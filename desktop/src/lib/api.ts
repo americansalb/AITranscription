@@ -2,7 +2,9 @@
  * API client for communicating with the Scribe backend
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// Remove trailing slash if present to avoid double slashes in URLs
+const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE_URL = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
 export interface TranscribeResponse {
   raw_text: string;
