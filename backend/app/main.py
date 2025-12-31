@@ -14,12 +14,43 @@ from app.models.base import Base
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create database tables on startup."""
+    """Create database tables on startup and ensure schema is up to date."""
+    from sqlalchemy import text
+
     # Import models to register them with Base
     from app.models import user, dictionary, transcript  # noqa: F401
 
     async with engine.begin() as conn:
+        # Create tables if they don't exist
         await conn.run_sync(Base.metadata.create_all)
+
+        # Add missing columns to users table (for existing deployments)
+        # These are safe to run multiple times - they check if column exists first
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'is_admin') THEN
+                    ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'total_audio_seconds') THEN
+                    ALTER TABLE users ADD COLUMN total_audio_seconds INTEGER DEFAULT 0;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'total_polish_tokens') THEN
+                    ALTER TABLE users ADD COLUMN total_polish_tokens INTEGER DEFAULT 0;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'total_transcriptions') THEN
+                    ALTER TABLE users ADD COLUMN total_transcriptions INTEGER DEFAULT 0;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'total_words') THEN
+                    ALTER TABLE users ADD COLUMN total_words INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+        """))
     yield
 
 
