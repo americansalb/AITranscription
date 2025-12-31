@@ -6,6 +6,18 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Required secrets for code signing:
+# macOS:
+#   APPLE_CERTIFICATE - Base64 encoded .p12 certificate
+#   APPLE_CERTIFICATE_PASSWORD - Password for the .p12 certificate
+#   APPLE_SIGNING_IDENTITY - "Developer ID Application: Your Name (TEAM_ID)"
+#   APPLE_ID - Your Apple ID email
+#   APPLE_PASSWORD - App-specific password for notarization
+#   APPLE_TEAM_ID - Your 10-character Team ID
+# Windows:
+#   WINDOWS_CERTIFICATE - Base64 encoded .pfx certificate (optional)
+#   WINDOWS_CERTIFICATE_PASSWORD - Password for the .pfx certificate (optional)
+
 jobs:
   build:
     strategy:
@@ -39,6 +51,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
+      # macOS code signing setup
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+
+          # Create and configure keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Clean up
+          rm $RUNNER_TEMP/certificate.p12
+
       - name: Install frontend dependencies
         working-directory: desktop
         run: npm ci
@@ -49,6 +88,12 @@ jobs:
 
       - name: Build the app
         working-directory: desktop
+        env:
+          # macOS signing environment variables (Tauri reads these automatically)
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri build
 
       - name: Upload macOS artifact
