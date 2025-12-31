@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,6 +19,8 @@ from app.services.auth import (
     get_user_by_email,
     get_user_by_id,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 security = HTTPBearer()
@@ -111,26 +114,41 @@ async def get_optional_user(
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
     """Create a new user account."""
-    # Check if email already exists
-    existing_user = await get_user_by_email(db, request.email)
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
+    try:
+        logger.info(f"Signup attempt for email: {request.email}")
+
+        # Check if email already exists
+        existing_user = await get_user_by_email(db, request.email)
+        if existing_user:
+            logger.info(f"Email already registered: {request.email}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+
+        # Create user
+        logger.info(f"Creating user: {request.email}")
+        user = await create_user(
+            db,
+            email=request.email,
+            password=request.password,
+            full_name=request.full_name,
         )
+        logger.info(f"User created successfully: {user.id}")
 
-    # Create user
-    user = await create_user(
-        db,
-        email=request.email,
-        password=request.password,
-        full_name=request.full_name,
-    )
+        # Generate token
+        access_token = create_access_token(user.id)
+        logger.info(f"Token generated for user: {user.id}")
 
-    # Generate token
-    access_token = create_access_token(user.id)
-
-    return TokenResponse(access_token=access_token)
+        return TokenResponse(access_token=access_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Signup error: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Signup failed: {str(e)}",
+        )
 
 
 @router.post("/login", response_model=TokenResponse)

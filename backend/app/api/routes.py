@@ -30,6 +30,33 @@ async def health_check():
     )
 
 
+@router.get("/debug/schema")
+async def debug_schema(db: AsyncSession = Depends(get_db)):
+    """Debug endpoint to check database schema."""
+    from sqlalchemy import text
+
+    try:
+        # Check users table columns
+        result = await db.execute(text(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position"
+        ))
+        user_columns = [row[0] for row in result.fetchall()]
+
+        # Check if transcripts table exists
+        result = await db.execute(text(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'transcripts')"
+        ))
+        transcripts_exists = result.scalar()
+
+        return {
+            "users_columns": user_columns,
+            "transcripts_table_exists": transcripts_exists,
+            "status": "ok"
+        }
+    except Exception as e:
+        return {"error": str(e), "status": "error"}
+
+
 @router.post(
     "/transcribe",
     response_model=TranscribeResponse,
