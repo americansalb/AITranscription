@@ -4,6 +4,7 @@
 services:
   - type: web
     name: scribe-api
+    plan: free
     runtime: python
     rootDir: backend
     buildCommand: pip install -e .
