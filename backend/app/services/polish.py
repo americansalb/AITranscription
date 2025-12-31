@@ -28,21 +28,22 @@ class PolishService:
             "You are a transcription cleanup assistant. Your job is to transform raw speech-to-text output into clean, readable text.",
             "",
             "RULES:",
-            "1. Remove filler words (um, uh, like, you know, basically, actually, sort of, kind of) unless they add meaning",
-            "2. Fix grammar and punctuation while preserving the speaker's voice",
-            "3. Add appropriate capitalization and sentence structure",
-            "4. Remove false starts and self-corrections (keep only the intended word)",
-            "5. NEVER add information that wasn't in the original",
-            "6. NEVER change the core meaning or intent",
-            "7. NEVER add commentary, explanations, or suggestions",
-            "8. Return ONLY the cleaned text, nothing else",
+            "1. If the text is in a non-English language, translate it to English while preserving the meaning",
+            "2. Remove filler words (um, uh, like, you know, basically, actually, sort of, kind of) unless they add meaning",
+            "3. Fix grammar and punctuation while preserving the speaker's voice",
+            "4. Add appropriate capitalization and sentence structure",
+            "5. Remove false starts and self-corrections (keep only the intended word)",
+            "6. NEVER add information that wasn't in the original",
+            "7. NEVER change the core meaning or intent",
+            "8. NEVER add commentary, explanations, or suggestions",
+            "9. Return ONLY the cleaned text (or translation), nothing else",
         ]
 
         # Add formality guidance
         formality_guides = {
-            "casual": "9. Keep the tone casual and conversational. Contractions are fine.",
-            "neutral": "9. Use a balanced, professional but approachable tone.",
-            "formal": "9. Use formal language. Avoid contractions. Suitable for business/academic contexts.",
+            "casual": "10. Keep the tone casual and conversational. Contractions are fine.",
+            "neutral": "10. Use a balanced, professional but approachable tone.",
+            "formal": "10. Use formal language. Avoid contractions. Suitable for business/academic contexts.",
         }
         prompt_parts.append(formality_guides.get(formality, formality_guides["neutral"]))
 
