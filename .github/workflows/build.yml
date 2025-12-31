@@ -51,9 +51,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
+      # Check if code signing secrets are configured
+      - name: Check code signing configuration
+        id: signing
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "enabled=true" >> $GITHUB_OUTPUT
+          else
+            echo "enabled=false" >> $GITHUB_OUTPUT
+            echo "::warning::Code signing secrets not configured. Building unsigned app."
+          fi
+
       # macOS code signing setup
       - name: Import macOS signing certificate
-        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        if: matrix.platform == 'macos-latest' && steps.signing.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -86,14 +101,21 @@ jobs:
         working-directory: desktop
         run: echo "VITE_API_URL=${{ secrets.API_URL }}" > .env
 
-      - name: Build the app
+      # Build with code signing (macOS with secrets configured)
+      - name: Build the app (signed)
+        if: matrix.platform == 'macos-latest' && steps.signing.outputs.enabled == 'true'
         working-directory: desktop
         env:
-          # macOS signing environment variables (Tauri reads these automatically)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri build
+
+      # Build without code signing (macOS without secrets, or other platforms)
+      - name: Build the app (unsigned)
+        if: matrix.platform != 'macos-latest' || steps.signing.outputs.enabled != 'true'
+        working-directory: desktop
         run: npm run tauri build
 
       - name: Upload macOS artifact
