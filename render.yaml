@@ -23,6 +23,6 @@ services:
 
 databases:
   - name: scribe-db
-    plan: starter
+    plan: free
     databaseName: scribe
     user: scribe
