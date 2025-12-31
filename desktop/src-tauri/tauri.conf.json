@@ -40,13 +40,5 @@
         "type": "embedBootstrapper"
       }
     }
-  },
-  "plugins": {
-    "global-shortcut": {
-      "all": true
-    },
-    "clipboard-manager": {
-      "all": true
-    }
   }
 }
