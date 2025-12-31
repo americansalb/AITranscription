@@ -1,9 +1,13 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class DictionaryEntry(Base):
@@ -37,15 +41,5 @@ class DictionaryEntry(Base):
         onupdate=func.now(),
     )
 
-    # Relationship
+    # Relationship - uses string reference to avoid circular import
     user: Mapped["User"] = relationship("User", back_populates="dictionary_entries")
-
-
-# Add relationship to User model
-from app.models.user import User
-
-User.dictionary_entries = relationship(
-    "DictionaryEntry",
-    back_populates="user",
-    cascade="all, delete-orphan",
-)

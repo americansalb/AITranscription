@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -5,8 +7,23 @@ from app.api import router
 from app.api.auth import router as auth_router
 from app.api.dictionary import router as dictionary_router
 from app.core.config import settings
+from app.core.database import engine
+from app.models.base import Base
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create database tables on startup."""
+    # Import models to register them with Base
+    from app.models import user, dictionary  # noqa: F401
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
 
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.app_name,
     description="AI-powered transcription API with Groq Whisper and Claude Haiku",
     version="0.1.0",

@@ -1,10 +1,14 @@
 from datetime import datetime
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, Enum as SQLEnum, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.dictionary import DictionaryEntry
 
 
 class SubscriptionTier(str, Enum):
@@ -52,3 +56,10 @@ class User(Base):
     # Usage tracking
     total_audio_seconds: Mapped[int] = mapped_column(default=0)
     total_polish_tokens: Mapped[int] = mapped_column(default=0)
+
+    # Relationships
+    dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
+        "DictionaryEntry",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
