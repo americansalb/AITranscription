@@ -13,11 +13,11 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target universal-apple-darwin
+            name: macOS
           - platform: windows-latest
-            args: --target x86_64-pc-windows-msvc
+            name: Windows
           - platform: ubuntu-22.04
-            args: --target x86_64-unknown-linux-gnu
+            name: Linux
 
     runs-on: ${{ matrix.platform }}
 
@@ -32,8 +32,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin,x86_64-pc-windows-msvc,x86_64-unknown-linux-gnu
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -51,9 +49,7 @@ jobs:
 
       - name: Build the app
         working-directory: desktop
-        run: npm run tauri build -- ${{ matrix.args }}
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: npm run tauri build
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
