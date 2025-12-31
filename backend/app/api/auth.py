@@ -1,9 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.models.transcript import Transcript
 from app.models.user import SubscriptionTier, User
 from app.services.auth import (
     authenticate_user,
@@ -169,3 +174,109 @@ async def refresh_token(current_user: User = Depends(get_current_user)):
     """Refresh the access token."""
     access_token = create_access_token(current_user.id)
     return TokenResponse(access_token=access_token)
+
+
+# Transcript history schemas
+class TranscriptItem(BaseModel):
+    """Single transcript item."""
+
+    id: int
+    raw_text: str
+    polished_text: str
+    word_count: int
+    audio_duration_seconds: float
+    words_per_minute: float
+    context: str | None
+    created_at: datetime
+
+
+class UserStatsResponse(BaseModel):
+    """User's own statistics."""
+
+    total_transcriptions: int
+    total_words: int
+    total_audio_seconds: int
+    transcriptions_today: int
+    words_today: int
+    average_words_per_transcription: float
+    average_words_per_minute: float
+
+
+@router.get("/transcripts", response_model=list[TranscriptItem])
+async def get_my_transcripts(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the current user's transcript history."""
+    query = (
+        select(Transcript)
+        .where(Transcript.user_id == current_user.id)
+        .order_by(Transcript.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    transcripts = result.scalars().all()
+
+    return [
+        TranscriptItem(
+            id=t.id,
+            raw_text=t.raw_text,
+            polished_text=t.polished_text,
+            word_count=t.word_count,
+            audio_duration_seconds=t.audio_duration_seconds,
+            words_per_minute=t.words_per_minute,
+            context=t.context,
+            created_at=t.created_at,
+        )
+        for t in transcripts
+    ]
+
+
+@router.get("/stats", response_model=UserStatsResponse)
+async def get_my_stats(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the current user's statistics."""
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Get today's transcripts
+    query = select(Transcript).where(
+        Transcript.user_id == current_user.id,
+        Transcript.created_at >= today,
+    )
+    result = await db.execute(query)
+    today_transcripts = result.scalars().all()
+
+    transcriptions_today = len(today_transcripts)
+    words_today = sum(t.word_count for t in today_transcripts)
+
+    # Calculate averages
+    avg_words = (
+        current_user.total_words / current_user.total_transcriptions
+        if current_user.total_transcriptions > 0
+        else 0
+    )
+
+    # Get average WPM from all transcripts
+    all_transcripts_query = select(Transcript).where(
+        Transcript.user_id == current_user.id
+    )
+    result = await db.execute(all_transcripts_query)
+    all_transcripts = result.scalars().all()
+    total_wpm = sum(t.words_per_minute for t in all_transcripts)
+    avg_wpm = total_wpm / len(all_transcripts) if all_transcripts else 0
+
+    return UserStatsResponse(
+        total_transcriptions=current_user.total_transcriptions,
+        total_words=current_user.total_words,
+        total_audio_seconds=current_user.total_audio_seconds,
+        transcriptions_today=transcriptions_today,
+        words_today=words_today,
+        average_words_per_transcription=round(avg_words, 1),
+        average_words_per_minute=round(avg_wpm, 1),
+    )

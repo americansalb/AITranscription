@@ -1,5 +1,7 @@
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import get_optional_user
 from app.api.schemas import (
     ErrorResponse,
     HealthResponse,
@@ -9,6 +11,9 @@ from app.api.schemas import (
     TranscribeResponse,
 )
 from app.core.config import settings
+from app.core.database import get_db
+from app.models.transcript import Transcript
+from app.models.user import User
 from app.services import polish_service, transcription_service
 
 router = APIRouter()
@@ -135,12 +140,15 @@ async def transcribe_and_polish(
     language: str | None = Form(default=None, description="Optional language code"),
     context: str | None = Form(default=None, description="Context like 'email', 'slack'"),
     formality: str = Form(default="neutral", description="'casual', 'neutral', or 'formal'"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ):
     """
     Combined endpoint: transcribe audio and polish the result.
 
     This is the main endpoint for the transcription pipeline.
     Provides both raw and polished text for comparison/debugging.
+    Saves transcript to database if user is authenticated.
     """
     # First, transcribe
     transcribe_response = await transcribe_audio(audio=audio, language=language)
@@ -161,6 +169,37 @@ async def transcribe_and_polish(
         formality=formality,
     )
     polish_response = await polish_text(polish_request)
+
+    # Save transcript to database
+    raw_text = transcribe_response.raw_text
+    polished_text = polish_response.text
+    duration = transcribe_response.duration or 0.0
+    word_count = len(polished_text.split())
+    char_count = len(polished_text)
+    wpm = (word_count / duration * 60) if duration > 0 else 0.0
+
+    transcript = Transcript(
+        user_id=current_user.id if current_user else None,
+        raw_text=raw_text,
+        polished_text=polished_text,
+        audio_duration_seconds=duration,
+        language=transcribe_response.language,
+        word_count=word_count,
+        character_count=char_count,
+        words_per_minute=round(wpm, 1),
+        context=context,
+        formality=formality,
+    )
+    db.add(transcript)
+
+    # Update user stats if authenticated
+    if current_user:
+        current_user.total_transcriptions += 1
+        current_user.total_words += word_count
+        current_user.total_audio_seconds += int(duration)
+        current_user.daily_transcriptions_used += 1
+
+    await db.commit()
 
     return TranscribeAndPolishResponse(
         raw_text=transcribe_response.raw_text,

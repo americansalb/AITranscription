@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import router
 from app.api.auth import router as auth_router
 from app.api.dictionary import router as dictionary_router
+from app.api.admin import router as admin_router
 from app.core.config import settings
 from app.core.database import engine
 from app.models.base import Base
@@ -15,7 +16,7 @@ from app.models.base import Base
 async def lifespan(app: FastAPI):
     """Create database tables on startup."""
     # Import models to register them with Base
-    from app.models import user, dictionary  # noqa: F401
+    from app.models import user, dictionary, transcript  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(dictionary_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 
 @app.get("/")

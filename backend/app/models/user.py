@@ -9,6 +9,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.dictionary import DictionaryEntry
+    from app.models.transcript import Transcript
 
 
 class SubscriptionTier(str, Enum):
@@ -29,12 +30,22 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Admin flag
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Subscription
     tier: Mapped[SubscriptionTier] = mapped_column(
         SQLEnum(SubscriptionTier),
         default=SubscriptionTier.STANDARD,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # API rate limiting (0 = unlimited)
+    daily_transcription_limit: Mapped[int] = mapped_column(default=0)
+    daily_transcriptions_used: Mapped[int] = mapped_column(default=0)
+    last_usage_reset: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     # Accessibility verification
     accessibility_verified: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -56,10 +67,17 @@ class User(Base):
     # Usage tracking
     total_audio_seconds: Mapped[int] = mapped_column(default=0)
     total_polish_tokens: Mapped[int] = mapped_column(default=0)
+    total_transcriptions: Mapped[int] = mapped_column(default=0)
+    total_words: Mapped[int] = mapped_column(default=0)
 
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
         "DictionaryEntry",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    transcripts: Mapped[list["Transcript"]] = relationship(
+        "Transcript",
         back_populates="user",
         cascade="all, delete-orphan",
     )
