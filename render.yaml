@@ -1,0 +1,28 @@
+# Render Blueprint - deploys backend automatically
+# See: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: scribe-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -e .
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scribe-db
+          property: connectionString
+    healthCheckPath: /api/v1/health
+
+databases:
+  - name: scribe-db
+    plan: starter
+    databaseName: scribe
+    user: scribe
