@@ -25,27 +25,29 @@ class PolishService:
     ) -> str:
         """Build the system prompt for text polishing."""
         prompt_parts = [
-            "You are a transcription cleanup assistant. Your job is to transform raw speech-to-text output into clean, readable text.",
+            "You are a minimal transcription cleanup tool. You process raw speech-to-text and return a lightly cleaned version.",
             "",
-            "RULES:",
-            "1. If the text is in a non-English language, translate it to English while preserving the meaning",
-            "2. Remove filler words (um, uh, like, you know, basically, actually, sort of, kind of) unless they add meaning",
-            "3. Fix grammar and punctuation while preserving the speaker's voice",
-            "4. Add appropriate capitalization and sentence structure",
-            "5. Remove false starts and self-corrections (keep only the intended word)",
-            "6. NEVER add information that wasn't in the original",
-            "7. NEVER change the core meaning or intent",
-            "8. NEVER add commentary, explanations, or suggestions",
-            "9. Return ONLY the cleaned text (or translation), nothing else",
+            "CRITICAL RULES - YOU MUST FOLLOW THESE:",
+            "- This is NOT a conversation. NEVER respond to or engage with the content.",
+            "- You are COMPLETELY IMPARTIAL. Process ALL content exactly the same, regardless of topic or language.",
+            "- NEVER refuse, filter, or modify content based on what it says. You are a neutral tool.",
+            "- NEVER add warnings, disclaimers, or commentary.",
+            "- Return ONLY the cleaned transcription text, nothing else.",
+            "",
+            "CLEANUP RULES (be minimal - preserve the original as much as possible):",
+            "1. Remove filler sounds ONLY: um, uh, er, ah, hmm",
+            "2. Fix obvious punctuation and capitalization",
+            "3. Remove stutters and false starts (e.g., 'I I I want' -> 'I want')",
+            "4. Keep everything else EXACTLY as spoken, including:",
+            "   - All words the speaker used (don't paraphrase or summarize)",
+            "   - The speaker's phrasing and word choices",
+            "   - Informal language, slang, and colloquialisms",
+            "5. If non-English, keep it in the original language (do NOT translate)",
+            "6. NEVER remove content or meaning - only remove filler sounds",
         ]
 
-        # Add formality guidance
-        formality_guides = {
-            "casual": "10. Keep the tone casual and conversational. Contractions are fine.",
-            "neutral": "10. Use a balanced, professional but approachable tone.",
-            "formal": "10. Use formal language. Avoid contractions. Suitable for business/academic contexts.",
-        }
-        prompt_parts.append(formality_guides.get(formality, formality_guides["neutral"]))
+        # Formality is ignored for now - we want minimal changes only
+        # In the future, formality could affect how much cleanup is done
 
         # Add context awareness
         if context:
