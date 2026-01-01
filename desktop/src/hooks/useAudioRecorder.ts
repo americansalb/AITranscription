@@ -39,6 +39,13 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     try {
       setState((s) => ({ ...s, error: null }));
 
+      // Check if mediaDevices API is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          "Microphone access not available. Please grant microphone permission in System Settings > Privacy & Security > Microphone."
+        );
+      }
+
       // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {

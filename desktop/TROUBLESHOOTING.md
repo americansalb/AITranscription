@@ -104,6 +104,30 @@ sudo apt-get install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
 
 ---
 
+## macOS: Microphone Permission Error
+
+If you see an error like `undefined is not an object (evaluating 'navigator.mediaDevices.getUserMedia')` or "Microphone access not available":
+
+### Grant Microphone Permission
+
+1. Open **System Settings** (or System Preferences on older macOS)
+2. Go to **Privacy & Security** > **Microphone**
+3. Find **Scribe** in the list and enable the toggle
+4. If Scribe isn't listed, try clicking the record button once to trigger the permission prompt
+5. Restart Scribe after granting permission
+
+### Alternative: Reset Permissions
+
+If permission was previously denied:
+
+```bash
+tccutil reset Microphone com.scribe.app
+```
+
+Then relaunch Scribe and grant permission when prompted.
+
+---
+
 ## Backend Connection Issues
 
 If the app starts but shows "Cannot connect to backend":
