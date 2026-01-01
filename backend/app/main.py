@@ -63,6 +63,23 @@ async def lifespan(app: FastAPI):
                 END IF;
             END $$;
         """))
+
+        # Add 'developer' tier to the subscription_tier enum if it doesn't exist
+        await conn.execute(text("""
+            DO $$
+            BEGIN
+                -- Check if 'developer' value exists in the enum
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_enum
+                    WHERE enumlabel = 'developer'
+                    AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'subscriptiontier')
+                ) THEN
+                    ALTER TYPE subscriptiontier ADD VALUE IF NOT EXISTS 'developer' BEFORE 'access';
+                END IF;
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END $$;
+        """))
     yield
 
 

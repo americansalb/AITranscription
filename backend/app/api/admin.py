@@ -4,15 +4,17 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.core.database import get_db
+from app.core.config import settings
 from app.models.user import SubscriptionTier, User
 from app.models.transcript import Transcript
-from app.services.auth import create_user, hash_password
+from app.services.auth import create_user, hash_password, get_user_by_email
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -487,3 +489,1088 @@ async def make_user_admin(
     await db.commit()
 
     return {"message": f"User {user.email} is now an admin"}
+
+
+class BootstrapRequest(BaseModel):
+    """Request to bootstrap the first admin."""
+    email: EmailStr
+    secret: str
+
+
+@router.post("/bootstrap")
+async def bootstrap_admin(
+    request: BootstrapRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Bootstrap endpoint to make an existing user an admin.
+    Requires the SECRET_KEY from environment to authorize.
+    This is a one-time setup endpoint for initial admin creation.
+    """
+    # Verify the secret matches our app secret key
+    if request.secret != settings.secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid secret key",
+        )
+
+    # Find the user
+    user = await get_user_by_email(db, request.email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found. Please sign up first.",
+        )
+
+    # Make them admin and developer tier
+    user.is_admin = True
+    user.tier = SubscriptionTier.DEVELOPER
+    user.daily_transcription_limit = 0  # 0 = unlimited
+    await db.commit()
+
+    return {
+        "message": f"User {user.email} is now an admin with developer tier",
+        "user_id": user.id,
+    }
+
+
+# Admin Dashboard HTML
+ADMIN_DASHBOARD_HTML = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scribe Admin Dashboard</title>
+    <style>
+        :root {
+            --bg-primary: #0f0f0f;
+            --bg-secondary: #1a1a1a;
+            --bg-tertiary: #252525;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0a0;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --border: #333;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .login-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .login-box {
+            background: var(--bg-secondary);
+            padding: 40px;
+            border-radius: 12px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid var(--border);
+        }
+
+        .login-box h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 24px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 16px;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+            width: 100%;
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-hover);
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-secondary);
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .error-message {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .dashboard {
+            display: none;
+        }
+
+        .header {
+            background: var(--bg-secondary);
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 20px;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .user-info {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .main-content {
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 16px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 14px;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .tab.active {
+            background: var(--accent);
+            color: white;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            padding: 24px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .stat-card.accent {
+            border-color: var(--accent);
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), transparent);
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .panel {
+            display: none;
+        }
+
+        .panel.active {
+            display: block;
+        }
+
+        .table-container {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .table-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .table-header h2 {
+            font-size: 16px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: var(--bg-tertiary);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .badge-developer {
+            background: rgba(99, 102, 241, 0.2);
+            color: var(--accent);
+        }
+
+        .badge-standard {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+
+        .badge-enterprise {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+        }
+
+        .badge-access {
+            background: rgba(160, 160, 160, 0.2);
+            color: var(--text-secondary);
+        }
+
+        .badge-admin {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+
+        .badge-active {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+
+        .badge-inactive {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-secondary);
+            padding: 32px;
+            border-radius: 12px;
+            width: 100%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+        }
+
+        .modal h2 {
+            margin-bottom: 24px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            margin-top: 24px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .tier-breakdown {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .tier-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .search-box {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .search-box input {
+            flex: 1;
+            padding: 10px 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .user-detail-panel {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .detail-item label {
+            display: block;
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+
+        .detail-item .value {
+            font-size: 16px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="login-container">
+        <div class="login-box">
+            <h1>Scribe Admin</h1>
+            <div id="loginError" class="error-message" style="display: none;"></div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="email">Email</label>
+                    <input type="email" id="email" required autocomplete="email">
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary">Sign In</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard" class="dashboard">
+        <header class="header">
+            <h1>Scribe Admin Dashboard</h1>
+            <div class="header-actions">
+                <span class="user-info" id="currentUserEmail"></span>
+                <button class="btn btn-secondary btn-sm" onclick="logout()">Logout</button>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <div class="tabs">
+                <button class="tab active" data-panel="overview">Overview</button>
+                <button class="tab" data-panel="users">Users</button>
+            </div>
+
+            <!-- Overview Panel -->
+            <div id="overview" class="panel active">
+                <div class="stats-grid" id="globalStats">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading statistics...
+                    </div>
+                </div>
+            </div>
+
+            <!-- Users Panel -->
+            <div id="users" class="panel">
+                <div class="search-box">
+                    <input type="text" id="userSearch" placeholder="Search users by email...">
+                    <button class="btn btn-primary" onclick="searchUsers()">Search</button>
+                    <button class="btn btn-secondary" onclick="loadUsers()">Refresh</button>
+                </div>
+                <div class="table-container">
+                    <div class="table-header">
+                        <h2>All Users</h2>
+                        <span id="userCount"></span>
+                    </div>
+                    <div id="usersTable">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            Loading users...
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Edit User Modal -->
+    <div id="editUserModal" class="modal-overlay">
+        <div class="modal">
+            <h2>Edit User</h2>
+            <form id="editUserForm">
+                <input type="hidden" id="editUserId">
+                <div class="form-group">
+                    <label for="editEmail">Email</label>
+                    <input type="email" id="editEmail" required>
+                </div>
+                <div class="form-group">
+                    <label for="editFullName">Full Name</label>
+                    <input type="text" id="editFullName">
+                </div>
+                <div class="form-group">
+                    <label for="editTier">Tier</label>
+                    <select id="editTier">
+                        <option value="developer">Developer (Unlimited)</option>
+                        <option value="standard">Standard</option>
+                        <option value="enterprise">Enterprise</option>
+                        <option value="access">Access (Accessibility)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="editLimit">Daily Limit (0 = unlimited)</label>
+                    <input type="number" id="editLimit" min="0">
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="editIsAdmin"> Is Admin
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="editIsActive"> Is Active
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label for="editPassword">New Password (leave empty to keep current)</label>
+                    <input type="password" id="editPassword" minlength="8">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('editUserModal')">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- User Detail Modal -->
+    <div id="userDetailModal" class="modal-overlay">
+        <div class="modal" style="max-width: 700px;">
+            <h2>User Details</h2>
+            <div id="userDetailContent">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    Loading...
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('userDetailModal')">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin + '/api/v1';
+        let authToken = localStorage.getItem('admin_token');
+        let currentUser = null;
+
+        // Check if already logged in
+        if (authToken) {
+            checkAuth();
+        }
+
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.panel).classList.add('active');
+            });
+        });
+
+        // Login form
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            try {
+                const response = await fetch(`${API_BASE}/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Login failed');
+                }
+
+                const data = await response.json();
+                authToken = data.access_token;
+                localStorage.setItem('admin_token', authToken);
+                await checkAuth();
+            } catch (err) {
+                document.getElementById('loginError').textContent = err.message;
+                document.getElementById('loginError').style.display = 'block';
+            }
+        });
+
+        async function checkAuth() {
+            try {
+                // Get current user
+                const response = await fetch(`${API_BASE}/auth/me`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) {
+                    throw new Error('Not authenticated');
+                }
+
+                currentUser = await response.json();
+
+                // Check if admin by trying to access admin endpoint
+                const adminCheck = await fetch(`${API_BASE}/admin/stats`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!adminCheck.ok) {
+                    throw new Error('Admin access required');
+                }
+
+                // Show dashboard
+                document.getElementById('loginScreen').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+                document.getElementById('currentUserEmail').textContent = currentUser.email;
+
+                // Load data
+                loadGlobalStats();
+                loadUsers();
+            } catch (err) {
+                localStorage.removeItem('admin_token');
+                authToken = null;
+                document.getElementById('loginError').textContent = err.message;
+                document.getElementById('loginError').style.display = 'block';
+                document.getElementById('loginScreen').style.display = 'flex';
+                document.getElementById('dashboard').style.display = 'none';
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('admin_token');
+            authToken = null;
+            currentUser = null;
+            document.getElementById('loginScreen').style.display = 'flex';
+            document.getElementById('dashboard').style.display = 'none';
+            document.getElementById('loginError').style.display = 'none';
+        }
+
+        async function loadGlobalStats() {
+            try {
+                const response = await fetch(`${API_BASE}/admin/stats`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const stats = await response.json();
+
+                document.getElementById('globalStats').innerHTML = `
+                    <div class="stat-card accent">
+                        <div class="stat-value">${stats.total_users}</div>
+                        <div class="stat-label">Total Users</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.active_users}</div>
+                        <div class="stat-label">Active Users</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.total_transcriptions.toLocaleString()}</div>
+                        <div class="stat-label">Total Transcriptions</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.total_words.toLocaleString()}</div>
+                        <div class="stat-label">Total Words</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.total_audio_hours.toFixed(1)}h</div>
+                        <div class="stat-label">Audio Transcribed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.transcriptions_today}</div>
+                        <div class="stat-label">Transcriptions Today</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.transcriptions_this_week}</div>
+                        <div class="stat-label">This Week</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Users by Tier</div>
+                        <div class="tier-breakdown">
+                            ${Object.entries(stats.users_by_tier).map(([tier, count]) => `
+                                <div class="tier-item">
+                                    <span class="badge badge-${tier}">${tier}</span>
+                                    <span>${count}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            } catch (err) {
+                console.error('Failed to load stats:', err);
+            }
+        }
+
+        let allUsers = [];
+
+        async function loadUsers() {
+            try {
+                const response = await fetch(`${API_BASE}/admin/users?limit=100`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                allUsers = await response.json();
+                renderUsers(allUsers);
+            } catch (err) {
+                console.error('Failed to load users:', err);
+            }
+        }
+
+        function searchUsers() {
+            const query = document.getElementById('userSearch').value.toLowerCase();
+            const filtered = allUsers.filter(u =>
+                u.email.toLowerCase().includes(query) ||
+                (u.full_name && u.full_name.toLowerCase().includes(query))
+            );
+            renderUsers(filtered);
+        }
+
+        function renderUsers(users) {
+            document.getElementById('userCount').textContent = `${users.length} users`;
+
+            if (users.length === 0) {
+                document.getElementById('usersTable').innerHTML = `
+                    <div class="empty-state">No users found</div>
+                `;
+                return;
+            }
+
+            document.getElementById('usersTable').innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Name</th>
+                            <th>Tier</th>
+                            <th>Status</th>
+                            <th>Transcriptions</th>
+                            <th>Words</th>
+                            <th>Joined</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${users.map(user => `
+                            <tr>
+                                <td>
+                                    ${user.email}
+                                    ${user.is_admin ? '<span class="badge badge-admin">Admin</span>' : ''}
+                                </td>
+                                <td>${user.full_name || '-'}</td>
+                                <td><span class="badge badge-${user.tier}">${user.tier}</span></td>
+                                <td><span class="badge badge-${user.is_active ? 'active' : 'inactive'}">${user.is_active ? 'Active' : 'Inactive'}</span></td>
+                                <td>${user.total_transcriptions.toLocaleString()}</td>
+                                <td>${user.total_words.toLocaleString()}</td>
+                                <td>${new Date(user.created_at).toLocaleDateString()}</td>
+                                <td class="actions">
+                                    <button class="btn btn-secondary btn-sm" onclick="viewUser(${user.id})">View</button>
+                                    <button class="btn btn-secondary btn-sm" onclick="editUser(${user.id})">Edit</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        async function viewUser(userId) {
+            document.getElementById('userDetailModal').classList.add('active');
+            document.getElementById('userDetailContent').innerHTML = `
+                <div class="loading"><div class="spinner"></div>Loading...</div>
+            `;
+
+            try {
+                const [userRes, statsRes, transcriptsRes] = await Promise.all([
+                    fetch(`${API_BASE}/admin/users/${userId}`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    }),
+                    fetch(`${API_BASE}/admin/users/${userId}/stats`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    }),
+                    fetch(`${API_BASE}/admin/users/${userId}/transcripts?limit=10`, {
+                        headers: { 'Authorization': `Bearer ${authToken}` }
+                    })
+                ]);
+
+                const user = await userRes.json();
+                const stats = await statsRes.json();
+                const transcripts = await transcriptsRes.json();
+
+                document.getElementById('userDetailContent').innerHTML = `
+                    <div class="user-detail-panel">
+                        <h3 style="margin-bottom: 16px;">${user.email}</h3>
+                        <div class="detail-grid">
+                            <div class="detail-item">
+                                <label>Full Name</label>
+                                <div class="value">${user.full_name || '-'}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Tier</label>
+                                <div class="value"><span class="badge badge-${user.tier}">${user.tier}</span></div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Status</label>
+                                <div class="value">
+                                    <span class="badge badge-${user.is_active ? 'active' : 'inactive'}">${user.is_active ? 'Active' : 'Inactive'}</span>
+                                    ${user.is_admin ? '<span class="badge badge-admin">Admin</span>' : ''}
+                                </div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Daily Limit</label>
+                                <div class="value">${user.daily_transcription_limit === 0 ? 'Unlimited' : user.daily_transcription_limit}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Used Today</label>
+                                <div class="value">${user.daily_transcriptions_used}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Joined</label>
+                                <div class="value">${new Date(user.created_at).toLocaleString()}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="user-detail-panel">
+                        <h3 style="margin-bottom: 16px;">Usage Statistics</h3>
+                        <div class="detail-grid">
+                            <div class="detail-item">
+                                <label>Total Transcriptions</label>
+                                <div class="value">${stats.total_transcriptions.toLocaleString()}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Total Words</label>
+                                <div class="value">${stats.total_words.toLocaleString()}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Audio Transcribed</label>
+                                <div class="value">${formatDuration(stats.total_audio_seconds)}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Avg WPM</label>
+                                <div class="value">${stats.average_words_per_minute}</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>Today</label>
+                                <div class="value">${stats.transcriptions_today} transcriptions / ${stats.words_today.toLocaleString()} words</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>This Week</label>
+                                <div class="value">${stats.transcriptions_this_week} transcriptions / ${stats.words_this_week.toLocaleString()} words</div>
+                            </div>
+                            <div class="detail-item">
+                                <label>This Month</label>
+                                <div class="value">${stats.transcriptions_this_month} transcriptions / ${stats.words_this_month.toLocaleString()} words</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="user-detail-panel">
+                        <h3 style="margin-bottom: 16px;">Recent Transcripts</h3>
+                        ${transcripts.length === 0 ? '<p>No transcripts yet</p>' : `
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Preview</th>
+                                        <th>Words</th>
+                                        <th>Duration</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${transcripts.map(t => `
+                                        <tr>
+                                            <td>${new Date(t.created_at).toLocaleString()}</td>
+                                            <td>${t.polished_text.slice(0, 60)}${t.polished_text.length > 60 ? '...' : ''}</td>
+                                            <td>${t.word_count}</td>
+                                            <td>${t.audio_duration_seconds.toFixed(1)}s</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        `}
+                    </div>
+                `;
+            } catch (err) {
+                document.getElementById('userDetailContent').innerHTML = `
+                    <div class="error-message">Failed to load user details: ${err.message}</div>
+                `;
+            }
+        }
+
+        function formatDuration(seconds) {
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            if (hours > 0) return `${hours}h ${mins}m`;
+            if (mins > 0) return `${mins}m ${secs}s`;
+            return `${secs}s`;
+        }
+
+        async function editUser(userId) {
+            try {
+                const response = await fetch(`${API_BASE}/admin/users/${userId}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const user = await response.json();
+
+                document.getElementById('editUserId').value = user.id;
+                document.getElementById('editEmail').value = user.email;
+                document.getElementById('editFullName').value = user.full_name || '';
+                document.getElementById('editTier').value = user.tier;
+                document.getElementById('editLimit').value = user.daily_transcription_limit;
+                document.getElementById('editIsAdmin').checked = user.is_admin;
+                document.getElementById('editIsActive').checked = user.is_active;
+                document.getElementById('editPassword').value = '';
+
+                document.getElementById('editUserModal').classList.add('active');
+            } catch (err) {
+                alert('Failed to load user: ' + err.message);
+            }
+        }
+
+        document.getElementById('editUserForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const userId = document.getElementById('editUserId').value;
+            const data = {
+                email: document.getElementById('editEmail').value,
+                full_name: document.getElementById('editFullName').value || null,
+                tier: document.getElementById('editTier').value,
+                daily_transcription_limit: parseInt(document.getElementById('editLimit').value),
+                is_admin: document.getElementById('editIsAdmin').checked,
+                is_active: document.getElementById('editIsActive').checked,
+            };
+
+            const password = document.getElementById('editPassword').value;
+            if (password) {
+                data.password = password;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/admin/users/${userId}`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Update failed');
+                }
+
+                closeModal('editUserModal');
+                loadUsers();
+                loadGlobalStats();
+                alert('User updated successfully');
+            } catch (err) {
+                alert('Failed to update user: ' + err.message);
+            }
+        });
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+
+        // Close modals on overlay click
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    overlay.classList.remove('active');
+                }
+            });
+        });
+
+        // Search on enter
+        document.getElementById('userSearch').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') searchUsers();
+        });
+    </script>
+</body>
+</html>
+'''
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def admin_dashboard():
+    """Serve the admin dashboard HTML page."""
+    return ADMIN_DASHBOARD_HTML
