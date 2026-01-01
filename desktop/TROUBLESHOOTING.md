@@ -106,7 +106,7 @@ sudo apt-get install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
 
 ## macOS: Global Hotkey Not Working
 
-If the `Option+Space` push-to-talk hotkey doesn't work:
+If the `Ctrl+Space` push-to-talk hotkey doesn't work:
 
 ### 1. Check Console for Errors
 
