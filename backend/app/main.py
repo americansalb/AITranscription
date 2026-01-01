@@ -65,21 +65,13 @@ async def lifespan(app: FastAPI):
         """))
 
         # Add 'developer' tier to the subscription_tier enum if it doesn't exist
-        await conn.execute(text("""
-            DO $$
-            BEGIN
-                -- Check if 'developer' value exists in the enum
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_enum
-                    WHERE enumlabel = 'developer'
-                    AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'subscriptiontier')
-                ) THEN
-                    ALTER TYPE subscriptiontier ADD VALUE IF NOT EXISTS 'developer' BEFORE 'access';
-                END IF;
-            EXCEPTION
-                WHEN duplicate_object THEN NULL;
-            END $$;
-        """))
+        # Note: ADD VALUE IF NOT EXISTS handles duplicates automatically in PostgreSQL 9.3+
+        try:
+            await conn.execute(text(
+                "ALTER TYPE subscriptiontier ADD VALUE IF NOT EXISTS 'developer'"
+            ))
+        except Exception:
+            pass  # Enum value already exists or type doesn't exist yet
     yield
 
 
