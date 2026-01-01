@@ -243,7 +243,7 @@ function App() {
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">Ctrl+Space</span> for push-to-talk
+          <span className="hotkey">Shift+F2</span> for push-to-talk
         </p>
       </div>
 

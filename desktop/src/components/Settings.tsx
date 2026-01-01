@@ -318,7 +318,7 @@ function Preferences() {
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <kbd>Ctrl+Space</kbd>
+        <kbd>Shift+F2</kbd>
       </div>
     </div>
   );
