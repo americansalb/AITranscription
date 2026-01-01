@@ -100,7 +100,7 @@ export function useGlobalHotkey({
  * Common hotkey combinations
  */
 export const HOTKEYS = {
-  PUSH_TO_TALK: "CommandOrControl+Shift+Space",
+  PUSH_TO_TALK: "Option+Space",
   TOGGLE_RECORDING: "CommandOrControl+Shift+R",
   CANCEL_RECORDING: "Escape",
 } as const;

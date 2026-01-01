@@ -106,25 +106,13 @@ sudo apt-get install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
 
 ## macOS: Global Hotkey Not Working
 
-If the `Cmd+Shift+Space` push-to-talk hotkey doesn't work:
+If the `Option+Space` push-to-talk hotkey doesn't work:
 
-### 1. Grant Accessibility Permission
+### 1. Check Console for Errors
 
-macOS requires accessibility permissions for global keyboard shortcuts:
+Open the app and check if the hotkey registers in the console (View > Developer > Developer Tools).
 
-1. Open **System Settings** > **Privacy & Security** > **Accessibility**
-2. Click the **+** button and add **Scribe**
-3. Restart Scribe
-
-### 2. Check for Shortcut Conflicts
-
-`Cmd+Shift+Space` may conflict with system shortcuts:
-
-1. Open **System Settings** > **Keyboard** > **Keyboard Shortcuts**
-2. Check **Input Sources** - disable "Select the previous input source" if it uses this shortcut
-3. Check **Spotlight** and other categories for conflicts
-
-### 3. Alternative: Use Click-to-Record
+### 2. Alternative: Use Click-to-Record
 
 If the hotkey still doesn't work, you can click the record button in the app window instead.
 
