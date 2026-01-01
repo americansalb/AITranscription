@@ -49,6 +49,18 @@ async def lifespan(app: FastAPI):
                     WHERE table_name = 'users' AND column_name = 'total_words') THEN
                     ALTER TABLE users ADD COLUMN total_words INTEGER DEFAULT 0;
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'daily_transcription_limit') THEN
+                    ALTER TABLE users ADD COLUMN daily_transcription_limit INTEGER DEFAULT 0;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'daily_transcriptions_used') THEN
+                    ALTER TABLE users ADD COLUMN daily_transcriptions_used INTEGER DEFAULT 0;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'last_usage_reset') THEN
+                    ALTER TABLE users ADD COLUMN last_usage_reset TIMESTAMP WITH TIME ZONE;
+                END IF;
             END $$;
         """))
     yield
