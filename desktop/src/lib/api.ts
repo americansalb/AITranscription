@@ -45,9 +45,19 @@ export interface UserResponse {
   id: number;
   email: string;
   full_name: string | null;
-  tier: "access" | "standard" | "enterprise";
+  tier: "access" | "standard" | "enterprise" | "developer";
   is_active: boolean;
   accessibility_verified: boolean;
+}
+
+export interface UserStatsResponse {
+  total_transcriptions: number;
+  total_words: number;
+  total_audio_seconds: number;
+  transcriptions_today: number;
+  words_today: number;
+  average_words_per_transcription: number;
+  average_words_per_minute: number;
 }
 
 export class ApiError extends Error {
@@ -265,4 +275,15 @@ export function logout() {
  */
 export function isLoggedIn(): boolean {
   return getAuthToken() !== null;
+}
+
+/**
+ * Get the current user's statistics
+ */
+export async function getUserStats(): Promise<UserStatsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<UserStatsResponse>(response);
 }

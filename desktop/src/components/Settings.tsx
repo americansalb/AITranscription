@@ -4,10 +4,13 @@ import {
   signup,
   logout,
   getCurrentUser,
+  getUserStats,
   isLoggedIn,
   UserResponse,
+  UserStatsResponse,
   ApiError,
 } from "../lib/api";
+import { HOTKEYS } from "../hooks/useGlobalHotkey";
 
 interface SettingsProps {
   onClose: () => void;
@@ -18,13 +21,20 @@ type SettingsTab = "account" | "dictionary" | "preferences";
 export function Settings({ onClose }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
+  const [stats, setStats] = useState<UserStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (isLoggedIn()) {
-      getCurrentUser()
-        .then(setUser)
-        .catch(() => setUser(null))
+      Promise.all([getCurrentUser(), getUserStats()])
+        .then(([userData, statsData]) => {
+          setUser(userData);
+          setStats(statsData);
+        })
+        .catch(() => {
+          setUser(null);
+          setStats(null);
+        })
         .finally(() => setLoading(false));
     } else {
       setLoading(false);
@@ -82,7 +92,7 @@ export function Settings({ onClose }: SettingsProps) {
             <div className="loading">Loading...</div>
           ) : activeTab === "account" ? (
             user ? (
-              <AccountInfo user={user} onLogout={handleLogout} />
+              <AccountInfo user={user} stats={stats} onLogout={handleLogout} />
             ) : (
               <AuthForm onSuccess={setUser} />
             )
@@ -103,18 +113,30 @@ export function Settings({ onClose }: SettingsProps) {
   );
 }
 
+// Format seconds to human readable duration
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  return `${hours}h ${mins}m`;
+}
+
 // Account info when logged in
 function AccountInfo({
   user,
+  stats,
   onLogout,
 }: {
   user: UserResponse;
+  stats: UserStatsResponse | null;
   onLogout: () => void;
 }) {
-  const tierLabels = {
+  const tierLabels: Record<string, string> = {
     access: "Access (Accessibility)",
     standard: "Standard",
     enterprise: "Enterprise",
+    developer: "Developer",
   };
 
   return (
@@ -124,10 +146,35 @@ function AccountInfo({
       </div>
       <h3>{user.full_name || "User"}</h3>
       <p className="email">{user.email}</p>
-      <div className="tier-badge">{tierLabels[user.tier]}</div>
+      <div className="tier-badge">{tierLabels[user.tier] || user.tier}</div>
       {user.accessibility_verified && (
         <div className="verified-badge">Accessibility Verified</div>
       )}
+
+      {stats && (
+        <div className="user-stats">
+          <h4>Your Statistics</h4>
+          <div className="stats-grid">
+            <div className="stat-item">
+              <span className="stat-value">{stats.total_transcriptions}</span>
+              <span className="stat-label">Transcriptions</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">{stats.total_words.toLocaleString()}</span>
+              <span className="stat-label">Words</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">{formatDuration(stats.total_audio_seconds)}</span>
+              <span className="stat-label">Audio Time</span>
+            </div>
+            <div className="stat-item">
+              <span className="stat-value">{stats.transcriptions_today}</span>
+              <span className="stat-label">Today</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <button className="logout-btn" onClick={onLogout}>
         Log Out
       </button>
@@ -318,7 +365,7 @@ function Preferences() {
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <kbd>{navigator.platform.includes("Mac") ? "Cmd" : "Ctrl"}+Shift+A</kbd>
+        <kbd>{navigator.platform.includes("Mac") ? "Option" : "Alt"}+D</kbd>
       </div>
     </div>
   );
