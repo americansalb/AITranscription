@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
 import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
-import { injectText } from "./lib/clipboard";
+import { injectText, setTrayRecordingState } from "./lib/clipboard";
 import { Settings } from "./components/Settings";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
@@ -36,6 +36,11 @@ function App() {
     contextRef.current = context;
     formalityRef.current = formality;
   }, [context, formality]);
+
+  // Update tray icon when recording state changes
+  useEffect(() => {
+    setTrayRecordingState(recorder.isRecording);
+  }, [recorder.isRecording]);
 
   // Push-to-talk: start recording on key down
   const handleHotkeyDown = useCallback(async () => {

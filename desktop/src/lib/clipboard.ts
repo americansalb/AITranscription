@@ -165,8 +165,7 @@ export async function injectText(text: string): Promise<boolean> {
 
       await tauriCore.invoke("simulate_paste");
 
-      // Show window again after a short delay
-      setTimeout(() => showWindow(), 500);
+      // Don't show window again - user can click tray icon to show it
       return true;
     } catch (error) {
       console.error("Auto-paste failed:", error);
@@ -234,8 +233,7 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
       await tauriCore.invoke("simulate_paste");
 
-      // Show window again after a short delay
-      setTimeout(() => showWindow(), 500);
+      // Don't automatically show window - user can click tray icon to show it
       return {
         success: true,
         method: "auto-paste",
@@ -258,4 +256,21 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
     method: "clipboard",
     message: "Copied to clipboard. Press Ctrl+V to paste.",
   };
+}
+
+/**
+ * Update tray icon recording state
+ */
+export async function setTrayRecordingState(recording: boolean): Promise<void> {
+  if (!tauriCore) {
+    await loadTauriCore();
+  }
+
+  if (tauriCore) {
+    try {
+      await tauriCore.invoke("set_recording_state", { recording });
+    } catch (error) {
+      console.error("Failed to update tray state:", error);
+    }
+  }
 }
