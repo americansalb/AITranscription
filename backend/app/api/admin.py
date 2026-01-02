@@ -60,7 +60,7 @@ class CreateUserRequest(BaseModel):
     """Request to create a new user."""
 
     email: EmailStr
-    password: str = Field(min_length=8)
+    password: str = Field(min_length=6)
     full_name: str | None = None
     tier: SubscriptionTier = SubscriptionTier.STANDARD
     is_active: bool = True
@@ -76,7 +76,7 @@ class UpdateUserRequest(BaseModel):
     is_active: bool | None = None
     is_admin: bool | None = None
     daily_transcription_limit: int | None = None
-    password: str | None = Field(None, min_length=8)
+    password: str | None = Field(None, min_length=6)
 
 
 class UserStatsResponse(BaseModel):
@@ -1103,7 +1103,7 @@ ADMIN_DASHBOARD_HTML = '''
                 </div>
                 <div class="form-group">
                     <label for="editPassword">New Password (leave empty to keep current)</label>
-                    <input type="password" id="editPassword" minlength="8">
+                    <input type="password" id="editPassword" minlength="6">
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('editUserModal')">Cancel</button>

@@ -31,7 +31,7 @@ class SignupRequest(BaseModel):
     """Request body for user signup."""
 
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72, description="Password must be 8-72 characters")
+    password: str = Field(min_length=6, max_length=72, description="Password must be 6-72 characters")
     full_name: str | None = None
 
 
