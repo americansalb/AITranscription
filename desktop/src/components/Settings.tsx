@@ -318,7 +318,7 @@ function Preferences() {
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <kbd>Shift+F2</kbd>
+        <kbd>{navigator.platform.includes("Mac") ? "Cmd" : "Ctrl"}+Shift+A</kbd>
       </div>
     </div>
   );
