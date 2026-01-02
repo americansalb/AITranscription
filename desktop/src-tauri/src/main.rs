@@ -11,6 +11,16 @@ use tauri::{
     Manager,
 };
 
+/// Helper to create an Image from PNG bytes
+fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
+    // Decode PNG to RGBA
+    let img = image::load_from_memory(png_bytes)
+        .map_err(|e| format!("Failed to decode PNG: {}", e))?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(Image::new_owned(rgba.into_raw(), width, height))
+}
+
 #[cfg(target_os = "windows")]
 use std::fs::OpenOptions;
 #[cfg(target_os = "windows")]
@@ -92,13 +102,13 @@ fn type_text(text: String) -> Result<(), String> {
 #[tauri::command]
 fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let icon_bytes = if recording {
-            include_bytes!("../icons/tray-recording.png").to_vec()
+        let icon_bytes: &[u8] = if recording {
+            include_bytes!("../icons/tray-recording.png")
         } else {
-            include_bytes!("../icons/tray-idle.png").to_vec()
+            include_bytes!("../icons/tray-idle.png")
         };
 
-        if let Ok(icon) = Image::from_bytes(&icon_bytes) {
+        if let Ok(icon) = load_png_image(icon_bytes) {
             let _ = tray.set_icon(Some(icon));
         }
 
@@ -130,10 +140,10 @@ fn main() {
                 .build()?;
 
             // Create tray icon - use the app icon initially
-            let icon = Image::from_bytes(include_bytes!("../icons/tray-idle.png"))
+            let icon = load_png_image(include_bytes!("../icons/tray-idle.png"))
                 .unwrap_or_else(|_| {
                     // Fallback to 32x32 icon
-                    Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                    load_png_image(include_bytes!("../icons/32x32.png"))
                         .expect("Failed to load tray icon")
                 });
 
