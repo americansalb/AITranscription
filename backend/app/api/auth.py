@@ -365,8 +365,9 @@ async def get_detailed_stats(
 ):
     """Get detailed statistics with insights for the current user."""
     from collections import defaultdict
+    from datetime import timezone
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
     month_ago = today - timedelta(days=30)

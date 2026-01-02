@@ -329,7 +329,8 @@ async def get_user_stats(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    now = datetime.utcnow()
+    from datetime import timezone as tz
+    now = datetime.now(tz.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
     month_ago = today - timedelta(days=30)
