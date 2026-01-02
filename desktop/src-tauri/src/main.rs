@@ -134,9 +134,11 @@ fn main() {
         .setup(|app| {
             // Create tray menu
             let show_item = MenuItemBuilder::with_id("show", "Show Scribe").build(app)?;
+            let devtools_item = MenuItemBuilder::with_id("devtools", "Open Dev Tools").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
+                .item(&devtools_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
@@ -161,6 +163,11 @@ fn main() {
                                 let _ = window.set_focus();
                             }
                         }
+                        "devtools" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                window.open_devtools();
+                            }
+                        }
                         "quit" => {
                             app.exit(0);
                         }
@@ -177,6 +184,12 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            // Open dev tools for debugging (in both dev and release builds)
+            #[cfg(debug_assertions)]
+            if let Some(window) = app.get_webview_window("main") {
+                window.open_devtools();
+            }
 
             Ok(())
         })
