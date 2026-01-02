@@ -111,8 +111,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass  # Enum value already exists or type doesn't exist yet
 
-    # Seed default admin user
-    await seed_default_admin()
+    # Seed default admin user (don't let this crash the app)
+    try:
+        await seed_default_admin()
+    except Exception as e:
+        print(f"Warning: Could not seed admin user: {e}")
     yield
 
 
