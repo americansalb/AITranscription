@@ -21,15 +21,19 @@ fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
     Ok(Image::new_owned(rgba.into_raw(), width, height))
 }
 
-#[cfg(target_os = "windows")]
 use std::fs::OpenOptions;
-#[cfg(target_os = "windows")]
 use std::io::Write;
 
-/// Log errors to a file on Windows for debugging launch issues
-#[cfg(target_os = "windows")]
+/// Log errors to a file for debugging launch issues
 fn log_error(message: &str) {
-    if let Some(home) = std::env::var_os("USERPROFILE") {
+    // Get home directory based on platform
+    let home_var = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+
+    if let Some(home) = std::env::var_os(home_var) {
         let log_path = std::path::PathBuf::from(home).join("scribe-error.log");
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let timestamp = std::time::SystemTime::now()
@@ -39,11 +43,9 @@ fn log_error(message: &str) {
             let _ = writeln!(file, "[{}] {}", timestamp, message);
         }
     }
-}
 
-#[cfg(not(target_os = "windows"))]
-fn log_error(message: &str) {
-    eprintln!("Scribe Error: {}", message);
+    // Also print to stderr for debugging
+    eprintln!("Scribe: {}", message);
 }
 
 /// Simulate a paste keyboard shortcut (Ctrl+V on Windows/Linux, Cmd+V on macOS)
@@ -186,34 +188,69 @@ fn main() {
             let error_msg = format!("Failed to run Tauri application: {}", e);
             log_error(&error_msg);
 
-            // On Windows, also show a message box so user sees the error
-            #[cfg(target_os = "windows")]
-            {
-                use std::ptr::null_mut;
-                let msg = format!(
-                    "Scribe failed to start:\n\n{}\n\nCheck ~/scribe-error.log for details.",
-                    e
-                );
-                let wide_msg: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-                let wide_title: Vec<u16> = "Scribe Error"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                unsafe {
-                    #[link(name = "user32")]
-                    extern "system" {
-                        fn MessageBoxW(
-                            hwnd: *mut std::ffi::c_void,
-                            text: *const u16,
-                            caption: *const u16,
-                            utype: u32,
-                        ) -> i32;
-                    }
-                    MessageBoxW(null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), 0x10);
-                }
-            }
+            // Show native error dialog based on platform
+            show_error_dialog(&format!(
+                "Scribe failed to start:\n\n{}\n\nCheck ~/scribe-error.log for details.",
+                e
+            ));
 
             std::process::exit(1);
+        }
+    }
+}
+
+/// Show a native error dialog on all platforms
+#[cfg(target_os = "windows")]
+fn show_error_dialog(message: &str) {
+    use std::ptr::null_mut;
+    let wide_msg: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide_title: Vec<u16> = "Scribe Error"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(
+                hwnd: *mut std::ffi::c_void,
+                text: *const u16,
+                caption: *const u16,
+                utype: u32,
+            ) -> i32;
+        }
+        MessageBoxW(null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), 0x10);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_error_dialog(message: &str) {
+    use std::process::Command;
+    // Use osascript to show a native macOS alert dialog
+    let script = format!(
+        r#"display dialog "{}" with title "Scribe Error" buttons {{"OK"}} default button "OK" with icon stop"#,
+        message.replace("\"", "\\\"").replace("\n", "\\n")
+    );
+    let _ = Command::new("osascript").arg("-e").arg(&script).output();
+}
+
+#[cfg(target_os = "linux")]
+fn show_error_dialog(message: &str) {
+    use std::process::Command;
+    // Try zenity first (GTK), then kdialog (KDE), then notify-send as fallback
+    let zenity = Command::new("zenity")
+        .args(["--error", "--title=Scribe Error", &format!("--text={}", message)])
+        .output();
+
+    if zenity.is_err() || !zenity.unwrap().status.success() {
+        let kdialog = Command::new("kdialog")
+            .args(["--error", message, "--title", "Scribe Error"])
+            .output();
+
+        if kdialog.is_err() || !kdialog.unwrap().status.success() {
+            // Last resort: notification
+            let _ = Command::new("notify-send")
+                .args(["Scribe Error", message])
+                .output();
         }
     }
 }

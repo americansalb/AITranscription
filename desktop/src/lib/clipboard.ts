@@ -243,18 +243,20 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
       console.error("Auto-paste failed:", error);
       // Show window again if paste failed
       showWindow();
+      const pasteKey = navigator.platform.includes("Mac") ? "Cmd+V" : "Ctrl+V";
       return {
         success: true,
         method: "clipboard",
-        message: "Copied to clipboard. Press Ctrl+V to paste.",
+        message: `Copied to clipboard. Press ${pasteKey} to paste.`,
       };
     }
   }
 
+  const pasteKey = navigator.platform.includes("Mac") ? "Cmd+V" : "Ctrl+V";
   return {
     success: true,
     method: "clipboard",
-    message: "Copied to clipboard. Press Ctrl+V to paste.",
+    message: `Copied to clipboard. Press ${pasteKey} to paste.`,
   };
 }
 

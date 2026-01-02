@@ -249,7 +249,7 @@ function App() {
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">{navigator.platform.includes("Mac") ? "Cmd" : "Ctrl"}+Shift+A</span> for push-to-talk
+          <span className="hotkey">{navigator.platform.includes("Mac") ? "Option" : "Alt"}+D</span> for push-to-talk
         </p>
       </div>
 

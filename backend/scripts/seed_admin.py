@@ -2,6 +2,7 @@
 """
 Seed script to create the default admin user.
 Run with: python -m scripts.seed_admin
+Use --force to reset an existing admin user's password
 """
 import asyncio
 import sys
@@ -9,9 +10,6 @@ from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session_maker
 from app.models.user import User, SubscriptionTier
@@ -24,20 +22,29 @@ ADMIN_PASSWORD = "winner"
 ADMIN_NAME = "Kenil Thakkar"
 
 
-async def seed_admin():
-    """Create the default admin user if they don't exist."""
+async def seed_admin(force: bool = False):
+    """Create the default admin user if they don't exist.
+
+    Args:
+        force: If True, reset existing user's password and settings
+    """
     async with async_session_maker() as db:
         # Check if user already exists
         existing_user = await get_user_by_email(db, ADMIN_EMAIL)
 
         if existing_user:
-            # Update existing user to admin
-            existing_user.is_admin = True
-            existing_user.tier = SubscriptionTier.DEVELOPER
-            existing_user.daily_transcription_limit = 0  # Unlimited
-            existing_user.is_active = True
-            await db.commit()
-            print(f"Updated existing user {ADMIN_EMAIL} to admin with developer tier")
+            if force:
+                # Force reset the admin user
+                existing_user.is_admin = True
+                existing_user.tier = SubscriptionTier.DEVELOPER
+                existing_user.daily_transcription_limit = 0
+                existing_user.is_active = True
+                existing_user.hashed_password = hash_password(ADMIN_PASSWORD)
+                await db.commit()
+                print(f"Reset admin user {ADMIN_EMAIL} (password changed)")
+            else:
+                print(f"Admin user {ADMIN_EMAIL} already exists (use --force to reset)")
+                return
         else:
             # Create new admin user
             admin_user = User(
@@ -46,7 +53,7 @@ async def seed_admin():
                 full_name=ADMIN_NAME,
                 is_admin=True,
                 tier=SubscriptionTier.DEVELOPER,
-                daily_transcription_limit=0,  # Unlimited
+                daily_transcription_limit=0,
                 is_active=True,
             )
             db.add(admin_user)
@@ -61,4 +68,5 @@ async def seed_admin():
 
 
 if __name__ == "__main__":
-    asyncio.run(seed_admin())
+    force = "--force" in sys.argv
+    asyncio.run(seed_admin(force=force))

@@ -105,9 +105,14 @@ export function useGlobalHotkey({
 
 /**
  * Common hotkey combinations
+ *
+ * Push-to-talk: Alt+D (Option+D on Mac)
+ * - "D" for Dictate - easy to remember
+ * - Feels like a dedicated tool, not a system shortcut
+ * - One-handed: thumb on Alt/Option, finger on D
  */
 export const HOTKEYS = {
-  PUSH_TO_TALK: "CommandOrControl+Shift+A",
+  PUSH_TO_TALK: "Alt+D",
   TOGGLE_RECORDING: "CommandOrControl+Shift+R",
   CANCEL_RECORDING: "Escape",
 } as const;

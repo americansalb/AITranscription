@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://localhost:5432/scribe"
 
     # Auth
-    secret_key: str = "dev-secret-key-change-in-production"
+    secret_key: str = "scribe-app-secret-key-change-in-production"
     access_token_expire_minutes: int = 60 * 24 * 7  # 1 week
 
     # App settings
