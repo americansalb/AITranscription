@@ -45,9 +45,19 @@ export interface UserResponse {
   id: number;
   email: string;
   full_name: string | null;
-  tier: "access" | "standard" | "enterprise";
+  tier: "access" | "standard" | "enterprise" | "developer";
   is_active: boolean;
   accessibility_verified: boolean;
+}
+
+export interface UserStatsResponse {
+  total_transcriptions: number;
+  total_words: number;
+  total_audio_seconds: number;
+  transcriptions_today: number;
+  words_today: number;
+  average_words_per_transcription: number;
+  average_words_per_minute: number;
 }
 
 export class ApiError extends Error {
@@ -82,6 +92,17 @@ export async function checkHealth(): Promise<HealthResponse> {
 }
 
 /**
+ * Get filename with correct extension based on audio MIME type
+ */
+function getAudioFilename(blob: Blob): string {
+  const mimeType = blob.type || "audio/webm";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "recording.mp4";
+  if (mimeType.includes("ogg")) return "recording.ogg";
+  if (mimeType.includes("wav")) return "recording.wav";
+  return "recording.webm";
+}
+
+/**
  * Transcribe audio and polish the result
  */
 export async function transcribeAndPolish(
@@ -92,8 +113,11 @@ export async function transcribeAndPolish(
     formality?: "casual" | "neutral" | "formal";
   } = {}
 ): Promise<TranscribeAndPolishResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (options.language) {
     formData.append("language", options.language);
@@ -120,8 +144,11 @@ export async function transcribe(
   audioBlob: Blob,
   language?: string
 ): Promise<TranscribeResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (language) {
     formData.append("language", language);
@@ -248,4 +275,15 @@ export function logout() {
  */
 export function isLoggedIn(): boolean {
   return getAuthToken() !== null;
+}
+
+/**
+ * Get the current user's statistics
+ */
+export async function getUserStats(): Promise<UserStatsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<UserStatsResponse>(response);
 }
