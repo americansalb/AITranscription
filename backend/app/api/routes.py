@@ -1,8 +1,8 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import get_optional_user
+from app.api.auth import get_current_user, get_optional_user
 from app.api.schemas import (
     ErrorResponse,
     HealthResponse,
@@ -168,7 +168,7 @@ async def polish_text(request: PolishRequest):
 @router.post(
     "/transcribe-and-polish",
     response_model=TranscribeAndPolishResponse,
-    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    responses={400: {"model": ErrorResponse}, 401: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
 async def transcribe_and_polish(
     audio: UploadFile = File(..., description="Audio file to transcribe and polish"),
@@ -177,15 +177,22 @@ async def transcribe_and_polish(
     formality: str = Form(default="neutral", description="'casual', 'neutral', or 'formal'"),
     model: str | None = Form(default=None, description="Whisper model: 'whisper-large-v3' or 'whisper-large-v3-turbo'"),
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(get_optional_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Combined endpoint: transcribe audio and polish the result.
 
     This is the main endpoint for the transcription pipeline.
     Provides both raw and polished text for comparison/debugging.
-    Saves transcript to database if user is authenticated.
+    Requires authentication - transcripts are saved to user's account.
     """
+    # Check daily limit (0 = unlimited)
+    if current_user.daily_transcription_limit > 0:
+        if current_user.daily_transcriptions_used >= current_user.daily_transcription_limit:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Daily transcription limit ({current_user.daily_transcription_limit}) reached. Try again tomorrow.",
+            )
     # First, transcribe
     transcribe_response = await transcribe_audio(audio=audio, language=language, model=model)
 
@@ -215,7 +222,7 @@ async def transcribe_and_polish(
     wpm = (word_count / duration * 60) if duration > 0 else 0.0
 
     transcript = Transcript(
-        user_id=current_user.id if current_user else None,
+        user_id=current_user.id,
         raw_text=raw_text,
         polished_text=polished_text,
         audio_duration_seconds=duration,
@@ -228,12 +235,11 @@ async def transcribe_and_polish(
     )
     db.add(transcript)
 
-    # Update user stats if authenticated
-    if current_user:
-        current_user.total_transcriptions += 1
-        current_user.total_words += word_count
-        current_user.total_audio_seconds += int(duration)
-        current_user.daily_transcriptions_used += 1
+    # Update user stats
+    current_user.total_transcriptions += 1
+    current_user.total_words += word_count
+    current_user.total_audio_seconds += int(duration)
+    current_user.daily_transcriptions_used += 1
 
     await db.commit()
 
