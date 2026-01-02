@@ -21,15 +21,19 @@ fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
     Ok(Image::new_owned(rgba.into_raw(), width, height))
 }
 
-#[cfg(target_os = "windows")]
 use std::fs::OpenOptions;
-#[cfg(target_os = "windows")]
 use std::io::Write;
 
-/// Log errors to a file on Windows for debugging launch issues
-#[cfg(target_os = "windows")]
+/// Log errors to a file for debugging launch issues
 fn log_error(message: &str) {
-    if let Some(home) = std::env::var_os("USERPROFILE") {
+    // Get home directory based on platform
+    let home_var = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+
+    if let Some(home) = std::env::var_os(home_var) {
         let log_path = std::path::PathBuf::from(home).join("scribe-error.log");
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let timestamp = std::time::SystemTime::now()
@@ -39,11 +43,9 @@ fn log_error(message: &str) {
             let _ = writeln!(file, "[{}] {}", timestamp, message);
         }
     }
-}
 
-#[cfg(not(target_os = "windows"))]
-fn log_error(message: &str) {
-    eprintln!("Scribe Error: {}", message);
+    // Also print to stderr for debugging
+    eprintln!("Scribe: {}", message);
 }
 
 /// Simulate a paste keyboard shortcut (Ctrl+V on Windows/Linux, Cmd+V on macOS)

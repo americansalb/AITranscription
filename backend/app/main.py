@@ -13,7 +13,11 @@ from app.models.base import Base
 
 
 async def seed_default_admin():
-    """Create the default admin user if they don't exist."""
+    """Create the default admin user if they don't exist.
+
+    Only creates the user once - doesn't modify existing users.
+    This allows the admin to change their password without it being reset.
+    """
     from sqlalchemy import select
     from app.core.database import async_session_maker
     from app.models.user import User, SubscriptionTier
@@ -28,25 +32,22 @@ async def seed_default_admin():
         existing_user = result.scalar_one_or_none()
 
         if existing_user:
-            # Ensure admin privileges
-            existing_user.is_admin = True
-            existing_user.tier = SubscriptionTier.DEVELOPER
-            existing_user.daily_transcription_limit = 0
-            await db.commit()
-        else:
-            # Create new admin user
-            admin_user = User(
-                email=ADMIN_EMAIL,
-                hashed_password=hash_password(ADMIN_PASSWORD),
-                full_name=ADMIN_NAME,
-                is_admin=True,
-                tier=SubscriptionTier.DEVELOPER,
-                daily_transcription_limit=0,
-                is_active=True,
-            )
-            db.add(admin_user)
-            await db.commit()
-            print(f"Created default admin user: {ADMIN_EMAIL}")
+            # User already exists - don't modify (preserves password changes)
+            return
+
+        # Create new admin user only if they don't exist
+        admin_user = User(
+            email=ADMIN_EMAIL,
+            hashed_password=hash_password(ADMIN_PASSWORD),
+            full_name=ADMIN_NAME,
+            is_admin=True,
+            tier=SubscriptionTier.DEVELOPER,
+            daily_transcription_limit=0,
+            is_active=True,
+        )
+        db.add(admin_user)
+        await db.commit()
+        print(f"Created default admin user: {ADMIN_EMAIL}")
 
 
 @asynccontextmanager
