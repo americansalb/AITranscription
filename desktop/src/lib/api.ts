@@ -60,6 +60,61 @@ export interface UserStatsResponse {
   average_words_per_minute: number;
 }
 
+export interface ContextStats {
+  context: string;
+  count: number;
+  words: number;
+  percentage: number;
+}
+
+export interface DailyStats {
+  date: string;
+  transcriptions: number;
+  words: number;
+}
+
+export interface DetailedStatsResponse {
+  // Totals
+  total_transcriptions: number;
+  total_words: number;
+  total_audio_seconds: number;
+  total_characters: number;
+
+  // Time-based
+  transcriptions_today: number;
+  words_today: number;
+  transcriptions_this_week: number;
+  words_this_week: number;
+  transcriptions_this_month: number;
+  words_this_month: number;
+
+  // Averages
+  average_words_per_transcription: number;
+  average_words_per_minute: number;
+  average_transcriptions_per_day: number;
+
+  // Time saved
+  estimated_time_saved_minutes: number;
+
+  // Context breakdown
+  context_breakdown: ContextStats[];
+
+  // Daily activity (last 7 days)
+  daily_activity: DailyStats[];
+
+  // Streaks
+  current_streak_days: number;
+  longest_streak_days: number;
+
+  // Records
+  most_productive_day: string | null;
+  most_productive_day_words: number;
+  longest_transcription_words: number;
+
+  // Member since
+  member_since: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -286,4 +341,15 @@ export async function getUserStats(): Promise<UserStatsResponse> {
   });
 
   return handleResponse<UserStatsResponse>(response);
+}
+
+/**
+ * Get detailed statistics with insights
+ */
+export async function getDetailedStats(): Promise<DetailedStatsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats/detailed`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<DetailedStatsResponse>(response);
 }

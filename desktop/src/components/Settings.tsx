@@ -5,9 +5,11 @@ import {
   logout,
   getCurrentUser,
   getUserStats,
+  getDetailedStats,
   isLoggedIn,
   UserResponse,
   UserStatsResponse,
+  DetailedStatsResponse,
   ApiError,
 } from "../lib/api";
 import { HOTKEYS } from "../hooks/useGlobalHotkey";
@@ -16,7 +18,7 @@ interface SettingsProps {
   onClose: () => void;
 }
 
-type SettingsTab = "account" | "dictionary" | "preferences";
+type SettingsTab = "account" | "stats" | "dictionary" | "preferences";
 
 export function Settings({ onClose }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
@@ -74,6 +76,12 @@ export function Settings({ onClose }: SettingsProps) {
             Account
           </button>
           <button
+            className={activeTab === "stats" ? "active" : ""}
+            onClick={() => setActiveTab("stats")}
+          >
+            Stats
+          </button>
+          <button
             className={activeTab === "dictionary" ? "active" : ""}
             onClick={() => setActiveTab("dictionary")}
           >
@@ -95,6 +103,14 @@ export function Settings({ onClose }: SettingsProps) {
               <AccountInfo user={user} stats={stats} onLogout={handleLogout} />
             ) : (
               <AuthForm onSuccess={setUser} />
+            )
+          ) : activeTab === "stats" ? (
+            user ? (
+              <StatsPanel />
+            ) : (
+              <div className="auth-required">
+                Please log in to view your statistics.
+              </div>
             )
           ) : activeTab === "dictionary" ? (
             user ? (
@@ -366,6 +382,216 @@ function Preferences() {
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
         <kbd>{navigator.platform.includes("Mac") ? "Option" : "Alt"}+D</kbd>
+      </div>
+    </div>
+  );
+}
+
+// Beautiful Stats Panel
+function StatsPanel() {
+  const [stats, setStats] = useState<DetailedStatsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getDetailedStats()
+      .then(setStats)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <div className="loading">Loading statistics...</div>;
+  }
+
+  if (error) {
+    return <div className="form-error">Failed to load stats: {error}</div>;
+  }
+
+  if (!stats) {
+    return <div className="auth-required">No statistics available yet.</div>;
+  }
+
+  const contextLabels: Record<string, string> = {
+    general: "General",
+    email: "Email",
+    slack: "Slack / Chat",
+    document: "Document",
+    code: "Code",
+  };
+
+  const contextColors: Record<string, string> = {
+    general: "#6366f1",
+    email: "#22c55e",
+    slack: "#f59e0b",
+    document: "#3b82f6",
+    code: "#ec4899",
+  };
+
+  // Format time saved
+  const formatTimeSaved = (minutes: number) => {
+    if (minutes < 60) return `${Math.round(minutes)} min`;
+    const hours = Math.floor(minutes / 60);
+    const mins = Math.round(minutes % 60);
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours} hours`;
+  };
+
+  // Format date for display
+  const formatDate = (dateStr: string) => {
+    const date = new Date(dateStr);
+    return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  };
+
+  // Get day name from date string
+  const getDayName = (dateStr: string) => {
+    const date = new Date(dateStr);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (date.toDateString() === today.toDateString()) return "Today";
+    if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+    return date.toLocaleDateString("en-US", { weekday: "short" });
+  };
+
+  // Calculate max for activity chart
+  const maxWords = Math.max(...stats.daily_activity.map((d) => d.words), 1);
+
+  return (
+    <div className="stats-panel">
+      {/* Time Saved Hero */}
+      <div className="stats-hero">
+        <div className="hero-icon">⚡</div>
+        <div className="hero-content">
+          <span className="hero-value">{formatTimeSaved(stats.estimated_time_saved_minutes)}</span>
+          <span className="hero-label">Time Saved</span>
+        </div>
+        <div className="hero-subtitle">vs typing at 40 WPM</div>
+      </div>
+
+      {/* Quick Stats */}
+      <div className="quick-stats">
+        <div className="quick-stat">
+          <span className="quick-value">{stats.total_transcriptions.toLocaleString()}</span>
+          <span className="quick-label">Transcriptions</span>
+        </div>
+        <div className="quick-stat">
+          <span className="quick-value">{stats.total_words.toLocaleString()}</span>
+          <span className="quick-label">Words</span>
+        </div>
+        <div className="quick-stat">
+          <span className="quick-value">{Math.round(stats.average_words_per_minute)}</span>
+          <span className="quick-label">Avg WPM</span>
+        </div>
+        <div className="quick-stat">
+          <span className="quick-value">{stats.current_streak_days}</span>
+          <span className="quick-label">Day Streak 🔥</span>
+        </div>
+      </div>
+
+      {/* Time Period Breakdown */}
+      <div className="stats-section">
+        <h4>Activity</h4>
+        <div className="period-stats">
+          <div className="period-row">
+            <span className="period-label">Today</span>
+            <span className="period-value">{stats.words_today.toLocaleString()} words</span>
+            <span className="period-count">{stats.transcriptions_today} transcriptions</span>
+          </div>
+          <div className="period-row">
+            <span className="period-label">This Week</span>
+            <span className="period-value">{stats.words_this_week.toLocaleString()} words</span>
+            <span className="period-count">{stats.transcriptions_this_week} transcriptions</span>
+          </div>
+          <div className="period-row">
+            <span className="period-label">This Month</span>
+            <span className="period-value">{stats.words_this_month.toLocaleString()} words</span>
+            <span className="period-count">{stats.transcriptions_this_month} transcriptions</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 7-Day Activity Chart */}
+      <div className="stats-section">
+        <h4>Last 7 Days</h4>
+        <div className="activity-chart">
+          {stats.daily_activity.map((day) => (
+            <div key={day.date} className="activity-bar-container">
+              <div
+                className="activity-bar"
+                style={{ height: `${(day.words / maxWords) * 100}%` }}
+                title={`${day.words.toLocaleString()} words`}
+              />
+              <span className="activity-day">{getDayName(day.date)}</span>
+              <span className="activity-words">{day.words > 0 ? day.words.toLocaleString() : "-"}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Context Breakdown */}
+      {stats.context_breakdown.length > 0 && (
+        <div className="stats-section">
+          <h4>Usage by Context</h4>
+          <div className="context-breakdown">
+            {stats.context_breakdown.map((ctx) => (
+              <div key={ctx.context} className="context-item">
+                <div className="context-header">
+                  <span
+                    className="context-dot"
+                    style={{ background: contextColors[ctx.context] || "#666" }}
+                  />
+                  <span className="context-name">{contextLabels[ctx.context] || ctx.context}</span>
+                  <span className="context-percentage">{ctx.percentage}%</span>
+                </div>
+                <div className="context-bar-bg">
+                  <div
+                    className="context-bar-fill"
+                    style={{
+                      width: `${ctx.percentage}%`,
+                      background: contextColors[ctx.context] || "#666",
+                    }}
+                  />
+                </div>
+                <span className="context-words">{ctx.words.toLocaleString()} words</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Personal Records */}
+      <div className="stats-section">
+        <h4>Personal Records</h4>
+        <div className="records-grid">
+          <div className="record-item">
+            <span className="record-icon">🏆</span>
+            <span className="record-value">{stats.longest_streak_days} days</span>
+            <span className="record-label">Longest Streak</span>
+          </div>
+          <div className="record-item">
+            <span className="record-icon">📝</span>
+            <span className="record-value">{stats.longest_transcription_words.toLocaleString()}</span>
+            <span className="record-label">Longest Transcription</span>
+          </div>
+          {stats.most_productive_day && (
+            <div className="record-item">
+              <span className="record-icon">⭐</span>
+              <span className="record-value">{stats.most_productive_day_words.toLocaleString()} words</span>
+              <span className="record-label">Best Day ({formatDate(stats.most_productive_day)})</span>
+            </div>
+          )}
+          <div className="record-item">
+            <span className="record-icon">📊</span>
+            <span className="record-value">{stats.average_transcriptions_per_day}</span>
+            <span className="record-label">Avg/Day</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Member Since */}
+      <div className="member-since">
+        Member since {new Date(stats.member_since).toLocaleDateString("en-US", { month: "long", year: "numeric" })}
       </div>
     </div>
   );
