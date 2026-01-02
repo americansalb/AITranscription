@@ -12,6 +12,43 @@ from app.core.database import engine
 from app.models.base import Base
 
 
+async def seed_default_admin():
+    """Create the default admin user if they don't exist."""
+    from sqlalchemy import select
+    from app.core.database import async_session
+    from app.models.user import User, SubscriptionTier
+    from app.services.auth import hash_password
+
+    ADMIN_EMAIL = "kenil.thakkar@gmail.com"
+    ADMIN_PASSWORD = "winner"
+    ADMIN_NAME = "Kenil Thakkar"
+
+    async with async_session() as db:
+        result = await db.execute(select(User).where(User.email == ADMIN_EMAIL))
+        existing_user = result.scalar_one_or_none()
+
+        if existing_user:
+            # Ensure admin privileges
+            existing_user.is_admin = True
+            existing_user.tier = SubscriptionTier.DEVELOPER
+            existing_user.daily_transcription_limit = 0
+            await db.commit()
+        else:
+            # Create new admin user
+            admin_user = User(
+                email=ADMIN_EMAIL,
+                hashed_password=hash_password(ADMIN_PASSWORD),
+                full_name=ADMIN_NAME,
+                is_admin=True,
+                tier=SubscriptionTier.DEVELOPER,
+                daily_transcription_limit=0,
+                is_active=True,
+            )
+            db.add(admin_user)
+            await db.commit()
+            print(f"Created default admin user: {ADMIN_EMAIL}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create database tables on startup and ensure schema is up to date."""
@@ -72,6 +109,9 @@ async def lifespan(app: FastAPI):
             ))
         except Exception:
             pass  # Enum value already exists or type doesn't exist yet
+
+    # Seed default admin user
+    await seed_default_admin()
     yield
 
 
