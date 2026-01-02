@@ -101,11 +101,11 @@ async def lifespan(app: FastAPI):
             END $$;
         """))
 
-        # Add 'developer' tier to the subscription_tier enum if it doesn't exist
-        # Note: ADD VALUE IF NOT EXISTS handles duplicates automatically in PostgreSQL 9.3+
+        # Add 'DEVELOPER' tier to the subscription_tier enum if it doesn't exist
+        # Note: SQLAlchemy SQLEnum uses enum member NAMES (uppercase), not values
         try:
             await conn.execute(text(
-                "ALTER TYPE subscriptiontier ADD VALUE IF NOT EXISTS 'developer'"
+                "ALTER TYPE subscriptiontier ADD VALUE IF NOT EXISTS 'DEVELOPER'"
             ))
         except Exception:
             pass  # Enum value already exists or type doesn't exist yet
