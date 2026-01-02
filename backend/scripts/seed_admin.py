@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import async_session
+from app.core.database import async_session_maker
 from app.models.user import User, SubscriptionTier
 from app.services.auth import hash_password, get_user_by_email
 
@@ -26,7 +26,7 @@ ADMIN_NAME = "Kenil Thakkar"
 
 async def seed_admin():
     """Create the default admin user if they don't exist."""
-    async with async_session() as db:
+    async with async_session_maker() as db:
         # Check if user already exists
         existing_user = await get_user_by_email(db, ADMIN_EMAIL)
 

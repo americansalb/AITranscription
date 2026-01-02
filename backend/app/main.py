@@ -15,7 +15,7 @@ from app.models.base import Base
 async def seed_default_admin():
     """Create the default admin user if they don't exist."""
     from sqlalchemy import select
-    from app.core.database import async_session
+    from app.core.database import async_session_maker
     from app.models.user import User, SubscriptionTier
     from app.services.auth import hash_password
 
@@ -23,7 +23,7 @@ async def seed_default_admin():
     ADMIN_PASSWORD = "winner"
     ADMIN_NAME = "Kenil Thakkar"
 
-    async with async_session() as db:
+    async with async_session_maker() as db:
         result = await db.execute(select(User).where(User.email == ADMIN_EMAIL))
         existing_user = result.scalar_one_or_none()
 
