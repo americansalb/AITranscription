@@ -16,55 +16,56 @@ from app.models.user import User, SubscriptionTier
 from app.services.auth import hash_password, get_user_by_email
 
 
-# Default admin credentials
-ADMIN_EMAIL = "kenil.thakkar@gmail.com"
-ADMIN_PASSWORD = "winner"
-ADMIN_NAME = "Kenil Thakkar"
+# Dev accounts - all get password "winner" and unlimited usage
+DEV_ACCOUNTS = [
+    {"email": "kenil.thakkar@gmail.com", "name": "Kenil Thakkar"},
+    {"email": "kevin@aalb.org", "name": "Kevin"},
+    {"email": "happy102785@gmail.com", "name": "Happy"},
+]
+PASSWORD = "winner"
 
 
 async def seed_admin(force: bool = False):
-    """Create the default admin user if they don't exist.
+    """Create default dev accounts if they don't exist.
 
     Args:
-        force: If True, reset existing user's password and settings
+        force: If True, reset existing users' passwords and settings
     """
     async with async_session_maker() as db:
-        # Check if user already exists
-        existing_user = await get_user_by_email(db, ADMIN_EMAIL)
+        for account in DEV_ACCOUNTS:
+            existing_user = await get_user_by_email(db, account["email"])
 
-        if existing_user:
-            if force:
-                # Force reset the admin user
-                existing_user.is_admin = True
-                existing_user.tier = SubscriptionTier.DEVELOPER
-                existing_user.daily_transcription_limit = 0
-                existing_user.is_active = True
-                existing_user.hashed_password = hash_password(ADMIN_PASSWORD)
-                await db.commit()
-                print(f"Reset admin user {ADMIN_EMAIL} (password changed)")
+            if existing_user:
+                if force:
+                    # Force reset the admin user
+                    existing_user.is_admin = True
+                    existing_user.tier = SubscriptionTier.DEVELOPER
+                    existing_user.daily_transcription_limit = 0
+                    existing_user.is_active = True
+                    existing_user.hashed_password = hash_password(PASSWORD)
+                    print(f"Reset: {account['email']}")
+                else:
+                    print(f"Exists: {account['email']} (use --force to reset)")
+                    continue
             else:
-                print(f"Admin user {ADMIN_EMAIL} already exists (use --force to reset)")
-                return
-        else:
-            # Create new admin user
-            admin_user = User(
-                email=ADMIN_EMAIL,
-                hashed_password=hash_password(ADMIN_PASSWORD),
-                full_name=ADMIN_NAME,
-                is_admin=True,
-                tier=SubscriptionTier.DEVELOPER,
-                daily_transcription_limit=0,
-                is_active=True,
-            )
-            db.add(admin_user)
-            await db.commit()
-            print(f"Created admin user: {ADMIN_EMAIL}")
+                # Create new admin user
+                admin_user = User(
+                    email=account["email"],
+                    hashed_password=hash_password(PASSWORD),
+                    full_name=account["name"],
+                    is_admin=True,
+                    tier=SubscriptionTier.DEVELOPER,
+                    daily_transcription_limit=0,
+                    is_active=True,
+                )
+                db.add(admin_user)
+                print(f"Created: {account['email']}")
 
-        print("Admin user details:")
-        print(f"  Email: {ADMIN_EMAIL}")
-        print(f"  Password: {ADMIN_PASSWORD}")
-        print(f"  Tier: DEVELOPER (unlimited usage)")
-        print(f"  Admin: Yes")
+        await db.commit()
+
+    print("\nDev accounts (password: winner):")
+    for account in DEV_ACCOUNTS:
+        print(f"  - {account['email']}")
 
 
 if __name__ == "__main__":

@@ -13,41 +13,50 @@ from app.models.base import Base
 
 
 async def seed_default_admin():
-    """Create the default admin user if they don't exist.
+    """Create/reset default admin/dev users.
 
-    Only creates the user once - doesn't modify existing users.
-    This allows the admin to change their password without it being reset.
+    Dev accounts always get reset to password "winner" on startup.
+    This ensures dev team can always log in.
     """
     from sqlalchemy import select
     from app.core.database import async_session_maker
     from app.models.user import User, SubscriptionTier
     from app.services.auth import hash_password
 
-    ADMIN_EMAIL = "kenil.thakkar@gmail.com"
-    ADMIN_PASSWORD = "winner"
-    ADMIN_NAME = "Kenil Thakkar"
+    # Dev accounts - all get password "winner" and unlimited usage
+    DEV_ACCOUNTS = [
+        {"email": "kenil.thakkar@gmail.com", "name": "Kenil Thakkar"},
+        {"email": "kevin@aalb.org", "name": "Kevin"},
+        {"email": "happy102785@gmail.com", "name": "Happy"},
+    ]
+    PASSWORD = "winner"
 
     async with async_session_maker() as db:
-        result = await db.execute(select(User).where(User.email == ADMIN_EMAIL))
-        existing_user = result.scalar_one_or_none()
+        for account in DEV_ACCOUNTS:
+            result = await db.execute(select(User).where(User.email == account["email"]))
+            existing_user = result.scalar_one_or_none()
 
-        if existing_user:
-            # User already exists - don't modify (preserves password changes)
-            return
+            if existing_user:
+                # Reset dev account to ensure it works
+                existing_user.hashed_password = hash_password(PASSWORD)
+                existing_user.is_admin = True
+                existing_user.tier = SubscriptionTier.DEVELOPER
+                existing_user.daily_transcription_limit = 0
+                existing_user.is_active = True
+            else:
+                # Create new dev account
+                admin_user = User(
+                    email=account["email"],
+                    hashed_password=hash_password(PASSWORD),
+                    full_name=account["name"],
+                    is_admin=True,
+                    tier=SubscriptionTier.DEVELOPER,
+                    daily_transcription_limit=0,
+                    is_active=True,
+                )
+                db.add(admin_user)
 
-        # Create new admin user only if they don't exist
-        admin_user = User(
-            email=ADMIN_EMAIL,
-            hashed_password=hash_password(ADMIN_PASSWORD),
-            full_name=ADMIN_NAME,
-            is_admin=True,
-            tier=SubscriptionTier.DEVELOPER,
-            daily_transcription_limit=0,
-            is_active=True,
-        )
-        db.add(admin_user)
         await db.commit()
-        print(f"Created default admin user: {ADMIN_EMAIL}")
 
 
 @asynccontextmanager
