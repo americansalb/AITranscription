@@ -12,7 +12,6 @@ import {
   DetailedStatsResponse,
   ApiError,
 } from "../lib/api";
-import { HOTKEYS } from "../hooks/useGlobalHotkey";
 
 interface SettingsProps {
   onClose: () => void;
