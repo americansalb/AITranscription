@@ -82,6 +82,17 @@ export async function checkHealth(): Promise<HealthResponse> {
 }
 
 /**
+ * Get filename with correct extension based on audio MIME type
+ */
+function getAudioFilename(blob: Blob): string {
+  const mimeType = blob.type || "audio/webm";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "recording.mp4";
+  if (mimeType.includes("ogg")) return "recording.ogg";
+  if (mimeType.includes("wav")) return "recording.wav";
+  return "recording.webm";
+}
+
+/**
  * Transcribe audio and polish the result
  */
 export async function transcribeAndPolish(
@@ -92,8 +103,11 @@ export async function transcribeAndPolish(
     formality?: "casual" | "neutral" | "formal";
   } = {}
 ): Promise<TranscribeAndPolishResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (options.language) {
     formData.append("language", options.language);
@@ -120,8 +134,11 @@ export async function transcribe(
   audioBlob: Blob,
   language?: string
 ): Promise<TranscribeResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (language) {
     formData.append("language", language);
