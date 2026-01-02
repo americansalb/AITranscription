@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Scribe",
@@ -46,9 +47,7 @@
       "signingIdentity": "-",
       "providerShortName": null,
       "entitlements": "entitlements.plist",
-      "infoPlist": {
-        "NSMicrophoneUsageDescription": "Scribe needs microphone access to transcribe your voice recordings."
-      },
+      "infoPlist": "Info.plist",
       "dmg": {
         "appPosition": { "x": 180, "y": 170 },
         "applicationFolderPosition": { "x": 480, "y": 170 },

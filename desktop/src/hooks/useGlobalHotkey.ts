@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 
 // Dynamic import for Tauri - will be undefined in browser
 let tauriGlobalShortcut: typeof import("@tauri-apps/plugin-global-shortcut") | null = null;
@@ -37,6 +37,8 @@ export function useGlobalHotkey({
   onKeyUp,
   enabled = true,
 }: UseGlobalHotkeyOptions) {
+  const [registrationError, setRegistrationError] = useState<string | null>(null);
+  const [registered, setRegistered] = useState(false);
   const isRegistered = useRef(false);
   const isTauriLoaded = useRef(false);
   const keyDownRef = useRef(onKeyDown);
@@ -55,7 +57,7 @@ export function useGlobalHotkey({
     }
 
     if (!tauriGlobalShortcut) {
-      console.log("Global hotkeys not available (not running in Tauri)");
+      setRegistrationError("Global hotkeys not available (not running in Tauri)");
       return;
     }
 
@@ -68,8 +70,12 @@ export function useGlobalHotkey({
         }
       });
       isRegistered.current = true;
+      setRegistered(true);
+      setRegistrationError(null);
       console.log(`Global hotkey registered: ${hotkey}`);
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      setRegistrationError(`Hotkey failed: ${errorMsg}`);
       console.error(`Failed to register global hotkey: ${hotkey}`, error);
     }
   }, [hotkey, enabled]);
@@ -80,6 +86,7 @@ export function useGlobalHotkey({
     try {
       await tauriGlobalShortcut.unregister(hotkey);
       isRegistered.current = false;
+      setRegistered(false);
       console.log(`Global hotkey unregistered: ${hotkey}`);
     } catch (error) {
       console.error(`Failed to unregister global hotkey: ${hotkey}`, error);
@@ -93,14 +100,14 @@ export function useGlobalHotkey({
     };
   }, [register, unregister]);
 
-  return { isRegistered: isRegistered.current };
+  return { isRegistered: registered, error: registrationError };
 }
 
 /**
  * Common hotkey combinations
  */
 export const HOTKEYS = {
-  PUSH_TO_TALK: "CommandOrControl+Shift+Space",
+  PUSH_TO_TALK: "Shift+F2",
   TOGGLE_RECORDING: "CommandOrControl+Shift+R",
   CANCEL_RECORDING: "Escape",
 } as const;

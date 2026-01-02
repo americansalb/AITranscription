@@ -104,6 +104,20 @@ sudo apt-get install libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1
 
 ---
 
+## macOS: Global Hotkey Not Working
+
+If the `Ctrl+Space` push-to-talk hotkey doesn't work:
+
+### 1. Check Console for Errors
+
+Open the app and check if the hotkey registers in the console (View > Developer > Developer Tools).
+
+### 2. Alternative: Use Click-to-Record
+
+If the hotkey still doesn't work, you can click the record button in the app window instead.
+
+---
+
 ## macOS: Microphone Permission Error
 
 If you see an error like `undefined is not an object (evaluating 'navigator.mediaDevices.getUserMedia')` or "Microphone access not available":
