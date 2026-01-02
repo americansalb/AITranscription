@@ -97,7 +97,7 @@ function App() {
   }, [recorder]);
 
   // Register global hotkey for push-to-talk
-  useGlobalHotkey({
+  const { error: hotkeyError } = useGlobalHotkey({
     hotkey: HOTKEYS.PUSH_TO_TALK,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
@@ -214,6 +214,7 @@ function App() {
       </header>
 
       {error && <div className="error-message">{error}</div>}
+      {hotkeyError && <div className="error-message">{hotkeyError}</div>}
 
       <div className="recording-section">
         <button
