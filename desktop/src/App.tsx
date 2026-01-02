@@ -75,6 +75,7 @@ function App() {
       }
 
       const response = await transcribeAndPolish(audioBlob, {
+        language: "en",  // Default to English to avoid wrong language detection
         context: contextRef.current === "general" ? undefined : contextRef.current,
         formality: formalityRef.current,
       });
@@ -139,6 +140,7 @@ function App() {
         }
 
         const response = await transcribeAndPolish(audioBlob, {
+          language: "en",  // Default to English
           context: context === "general" ? undefined : context,
           formality,
         });
