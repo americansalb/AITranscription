@@ -4,6 +4,12 @@
 use enigo::{Enigo, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
+use tauri::{
+    image::Image,
+    menu::{MenuBuilder, MenuItemBuilder},
+    tray::TrayIconBuilder,
+    Manager,
+};
 
 #[cfg(target_os = "windows")]
 use std::fs::OpenOptions;
@@ -82,6 +88,30 @@ fn type_text(text: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Update tray icon to show recording state
+#[tauri::command]
+fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let icon_bytes = if recording {
+            include_bytes!("../icons/tray-recording.png").to_vec()
+        } else {
+            include_bytes!("../icons/tray-idle.png").to_vec()
+        };
+
+        if let Ok(icon) = Image::from_bytes(&icon_bytes) {
+            let _ = tray.set_icon(Some(icon));
+        }
+
+        let tooltip = if recording {
+            "Scribe - Recording..."
+        } else {
+            "Scribe - Ready"
+        };
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
+    Ok(())
+}
+
 fn main() {
     // Log startup attempt for debugging
     log_error("Scribe starting...");
@@ -89,7 +119,56 @@ fn main() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .invoke_handler(tauri::generate_handler![simulate_paste, type_text]);
+        .setup(|app| {
+            // Create tray menu
+            let show_item = MenuItemBuilder::with_id("show", "Show Scribe").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&show_item)
+                .separator()
+                .item(&quit_item)
+                .build()?;
+
+            // Create tray icon - use the app icon initially
+            let icon = Image::from_bytes(include_bytes!("../icons/tray-idle.png"))
+                .unwrap_or_else(|_| {
+                    // Fallback to 32x32 icon
+                    Image::from_bytes(include_bytes!("../icons/32x32.png"))
+                        .expect("Failed to load tray icon")
+                });
+
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .icon(icon)
+                .tooltip("Scribe - Ready")
+                .menu(&menu)
+                .on_menu_event(move |app, event| {
+                    match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state]);
 
     match builder.run(tauri::generate_context!()) {
         Ok(_) => {}
