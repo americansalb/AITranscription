@@ -106,13 +106,13 @@ export function useGlobalHotkey({
 /**
  * Common hotkey combinations
  *
- * Push-to-talk: Ctrl+Space (hold to record, release to transcribe)
- * - Intuitive: "speak into space"
- * - Easy to hold with one hand
- * - Note: May conflict with input method switching for CJK users
+ * Push-to-talk: Alt+D (Option+D on Mac)
+ * - "D" for Dictate - easy to remember
+ * - Feels like a dedicated tool, not a system shortcut
+ * - One-handed: thumb on Alt/Option, finger on D
  */
 export const HOTKEYS = {
-  PUSH_TO_TALK: "Control+Space",
+  PUSH_TO_TALK: "Alt+D",
   TOGGLE_RECORDING: "CommandOrControl+Shift+R",
   CANCEL_RECORDING: "Escape",
 } as const;
