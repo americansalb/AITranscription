@@ -148,8 +148,11 @@ async function showWindowNoFocus(): Promise<void> {
  * Inject text into the active application using clipboard + paste simulation
  */
 export async function injectText(text: string): Promise<boolean> {
+  console.log("[injectText] Called with text length:", text.length);
+
   // First, copy to clipboard
   const copied = await copyToClipboard(text);
+  console.log("[injectText] Clipboard copy result:", copied);
   if (!copied) return false;
 
   // Try to simulate paste via Tauri command
@@ -159,19 +162,25 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      // Hide window briefly to return focus to target app
+      console.log("[injectText] Hiding window briefly...");
       await hideWindowBriefly();
+      console.log("[injectText] Invoking simulate_paste...");
       await tauriCore.invoke("simulate_paste");
+      console.log("[injectText] Paste invoked, waiting...");
       // Show window again without stealing focus
       await new Promise((resolve) => setTimeout(resolve, 100));
+      console.log("[injectText] Showing window...");
       await showWindowNoFocus();
+      console.log("[injectText] Done - success");
       return true;
     } catch (error) {
-      console.error("Auto-paste failed:", error);
+      console.error("[injectText] Auto-paste failed:", error);
       await showWindowNoFocus();
       // Clipboard still has the text, user can paste manually
       return true;
     }
+  } else {
+    console.log("[injectText] tauriCore not available");
   }
 
   // In browser mode, just copy to clipboard
