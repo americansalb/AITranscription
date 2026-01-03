@@ -2,10 +2,10 @@
  * Clipboard and text injection utilities
  *
  * For text injection into active applications, we use the clipboard + paste approach:
- * 1. Save current clipboard content
- * 2. Copy our text to clipboard
+ * 1. Copy our text to clipboard
+ * 2. Hide Scribe window to return focus to target app
  * 3. Simulate Ctrl+V / Cmd+V to paste
- * 4. Restore original clipboard content
+ * 4. Keep window hidden - user can click tray to reopen
  *
  * This is the most reliable cross-platform approach for universal dictation.
  */
@@ -37,6 +37,12 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   if (tauriClipboard) {
     try {
       await tauriClipboard.writeText(text);
+      // Verify the write by reading back (helps catch async issues)
+      const readBack = await tauriClipboard.readText();
+      if (readBack !== text) {
+        console.warn("[clipboard] Write verification failed, retrying...");
+        await tauriClipboard.writeText(text);
+      }
       return true;
     } catch (error) {
       console.error("Tauri clipboard write failed:", error);
@@ -108,52 +114,46 @@ async function loadTauriWindow() {
 }
 
 /**
- * Hide window briefly to return focus to previous app
+ * Minimize the Scribe window to return focus to the target app
+ *
+ * We use minimize instead of hide because:
+ * - On Windows, minimize properly returns focus to the previous app
+ * - The window is still accessible via taskbar
+ * - show() after hide() steals focus on Windows
  */
-async function hideWindowBriefly(): Promise<void> {
+async function minimizeWindow(): Promise<void> {
   if (!tauriWindow) {
     await loadTauriWindow();
   }
   if (tauriWindow) {
     try {
       const win = tauriWindow.getCurrentWindow();
-      await win.hide();
-      // Small delay to let OS switch focus back to previous app
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await win.minimize();
     } catch (error) {
-      console.error("Failed to hide window:", error);
-    }
-  }
-}
-
-/**
- * Show window without stealing focus from target app
- */
-async function showWindowNoFocus(): Promise<void> {
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      // Show but don't focus - user can click on it when they want
-      await win.show();
-    } catch (error) {
-      console.error("Failed to show window:", error);
+      console.error("Failed to minimize window:", error);
     }
   }
 }
 
 /**
  * Inject text into the active application using clipboard + paste simulation
+ *
+ * IMPORTANT: This function minimizes the Scribe window and does NOT bring it
+ * back automatically. This prevents focus stealing which was causing text to
+ * end up in Scribe instead of the target app.
+ *
+ * The user can click the tray icon to bring the window back.
  */
 export async function injectText(text: string): Promise<boolean> {
   console.log("[injectText] Called with text length:", text.length);
 
-  // First, copy to clipboard
+  // First, copy to clipboard and verify
   const copied = await copyToClipboard(text);
   console.log("[injectText] Clipboard copy result:", copied);
   if (!copied) return false;
+
+  // Small delay to ensure clipboard is fully written
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
   // Try to simulate paste via Tauri command
   if (!tauriCore) {
@@ -162,20 +162,26 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      console.log("[injectText] Hiding window briefly...");
-      await hideWindowBriefly();
+      // Minimize window - this works better than hide() on Windows
+      // because it properly returns focus to the previous app
+      console.log("[injectText] Minimizing window...");
+      await minimizeWindow();
+
+      // Give the OS time to switch focus back to the target app
+      // This is critical - too short and the paste goes to the wrong window
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
       console.log("[injectText] Invoking simulate_paste...");
       await tauriCore.invoke("simulate_paste");
-      console.log("[injectText] Paste invoked, waiting...");
-      // Show window again without stealing focus
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      console.log("[injectText] Showing window...");
-      await showWindowNoFocus();
-      console.log("[injectText] Done - success");
+      console.log("[injectText] Paste completed successfully");
+
+      // DO NOT show/restore the window here!
+      // On Windows, win.show() ALWAYS steals focus, which is the main regression.
+      // The window stays minimized. User can click tray icon if needed.
+
       return true;
     } catch (error) {
       console.error("[injectText] Auto-paste failed:", error);
-      await showWindowNoFocus();
       // Clipboard still has the text, user can paste manually
       return true;
     }
@@ -228,6 +234,9 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
     };
   }
 
+  // Small delay to ensure clipboard is fully written
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
   // Try auto-paste via Tauri
   if (!tauriCore) {
     await loadTauriCore();
@@ -235,15 +244,17 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Hide window briefly to return focus to the target app
-      await hideWindowBriefly();
+      // Minimize window to return focus to the target app
+      await minimizeWindow();
+
+      // Give the OS time to switch focus
+      await new Promise((resolve) => setTimeout(resolve, 150));
 
       // Now paste into the target app
       await tauriCore.invoke("simulate_paste");
 
-      // Show window again without stealing focus, so user can access stats/history
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await showWindowNoFocus();
+      // DO NOT show/restore the window - it steals focus on Windows
+      // Window stays minimized, user can click tray to restore
 
       return {
         success: true,
@@ -252,8 +263,6 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
       };
     } catch (error) {
       console.error("Auto-paste failed:", error);
-      // Make sure window is visible if paste failed
-      await showWindowNoFocus();
       const pasteKey = navigator.platform.includes("Mac") ? "Cmd+V" : "Ctrl+V";
       return {
         success: true,
