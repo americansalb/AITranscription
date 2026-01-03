@@ -3,7 +3,9 @@ import { useAudioRecorder } from "./hooks/useAudioRecorder";
 import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
 import { injectText, setTrayRecordingState } from "./lib/clipboard";
+import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { Settings } from "./components/Settings";
+import { RecordingOverlay } from "./components/RecordingOverlay";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
 
@@ -53,10 +55,12 @@ function App() {
     try {
       await recorder.startRecording();
       setStatus("recording");
+      playStartSound();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to start recording";
       setError(message);
       setStatus("error");
+      playErrorSound();
     }
   }, [recorder, backendReady]);
 
@@ -67,6 +71,7 @@ function App() {
     isProcessingRef.current = true;
     setStatus("processing");
     setError(null);
+    playStopSound();
 
     try {
       const audioBlob = await recorder.stopRecording();
@@ -83,6 +88,7 @@ function App() {
       setRawText(response.raw_text);
       setResult(response.polished_text);
       setStatus("success");
+      playSuccessSound();
 
       // Auto-inject the polished text into the active application
       if (response.polished_text) {
@@ -97,6 +103,7 @@ function App() {
             : "An error occurred";
       setError(message);
       setStatus("error");
+      playErrorSound();
     } finally {
       isProcessingRef.current = false;
     }
@@ -132,6 +139,7 @@ function App() {
       // Stop recording and process
       setStatus("processing");
       setError(null);
+      playStopSound();
 
       try {
         const audioBlob = await recorder.stopRecording();
@@ -148,6 +156,7 @@ function App() {
         setRawText(response.raw_text);
         setResult(response.polished_text);
         setStatus("success");
+        playSuccessSound();
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -157,6 +166,7 @@ function App() {
               : "An error occurred";
         setError(message);
         setStatus("error");
+        playErrorSound();
       }
     } else {
       // Start recording
@@ -167,11 +177,13 @@ function App() {
       try {
         await recorder.startRecording();
         setStatus("recording");
+        playStartSound();
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to start recording";
         setError(message);
         setStatus("error");
+        playErrorSound();
       }
     }
   }, [recorder, context, formality]);
@@ -343,6 +355,13 @@ function App() {
       </div>
 
       {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+
+      {/* Floating recording indicator - visible even when window is minimized */}
+      <RecordingOverlay
+        isRecording={recorder.isRecording}
+        isProcessing={status === "processing"}
+        duration={recorder.duration}
+      />
     </div>
   );
 }

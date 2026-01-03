@@ -49,17 +49,21 @@ fn log_error(message: &str) {
 }
 
 /// Simulate a paste keyboard shortcut (Ctrl+V on Windows/Linux, Cmd+V on macOS)
+///
+/// Note: Focus switching timing is handled by the JavaScript caller.
+/// This function just sends the paste keys immediately.
 #[tauri::command]
 fn simulate_paste() -> Result<(), String> {
-    // Small delay to let the app lose focus and target app gain it
-    thread::sleep(Duration::from_millis(100));
-
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+        log_error(&format!("Failed to create Enigo: {}", e));
+        e.to_string()
+    })?;
 
     // Use the appropriate modifier key based on platform
     #[cfg(target_os = "macos")]
     {
         use enigo::Key;
+        // macOS: Cmd+V
         enigo
             .key(Key::Meta, enigo::Direction::Press)
             .map_err(|e| e.to_string())?;
@@ -71,9 +75,27 @@ fn simulate_paste() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
         use enigo::Key;
+        // Windows: Ctrl+V
+        // Small delay here helps with some applications that are slow to receive focus
+        thread::sleep(Duration::from_millis(50));
+        enigo
+            .key(Key::Control, enigo::Direction::Press)
+            .map_err(|e| e.to_string())?;
+        enigo
+            .key(Key::Unicode('v'), enigo::Direction::Click)
+            .map_err(|e| e.to_string())?;
+        enigo
+            .key(Key::Control, enigo::Direction::Release)
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use enigo::Key;
+        // Linux: Ctrl+V
         enigo
             .key(Key::Control, enigo::Direction::Press)
             .map_err(|e| e.to_string())?;
@@ -92,10 +114,15 @@ fn simulate_paste() -> Result<(), String> {
 /// This is an alternative to paste for applications that don't support clipboard
 #[tauri::command]
 fn type_text(text: String) -> Result<(), String> {
-    thread::sleep(Duration::from_millis(100));
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+        log_error(&format!("Failed to create Enigo for typing: {}", e));
+        e.to_string()
+    })?;
 
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
-    enigo.text(&text).map_err(|e| e.to_string())?;
+    enigo.text(&text).map_err(|e| {
+        log_error(&format!("Failed to type text: {}", e));
+        e.to_string()
+    })?;
 
     Ok(())
 }
