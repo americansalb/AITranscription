@@ -27,6 +27,7 @@ function App() {
   const [showRaw, setShowRaw] = useState(false);
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [statsRefreshTrigger, setStatsRefreshTrigger] = useState(0);
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
@@ -89,6 +90,9 @@ function App() {
       setResult(response.polished_text);
       setStatus("success");
       playSuccessSound();
+
+      // Trigger stats refresh so dashboard updates in real-time
+      setStatsRefreshTrigger((prev) => prev + 1);
 
       // Auto-inject the polished text into the active application
       if (response.polished_text) {
@@ -157,6 +161,9 @@ function App() {
         setResult(response.polished_text);
         setStatus("success");
         playSuccessSound();
+
+        // Trigger stats refresh so dashboard updates in real-time
+        setStatsRefreshTrigger((prev) => prev + 1);
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -354,7 +361,12 @@ function App() {
         </div>
       </div>
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <Settings
+          onClose={() => setShowSettings(false)}
+          refreshTrigger={statsRefreshTrigger}
+        />
+      )}
 
       {/* Floating recording indicator - visible even when window is minimized */}
       <RecordingOverlay
