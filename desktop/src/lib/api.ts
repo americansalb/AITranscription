@@ -186,6 +186,7 @@ export async function transcribeAndPolish(
 
   const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   });
 
@@ -211,6 +212,7 @@ export async function transcribe(
 
   const response = await fetch(`${API_BASE_URL}/api/v1/transcribe`, {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   });
 
