@@ -7,6 +7,7 @@ import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from 
 import { Settings } from "./components/Settings";
 import { RecordingOverlay } from "./components/RecordingOverlay";
 import { AudioVisualizer } from "./components/AudioVisualizer";
+import { HistoryPanel } from "./components/HistoryPanel";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
 
@@ -441,6 +442,9 @@ function App() {
           {showRaw ? rawText : result || "Your transcription will appear here..."}
         </div>
       </div>
+
+      {/* History panel with click-to-copy and multi-select */}
+      <HistoryPanel history={history} onClear={() => setHistory([])} />
 
       {showSettings && (
         <Settings
