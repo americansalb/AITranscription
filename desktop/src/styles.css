@@ -1103,43 +1103,28 @@ body {
 }
 
 /* ==================== Audio Visualizer ==================== */
+/* Compact, subtle indicator - only shows during recording */
 
 .audio-visualizer {
-  width: 100%;
-  max-width: 200px;
-  height: 40px;
-  margin: 8px 0;
+  height: 20px;
+  margin: 4px 0;
 }
 
 .visualizer-bars {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  gap: 3px;
+  gap: 2px;
   height: 100%;
-  padding: 4px 0;
 }
 
 .visualizer-bar {
-  width: 6px;
-  min-height: 4px;
-  background: var(--text-muted);
-  border-radius: 3px;
-  transition: height 0.05s ease, background 0.15s ease;
-}
-
-.visualizer-bar.active {
-  background: var(--accent);
-  animation: barPulse 0.3s ease infinite alternate;
-}
-
-@keyframes barPulse {
-  from {
-    opacity: 0.7;
-  }
-  to {
-    opacity: 1;
-  }
+  width: 3px;
+  min-height: 3px;
+  background: var(--error);
+  border-radius: 2px;
+  transition: height 0.05s ease;
+  opacity: 0.9;
 }
 
 /* ==================== History Panel ==================== */

@@ -6,27 +6,28 @@ interface AudioVisualizerProps {
 }
 
 /**
- * A small audio level visualizer widget that shows audio input levels
- * during recording as animated bars.
+ * A compact, subtle audio level indicator that appears during recording.
+ * Small enough to not distract, visible enough to confirm audio input.
  */
 export function AudioVisualizer({ isRecording, audioLevel }: AudioVisualizerProps) {
-  // Generate bar heights based on audio level
+  // Only show when recording
+  if (!isRecording) return null;
+
+  // Generate bar heights based on audio level - just 5 compact bars
   const bars = useMemo(() => {
-    const numBars = 16;
+    const numBars = 5;
     const result: number[] = [];
 
     for (let i = 0; i < numBars; i++) {
       // Create a wave pattern based on position and audio level
       const centerDistance = Math.abs(i - numBars / 2) / (numBars / 2);
-      const baseHeight = 1 - centerDistance * 0.6;
-      const height = isRecording
-        ? Math.max(0.15, baseHeight * audioLevel + Math.random() * 0.1 * audioLevel)
-        : 0.15;
+      const baseHeight = 1 - centerDistance * 0.4;
+      const height = Math.max(0.2, baseHeight * audioLevel + Math.random() * 0.15 * audioLevel);
       result.push(height);
     }
 
     return result;
-  }, [isRecording, audioLevel]);
+  }, [audioLevel]);
 
   return (
     <div className="audio-visualizer" aria-label="Audio level indicator">
@@ -34,10 +35,9 @@ export function AudioVisualizer({ isRecording, audioLevel }: AudioVisualizerProp
         {bars.map((height, i) => (
           <div
             key={i}
-            className={`visualizer-bar ${isRecording ? "active" : ""}`}
+            className="visualizer-bar active"
             style={{
               height: `${height * 100}%`,
-              animationDelay: `${i * 30}ms`,
             }}
           />
         ))}
