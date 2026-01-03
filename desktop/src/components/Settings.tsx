@@ -12,15 +12,19 @@ import {
   DetailedStatsResponse,
   ApiError,
 } from "../lib/api";
+import type { HistoryEntry } from "../App";
+import { copyToClipboard } from "../lib/clipboard";
 
 interface SettingsProps {
   onClose: () => void;
   refreshTrigger?: number;
+  history?: HistoryEntry[];
+  onClearHistory?: () => void;
 }
 
-type SettingsTab = "account" | "stats" | "dictionary" | "preferences";
+type SettingsTab = "account" | "stats" | "history" | "dictionary" | "preferences";
 
-export function Settings({ onClose, refreshTrigger = 0 }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
@@ -83,6 +87,12 @@ export function Settings({ onClose, refreshTrigger = 0 }: SettingsProps) {
             Stats
           </button>
           <button
+            className={activeTab === "history" ? "active" : ""}
+            onClick={() => setActiveTab("history")}
+          >
+            History
+          </button>
+          <button
             className={activeTab === "dictionary" ? "active" : ""}
             onClick={() => setActiveTab("dictionary")}
           >
@@ -113,6 +123,8 @@ export function Settings({ onClose, refreshTrigger = 0 }: SettingsProps) {
                 Please log in to view your statistics.
               </div>
             )
+          ) : activeTab === "history" ? (
+            <HistoryPanel history={history} onClear={onClearHistory} />
           ) : activeTab === "dictionary" ? (
             user ? (
               <DictionaryManager />
@@ -595,6 +607,87 @@ function StatsPanel({ refreshTrigger = 0 }: { refreshTrigger?: number }) {
       {/* Member Since */}
       <div className="member-since">
         Member since {new Date(stats.member_since).toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+      </div>
+    </div>
+  );
+}
+
+// History Panel
+function HistoryPanel({
+  history,
+  onClear,
+}: {
+  history: HistoryEntry[];
+  onClear?: () => void;
+}) {
+  const formatTime = (date: Date) => {
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return "Just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
+
+  const formatDuration = (seconds: number | null) => {
+    if (!seconds) return "";
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  };
+
+  const handleCopy = async (text: string) => {
+    await copyToClipboard(text);
+  };
+
+  if (history.length === 0) {
+    return (
+      <div className="history-panel">
+        <div className="history-empty">
+          <div className="history-empty-icon">📝</div>
+          <div className="history-empty-text">
+            No transcriptions yet. Start recording to see your history here.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="history-panel">
+      <div className="history-header">
+        <h3>Recent Transcriptions</h3>
+        {onClear && history.length > 0 && (
+          <button className="clear-history-btn" onClick={onClear}>
+            Clear All
+          </button>
+        )}
+      </div>
+
+      <div className="history-list">
+        {history.map((entry) => (
+          <div
+            key={entry.id}
+            className="history-item"
+            onClick={() => handleCopy(entry.polishedText)}
+            title="Click to copy"
+          >
+            <div className="history-item-header">
+              <span className="history-time">{formatTime(entry.timestamp)}</span>
+              <div className="history-meta">
+                <span className="history-context">{entry.context}</span>
+                {entry.duration && (
+                  <span className="history-duration">{formatDuration(entry.duration)}</span>
+                )}
+              </div>
+            </div>
+            <div className="history-text">{entry.polishedText}</div>
+          </div>
+        ))}
       </div>
     </div>
   );

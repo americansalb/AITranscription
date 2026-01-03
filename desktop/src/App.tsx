@@ -6,8 +6,48 @@ import { injectText, setTrayRecordingState } from "./lib/clipboard";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { Settings } from "./components/Settings";
 import { RecordingOverlay } from "./components/RecordingOverlay";
+import { AudioVisualizer } from "./components/AudioVisualizer";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
+
+// History entry interface
+export interface HistoryEntry {
+  id: string;
+  timestamp: Date;
+  rawText: string;
+  polishedText: string;
+  context: string;
+  formality: string;
+  duration: number | null;
+}
+
+// Load history from localStorage
+function loadHistory(): HistoryEntry[] {
+  try {
+    const stored = localStorage.getItem("scribe_history");
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return parsed.map((entry: HistoryEntry) => ({
+        ...entry,
+        timestamp: new Date(entry.timestamp),
+      }));
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return [];
+}
+
+// Save history to localStorage
+function saveHistory(history: HistoryEntry[]) {
+  try {
+    // Keep only last 100 entries to avoid storage bloat
+    const toSave = history.slice(0, 100);
+    localStorage.setItem("scribe_history", JSON.stringify(toSave));
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -28,6 +68,7 @@ function App() {
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [statsRefreshTrigger, setStatsRefreshTrigger] = useState(0);
+  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
@@ -39,6 +80,20 @@ function App() {
     contextRef.current = context;
     formalityRef.current = formality;
   }, [context, formality]);
+
+  // Persist history to localStorage when it changes
+  useEffect(() => {
+    saveHistory(history);
+  }, [history]);
+
+  // Add entry to history
+  const addToHistory = useCallback((entry: Omit<HistoryEntry, "id">) => {
+    const newEntry: HistoryEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    };
+    setHistory((prev) => [newEntry, ...prev]);
+  }, []);
 
   // Update tray icon when recording state changes
   useEffect(() => {
@@ -91,6 +146,16 @@ function App() {
       setStatus("success");
       playSuccessSound();
 
+      // Add to history
+      addToHistory({
+        timestamp: new Date(),
+        rawText: response.raw_text,
+        polishedText: response.polished_text,
+        context: contextRef.current,
+        formality: formalityRef.current,
+        duration: response.duration,
+      });
+
       // Trigger stats refresh so dashboard updates in real-time
       setStatsRefreshTrigger((prev) => prev + 1);
 
@@ -111,7 +176,7 @@ function App() {
     } finally {
       isProcessingRef.current = false;
     }
-  }, [recorder]);
+  }, [recorder, addToHistory]);
 
   // Register global hotkey for push-to-talk
   const { error: hotkeyError } = useGlobalHotkey({
@@ -162,6 +227,16 @@ function App() {
         setStatus("success");
         playSuccessSound();
 
+        // Add to history
+        addToHistory({
+          timestamp: new Date(),
+          rawText: response.raw_text,
+          polishedText: response.polished_text,
+          context,
+          formality,
+          duration: response.duration,
+        });
+
         // Trigger stats refresh so dashboard updates in real-time
         setStatsRefreshTrigger((prev) => prev + 1);
       } catch (err) {
@@ -193,7 +268,7 @@ function App() {
         playErrorSound();
       }
     }
-  }, [recorder, context, formality]);
+  }, [recorder, context, formality, addToHistory]);
 
   const handleCopy = useCallback(async () => {
     if (result) {
@@ -267,6 +342,12 @@ function App() {
           />
           {getStatusText()}
         </div>
+
+        {/* Audio level visualizer */}
+        <AudioVisualizer
+          isRecording={recorder.isRecording}
+          audioLevel={recorder.audioLevel || 0}
+        />
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
@@ -365,6 +446,8 @@ function App() {
         <Settings
           onClose={() => setShowSettings(false)}
           refreshTrigger={statsRefreshTrigger}
+          history={history}
+          onClearHistory={() => setHistory([])}
         />
       )}
 
