@@ -81,6 +81,7 @@ export async function readFromClipboard(): Promise<string | null> {
 
 // Dynamic import for Tauri core API
 let tauriCore: typeof import("@tauri-apps/api/core") | null = null;
+let tauriWindow: typeof import("@tauri-apps/api/window") | null = null;
 
 async function loadTauriCore() {
   try {
@@ -94,12 +95,64 @@ async function loadTauriCore() {
   return false;
 }
 
+async function loadTauriWindow() {
+  try {
+    if (typeof window !== "undefined" && "__TAURI__" in window) {
+      tauriWindow = await import("@tauri-apps/api/window");
+      return true;
+    }
+  } catch {
+    // Not running in Tauri
+  }
+  return false;
+}
+
+/**
+ * Hide window briefly to return focus to previous app
+ */
+async function hideWindowBriefly(): Promise<void> {
+  if (!tauriWindow) {
+    await loadTauriWindow();
+  }
+  if (tauriWindow) {
+    try {
+      const win = tauriWindow.getCurrentWindow();
+      await win.hide();
+      // Small delay to let OS switch focus back to previous app
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } catch (error) {
+      console.error("Failed to hide window:", error);
+    }
+  }
+}
+
+/**
+ * Show window without stealing focus from target app
+ */
+async function showWindowNoFocus(): Promise<void> {
+  if (!tauriWindow) {
+    await loadTauriWindow();
+  }
+  if (tauriWindow) {
+    try {
+      const win = tauriWindow.getCurrentWindow();
+      // Show but don't focus - user can click on it when they want
+      await win.show();
+    } catch (error) {
+      console.error("Failed to show window:", error);
+    }
+  }
+}
+
 /**
  * Inject text into the active application using clipboard + paste simulation
  */
 export async function injectText(text: string): Promise<boolean> {
+  console.log("[injectText] Called with text length:", text.length);
+
   // First, copy to clipboard
   const copied = await copyToClipboard(text);
+  console.log("[injectText] Clipboard copy result:", copied);
   if (!copied) return false;
 
   // Try to simulate paste via Tauri command
@@ -109,14 +162,25 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      // Just simulate paste - don't hide the window
+      console.log("[injectText] Hiding window briefly...");
+      await hideWindowBriefly();
+      console.log("[injectText] Invoking simulate_paste...");
       await tauriCore.invoke("simulate_paste");
+      console.log("[injectText] Paste invoked, waiting...");
+      // Show window again without stealing focus
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      console.log("[injectText] Showing window...");
+      await showWindowNoFocus();
+      console.log("[injectText] Done - success");
       return true;
     } catch (error) {
-      console.error("Auto-paste failed:", error);
+      console.error("[injectText] Auto-paste failed:", error);
+      await showWindowNoFocus();
       // Clipboard still has the text, user can paste manually
       return true;
     }
+  } else {
+    console.log("[injectText] tauriCore not available");
   }
 
   // In browser mode, just copy to clipboard
@@ -171,8 +235,15 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Just simulate paste - keep the window open so user can access stats/history
+      // Hide window briefly to return focus to the target app
+      await hideWindowBriefly();
+
+      // Now paste into the target app
       await tauriCore.invoke("simulate_paste");
+
+      // Show window again without stealing focus, so user can access stats/history
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await showWindowNoFocus();
 
       return {
         success: true,
@@ -181,6 +252,8 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
       };
     } catch (error) {
       console.error("Auto-paste failed:", error);
+      // Make sure window is visible if paste failed
+      await showWindowNoFocus();
       const pasteKey = navigator.platform.includes("Mac") ? "Cmd+V" : "Ctrl+V";
       return {
         success: true,
