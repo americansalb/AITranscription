@@ -15,16 +15,18 @@ import {
 
 interface SettingsProps {
   onClose: () => void;
+  refreshTrigger?: number;
 }
 
 type SettingsTab = "account" | "stats" | "dictionary" | "preferences";
 
-export function Settings({ onClose }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0 }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Fetch user and stats on mount and when refreshTrigger changes
   useEffect(() => {
     if (isLoggedIn()) {
       Promise.all([getCurrentUser(), getUserStats()])
@@ -40,7 +42,7 @@ export function Settings({ onClose }: SettingsProps) {
     } else {
       setLoading(false);
     }
-  }, []);
+  }, [refreshTrigger]);
 
   const handleLogout = useCallback(() => {
     logout();
@@ -105,7 +107,7 @@ export function Settings({ onClose }: SettingsProps) {
             )
           ) : activeTab === "stats" ? (
             user ? (
-              <StatsPanel />
+              <StatsPanel refreshTrigger={refreshTrigger} />
             ) : (
               <div className="auth-required">
                 Please log in to view your statistics.
@@ -387,17 +389,19 @@ function Preferences() {
 }
 
 // Beautiful Stats Panel
-function StatsPanel() {
+function StatsPanel({ refreshTrigger = 0 }: { refreshTrigger?: number }) {
   const [stats, setStats] = useState<DetailedStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Fetch stats on mount and whenever refreshTrigger changes
   useEffect(() => {
+    setLoading(true);
     getDetailedStats()
       .then(setStats)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [refreshTrigger]);
 
   if (loading) {
     return <div className="loading">Loading statistics...</div>;

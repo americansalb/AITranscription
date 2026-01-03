@@ -145,15 +145,17 @@ async function minimizeWindow(): Promise<void> {
  * The user can click the tray icon to bring the window back.
  */
 export async function injectText(text: string): Promise<boolean> {
-  console.log("[injectText] Called with text length:", text.length);
+  const timestamp = Date.now();
+  console.log(`[injectText:${timestamp}] Called with text length:`, text.length);
 
   // First, copy to clipboard and verify
   const copied = await copyToClipboard(text);
-  console.log("[injectText] Clipboard copy result:", copied);
+  console.log(`[injectText:${timestamp}] Clipboard copy result:`, copied);
   if (!copied) return false;
 
-  // Small delay to ensure clipboard is fully written
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Delay to ensure clipboard is fully written (antivirus scanning, etc.)
+  console.log(`[injectText:${timestamp}] Waiting for clipboard to settle...`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
 
   // Try to simulate paste via Tauri command
   if (!tauriCore) {
@@ -164,16 +166,21 @@ export async function injectText(text: string): Promise<boolean> {
     try {
       // Minimize window - this works better than hide() on Windows
       // because it properly returns focus to the previous app
-      console.log("[injectText] Minimizing window...");
+      console.log(`[injectText:${timestamp}] Minimizing window...`);
       await minimizeWindow();
 
       // Give the OS time to switch focus back to the target app
-      // This is critical - too short and the paste goes to the wrong window
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Increased from 150ms to 250ms - Windows needs more time for reliable focus switch
+      console.log(`[injectText:${timestamp}] Waiting for focus switch...`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
 
-      console.log("[injectText] Invoking simulate_paste...");
+      console.log(`[injectText:${timestamp}] Invoking simulate_paste...`);
       await tauriCore.invoke("simulate_paste");
-      console.log("[injectText] Paste completed successfully");
+      console.log(`[injectText:${timestamp}] Paste command sent`);
+
+      // Wait a bit to let the paste complete before returning
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      console.log(`[injectText:${timestamp}] Done`);
 
       // DO NOT show/restore the window here!
       // On Windows, win.show() ALWAYS steals focus, which is the main regression.
@@ -181,12 +188,12 @@ export async function injectText(text: string): Promise<boolean> {
 
       return true;
     } catch (error) {
-      console.error("[injectText] Auto-paste failed:", error);
+      console.error(`[injectText:${timestamp}] Auto-paste failed:`, error);
       // Clipboard still has the text, user can paste manually
       return true;
     }
   } else {
-    console.log("[injectText] tauriCore not available");
+    console.log(`[injectText:${timestamp}] tauriCore not available`);
   }
 
   // In browser mode, just copy to clipboard
