@@ -81,7 +81,6 @@ export async function readFromClipboard(): Promise<string | null> {
 
 // Dynamic import for Tauri core API
 let tauriCore: typeof import("@tauri-apps/api/core") | null = null;
-let tauriWindow: typeof import("@tauri-apps/api/window") | null = null;
 
 async function loadTauriCore() {
   try {
@@ -93,56 +92,6 @@ async function loadTauriCore() {
     // Not running in Tauri
   }
   return false;
-}
-
-async function loadTauriWindow() {
-  try {
-    if (typeof window !== "undefined" && "__TAURI__" in window) {
-      tauriWindow = await import("@tauri-apps/api/window");
-      return true;
-    }
-  } catch {
-    // Not running in Tauri
-  }
-  return false;
-}
-
-/**
- * Hide the Scribe window to return focus to the previous app
- */
-async function hideWindow(): Promise<boolean> {
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      await win.hide();
-      // Small delay to let OS switch focus
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      return true;
-    } catch (error) {
-      console.error("Failed to hide window:", error);
-    }
-  }
-  return false;
-}
-
-/**
- * Show the Scribe window again
- */
-async function showWindow(): Promise<void> {
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      await win.show();
-    } catch (error) {
-      console.error("Failed to show window:", error);
-    }
-  }
 }
 
 /**
