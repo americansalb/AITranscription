@@ -5,6 +5,7 @@ export interface AudioRecorderState {
   isPaused: boolean;
   duration: number;
   error: string | null;
+  audioLevel: number;
 }
 
 export interface UseAudioRecorderReturn extends AudioRecorderState {
@@ -21,18 +22,49 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     isPaused: false,
     duration: 0,
     error: null,
+    audioLevel: 0,
   });
 
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const audioChunks = useRef<Blob[]>([]);
   const startTime = useRef<number>(0);
   const durationInterval = useRef<number | null>(null);
+  const audioContext = useRef<AudioContext | null>(null);
+  const analyser = useRef<AnalyserNode | null>(null);
+  const animationFrame = useRef<number | null>(null);
 
   const clearDurationInterval = useCallback(() => {
     if (durationInterval.current) {
       clearInterval(durationInterval.current);
       durationInterval.current = null;
     }
+  }, []);
+
+  const cleanupAudioAnalysis = useCallback(() => {
+    if (animationFrame.current) {
+      cancelAnimationFrame(animationFrame.current);
+      animationFrame.current = null;
+    }
+    if (audioContext.current) {
+      audioContext.current.close();
+      audioContext.current = null;
+    }
+    analyser.current = null;
+  }, []);
+
+  const updateAudioLevel = useCallback(() => {
+    if (!analyser.current) return;
+
+    const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
+    analyser.current.getByteFrequencyData(dataArray);
+
+    // Calculate average volume level (0-1)
+    const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+    const normalizedLevel = Math.min(average / 128, 1); // Normalize to 0-1
+
+    setState((s) => ({ ...s, audioLevel: normalizedLevel }));
+
+    animationFrame.current = requestAnimationFrame(updateAudioLevel);
   }, []);
 
   const startRecording = useCallback(async () => {
@@ -54,6 +86,14 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
           sampleRate: 44100,
         },
       });
+
+      // Set up audio analysis for level metering
+      audioContext.current = new AudioContext();
+      analyser.current = audioContext.current.createAnalyser();
+      analyser.current.fftSize = 256;
+      const source = audioContext.current.createMediaStreamSource(stream);
+      source.connect(analyser.current);
+      updateAudioLevel();
 
       // Determine best supported format
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -94,7 +134,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       setState((s) => ({ ...s, error: message }));
       throw err;
     }
-  }, []);
+  }, [updateAudioLevel]);
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
     return new Promise((resolve) => {
@@ -104,6 +144,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       }
 
       clearDurationInterval();
+      cleanupAudioAnalysis();
 
       mediaRecorder.current.onstop = () => {
         const mimeType = mediaRecorder.current?.mimeType || "audio/webm";
@@ -116,6 +157,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
           ...s,
           isRecording: false,
           isPaused: false,
+          audioLevel: 0,
         }));
 
         resolve(audioBlob);
@@ -123,7 +165,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
       mediaRecorder.current.stop();
     });
-  }, [clearDurationInterval]);
+  }, [clearDurationInterval, cleanupAudioAnalysis]);
 
   const pauseRecording = useCallback(() => {
     if (mediaRecorder.current && mediaRecorder.current.state === "recording") {
@@ -153,6 +195,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
   const cancelRecording = useCallback(() => {
     clearDurationInterval();
+    cleanupAudioAnalysis();
 
     if (mediaRecorder.current) {
       mediaRecorder.current.stream.getTracks().forEach((track) => track.stop());
@@ -165,8 +208,9 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       isPaused: false,
       duration: 0,
       error: null,
+      audioLevel: 0,
     });
-  }, [clearDurationInterval]);
+  }, [clearDurationInterval, cleanupAudioAnalysis]);
 
   return {
     ...state,

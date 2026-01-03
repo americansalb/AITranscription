@@ -114,23 +114,26 @@ async function loadTauriWindow() {
 }
 
 /**
- * Minimize the Scribe window to return focus to the target app
+ * Hide the Scribe window to return focus to the target app
  *
- * We use minimize instead of hide because:
- * - On Windows, minimize properly returns focus to the previous app
- * - The window is still accessible via taskbar
- * - show() after hide() steals focus on Windows
+ * We use hide() instead of minimize() because:
+ * - minimize() causes Windows to "click" somewhere, moving the cursor
+ * - hide() preserves cursor position in the target app
+ * - Window is accessible via system tray icon
+ *
+ * IMPORTANT: Do NOT call show() after paste - it steals focus on Windows.
+ * User can click tray icon to restore window.
  */
-async function minimizeWindow(): Promise<void> {
+async function hideWindow(): Promise<void> {
   if (!tauriWindow) {
     await loadTauriWindow();
   }
   if (tauriWindow) {
     try {
       const win = tauriWindow.getCurrentWindow();
-      await win.minimize();
+      await win.hide();
     } catch (error) {
-      console.error("Failed to minimize window:", error);
+      console.error("Failed to hide window:", error);
     }
   }
 }
@@ -164,10 +167,10 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      // Minimize window - this works better than hide() on Windows
-      // because it properly returns focus to the previous app
-      console.log(`[injectText:${timestamp}] Minimizing window...`);
-      await minimizeWindow();
+      // Hide window - this preserves cursor position unlike minimize()
+      // which causes Windows to "click" somewhere and move the cursor
+      console.log(`[injectText:${timestamp}] Hiding window...`);
+      await hideWindow();
 
       // Give the OS time to switch focus back to the target app
       // Increased from 150ms to 250ms - Windows needs more time for reliable focus switch
@@ -251,8 +254,8 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Minimize window to return focus to the target app
-      await minimizeWindow();
+      // Hide window to return focus to the target app
+      await hideWindow();
 
       // Give the OS time to switch focus
       await new Promise((resolve) => setTimeout(resolve, 150));
