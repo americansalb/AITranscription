@@ -160,17 +160,11 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      // Hide window to return focus to previous app
-      await hideWindow();
-
+      // Just simulate paste - don't hide the window
       await tauriCore.invoke("simulate_paste");
-
-      // Don't show window again - user can click tray icon to show it
       return true;
     } catch (error) {
       console.error("Auto-paste failed:", error);
-      // Show window again if paste failed
-      showWindow();
       // Clipboard still has the text, user can paste manually
       return true;
     }
@@ -228,12 +222,9 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Hide window to return focus to previous app
-      await hideWindow();
-
+      // Just simulate paste - keep the window open so user can access stats/history
       await tauriCore.invoke("simulate_paste");
 
-      // Don't automatically show window - user can click tray icon to show it
       return {
         success: true,
         method: "auto-paste",
@@ -241,8 +232,6 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
       };
     } catch (error) {
       console.error("Auto-paste failed:", error);
-      // Show window again if paste failed
-      showWindow();
       const pasteKey = navigator.platform.includes("Mac") ? "Cmd+V" : "Ctrl+V";
       return {
         success: true,
