@@ -65,17 +65,32 @@ fn simulate_paste() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use enigo::Key;
+        log_error("simulate_paste: macOS - waiting for focus");
+        // Same timing as Windows for consistent behavior
+        thread::sleep(Duration::from_millis(100));
         log_error("simulate_paste: macOS - sending Cmd+V");
         enigo
             .key(Key::Meta, enigo::Direction::Press)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: Meta press failed: {}", e));
+                e.to_string()
+            })?;
+        // Small delay between key press and V for reliable detection
+        thread::sleep(Duration::from_millis(20));
         enigo
             .key(Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: V click failed: {}", e));
+                e.to_string()
+            })?;
+        thread::sleep(Duration::from_millis(20));
         enigo
             .key(Key::Meta, enigo::Direction::Release)
-            .map_err(|e| e.to_string())?;
-        log_error("simulate_paste: macOS - Cmd+V sent");
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: Meta release failed: {}", e));
+                e.to_string()
+            })?;
+        log_error("simulate_paste: macOS - Cmd+V sent successfully");
     }
 
     #[cfg(target_os = "windows")]
@@ -113,17 +128,31 @@ fn simulate_paste() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         use enigo::Key;
+        log_error("simulate_paste: Linux - waiting for focus");
+        // Same timing as Windows/macOS for consistent behavior
+        thread::sleep(Duration::from_millis(100));
         log_error("simulate_paste: Linux - sending Ctrl+V");
         enigo
             .key(Key::Control, enigo::Direction::Press)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: Ctrl press failed: {}", e));
+                e.to_string()
+            })?;
+        thread::sleep(Duration::from_millis(20));
         enigo
             .key(Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: V click failed: {}", e));
+                e.to_string()
+            })?;
+        thread::sleep(Duration::from_millis(20));
         enigo
             .key(Key::Control, enigo::Direction::Release)
-            .map_err(|e| e.to_string())?;
-        log_error("simulate_paste: Linux - Ctrl+V sent");
+            .map_err(|e| {
+                log_error(&format!("simulate_paste: Ctrl release failed: {}", e));
+                e.to_string()
+            })?;
+        log_error("simulate_paste: Linux - Ctrl+V sent successfully");
     }
 
     Ok(())
