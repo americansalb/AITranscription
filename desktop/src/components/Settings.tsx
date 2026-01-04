@@ -20,11 +20,12 @@ interface SettingsProps {
   refreshTrigger?: number;
   history?: HistoryEntry[];
   onClearHistory?: () => void;
+  onHotkeyChange?: (hotkey: string) => void;
 }
 
 type SettingsTab = "account" | "stats" | "history" | "dictionary" | "preferences";
 
-export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory, onHotkeyChange }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
@@ -134,7 +135,7 @@ export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHis
               </div>
             )
           ) : (
-            <Preferences />
+            <Preferences onHotkeyChange={onHotkeyChange} />
           )}
         </div>
       </div>
@@ -363,10 +364,47 @@ function DictionaryManager() {
   );
 }
 
+// Hotkey options for push-to-talk
+const HOTKEY_OPTIONS = [
+  { value: "Alt+D", label: "Alt+D", macLabel: "Option+D" },
+  { value: "Alt+Space", label: "Alt+Space", macLabel: "Option+Space" },
+  { value: "Alt+R", label: "Alt+R", macLabel: "Option+R" },
+  { value: "CommandOrControl+Shift+Space", label: "Ctrl+Shift+Space", macLabel: "Cmd+Shift+Space" },
+  { value: "CommandOrControl+Shift+D", label: "Ctrl+Shift+D", macLabel: "Cmd+Shift+D" },
+  { value: "F9", label: "F9", macLabel: "F9" },
+  { value: "F10", label: "F10", macLabel: "F10" },
+];
+
+// Get stored hotkey from localStorage
+export function getStoredHotkey(): string {
+  try {
+    return localStorage.getItem("scribe_hotkey") || "Alt+D";
+  } catch {
+    return "Alt+D";
+  }
+}
+
+// Save hotkey to localStorage
+function saveHotkey(hotkey: string) {
+  try {
+    localStorage.setItem("scribe_hotkey", hotkey);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 // App preferences
-function Preferences() {
+function Preferences({ onHotkeyChange }: { onHotkeyChange?: (hotkey: string) => void }) {
   const [autoPaste, setAutoPaste] = useState(true);
   const [playSound, setPlaySound] = useState(true);
+  const [hotkey, setHotkey] = useState(() => getStoredHotkey());
+  const isMac = navigator.platform.includes("Mac");
+
+  const handleHotkeyChange = (newHotkey: string) => {
+    setHotkey(newHotkey);
+    saveHotkey(newHotkey);
+    onHotkeyChange?.(newHotkey);
+  };
 
   return (
     <div className="preferences">
@@ -394,8 +432,22 @@ function Preferences() {
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <kbd>{navigator.platform.includes("Mac") ? "Option" : "Alt"}+D</kbd>
+        <select
+          value={hotkey}
+          onChange={(e) => handleHotkeyChange(e.target.value)}
+          className="hotkey-select"
+        >
+          {HOTKEY_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {isMac ? opt.macLabel : opt.label}
+            </option>
+          ))}
+        </select>
       </div>
+
+      <p className="hotkey-hint">
+        Changes take effect immediately. Hold the hotkey to record, release to transcribe.
+      </p>
     </div>
   );
 }

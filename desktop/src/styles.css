@@ -744,6 +744,29 @@ body {
   color: var(--text-secondary);
 }
 
+.hotkey-select {
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+  cursor: pointer;
+  min-width: 140px;
+}
+
+.hotkey-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.hotkey-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 12px;
+  font-style: italic;
+}
+
 /* ==================== Stats Panel ==================== */
 
 .stats-panel {
