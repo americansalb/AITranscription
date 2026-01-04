@@ -131,24 +131,6 @@ async function minimizeWindow(): Promise<void> {
 }
 
 /**
- * Restore/show the Scribe window after paste
- */
-async function restoreWindow(): Promise<void> {
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      await win.unminimize();
-      await win.setFocus();
-    } catch (error) {
-      console.error("Failed to restore window:", error);
-    }
-  }
-}
-
-/**
  * Inject text into the active application using clipboard + paste simulation
  *
  * IMPORTANT: This function minimizes the Scribe window and does NOT bring it
@@ -178,6 +160,7 @@ export async function injectText(text: string): Promise<boolean> {
   if (tauriCore) {
     try {
       // Minimize window to return focus to the target app
+      // Window stays minimized - user can access via tray when they want
       console.log(`[injectText:${timestamp}] Minimizing window...`);
       await minimizeWindow();
 
@@ -187,13 +170,7 @@ export async function injectText(text: string): Promise<boolean> {
 
       console.log(`[injectText:${timestamp}] Invoking simulate_paste...`);
       await tauriCore.invoke("simulate_paste");
-      console.log(`[injectText:${timestamp}] Paste command sent`);
-
-      // Wait for paste to complete, then restore our window
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      console.log(`[injectText:${timestamp}] Restoring window...`);
-      await restoreWindow();
-      console.log(`[injectText:${timestamp}] Done`);
+      console.log(`[injectText:${timestamp}] Paste complete`);
 
       return true;
     } catch (error) {
@@ -261,6 +238,7 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
   if (tauriCore) {
     try {
       // Minimize window to return focus to the target app
+      // Window stays minimized - user can access via tray
       await minimizeWindow();
 
       // Give the OS time to switch focus
@@ -268,10 +246,6 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
       // Now paste into the target app
       await tauriCore.invoke("simulate_paste");
-
-      // Wait for paste, then restore window
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      await restoreWindow();
 
       return {
         success: true,
@@ -299,6 +273,9 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
 /**
  * Update tray icon recording state
+ *
+ * This ONLY updates the tray icon - doesn't touch the window.
+ * Window stays wherever it is. User can access via tray when they want.
  */
 export async function setTrayRecordingState(recording: boolean): Promise<void> {
   if (!tauriCore) {
@@ -310,26 +287,6 @@ export async function setTrayRecordingState(recording: boolean): Promise<void> {
       await tauriCore.invoke("set_recording_state", { recording });
     } catch (error) {
       console.error("Failed to update tray state:", error);
-    }
-  }
-
-  // Also set window always-on-top during recording so indicator is visible
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      await win.setAlwaysOnTop(recording);
-
-      // If starting recording, also make sure window is visible and in a good position
-      if (recording) {
-        await win.unminimize();
-        await win.show();
-      }
-    } catch (error) {
-      console.error("Failed to set always-on-top:", error);
     }
   }
 }
