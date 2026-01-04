@@ -312,4 +312,24 @@ export async function setTrayRecordingState(recording: boolean): Promise<void> {
       console.error("Failed to update tray state:", error);
     }
   }
+
+  // Also set window always-on-top during recording so indicator is visible
+  if (!tauriWindow) {
+    await loadTauriWindow();
+  }
+
+  if (tauriWindow) {
+    try {
+      const win = tauriWindow.getCurrentWindow();
+      await win.setAlwaysOnTop(recording);
+
+      // If starting recording, also make sure window is visible and in a good position
+      if (recording) {
+        await win.unminimize();
+        await win.show();
+      }
+    } catch (error) {
+      console.error("Failed to set always-on-top:", error);
+    }
+  }
 }
