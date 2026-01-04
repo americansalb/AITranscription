@@ -114,26 +114,36 @@ async function loadTauriWindow() {
 }
 
 /**
- * Hide the Scribe window to return focus to the target app
- *
- * We use hide() instead of minimize() because:
- * - minimize() causes Windows to "click" somewhere, moving the cursor
- * - hide() preserves cursor position in the target app
- * - Window is accessible via system tray icon
- *
- * IMPORTANT: Do NOT call show() after paste - it steals focus on Windows.
- * User can click tray icon to restore window.
+ * Minimize the Scribe window to return focus to the target app
  */
-async function hideWindow(): Promise<void> {
+async function minimizeWindow(): Promise<void> {
   if (!tauriWindow) {
     await loadTauriWindow();
   }
   if (tauriWindow) {
     try {
       const win = tauriWindow.getCurrentWindow();
-      await win.hide();
+      await win.minimize();
     } catch (error) {
-      console.error("Failed to hide window:", error);
+      console.error("Failed to minimize window:", error);
+    }
+  }
+}
+
+/**
+ * Restore/show the Scribe window after paste
+ */
+async function restoreWindow(): Promise<void> {
+  if (!tauriWindow) {
+    await loadTauriWindow();
+  }
+  if (tauriWindow) {
+    try {
+      const win = tauriWindow.getCurrentWindow();
+      await win.unminimize();
+      await win.setFocus();
+    } catch (error) {
+      console.error("Failed to restore window:", error);
     }
   }
 }
@@ -167,27 +177,23 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
-      // Hide window - this preserves cursor position unlike minimize()
-      // which causes Windows to "click" somewhere and move the cursor
-      console.log(`[injectText:${timestamp}] Hiding window...`);
-      await hideWindow();
+      // Minimize window to return focus to the target app
+      console.log(`[injectText:${timestamp}] Minimizing window...`);
+      await minimizeWindow();
 
       // Give the OS time to switch focus back to the target app
-      // Increased from 150ms to 250ms - Windows needs more time for reliable focus switch
       console.log(`[injectText:${timestamp}] Waiting for focus switch...`);
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       console.log(`[injectText:${timestamp}] Invoking simulate_paste...`);
       await tauriCore.invoke("simulate_paste");
       console.log(`[injectText:${timestamp}] Paste command sent`);
 
-      // Wait a bit to let the paste complete before returning
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Wait for paste to complete, then restore our window
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      console.log(`[injectText:${timestamp}] Restoring window...`);
+      await restoreWindow();
       console.log(`[injectText:${timestamp}] Done`);
-
-      // DO NOT show/restore the window here!
-      // On Windows, win.show() ALWAYS steals focus, which is the main regression.
-      // The window stays minimized. User can click tray icon if needed.
 
       return true;
     } catch (error) {
@@ -254,17 +260,18 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Hide window to return focus to the target app
-      await hideWindow();
+      // Minimize window to return focus to the target app
+      await minimizeWindow();
 
       // Give the OS time to switch focus
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // Now paste into the target app
       await tauriCore.invoke("simulate_paste");
 
-      // DO NOT show/restore the window - it steals focus on Windows
-      // Window stays minimized, user can click tray to restore
+      // Wait for paste, then restore window
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await restoreWindow();
 
       return {
         success: true,

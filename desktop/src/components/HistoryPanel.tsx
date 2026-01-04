@@ -63,9 +63,11 @@ export function HistoryPanel({ history, onClear }: HistoryPanelProps) {
   const handleCopySelected = useCallback(async () => {
     if (selectedIds.size === 0) return;
 
-    // Get selected entries in order
+    // Get selected entries in display order, then reverse for chronological (oldest first)
     const selectedEntries = history.filter((h) => selectedIds.has(h.id));
-    const text = selectedEntries.map((e) => e.polishedText).join("\n\n");
+    // Reverse so oldest is first when pasting (history is newest-first)
+    const chronological = [...selectedEntries].reverse();
+    const text = chronological.map((e) => e.polishedText).join("\n\n");
 
     await copyToClipboard(text);
     setCopiedId("all");
