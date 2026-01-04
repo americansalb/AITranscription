@@ -4,5 +4,7 @@
 <dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Scribe needs microphone access to transcribe your voice recordings.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Scribe uses AppleScript to paste text into other applications.</string>
 </dict>
 </plist>
