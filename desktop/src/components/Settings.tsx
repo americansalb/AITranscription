@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   login,
   signup,
@@ -366,16 +366,45 @@ function DictionaryManager() {
   );
 }
 
-// Hotkey options for push-to-talk
-const HOTKEY_OPTIONS = [
-  { value: "Alt+D", label: "Alt+D", macLabel: "Option+D" },
-  { value: "Alt+Space", label: "Alt+Space", macLabel: "Option+Space" },
-  { value: "Alt+R", label: "Alt+R", macLabel: "Option+R" },
-  { value: "CommandOrControl+Shift+Space", label: "Ctrl+Shift+Space", macLabel: "Cmd+Shift+Space" },
-  { value: "CommandOrControl+Shift+D", label: "Ctrl+Shift+D", macLabel: "Cmd+Shift+D" },
-  { value: "F9", label: "F9", macLabel: "F9" },
-  { value: "F10", label: "F10", macLabel: "F10" },
-];
+// Convert keyboard event to Tauri hotkey format
+function keyEventToHotkey(e: KeyboardEvent): string | null {
+  // Don't capture if only modifier keys pressed
+  if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
+    return null;
+  }
+
+  const parts: string[] = [];
+
+  // Build modifier string (Tauri format)
+  if (e.ctrlKey || e.metaKey) {
+    parts.push("CommandOrControl");
+  }
+  if (e.altKey) {
+    parts.push("Alt");
+  }
+  if (e.shiftKey) {
+    parts.push("Shift");
+  }
+
+  // Map key to Tauri format
+  let key = e.key;
+  if (key === " ") key = "Space";
+  else if (key.length === 1) key = key.toUpperCase();
+  else if (key.startsWith("Arrow")) key = key; // ArrowUp, etc
+  else if (key.startsWith("F") && !isNaN(parseInt(key.slice(1)))) key = key; // F1-F12
+
+  parts.push(key);
+
+  return parts.join("+");
+}
+
+// Format hotkey for display
+function formatHotkeyForDisplay(hotkey: string): string {
+  const isMac = navigator.platform.includes("Mac");
+  return hotkey
+    .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
+    .replace("Alt", isMac ? "Option" : "Alt");
+}
 
 // Get stored hotkey from localStorage
 export function getStoredHotkey(): string {
@@ -451,7 +480,8 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange 
   const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
   const [noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
   const [showDevSettings, setShowDevSettings] = useState(false);
-  const isMac = navigator.platform.includes("Mac");
+  const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
+  const hotkeyInputRef = useRef<HTMLInputElement>(null);
 
   const handleHotkeyChange = (newHotkey: string) => {
     setHotkey(newHotkey);
@@ -469,6 +499,20 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange 
     setNoiseCancellation(enabled);
     saveNoiseCancellation(enabled);
     onNoiseCancellationChange?.(enabled);
+  };
+
+  // Handle keydown for custom hotkey recording
+  const handleHotkeyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Convert the event to a hotkey string
+    const newHotkey = keyEventToHotkey(e.nativeEvent);
+    if (newHotkey) {
+      handleHotkeyChange(newHotkey);
+      setIsRecordingHotkey(false);
+      hotkeyInputRef.current?.blur();
+    }
   };
 
   return (
@@ -508,21 +552,32 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange 
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <select
-          value={hotkey}
-          onChange={(e) => handleHotkeyChange(e.target.value)}
-          className="hotkey-select"
-        >
-          {HOTKEY_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {isMac ? opt.macLabel : opt.label}
-            </option>
-          ))}
-        </select>
+        <div className="hotkey-recorder">
+          <input
+            ref={hotkeyInputRef}
+            type="text"
+            readOnly
+            value={isRecordingHotkey ? "Press any key combo..." : formatHotkeyForDisplay(hotkey)}
+            onFocus={() => setIsRecordingHotkey(true)}
+            onBlur={() => setIsRecordingHotkey(false)}
+            onKeyDown={handleHotkeyKeyDown}
+            className={`hotkey-input ${isRecordingHotkey ? "recording" : ""}`}
+            placeholder="Click to set hotkey"
+          />
+          {!isRecordingHotkey && (
+            <button
+              className="hotkey-clear-btn"
+              onClick={() => handleHotkeyChange("Alt+D")}
+              title="Reset to default"
+            >
+              Reset
+            </button>
+          )}
+        </div>
       </div>
 
       <p className="hotkey-hint">
-        Changes take effect immediately. Hold the hotkey to record, release to transcribe.
+        Click the field and press any key combination. Hold the hotkey to record, release to transcribe.
       </p>
 
       {/* Developer Settings - Click to expand */}

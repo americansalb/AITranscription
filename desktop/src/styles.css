@@ -760,6 +760,61 @@ body {
   border-color: var(--accent);
 }
 
+/* Custom Hotkey Recorder */
+.hotkey-recorder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hotkey-input {
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: monospace;
+  color: var(--text-primary);
+  min-width: 160px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hotkey-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.hotkey-input.recording {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent);
+  animation: hotkeyPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes hotkeyPulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.3); }
+}
+
+.hotkey-clear-btn {
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hotkey-clear-btn:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
 .hotkey-hint {
   font-size: 12px;
   color: var(--text-muted);
@@ -2098,6 +2153,7 @@ body {
 /* ============================================
    MINI FLOATING OVERLAY
    Tiny WhisperFlow-inspired recording indicator
+   Always visible: line when idle, pill when recording
    ============================================ */
 
 .mini-overlay {
@@ -2114,11 +2170,25 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
   background: rgba(0, 0, 0, 0.85);
-  border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+/* Collapsed state - small line */
+.mini-pill.collapsed {
+  padding: 6px 12px;
+  border-radius: 10px;
+  gap: 0;
+}
+
+/* Expanded state - full pill */
+.mini-pill.expanded {
+  padding: 8px 14px;
+  border-radius: 18px;
+  gap: 8px;
 }
 
 .mini-pill.recording {
@@ -2131,13 +2201,14 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 8px rgba(99, 102, 241, 0.3);
 }
 
-/* Pulsing dot */
+/* Pulsing dot - always visible */
 .mini-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #666;
+  background: #555;
   transition: all 0.2s ease;
+  flex-shrink: 0;
 }
 
 .mini-dot.active {
@@ -2157,12 +2228,21 @@ body {
   50% { opacity: 0.6; transform: scale(0.85); }
 }
 
-/* Audio bars */
+/* Audio bars - hidden when collapsed */
 .mini-bars {
   display: flex;
   align-items: center;
   gap: 2px;
   height: 14px;
+  overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 0;
+  opacity: 0;
+}
+
+.mini-bars.visible {
+  width: 20px;
+  opacity: 1;
 }
 
 .mini-bar {

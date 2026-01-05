@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 /**
  * Minimal floating recording indicator - WhisperFlow-inspired design.
- * Tiny pill with pulsing dot and 3 audio bars.
+ * Always visible: small line when idle, expands to pill with audio bars when recording.
  */
 export function FloatingOverlay() {
   const [isRecording, setIsRecording] = useState(false);
@@ -42,14 +42,18 @@ export function FloatingOverlay() {
     Math.max(0.3, audioLevel * 0.8 + Math.random() * 0.1),
   ];
 
+  // Determine state for CSS class
+  const state = isProcessing ? "processing" : isRecording ? "recording" : "idle";
+  const isExpanded = isRecording || isProcessing;
+
   return (
     <div className="mini-overlay">
-      <div className={`mini-pill ${isProcessing ? "processing" : isRecording ? "recording" : "idle"}`}>
-        {/* Pulsing dot */}
+      <div className={`mini-pill ${state} ${isExpanded ? "expanded" : "collapsed"}`}>
+        {/* Pulsing dot - always visible */}
         <div className={`mini-dot ${isRecording ? "active" : ""}`} />
 
-        {/* Audio bars */}
-        <div className="mini-bars">
+        {/* Audio bars - only visible when expanded */}
+        <div className={`mini-bars ${isExpanded ? "visible" : ""}`}>
           {bars.map((h, i) => (
             <div
               key={i}
