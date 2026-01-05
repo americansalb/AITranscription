@@ -87,7 +87,6 @@ export async function readFromClipboard(): Promise<string | null> {
 
 // Dynamic import for Tauri core API
 let tauriCore: typeof import("@tauri-apps/api/core") | null = null;
-let tauriWindow: typeof import("@tauri-apps/api/window") | null = null;
 
 async function loadTauriCore() {
   try {
@@ -101,43 +100,11 @@ async function loadTauriCore() {
   return false;
 }
 
-async function loadTauriWindow() {
-  try {
-    if (typeof window !== "undefined" && "__TAURI__" in window) {
-      tauriWindow = await import("@tauri-apps/api/window");
-      return true;
-    }
-  } catch {
-    // Not running in Tauri
-  }
-  return false;
-}
-
-/**
- * Minimize the Scribe window to return focus to the target app
- */
-async function minimizeWindow(): Promise<void> {
-  if (!tauriWindow) {
-    await loadTauriWindow();
-  }
-  if (tauriWindow) {
-    try {
-      const win = tauriWindow.getCurrentWindow();
-      await win.minimize();
-    } catch (error) {
-      console.error("Failed to minimize window:", error);
-    }
-  }
-}
-
 /**
  * Inject text into the active application using clipboard + paste simulation
  *
- * IMPORTANT: This function minimizes the Scribe window and does NOT bring it
- * back automatically. This prevents focus stealing which was causing text to
- * end up in Scribe instead of the target app.
- *
- * The user can click the tray icon to bring the window back.
+ * Simply copies text to clipboard and simulates Ctrl+V / Cmd+V.
+ * The text goes wherever the cursor/focus already is - no window manipulation.
  */
 export async function injectText(text: string): Promise<boolean> {
   const timestamp = Date.now();
@@ -148,31 +115,19 @@ export async function injectText(text: string): Promise<boolean> {
   console.log(`[injectText:${timestamp}] Clipboard copy result:`, copied);
   if (!copied) return false;
 
-  // Delay to ensure clipboard is fully written (antivirus scanning, etc.)
-  console.log(`[injectText:${timestamp}] Waiting for clipboard to settle...`);
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  // Short delay to ensure clipboard is fully written
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
-  // Try to simulate paste via Tauri command
+  // Simulate paste via Tauri command
   if (!tauriCore) {
     await loadTauriCore();
   }
 
   if (tauriCore) {
     try {
-      // Minimize window to return focus to the target app
-      // Window stays minimized - user can access via tray when they want
-      console.log(`[injectText:${timestamp}] Minimizing window...`);
-      await minimizeWindow();
-
-      // Give the OS time to switch focus back to the target app
-      // Chrome needs more time to regain focus properly
-      console.log(`[injectText:${timestamp}] Waiting for focus switch...`);
-      await new Promise((resolve) => setTimeout(resolve, 350));
-
       console.log(`[injectText:${timestamp}] Invoking simulate_paste...`);
       await tauriCore.invoke("simulate_paste");
       console.log(`[injectText:${timestamp}] Paste complete`);
-
       return true;
     } catch (error) {
       console.error(`[injectText:${timestamp}] Auto-paste failed:`, error);
@@ -238,14 +193,7 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 
   if (tauriCore) {
     try {
-      // Minimize window to return focus to the target app
-      // Window stays minimized - user can access via tray
-      await minimizeWindow();
-
-      // Give the OS time to switch focus
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Now paste into the target app
+      // Paste directly - cursor/focus is already where user wants it
       await tauriCore.invoke("simulate_paste");
 
       return {
