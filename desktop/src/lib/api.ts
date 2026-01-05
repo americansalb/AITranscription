@@ -73,6 +73,77 @@ export interface DailyStats {
   words: number;
 }
 
+export interface HourlyStats {
+  hour: number;
+  transcriptions: number;
+  words: number;
+}
+
+export interface DayOfWeekStats {
+  day: string;
+  day_index: number;
+  transcriptions: number;
+  words: number;
+  percentage: number;
+}
+
+export interface MonthlyStats {
+  month: string;
+  month_label: string;
+  transcriptions: number;
+  words: number;
+  audio_minutes: number;
+}
+
+export interface FormalityStats {
+  formality: string;
+  count: number;
+  words: number;
+  percentage: number;
+}
+
+export interface WordLengthDistribution {
+  range_label: string;
+  min_words: number;
+  max_words: number;
+  count: number;
+  percentage: number;
+}
+
+export interface Achievement {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  earned: boolean;
+  earned_at?: string | null;
+  progress: number;
+  target?: number | null;
+  current?: number | null;
+}
+
+export interface GrowthMetrics {
+  words_wow_change: number;
+  words_mom_change: number;
+  transcriptions_wow_change: number;
+  transcriptions_mom_change: number;
+  last_week_words: number;
+  prev_week_words: number;
+  last_month_words: number;
+  prev_month_words: number;
+}
+
+export interface ProductivityInsights {
+  peak_hour: number;
+  peak_hour_label: string;
+  peak_day: string;
+  avg_session_words: number;
+  avg_session_duration_seconds: number;
+  busiest_week_ever: string | null;
+  busiest_week_words: number;
+  efficiency_score: number;
+}
+
 export interface DetailedStatsResponse {
   // Totals
   total_transcriptions: number;
@@ -92,15 +163,21 @@ export interface DetailedStatsResponse {
   average_words_per_transcription: number;
   average_words_per_minute: number;
   average_transcriptions_per_day: number;
+  average_audio_duration_seconds: number;
 
   // Time saved
   estimated_time_saved_minutes: number;
 
   // Context breakdown
   context_breakdown: ContextStats[];
+  formality_breakdown: FormalityStats[];
 
   // Daily activity (last 7 days)
   daily_activity: DailyStats[];
+  hourly_activity: HourlyStats[];
+  day_of_week_breakdown: DayOfWeekStats[];
+  monthly_trends: MonthlyStats[];
+  word_length_distribution: WordLengthDistribution[];
 
   // Streaks
   current_streak_days: number;
@@ -110,9 +187,21 @@ export interface DetailedStatsResponse {
   most_productive_day: string | null;
   most_productive_day_words: number;
   longest_transcription_words: number;
+  shortest_transcription_words: number;
+  fastest_wpm: number;
+  slowest_wpm: number;
 
-  // Member since
+  // Growth and productivity
+  growth: GrowthMetrics;
+  productivity: ProductivityInsights;
+
+  // Achievements
+  achievements: Achievement[];
+
+  // Member info
   member_since: string;
+  days_as_member: number;
+  total_active_days: number;
 }
 
 export class ApiError extends Error {
