@@ -65,6 +65,7 @@ async def debug_schema(db: AsyncSession = Depends(get_db)):
 async def transcribe_audio(
     audio: UploadFile = File(..., description="Audio file to transcribe"),
     language: str | None = Form(default=None, description="Optional language code (e.g., 'en')"),
+    model: str | None = Form(default=None, description="Whisper model: 'whisper-large-v3' or 'whisper-large-v3-turbo'"),
 ):
     """
     Transcribe audio using Groq's Whisper API.
@@ -109,12 +110,14 @@ async def transcribe_audio(
             audio_data=audio_data,
             filename=audio.filename or "audio.wav",
             language=language,
+            model=model,
         )
 
         return TranscribeResponse(
             raw_text=result["text"],
             duration=result.get("duration"),
             language=result.get("language"),
+            model_used=result.get("model_used"),
         )
 
     except ValueError as e:
@@ -167,6 +170,7 @@ async def transcribe_and_polish(
     language: str | None = Form(default=None, description="Optional language code"),
     context: str | None = Form(default=None, description="Context like 'email', 'slack'"),
     formality: str = Form(default="neutral", description="'casual', 'neutral', or 'formal'"),
+    model: str | None = Form(default=None, description="Whisper model: 'whisper-large-v3' or 'whisper-large-v3-turbo'"),
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ):
@@ -178,7 +182,7 @@ async def transcribe_and_polish(
     Saves transcript to database if user is authenticated.
     """
     # First, transcribe
-    transcribe_response = await transcribe_audio(audio=audio, language=language)
+    transcribe_response = await transcribe_audio(audio=audio, language=language, model=model)
 
     if not transcribe_response.raw_text.strip():
         return TranscribeAndPolishResponse(
