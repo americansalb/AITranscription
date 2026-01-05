@@ -4,7 +4,7 @@ import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
 import { injectText, setTrayRecordingState, showRecordingOverlay, hideRecordingOverlay, updateOverlayState } from "./lib/clipboard";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
-import { Settings, getStoredHotkey } from "./components/Settings";
+import { Settings, getStoredHotkey, getStoredWhisperModel, getStoredNoiseCancellation } from "./components/Settings";
 import { RecordingOverlay } from "./components/RecordingOverlay";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -79,17 +79,22 @@ function App() {
   const [statsRefreshTrigger, setStatsRefreshTrigger] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
   const [hotkey, setHotkey] = useState(() => getStoredHotkey());
+  const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
   const contextRef = useRef(context);
   const formalityRef = useRef(formality);
+  const whisperModelRef = useRef(whisperModel);
 
   // Keep refs in sync with state
   useEffect(() => {
     contextRef.current = context;
     formalityRef.current = formality;
-  }, [context, formality]);
+    whisperModelRef.current = whisperModel;
+  }, [context, formality, whisperModel]);
 
   // Persist history to localStorage when it changes
   useEffect(() => {
@@ -170,6 +175,7 @@ function App() {
         language: "en",  // Default to English to avoid wrong language detection
         context: contextRef.current === "general" ? undefined : contextRef.current,
         formality: formalityRef.current,
+        model: whisperModelRef.current as "whisper-large-v3" | "whisper-large-v3-turbo",
       });
 
       setRawText(response.raw_text);
@@ -251,6 +257,7 @@ function App() {
           language: "en",  // Default to English
           context: context === "general" ? undefined : context,
           formality,
+          model: whisperModel as "whisper-large-v3" | "whisper-large-v3-turbo",
         });
 
         setRawText(response.raw_text);
@@ -483,6 +490,8 @@ function App() {
           history={history}
           onClearHistory={() => setHistory([])}
           onHotkeyChange={setHotkey}
+          onModelChange={setWhisperModel}
+          onNoiseCancellationChange={setNoiseCancellation}
         />
       )}
 

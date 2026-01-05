@@ -66,8 +66,9 @@ fn simulate_paste() -> Result<(), String> {
     {
         use enigo::Key;
         log_error("simulate_paste: macOS - waiting for focus");
-        // Same timing as Windows for consistent behavior
-        thread::sleep(Duration::from_millis(100));
+        // Same timing as Windows for consistent cross-platform behavior
+        // 150ms works better for Chrome and Electron-based apps
+        thread::sleep(Duration::from_millis(150));
         log_error("simulate_paste: macOS - sending Cmd+V");
         enigo
             .key(Key::Meta, enigo::Direction::Press)
@@ -129,8 +130,8 @@ fn simulate_paste() -> Result<(), String> {
     {
         use enigo::Key;
         log_error("simulate_paste: Linux - waiting for focus");
-        // Same timing as Windows/macOS for consistent behavior
-        thread::sleep(Duration::from_millis(100));
+        // Same timing as Windows/macOS for consistent cross-platform behavior
+        thread::sleep(Duration::from_millis(150));
         log_error("simulate_paste: Linux - sending Ctrl+V");
         enigo
             .key(Key::Control, enigo::Direction::Press)

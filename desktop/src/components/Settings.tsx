@@ -21,11 +21,13 @@ interface SettingsProps {
   history?: HistoryEntry[];
   onClearHistory?: () => void;
   onHotkeyChange?: (hotkey: string) => void;
+  onModelChange?: (model: string) => void;
+  onNoiseCancellationChange?: (enabled: boolean) => void;
 }
 
 type SettingsTab = "account" | "stats" | "history" | "dictionary" | "preferences";
 
-export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory, onHotkeyChange }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory, onHotkeyChange, onModelChange, onNoiseCancellationChange }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
@@ -135,7 +137,7 @@ export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHis
               </div>
             )
           ) : (
-            <Preferences onHotkeyChange={onHotkeyChange} />
+            <Preferences onHotkeyChange={onHotkeyChange} onModelChange={onModelChange} onNoiseCancellationChange={onNoiseCancellationChange} />
           )}
         </div>
       </div>
@@ -394,16 +396,79 @@ function saveHotkey(hotkey: string) {
 }
 
 // App preferences
-function Preferences({ onHotkeyChange }: { onHotkeyChange?: (hotkey: string) => void }) {
+// Whisper model options for developer settings
+const WHISPER_MODEL_OPTIONS = [
+  { value: "whisper-large-v3-turbo", label: "Turbo (Fast)", description: "Faster, more cost-effective" },
+  { value: "whisper-large-v3", label: "Large V3 (Accurate)", description: "Higher accuracy, slower" },
+];
+
+// Get stored whisper model from localStorage
+export function getStoredWhisperModel(): string {
+  try {
+    return localStorage.getItem("scribe_whisper_model") || "whisper-large-v3-turbo";
+  } catch {
+    return "whisper-large-v3-turbo";
+  }
+}
+
+// Save whisper model to localStorage
+export function saveWhisperModel(model: string): void {
+  try {
+    localStorage.setItem("scribe_whisper_model", model);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+// Get stored noise cancellation preference
+export function getStoredNoiseCancellation(): boolean {
+  try {
+    return localStorage.getItem("scribe_noise_cancellation") === "true";
+  } catch {
+    return false;
+  }
+}
+
+// Save noise cancellation preference
+export function saveNoiseCancellation(enabled: boolean): void {
+  try {
+    localStorage.setItem("scribe_noise_cancellation", enabled ? "true" : "false");
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+interface PreferencesProps {
+  onHotkeyChange?: (hotkey: string) => void;
+  onModelChange?: (model: string) => void;
+  onNoiseCancellationChange?: (enabled: boolean) => void;
+}
+
+function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange }: PreferencesProps) {
   const [autoPaste, setAutoPaste] = useState(true);
   const [playSound, setPlaySound] = useState(true);
   const [hotkey, setHotkey] = useState(() => getStoredHotkey());
+  const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
+  const [noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
+  const [showDevSettings, setShowDevSettings] = useState(false);
   const isMac = navigator.platform.includes("Mac");
 
   const handleHotkeyChange = (newHotkey: string) => {
     setHotkey(newHotkey);
     saveHotkey(newHotkey);
     onHotkeyChange?.(newHotkey);
+  };
+
+  const handleModelChange = (newModel: string) => {
+    setWhisperModel(newModel);
+    saveWhisperModel(newModel);
+    onModelChange?.(newModel);
+  };
+
+  const handleNoiseCancellationChange = (enabled: boolean) => {
+    setNoiseCancellation(enabled);
+    saveNoiseCancellation(enabled);
+    onNoiseCancellationChange?.(enabled);
   };
 
   return (
@@ -430,6 +495,17 @@ function Preferences({ onHotkeyChange }: { onHotkeyChange?: (hotkey: string) => 
         <span className="toggle-switch" />
       </label>
 
+      <label className="toggle-setting">
+        <span>Noise cancellation</span>
+        <input
+          type="checkbox"
+          checked={noiseCancellation}
+          onChange={(e) => handleNoiseCancellationChange(e.target.checked)}
+        />
+        <span className="toggle-switch" />
+      </label>
+      <p className="setting-hint">Reduce background noise before transcription (experimental)</p>
+
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
         <select
@@ -448,6 +524,49 @@ function Preferences({ onHotkeyChange }: { onHotkeyChange?: (hotkey: string) => 
       <p className="hotkey-hint">
         Changes take effect immediately. Hold the hotkey to record, release to transcribe.
       </p>
+
+      {/* Developer Settings - Click to expand */}
+      <div className="dev-settings-section">
+        <button
+          className="dev-settings-toggle"
+          onClick={() => setShowDevSettings(!showDevSettings)}
+        >
+          <span>Developer Settings</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            style={{ transform: showDevSettings ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+
+        {showDevSettings && (
+          <div className="dev-settings-content">
+            <div className="model-setting">
+              <span>Whisper Model</span>
+              <select
+                value={whisperModel}
+                onChange={(e) => handleModelChange(e.target.value)}
+                className="model-select"
+              >
+                {WHISPER_MODEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="setting-hint">
+              {WHISPER_MODEL_OPTIONS.find(m => m.value === whisperModel)?.description}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

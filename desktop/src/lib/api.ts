@@ -246,6 +246,14 @@ function getAudioFilename(blob: Blob): string {
   return "recording.webm";
 }
 
+// Available Whisper models
+export type WhisperModel = "whisper-large-v3" | "whisper-large-v3-turbo";
+
+export const WHISPER_MODELS: { value: WhisperModel; label: string; description: string }[] = [
+  { value: "whisper-large-v3-turbo", label: "Turbo", description: "Faster, cost-effective" },
+  { value: "whisper-large-v3", label: "Large V3", description: "Higher accuracy" },
+];
+
 /**
  * Transcribe audio and polish the result
  */
@@ -255,6 +263,7 @@ export async function transcribeAndPolish(
     language?: string;
     context?: string;
     formality?: "casual" | "neutral" | "formal";
+    model?: WhisperModel;
   } = {}
 ): Promise<TranscribeAndPolishResponse> {
   // Use correct filename based on actual audio format
@@ -271,6 +280,9 @@ export async function transcribeAndPolish(
   }
   if (options.formality) {
     formData.append("formality", options.formality);
+  }
+  if (options.model) {
+    formData.append("model", options.model);
   }
 
   const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
