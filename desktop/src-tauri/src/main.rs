@@ -97,9 +97,9 @@ fn simulate_paste() -> Result<(), String> {
     {
         use enigo::Key;
         log_error("simulate_paste: Windows - waiting for focus");
-        // Longer delay to ensure the target window has focus
-        // The "clicking top right" issue suggests focus isn't fully transferred
-        thread::sleep(Duration::from_millis(100));
+        // Longer delay for Chrome and other electron-based apps
+        // They need extra time to fully regain focus after window switch
+        thread::sleep(Duration::from_millis(150));
         log_error("simulate_paste: Windows - sending Ctrl+V");
         enigo
             .key(Key::Control, enigo::Direction::Press)
@@ -172,6 +172,25 @@ fn type_text(text: String) -> Result<(), String> {
         e.to_string()
     })?;
 
+    Ok(())
+}
+
+/// Show the floating recording indicator overlay
+#[tauri::command]
+fn show_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("recording-indicator") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+/// Hide the floating recording indicator overlay
+#[tauri::command]
+fn hide_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("recording-indicator") {
+        let _ = window.hide();
+    }
     Ok(())
 }
 
@@ -284,7 +303,7 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state]);
+        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state, show_recording_overlay, hide_recording_overlay]);
 
     match builder.run(tauri::generate_context!()) {
         Ok(_) => {}

@@ -14,12 +14,28 @@
     "windows": [
       {
         "title": "Scribe",
+        "label": "main",
         "width": 800,
         "height": 900,
         "resizable": true,
         "minWidth": 600,
         "minHeight": 700,
         "center": true
+      },
+      {
+        "title": "",
+        "label": "recording-indicator",
+        "width": 180,
+        "height": 60,
+        "x": 20,
+        "y": 20,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "url": "index.html#/overlay"
       }
     ],
     "security": {

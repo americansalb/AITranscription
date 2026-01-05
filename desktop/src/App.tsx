@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
-import { injectText, setTrayRecordingState } from "./lib/clipboard";
+import { injectText, setTrayRecordingState, showRecordingOverlay, hideRecordingOverlay, updateOverlayState } from "./lib/clipboard";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { RecordingOverlay } from "./components/RecordingOverlay";
@@ -109,6 +109,27 @@ function App() {
   useEffect(() => {
     setTrayRecordingState(recorder.isRecording);
   }, [recorder.isRecording]);
+
+  // Show/hide floating overlay when recording starts/stops
+  useEffect(() => {
+    if (recorder.isRecording || status === "processing") {
+      showRecordingOverlay();
+    } else {
+      hideRecordingOverlay();
+    }
+  }, [recorder.isRecording, status]);
+
+  // Update overlay with audio level and duration
+  useEffect(() => {
+    if (recorder.isRecording || status === "processing") {
+      updateOverlayState({
+        isRecording: recorder.isRecording,
+        isProcessing: status === "processing",
+        duration: recorder.duration,
+        audioLevel: recorder.audioLevel || 0,
+      });
+    }
+  }, [recorder.isRecording, recorder.duration, recorder.audioLevel, status]);
 
   // Push-to-talk: start recording on key down
   const handleHotkeyDown = useCallback(async () => {

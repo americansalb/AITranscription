@@ -150,7 +150,7 @@ export async function injectText(text: string): Promise<boolean> {
 
   // Delay to ensure clipboard is fully written (antivirus scanning, etc.)
   console.log(`[injectText:${timestamp}] Waiting for clipboard to settle...`);
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 150));
 
   // Try to simulate paste via Tauri command
   if (!tauriCore) {
@@ -165,8 +165,9 @@ export async function injectText(text: string): Promise<boolean> {
       await minimizeWindow();
 
       // Give the OS time to switch focus back to the target app
+      // Chrome needs more time to regain focus properly
       console.log(`[injectText:${timestamp}] Waiting for focus switch...`);
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 350));
 
       console.log(`[injectText:${timestamp}] Invoking simulate_paste...`);
       await tauriCore.invoke("simulate_paste");
@@ -287,6 +288,59 @@ export async function setTrayRecordingState(recording: boolean): Promise<void> {
       await tauriCore.invoke("set_recording_state", { recording });
     } catch (error) {
       console.error("Failed to update tray state:", error);
+    }
+  }
+}
+
+/**
+ * Show the floating recording indicator overlay window
+ */
+export async function showRecordingOverlay(): Promise<void> {
+  if (!tauriCore) {
+    await loadTauriCore();
+  }
+
+  if (tauriCore) {
+    try {
+      await tauriCore.invoke("show_recording_overlay");
+    } catch (error) {
+      console.error("Failed to show recording overlay:", error);
+    }
+  }
+}
+
+/**
+ * Hide the floating recording indicator overlay window
+ */
+export async function hideRecordingOverlay(): Promise<void> {
+  if (!tauriCore) {
+    await loadTauriCore();
+  }
+
+  if (tauriCore) {
+    try {
+      await tauriCore.invoke("hide_recording_overlay");
+    } catch (error) {
+      console.error("Failed to hide recording overlay:", error);
+    }
+  }
+}
+
+/**
+ * Send recording state to the overlay window via Tauri events
+ */
+export async function updateOverlayState(state: {
+  isRecording: boolean;
+  isProcessing: boolean;
+  duration: number;
+  audioLevel: number;
+}): Promise<void> {
+  if (typeof window !== "undefined" && "__TAURI__" in window) {
+    try {
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("recording-state", state);
+    } catch (error) {
+      console.error("Failed to update overlay state:", error);
     }
   }
 }
