@@ -1,10 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
+import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
 import { injectText, setTrayRecordingState } from "./lib/clipboard";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
-import { Settings } from "./components/Settings";
+import { Settings, getStoredHotkey } from "./components/Settings";
 import { RecordingOverlay } from "./components/RecordingOverlay";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { HistoryPanel } from "./components/HistoryPanel";
@@ -56,6 +56,14 @@ function formatDuration(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+// Format hotkey for display (handle platform differences)
+function formatHotkeyDisplay(hotkey: string): string {
+  const isMac = navigator.platform.includes("Mac");
+  return hotkey
+    .replace("Alt+", isMac ? "Option+" : "Alt+")
+    .replace("CommandOrControl+", isMac ? "Cmd+" : "Ctrl+");
+}
+
 function App() {
   const recorder = useAudioRecorder();
   const [status, setStatus] = useState<ProcessingStatus>("idle");
@@ -70,6 +78,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [statsRefreshTrigger, setStatsRefreshTrigger] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
+  const [hotkey, setHotkey] = useState(() => getStoredHotkey());
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
@@ -181,7 +190,7 @@ function App() {
 
   // Register global hotkey for push-to-talk
   const { error: hotkeyError } = useGlobalHotkey({
-    hotkey: HOTKEYS.PUSH_TO_TALK,
+    hotkey,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
     enabled: backendReady !== false,
@@ -352,7 +361,7 @@ function App() {
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">{navigator.platform.includes("Mac") ? "Option" : "Alt"}+D</span> for push-to-talk
+          <span className="hotkey">{formatHotkeyDisplay(hotkey)}</span> for push-to-talk
         </p>
       </div>
 
@@ -452,6 +461,7 @@ function App() {
           refreshTrigger={statsRefreshTrigger}
           history={history}
           onClearHistory={() => setHistory([])}
+          onHotkeyChange={setHotkey}
         />
       )}
 
