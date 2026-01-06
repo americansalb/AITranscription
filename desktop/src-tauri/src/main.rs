@@ -3,7 +3,6 @@
 
 use enigo::{Enigo, Keyboard, Settings};
 use std::io::Read;
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{

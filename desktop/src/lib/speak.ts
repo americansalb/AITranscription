@@ -6,8 +6,6 @@
 
 import { listen } from "@tauri-apps/api/event";
 
-let currentUtterance: SpeechSynthesisUtterance | null = null;
-
 /**
  * Speak text using the browser's SpeechSynthesis API.
  */
@@ -38,12 +36,7 @@ export function speak(text: string): void {
     utterance.voice = preferredVoice;
   }
 
-  currentUtterance = utterance;
   window.speechSynthesis.speak(utterance);
-
-  utterance.onend = () => {
-    currentUtterance = null;
-  };
 }
 
 /**
@@ -53,7 +46,6 @@ export function stop(): void {
   if (window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
-  currentUtterance = null;
 }
 
 /**
