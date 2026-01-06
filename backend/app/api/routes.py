@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_optional_user
@@ -15,6 +16,10 @@ from app.core.database import get_db
 from app.models.transcript import Transcript
 from app.models.user import User
 from app.services import polish_service, transcription_service
+from app.services.explanation import explanation_service
+from app.services.tts import tts_service
+from app.services.events import event_manager, VoiceEvent
+from datetime import datetime
 
 router = APIRouter()
 
@@ -242,3 +247,133 @@ async def transcribe_and_polish(
             "output_tokens": polish_response.output_tokens,
         },
     )
+
+
+# ============================================================================
+# Voice Response Endpoints (Claude Code Integration)
+# ============================================================================
+
+
+@router.post("/claude-event")
+async def handle_claude_event(
+    event: dict,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Receive events from Claude Code hooks.
+
+    This endpoint is called by the Claude Code PostToolUse hook script
+    when code is written or edited. It triggers voice explanation generation.
+    """
+    tool_name = event.get("tool_name", "")
+    tool_input = event.get("tool_input", {})
+
+    # Only process Write and Edit operations
+    if tool_name not in ("Write", "Edit"):
+        return {"status": "ignored", "reason": f"tool {tool_name} not handled"}
+
+    file_path = tool_input.get("file_path", "unknown")
+    content = tool_input.get("content", "") or tool_input.get("new_string", "")
+    old_content = tool_input.get("old_string")
+
+    if not content:
+        return {"status": "ignored", "reason": "no content"}
+
+    # Process in background to respond quickly to the hook
+    background_tasks.add_task(
+        _process_claude_event,
+        tool_name=tool_name,
+        file_path=file_path,
+        content=content,
+        old_content=old_content,
+    )
+
+    return {"status": "accepted", "file_path": file_path}
+
+
+async def _process_claude_event(
+    tool_name: str,
+    file_path: str,
+    content: str,
+    old_content: str | None,
+):
+    """Background task to generate and broadcast voice explanation."""
+    try:
+        # Generate explanation using Haiku
+        explanation = await explanation_service.explain_code_change(
+            file_path=file_path,
+            content=content,
+            operation=tool_name,
+            old_content=old_content,
+        )
+
+        if not explanation:
+            return
+
+        # Convert to speech using Groq TTS
+        audio_bytes = await tts_service.synthesize(explanation)
+
+        if audio_bytes:
+            # Broadcast to all connected clients
+            await event_manager.broadcast(
+                VoiceEvent(
+                    type="voice",
+                    audio_base64=tts_service.audio_to_base64(audio_bytes),
+                    explanation=explanation,
+                    file_path=file_path,
+                    timestamp=datetime.utcnow().isoformat(),
+                )
+            )
+        else:
+            # TTS failed, but still send the text explanation
+            await event_manager.broadcast(
+                VoiceEvent(
+                    type="status",
+                    explanation=explanation,
+                    file_path=file_path,
+                    timestamp=datetime.utcnow().isoformat(),
+                )
+            )
+
+    except Exception as e:
+        # Broadcast error to clients
+        await event_manager.broadcast(
+            VoiceEvent(
+                type="error",
+                explanation=f"Failed to generate explanation: {str(e)}",
+                file_path=file_path,
+                timestamp=datetime.utcnow().isoformat(),
+            )
+        )
+
+
+@router.get("/voice-stream")
+async def voice_stream():
+    """
+    Server-Sent Events endpoint for real-time voice notifications.
+
+    Connect to this endpoint to receive voice explanations as they're generated.
+    Events are JSON-formatted with types: 'connected', 'voice', 'status', 'error'.
+    """
+    return StreamingResponse(
+        event_manager.subscribe(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
+
+
+@router.get("/voice-stream/status")
+async def voice_stream_status():
+    """
+    Check voice stream status and connected client count.
+    """
+    return {
+        "status": "active",
+        "connected_clients": event_manager.client_count,
+        "groq_configured": bool(settings.groq_api_key),
+        "anthropic_configured": bool(settings.anthropic_api_key),
+    }
