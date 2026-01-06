@@ -163,10 +163,24 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+    permissions:
+      contents: write
 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Downloaded artifacts:"
+          find . -type f -name "*.dmg" -o -name "*.app" -o -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" | head -50
+          echo ""
+          echo "Directory structure:"
+          ls -la
+          for dir in Scribe-*/; do
+            echo "Contents of $dir:"
+            ls -la "$dir" 2>/dev/null || echo "  (empty or not found)"
+          done
 
       - name: Generate release tag for manual builds
         id: release_tag
