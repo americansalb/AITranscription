@@ -87,6 +87,12 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         },
       });
 
+      const audioTracks = stream.getAudioTracks();
+      console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
+      if (audioTracks.length > 0) {
+        console.log("[AudioRecorder] Track:", audioTracks[0].label, "enabled:", audioTracks[0].enabled, "muted:", audioTracks[0].muted);
+      }
+
       // Set up audio analysis for level metering
       audioContext.current = new AudioContext();
       analyser.current = audioContext.current.createAnalyser();
@@ -107,6 +113,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       startTime.current = Date.now();
 
       mediaRecorder.current.ondataavailable = (event) => {
+        console.log("[AudioRecorder] Data available:", event.data.size, "bytes, total chunks:", audioChunks.current.length + 1);
         if (event.data.size > 0) {
           audioChunks.current.push(event.data);
         }
@@ -138,7 +145,10 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
     return new Promise((resolve) => {
+      console.log("[AudioRecorder] stopRecording called, state:", mediaRecorder.current?.state);
+
       if (!mediaRecorder.current || mediaRecorder.current.state === "inactive") {
+        console.log("[AudioRecorder] No active recorder, returning null");
         resolve(null);
         return;
       }
@@ -149,6 +159,8 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       mediaRecorder.current.onstop = () => {
         const mimeType = mediaRecorder.current?.mimeType || "audio/webm";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
+
+        console.log("[AudioRecorder] Recording stopped. Chunks:", audioChunks.current.length, "Blob size:", audioBlob.size, "bytes");
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());
