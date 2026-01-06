@@ -2,14 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use enigo::{Enigo, Keyboard, Settings};
+use std::io::Read;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Manager,
 };
+use tiny_http::{Response, Server};
 
 /// Helper to create an Image from PNG bytes
 fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
@@ -193,6 +196,77 @@ fn hide_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.hide();
     }
     Ok(())
+}
+
+/// Start local HTTP server for Claude Code speak integration
+fn start_speak_server(app_handle: tauri::AppHandle) {
+    thread::spawn(move || {
+        let server = match Server::http("127.0.0.1:7865") {
+            Ok(s) => {
+                log_error("Speak server started on http://127.0.0.1:7865");
+                s
+            }
+            Err(e) => {
+                log_error(&format!("Failed to start speak server: {}", e));
+                return;
+            }
+        };
+
+        for mut request in server.incoming_requests() {
+            // Only accept POST to /speak
+            if request.method().as_str() != "POST" || request.url() != "/speak" {
+                let response = Response::from_string("Not Found").with_status_code(404);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            // Read the body
+            let mut body = String::new();
+            if let Err(e) = request.as_reader().read_to_string(&mut body) {
+                log_error(&format!("Failed to read request body: {}", e));
+                let response = Response::from_string("Bad Request").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            // Parse JSON - expecting {"text": "..."}
+            let text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                json.get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                // If not JSON, treat the whole body as text
+                body.trim().to_string()
+            };
+
+            if text.is_empty() {
+                let response = Response::from_string("No text provided").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            // Emit event to frontend
+            if let Err(e) = app_handle.emit("speak", &text) {
+                log_error(&format!("Failed to emit speak event: {}", e));
+            }
+
+            // Respond with success
+            let response = Response::from_string("{\"status\":\"ok\"}")
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                )
+                .with_header(
+                    tiny_http::Header::from_bytes(
+                        &b"Access-Control-Allow-Origin"[..],
+                        &b"*"[..],
+                    )
+                    .unwrap(),
+                );
+            let _ = request.respond(response);
+        }
+    });
 }
 
 /// Update tray icon to show recording state
