@@ -25,14 +25,14 @@
       {
         "title": "",
         "label": "recording-indicator",
-        "width": 140,
-        "height": 44,
+        "width": 160,
+        "height": 48,
         "resizable": false,
         "decorations": false,
-        "transparent": false,
+        "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": false,
+        "visible": true,
         "focus": false,
         "url": "index.html#/overlay"
       }

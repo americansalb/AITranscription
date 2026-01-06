@@ -2220,16 +2220,17 @@ body {
 
 /* ============================================
    FLOATING RECORDING INDICATOR
-   Wispr Flow-inspired clean, modern design
+   Always-visible minimal line that expands on activation
    ============================================ */
 
 .floating-overlay-container {
   width: 100vw;
   height: 100vh;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  background: #1a1a1e;
+  padding-top: 4px;
+  background: transparent;
   cursor: grab;
   user-select: none;
 }
@@ -2238,43 +2239,85 @@ body {
   cursor: grabbing;
 }
 
-.floating-pill {
+/* Main indicator - transforms between line and pill */
+.floating-indicator {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Collapsed state - tiny subtle line */
+.floating-indicator.collapsed {
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.floating-indicator.collapsed:hover {
+  background: rgba(255, 255, 255, 0.25);
+  width: 56px;
+}
+
+/* Expanded state - full pill */
+.floating-indicator.expanded {
+  width: auto;
+  min-width: 120px;
+  height: 36px;
+  padding: 0 14px;
+  background: linear-gradient(135deg, rgba(24, 24, 28, 0.95) 0%, rgba(18, 18, 22, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 18px;
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+}
+
+.floating-indicator.expanded.recording {
+  border-color: rgba(239, 68, 68, 0.5);
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.5),
+    0 0 16px rgba(239, 68, 68, 0.25);
+}
+
+.floating-indicator.expanded.processing {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.5),
+    0 0 16px rgba(99, 102, 241, 0.25);
+}
+
+/* The subtle line shown in collapsed state */
+.floating-line {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  transition: opacity 0.2s ease;
+}
+
+.floating-indicator.expanded .floating-line {
+  opacity: 0;
+}
+
+/* Expanded content container */
+.floating-content {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 16px;
-  background: linear-gradient(135deg, #1e1e23 0%, #151518 100%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 22px;
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
-  animation: floatingSlideIn 0.2s ease-out;
+  opacity: 0;
+  transform: scale(0.8);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
 }
 
-@keyframes floatingSlideIn {
-  from {
-    opacity: 0;
-    transform: translateY(-8px) scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-.floating-pill.recording {
-  border-color: rgba(239, 68, 68, 0.4);
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.4),
-    0 0 12px rgba(239, 68, 68, 0.2);
-}
-
-.floating-pill.processing {
-  border-color: rgba(99, 102, 241, 0.4);
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.4),
-    0 0 12px rgba(99, 102, 241, 0.2);
+.floating-indicator.expanded .floating-content {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
 }
 
 /* Pulsing indicator dot */
@@ -2283,14 +2326,14 @@ body {
   height: 10px;
   border-radius: 50%;
   background: #ef4444;
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.7);
   animation: floatingDotPulse 1.2s ease-in-out infinite;
   flex-shrink: 0;
 }
 
-.floating-pill.processing .floating-dot {
+.floating-indicator.processing .floating-dot {
   background: #818cf8;
-  box-shadow: 0 0 8px rgba(129, 140, 248, 0.6);
+  box-shadow: 0 0 10px rgba(129, 140, 248, 0.7);
 }
 
 @keyframes floatingDotPulse {
@@ -2299,8 +2342,8 @@ body {
     transform: scale(1);
   }
   50% {
-    opacity: 0.5;
-    transform: scale(0.8);
+    opacity: 0.6;
+    transform: scale(0.85);
   }
 }
 
@@ -2344,6 +2387,6 @@ body {
   min-width: 32px;
 }
 
-.floating-pill.processing .floating-text {
+.floating-indicator.processing .floating-text {
   color: rgba(129, 140, 248, 0.9);
 }
