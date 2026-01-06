@@ -5,6 +5,22 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a shareable release (makes download links public)'
+        required: false
+        type: boolean
+        default: true
+      release_name:
+        description: 'Release name (e.g., "Artist Pack - John Smith")'
+        required: false
+        type: string
+        default: 'Artist Pack Build'
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: true
 
 # Required secrets for code signing:
 # macOS:
@@ -146,20 +162,45 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
 
+      - name: Generate release tag for manual builds
+        id: release_tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            # Generate a tag based on date and short commit SHA
+            TAG="build-$(date +'%Y%m%d-%H%M%S')-${{ github.sha }}"
+            TAG="${TAG:0:50}"
+            echo "tag=${TAG}" >> $GITHUB_OUTPUT
+            echo "name=${{ inputs.release_name || 'Artist Pack Build' }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.name }}
           files: |
             Scribe-macOS/*
             Scribe-Windows/*
             Scribe-Linux/*
           draft: false
-          prerelease: false
+          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+          generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
+          body: |
+            ${{ github.event_name == 'workflow_dispatch' && format('Artist Pack build created from commit {0}
+
+            **Download the installer for your platform below.**
+
+            - **macOS**: Download the `.dmg` file
+            - **Windows**: Download the `.exe` file
+            - **Linux**: Download the `.deb` or `.AppImage` file', github.sha) || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
