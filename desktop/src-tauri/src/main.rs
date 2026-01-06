@@ -376,6 +376,9 @@ fn main() {
                 window.open_devtools();
             }
 
+            // Start the speak server for Claude Code integration
+            start_speak_server(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state, show_recording_overlay, hide_recording_overlay]);

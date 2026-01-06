@@ -1,17 +1,15 @@
 [project]
-name = "mcp-speak"
+name = "scribe-speak"
 version = "0.1.0"
-description = "MCP server that provides a speak tool for text-to-speech"
+description = "MCP server that connects Claude Code to Scribe for voice announcements"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
-    "groq>=0.4.0",
-    "playsound3>=2.0.0",
 ]
 
 [project.scripts]
-mcp-speak = "mcp_speak.server:main"
+scribe-speak = "mcp_speak.server:main"
 
 [build-system]
 requires = ["hatchling"]
