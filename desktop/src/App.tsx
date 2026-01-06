@@ -142,6 +142,9 @@ function App() {
   const handleHotkeyDown = useCallback(async () => {
     if (recorder.isRecording || isProcessingRef.current || backendReady === false) return;
 
+    // Stop any playing voice explanation so it doesn't interfere with recording
+    voiceStream.stopAudio();
+
     setError(null);
     setResult("");
     setRawText("");
@@ -322,6 +325,9 @@ function App() {
       }
     } else {
       // Start recording
+      // Stop any playing voice explanation so it doesn't interfere
+      voiceStream.stopAudio();
+
       setError(null);
       setResult("");
       setRawText("");
