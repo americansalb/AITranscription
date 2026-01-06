@@ -1,0 +1,193 @@
+/**
+ * Voice stream client - connects to Scribe backend SSE endpoint
+ * and plays audio explanations of Claude Code actions.
+ */
+
+export interface VoiceEvent {
+  type: 'voice' | 'status' | 'error' | 'connected';
+  audio_base64?: string;
+  explanation?: string;
+  file_path?: string;
+  timestamp?: string;
+}
+
+export type VoiceEventHandler = (event: VoiceEvent) => void;
+
+class VoiceStreamClient {
+  private eventSource: EventSource | null = null;
+  private handlers: VoiceEventHandler[] = [];
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private currentAudio: HTMLAudioElement | null = null;
+  private enabled = false;
+  private apiUrl = '';
+
+  /**
+   * Start listening to voice events from the backend.
+   */
+  connect(apiUrl: string): void {
+    if (this.eventSource) {
+      this.disconnect();
+    }
+
+    this.enabled = true;
+    this.apiUrl = apiUrl;
+    const url = `${apiUrl}/api/v1/voice-stream`;
+
+    try {
+      this.eventSource = new EventSource(url);
+
+      this.eventSource.onopen = () => {
+        console.log('[VoiceStream] Connected');
+        this.reconnectAttempts = 0;
+      };
+
+      this.eventSource.onmessage = (event) => {
+        try {
+          const data: VoiceEvent = JSON.parse(event.data);
+          this.handleEvent(data);
+        } catch (e) {
+          console.error('[VoiceStream] Parse error:', e);
+        }
+      };
+
+      this.eventSource.onerror = () => {
+        console.error('[VoiceStream] Connection error');
+        this.handleDisconnect();
+      };
+
+    } catch (e) {
+      console.error('[VoiceStream] Failed to connect:', e);
+      this.handleDisconnect();
+    }
+  }
+
+  /**
+   * Stop listening to voice events.
+   */
+  disconnect(): void {
+    this.enabled = false;
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+    this.stopAudio();
+  }
+
+  /**
+   * Register a handler for voice events.
+   * Returns an unsubscribe function.
+   */
+  onEvent(handler: VoiceEventHandler): () => void {
+    this.handlers.push(handler);
+    return () => {
+      this.handlers = this.handlers.filter(h => h !== handler);
+    };
+  }
+
+  /**
+   * Stop any currently playing audio.
+   */
+  stopAudio(): void {
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio = null;
+    }
+  }
+
+  private handleEvent(event: VoiceEvent): void {
+    // Notify handlers
+    this.handlers.forEach(handler => handler(event));
+
+    // Play audio if present
+    if (event.type === 'voice' && event.audio_base64) {
+      this.playAudio(event.audio_base64);
+    }
+  }
+
+  private async playAudio(base64Audio: string): Promise<void> {
+    // Stop any playing audio first
+    this.stopAudio();
+
+    try {
+      // Decode base64 to blob
+      const binaryString = atob(base64Audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+
+      // Create and play audio
+      this.currentAudio = new Audio(url);
+      this.currentAudio.onended = () => {
+        URL.revokeObjectURL(url);
+        this.currentAudio = null;
+      };
+      this.currentAudio.onerror = (e) => {
+        console.error('[VoiceStream] Audio playback error:', e);
+        URL.revokeObjectURL(url);
+        this.currentAudio = null;
+      };
+
+      await this.currentAudio.play();
+
+    } catch (e) {
+      console.error('[VoiceStream] Failed to play audio:', e);
+    }
+  }
+
+  private handleDisconnect(): void {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+
+    if (!this.enabled) return;
+
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      const delay = this.reconnectDelay * this.reconnectAttempts;
+      console.log(`[VoiceStream] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+      setTimeout(() => {
+        if (this.enabled) {
+          this.connect(this.apiUrl);
+        }
+      }, delay);
+    } else {
+      console.error('[VoiceStream] Max reconnect attempts reached');
+    }
+  }
+
+  /**
+   * Check if currently connected.
+   */
+  get isConnected(): boolean {
+    return this.eventSource?.readyState === EventSource.OPEN;
+  }
+}
+
+// Singleton instance
+export const voiceStream = new VoiceStreamClient();
+
+
+// Storage helpers for voice settings
+const VOICE_ENABLED_KEY = 'scribe_voice_enabled';
+
+export function getStoredVoiceEnabled(): boolean {
+  try {
+    return localStorage.getItem(VOICE_ENABLED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function saveVoiceEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(VOICE_ENABLED_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // Ignore storage errors
+  }
+}
