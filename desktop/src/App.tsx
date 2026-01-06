@@ -174,9 +174,12 @@ function App() {
 
     try {
       const audioBlob = await recorder.stopRecording();
-      if (!audioBlob) {
-        throw new Error("No audio recorded");
+      if (!audioBlob || audioBlob.size < 1000) {
+        console.error("[Recording] Invalid blob:", audioBlob?.size, "bytes");
+        throw new Error(`Recording too short or empty (${audioBlob?.size || 0} bytes). Hold the key longer.`);
       }
+
+      console.log("[Recording] Sending blob:", audioBlob.size, "bytes, type:", audioBlob.type);
 
       const response = await transcribeAndPolish(audioBlob, {
         language: "en",  // Default to English to avoid wrong language detection
@@ -300,9 +303,12 @@ function App() {
 
       try {
         const audioBlob = await recorder.stopRecording();
-        if (!audioBlob) {
-          throw new Error("No audio recorded");
+        if (!audioBlob || audioBlob.size < 1000) {
+          console.error("[Recording] Invalid blob:", audioBlob?.size, "bytes");
+          throw new Error(`Recording too short or empty (${audioBlob?.size || 0} bytes). Hold the key longer.`);
         }
+
+        console.log("[Recording] Sending blob:", audioBlob.size, "bytes, type:", audioBlob.type);
 
         const response = await transcribeAndPolish(audioBlob, {
           language: "en",  // Default to English

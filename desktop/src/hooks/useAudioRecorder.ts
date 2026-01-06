@@ -87,6 +87,12 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         },
       });
 
+      const audioTracks = stream.getAudioTracks();
+      console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
+      if (audioTracks.length > 0) {
+        console.log("[AudioRecorder] Track:", audioTracks[0].label, "enabled:", audioTracks[0].enabled, "muted:", audioTracks[0].muted);
+      }
+
       // Set up audio analysis for level metering
       audioContext.current = new AudioContext();
       analyser.current = audioContext.current.createAnalyser();
@@ -107,6 +113,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       startTime.current = Date.now();
 
       mediaRecorder.current.ondataavailable = (event) => {
+        console.log("[AudioRecorder] Data available:", event.data.size, "bytes, total chunks:", audioChunks.current.length + 1);
         if (event.data.size > 0) {
           audioChunks.current.push(event.data);
         }
