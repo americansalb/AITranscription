@@ -138,7 +138,10 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
     return new Promise((resolve) => {
+      console.log("[AudioRecorder] stopRecording called, state:", mediaRecorder.current?.state);
+
       if (!mediaRecorder.current || mediaRecorder.current.state === "inactive") {
+        console.log("[AudioRecorder] No active recorder, returning null");
         resolve(null);
         return;
       }
@@ -149,6 +152,8 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       mediaRecorder.current.onstop = () => {
         const mimeType = mediaRecorder.current?.mimeType || "audio/webm";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
+
+        console.log("[AudioRecorder] Recording stopped. Chunks:", audioChunks.current.length, "Blob size:", audioBlob.size, "bytes");
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());
