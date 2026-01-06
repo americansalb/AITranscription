@@ -1,33 +1,15 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 
 /**
- * Floating audio indicator window - shown while recording even when main app is minimized.
- * This renders in a separate transparent, always-on-top window.
- *
- * Beautiful, non-intrusive design inspired by WhisperFlow but better.
+ * Minimal floating recording indicator - WhisperFlow-inspired design.
+ * Always visible: small line when idle, expands to pill with audio bars when recording.
  */
 export function FloatingOverlay() {
-  const [isRecording, setIsRecording] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [audioLevel, setAudioLevel] = useState(0.5);
+  const [audioLevel, setAudioLevel] = useState(0);
 
-  // Listen for messages from the main window
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (event.data.type === "recording-state") {
-        setIsRecording(event.data.isRecording);
-        setIsProcessing(event.data.isProcessing);
-        setDuration(event.data.duration || 0);
-        setAudioLevel(event.data.audioLevel || 0);
-      }
-    };
-
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, []);
-
-  // Also listen for Tauri events
+  // Listen for Tauri events from main window
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
@@ -42,7 +24,6 @@ export function FloatingOverlay() {
         }>("recording-state", (event) => {
           setIsRecording(event.payload.isRecording);
           setIsProcessing(event.payload.isProcessing);
-          setDuration(event.payload.duration);
           setAudioLevel(event.payload.audioLevel);
         });
       }
@@ -54,84 +35,32 @@ export function FloatingOverlay() {
     };
   }, []);
 
-  // Simulate audio level animation when recording
-  useEffect(() => {
-    if (!isRecording) return;
+  // Generate 3 bar heights based on audio level
+  const bars = [
+    Math.max(0.3, audioLevel * 0.7 + Math.random() * 0.1),
+    Math.max(0.4, audioLevel + Math.random() * 0.1),
+    Math.max(0.3, audioLevel * 0.8 + Math.random() * 0.1),
+  ];
 
-    const interval = setInterval(() => {
-      // Gentle pulsing animation
-      setAudioLevel((prev) => {
-        const delta = (Math.random() - 0.5) * 0.3;
-        return Math.max(0.2, Math.min(1, prev + delta));
-      });
-    }, 100);
-
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // Duration timer
-  useEffect(() => {
-    if (!isRecording) return;
-
-    const interval = setInterval(() => {
-      setDuration((d) => d + 1);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isRecording]);
-
-  // Format duration as mm:ss
-  const formatDuration = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
-  };
-
-  // Generate beautiful waveform bars
-  const bars = useMemo(() => {
-    const numBars = 9;
-    const result: number[] = [];
-
-    for (let i = 0; i < numBars; i++) {
-      const centerDistance = Math.abs(i - numBars / 2) / (numBars / 2);
-      const baseHeight = 1 - centerDistance * 0.5;
-      const height = Math.max(0.15, baseHeight * audioLevel + Math.random() * 0.2 * audioLevel);
-      result.push(height);
-    }
-
-    return result;
-  }, [audioLevel]);
+  // Determine state for CSS class
+  const state = isProcessing ? "processing" : isRecording ? "recording" : "idle";
+  const isExpanded = isRecording || isProcessing;
 
   return (
-    <div className="floating-overlay-container">
-      <div className={`floating-overlay ${isProcessing ? "processing" : "recording"}`}>
-        {/* Audio waveform visualization */}
-        <div className="floating-waveform">
-          {bars.map((height, i) => (
+    <div className="mini-overlay">
+      <div className={`mini-pill ${state} ${isExpanded ? "expanded" : "collapsed"}`}>
+        {/* Pulsing dot - always visible */}
+        <div className={`mini-dot ${isRecording ? "active" : ""}`} />
+
+        {/* Audio bars - only visible when expanded */}
+        <div className={`mini-bars ${isExpanded ? "visible" : ""}`}>
+          {bars.map((h, i) => (
             <div
               key={i}
-              className="floating-bar"
-              style={{
-                height: `${height * 100}%`,
-                animationDelay: `${i * 50}ms`,
-              }}
+              className="mini-bar"
+              style={{ height: `${h * 100}%` }}
             />
           ))}
-        </div>
-
-        {/* Status indicator */}
-        <div className="floating-status">
-          {isProcessing ? (
-            <>
-              <div className="floating-spinner" />
-              <span>Processing...</span>
-            </>
-          ) : (
-            <>
-              <div className="floating-dot" />
-              <span>{formatDuration(duration)}</span>
-            </>
-          )}
         </div>
       </div>
     </div>

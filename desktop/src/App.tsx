@@ -8,6 +8,7 @@ import { Settings, getStoredHotkey, getStoredWhisperModel, getStoredNoiseCancell
 import { RecordingOverlay } from "./components/RecordingOverlay";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { HistoryPanel } from "./components/HistoryPanel";
+import { voiceStream, getStoredVoiceEnabled } from "./lib/voiceStream";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
 
@@ -82,6 +83,7 @@ function App() {
   const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [_noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
+  const [voiceEnabled, setVoiceEnabled] = useState(() => getStoredVoiceEnabled());
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
@@ -139,6 +141,9 @@ function App() {
   // Push-to-talk: start recording on key down
   const handleHotkeyDown = useCallback(async () => {
     if (recorder.isRecording || isProcessingRef.current || backendReady === false) return;
+
+    // Stop any playing voice explanation so it doesn't interfere with recording
+    voiceStream.stopAudio();
 
     setError(null);
     setResult("");
@@ -240,6 +245,36 @@ function App() {
       });
   }, []);
 
+  // Connect/disconnect voice stream based on voiceEnabled setting
+  useEffect(() => {
+    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+    if (voiceEnabled) {
+      voiceStream.connect(apiUrl);
+
+      // Log voice events for debugging
+      const unsubscribe = voiceStream.onEvent((event) => {
+        if (event.type === 'voice' && event.explanation) {
+          console.log('[Voice]', event.explanation);
+        } else if (event.type === 'error') {
+          console.error('[Voice Error]', event.explanation);
+        }
+      });
+
+      return () => {
+        unsubscribe();
+        voiceStream.disconnect();
+      };
+    } else {
+      voiceStream.disconnect();
+    }
+  }, [voiceEnabled]);
+
+  // Handler for voice enabled toggle
+  const handleVoiceEnabledChange = useCallback((enabled: boolean) => {
+    setVoiceEnabled(enabled);
+  }, []);
+
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
       // Stop recording and process
@@ -290,6 +325,9 @@ function App() {
       }
     } else {
       // Start recording
+      // Stop any playing voice explanation so it doesn't interfere
+      voiceStream.stopAudio();
+
       setError(null);
       setResult("");
       setRawText("");
@@ -492,6 +530,7 @@ function App() {
           onHotkeyChange={setHotkey}
           onModelChange={setWhisperModel}
           onNoiseCancellationChange={setNoiseCancellation}
+          onVoiceEnabledChange={handleVoiceEnabledChange}
         />
       )}
 

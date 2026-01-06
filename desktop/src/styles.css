@@ -760,6 +760,61 @@ body {
   border-color: var(--accent);
 }
 
+/* Custom Hotkey Recorder */
+.hotkey-recorder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hotkey-input {
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: monospace;
+  color: var(--text-primary);
+  min-width: 160px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hotkey-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+.hotkey-input.recording {
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent);
+  animation: hotkeyPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes hotkeyPulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.3); }
+}
+
+.hotkey-clear-btn {
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hotkey-clear-btn:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
+}
+
 .hotkey-hint {
   font-size: 12px;
   color: var(--text-muted);
@@ -2096,11 +2151,12 @@ body {
 }
 
 /* ============================================
-   FLOATING RECORDING OVERLAY
-   Separate window that shows during recording
+   MINI FLOATING OVERLAY
+   Tiny WhisperFlow-inspired recording indicator
+   Always visible: line when idle, pill when recording
    ============================================ */
 
-.floating-overlay-container {
+.mini-overlay {
   width: 100vw;
   height: 100vh;
   display: flex;
@@ -2110,135 +2166,98 @@ body {
   -webkit-app-region: drag;
 }
 
-.floating-overlay {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: linear-gradient(135deg, rgba(20, 20, 22, 0.95), rgba(30, 30, 35, 0.95));
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  border-radius: 30px;
-  padding: 10px 18px;
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
-    0 0 20px rgba(99, 102, 241, 0.2);
-  animation: floatingOverlayAppear 0.3s ease-out;
-}
-
-@keyframes floatingOverlayAppear {
-  from {
-    opacity: 0;
-    transform: scale(0.9) translateY(10px);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1) translateY(0);
-  }
-}
-
-.floating-overlay.recording {
-  border-color: rgba(239, 68, 68, 0.4);
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
-    0 0 20px rgba(239, 68, 68, 0.25);
-}
-
-.floating-overlay.processing {
-  border-color: rgba(99, 102, 241, 0.4);
-}
-
-/* Audio waveform visualization */
-.floating-waveform {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  height: 28px;
-  padding: 0 4px;
-}
-
-.floating-bar {
-  width: 4px;
-  background: linear-gradient(180deg, #ef4444, #f87171);
-  border-radius: 2px;
-  transition: height 0.1s ease-out;
-  animation: floatingBarPulse 0.6s ease-in-out infinite;
-}
-
-.floating-overlay.processing .floating-bar {
-  background: linear-gradient(180deg, #6366f1, #818cf8);
-  animation: floatingBarProcess 1s ease-in-out infinite;
-}
-
-@keyframes floatingBarPulse {
-  0%, 100% {
-    opacity: 0.8;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
-@keyframes floatingBarProcess {
-  0%, 100% {
-    opacity: 0.5;
-    transform: scaleY(0.7);
-  }
-  50% {
-    opacity: 1;
-    transform: scaleY(1);
-  }
-}
-
-/* Status indicator */
-.floating-status {
+.mini-pill {
   display: flex;
   align-items: center;
   gap: 8px;
-  -webkit-app-region: no-drag;
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
 }
 
-.floating-dot {
-  width: 10px;
-  height: 10px;
+/* Collapsed state - small line */
+.mini-pill.collapsed {
+  padding: 6px 12px;
+  border-radius: 10px;
+  gap: 0;
+}
+
+/* Expanded state - full pill */
+.mini-pill.expanded {
+  padding: 8px 14px;
+  border-radius: 18px;
+  gap: 8px;
+}
+
+.mini-pill.recording {
+  border-color: rgba(239, 68, 68, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 8px rgba(239, 68, 68, 0.3);
+}
+
+.mini-pill.processing {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 0 8px rgba(99, 102, 241, 0.3);
+}
+
+/* Pulsing dot - always visible */
+.mini-dot {
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
+  background: #555;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.mini-dot.active {
   background: #ef4444;
-  animation: floatingDotPulse 1s ease-in-out infinite;
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
+  animation: miniDotPulse 1s ease-in-out infinite;
 }
 
-@keyframes floatingDotPulse {
-  0%, 100% {
-    transform: scale(1);
-    opacity: 1;
-  }
-  50% {
-    transform: scale(1.15);
-    opacity: 0.8;
-  }
+.mini-pill.processing .mini-dot {
+  background: #6366f1;
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.8);
+  animation: miniDotPulse 0.8s ease-in-out infinite;
 }
 
-.floating-spinner {
-  width: 14px;
+@keyframes miniDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+/* Audio bars - hidden when collapsed */
+.mini-bars {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   height: 14px;
-  border: 2px solid rgba(99, 102, 241, 0.3);
-  border-top-color: #6366f1;
-  border-radius: 50%;
-  animation: floatingSpin 0.8s linear infinite;
+  overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  width: 0;
+  opacity: 0;
 }
 
-@keyframes floatingSpin {
-  to {
-    transform: rotate(360deg);
-  }
+.mini-bars.visible {
+  width: 20px;
+  opacity: 1;
 }
 
-.floating-status span {
-  font-size: 14px;
-  font-weight: 600;
-  color: #fafafa;
-  letter-spacing: 0.02em;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+.mini-bar {
+  width: 3px;
+  background: #ef4444;
+  border-radius: 1.5px;
+  transition: height 0.08s ease-out;
+  min-height: 4px;
+}
+
+.mini-pill.processing .mini-bar {
+  background: #6366f1;
+}
+
+.mini-pill.idle .mini-bar {
+  background: #666;
+  height: 4px !important;
 }
