@@ -9,6 +9,7 @@ import { RecordingOverlay } from "./components/RecordingOverlay";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { voiceStream, getStoredVoiceEnabled } from "./lib/voiceStream";
+import { initSpeakListener, stop as stopSpeaking } from "./lib/speak";
 
 type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
 
@@ -142,8 +143,9 @@ function App() {
   const handleHotkeyDown = useCallback(async () => {
     if (recorder.isRecording || isProcessingRef.current || backendReady === false) return;
 
-    // Stop any playing voice explanation so it doesn't interfere with recording
+    // Stop any playing voice/speech so it doesn't interfere with recording
     voiceStream.stopAudio();
+    stopSpeaking();
 
     setError(null);
     setResult("");
@@ -245,9 +247,23 @@ function App() {
       });
   }, []);
 
+  // Initialize speak listener for Claude Code integration
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    initSpeakListener().then((unlistenFn) => {
+      unlisten = unlistenFn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+      stopSpeaking();
+    };
+  }, []);
+
   // Connect/disconnect voice stream based on voiceEnabled setting
   useEffect(() => {
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const apiUrl = import.meta.env.VITE_API_URL || 'https://scribe-api-yk09.onrender.com';
 
     if (voiceEnabled) {
       voiceStream.connect(apiUrl);
@@ -325,8 +341,9 @@ function App() {
       }
     } else {
       // Start recording
-      // Stop any playing voice explanation so it doesn't interfere
+      // Stop any playing voice/speech so it doesn't interfere
       voiceStream.stopAudio();
+      stopSpeaking();
 
       setError(null);
       setResult("");

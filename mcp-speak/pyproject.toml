@@ -1,0 +1,16 @@
+[project]
+name = "scribe-speak"
+version = "0.1.0"
+description = "MCP server that connects Claude Code to Scribe for voice announcements"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+scribe-speak = "mcp_speak.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

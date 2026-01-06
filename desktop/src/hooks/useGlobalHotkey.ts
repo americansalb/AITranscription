@@ -39,66 +39,100 @@ export function useGlobalHotkey({
 }: UseGlobalHotkeyOptions) {
   const [registrationError, setRegistrationError] = useState<string | null>(null);
   const [registered, setRegistered] = useState(false);
-  const isRegistered = useRef(false);
   const isTauriLoaded = useRef(false);
   const keyDownRef = useRef(onKeyDown);
   const keyUpRef = useRef(onKeyUp);
+  const registeredHotkeyRef = useRef<string | null>(null);
 
   // Keep callback refs up to date
   keyDownRef.current = onKeyDown;
   keyUpRef.current = onKeyUp;
 
-  const register = useCallback(async () => {
-    if (!enabled || isRegistered.current) return;
-
-    // Load Tauri plugin if not already loaded
-    if (!isTauriLoaded.current) {
-      isTauriLoaded.current = await loadTauriPlugin();
-    }
-
-    if (!tauriGlobalShortcut) {
-      setRegistrationError("Global hotkeys not available (not running in Tauri)");
-      return;
-    }
+  const unregisterHotkey = useCallback(async (hotkeyToUnregister: string) => {
+    if (!tauriGlobalShortcut || !hotkeyToUnregister) return;
 
     try {
-      await tauriGlobalShortcut.register(hotkey, (event) => {
+      await tauriGlobalShortcut.unregister(hotkeyToUnregister);
+      console.log(`Global hotkey unregistered: ${hotkeyToUnregister}`);
+    } catch (error) {
+      console.error(`Failed to unregister global hotkey: ${hotkeyToUnregister}`, error);
+    }
+  }, []);
+
+  const registerHotkey = useCallback(async (hotkeyToRegister: string) => {
+    if (!tauriGlobalShortcut) return false;
+
+    try {
+      await tauriGlobalShortcut.register(hotkeyToRegister, (event) => {
         if (event.state === "Pressed") {
           keyDownRef.current?.();
         } else if (event.state === "Released") {
           keyUpRef.current?.();
         }
       });
-      isRegistered.current = true;
-      setRegistered(true);
-      setRegistrationError(null);
-      console.log(`Global hotkey registered: ${hotkey}`);
+      console.log(`Global hotkey registered: ${hotkeyToRegister}`);
+      return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       setRegistrationError(`Hotkey failed: ${errorMsg}`);
-      console.error(`Failed to register global hotkey: ${hotkey}`, error);
+      console.error(`Failed to register global hotkey: ${hotkeyToRegister}`, error);
+      return false;
     }
-  }, [hotkey, enabled]);
-
-  const unregister = useCallback(async () => {
-    if (!isRegistered.current || !tauriGlobalShortcut) return;
-
-    try {
-      await tauriGlobalShortcut.unregister(hotkey);
-      isRegistered.current = false;
-      setRegistered(false);
-      console.log(`Global hotkey unregistered: ${hotkey}`);
-    } catch (error) {
-      console.error(`Failed to unregister global hotkey: ${hotkey}`, error);
-    }
-  }, [hotkey]);
+  }, []);
 
   useEffect(() => {
-    register();
-    return () => {
-      unregister();
+    let mounted = true;
+
+    const setupHotkey = async () => {
+      if (!enabled) {
+        // Unregister if disabled
+        if (registeredHotkeyRef.current) {
+          await unregisterHotkey(registeredHotkeyRef.current);
+          registeredHotkeyRef.current = null;
+          setRegistered(false);
+        }
+        return;
+      }
+
+      // Load Tauri plugin if not already loaded
+      if (!isTauriLoaded.current) {
+        isTauriLoaded.current = await loadTauriPlugin();
+      }
+
+      if (!tauriGlobalShortcut) {
+        setRegistrationError("Global hotkeys not available (not running in Tauri)");
+        return;
+      }
+
+      // If hotkey changed, unregister the old one first
+      if (registeredHotkeyRef.current && registeredHotkeyRef.current !== hotkey) {
+        await unregisterHotkey(registeredHotkeyRef.current);
+        registeredHotkeyRef.current = null;
+        setRegistered(false);
+      }
+
+      // Register new hotkey if not already registered
+      if (registeredHotkeyRef.current !== hotkey) {
+        const success = await registerHotkey(hotkey);
+        if (mounted && success) {
+          registeredHotkeyRef.current = hotkey;
+          setRegistered(true);
+          setRegistrationError(null);
+        }
+      }
     };
-  }, [register, unregister]);
+
+    setupHotkey();
+
+    return () => {
+      mounted = false;
+      // Cleanup on unmount
+      if (registeredHotkeyRef.current) {
+        unregisterHotkey(registeredHotkeyRef.current);
+        registeredHotkeyRef.current = null;
+      }
+    };
+  }, [hotkey, enabled, registerHotkey, unregisterHotkey]);
 
   return { isRegistered: registered, error: registrationError };
 }

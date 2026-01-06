@@ -571,6 +571,39 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
       </label>
       <p className="setting-hint">Hear spoken explanations when Claude Code writes or edits files</p>
 
+      {/* Claude Code Setup Instructions */}
+      <div className="claude-code-setup">
+        <p className="setup-title">Claude Code Setup</p>
+        <p className="setting-hint">
+          To enable voice announcements, add this to your Claude Code settings:
+        </p>
+        <ol className="setup-steps">
+          <li>Install: <code>cd mcp-speak && pip install -e .</code></li>
+          <li>Copy the config below</li>
+          <li>Paste into <code>~/.claude/settings.json</code></li>
+        </ol>
+        <div className="config-copy">
+          <code className="config-snippet">
+            {`"mcpServers": { "scribe": { "command": "scribe-speak" } }`}
+          </code>
+          <button
+            className="copy-config-btn"
+            onClick={() => {
+              const config = `{
+  "mcpServers": {
+    "scribe": {
+      "command": "scribe-speak"
+    }
+  }
+}`;
+              navigator.clipboard.writeText(config);
+            }}
+          >
+            Copy Config
+          </button>
+        </div>
+      </div>
+
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
         <div className="hotkey-recorder">

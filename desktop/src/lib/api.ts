@@ -3,7 +3,7 @@
  */
 
 // Remove trailing slash if present to avoid double slashes in URLs
-const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const rawUrl = import.meta.env.VITE_API_URL || "https://scribe-api-yk09.onrender.com";
 const API_BASE_URL = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
 export interface TranscribeResponse {
