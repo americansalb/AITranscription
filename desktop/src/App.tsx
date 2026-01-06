@@ -247,7 +247,7 @@ function App() {
 
   // Connect/disconnect voice stream based on voiceEnabled setting
   useEffect(() => {
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+    const apiUrl = import.meta.env.VITE_API_URL || 'https://scribe-api-yk09.onrender.com';
 
     if (voiceEnabled) {
       voiceStream.connect(apiUrl);
