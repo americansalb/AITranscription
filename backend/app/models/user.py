@@ -71,6 +71,11 @@ class User(Base):
     total_transcriptions: Mapped[int] = mapped_column(default=0)
     total_words: Mapped[int] = mapped_column(default=0)
 
+    # User preferences for time saved calculation
+    # Average typing WPM - used to calculate how much time transcription saves
+    # Default 40 WPM is average typing speed
+    typing_wpm: Mapped[int] = mapped_column(default=40)
+
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
         "DictionaryEntry",

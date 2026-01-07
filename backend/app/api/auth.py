@@ -218,6 +218,10 @@ class UserStatsResponse(BaseModel):
     words_today: int
     average_words_per_transcription: float
     average_words_per_minute: float
+    # Time saved calculation
+    typing_wpm: int  # User's configured typing speed
+    time_saved_seconds: int  # How much time transcription has saved vs typing
+    time_saved_today_seconds: int  # Time saved today
 
 
 class ContextStats(BaseModel):
@@ -456,6 +460,20 @@ async def get_my_stats(
     total_wpm = sum(t.words_per_minute for t in all_transcripts)
     avg_wpm = total_wpm / len(all_transcripts) if all_transcripts else 0
 
+    # Calculate time saved based on user's typing WPM
+    # Time to type = words / typing_wpm * 60 (in seconds)
+    # Time saved = time_to_type - audio_duration
+    typing_wpm = current_user.typing_wpm or 40  # Default 40 WPM
+
+    # Total time saved (all time)
+    time_to_type_total = (current_user.total_words / typing_wpm * 60) if typing_wpm > 0 else 0
+    time_saved_total = max(0, int(time_to_type_total - current_user.total_audio_seconds))
+
+    # Time saved today
+    audio_today = sum(t.audio_duration_seconds for t in today_transcripts)
+    time_to_type_today = (words_today / typing_wpm * 60) if typing_wpm > 0 else 0
+    time_saved_today = max(0, int(time_to_type_today - audio_today))
+
     return UserStatsResponse(
         total_transcriptions=current_user.total_transcriptions,
         total_words=current_user.total_words,
@@ -464,6 +482,149 @@ async def get_my_stats(
         words_today=words_today,
         average_words_per_transcription=round(avg_words, 1),
         average_words_per_minute=round(avg_wpm, 1),
+        typing_wpm=typing_wpm,
+        time_saved_seconds=time_saved_total,
+        time_saved_today_seconds=time_saved_today,
+    )
+
+
+# Typing WPM setting
+class UpdateTypingWpmRequest(BaseModel):
+    """Request to update typing WPM."""
+    typing_wpm: int = Field(ge=1, le=200, description="Typing speed in words per minute (1-200)")
+
+
+class UpdateTypingWpmResponse(BaseModel):
+    """Response after updating typing WPM."""
+    typing_wpm: int
+    message: str
+
+
+@router.patch("/typing-wpm", response_model=UpdateTypingWpmResponse)
+async def update_typing_wpm(
+    request: UpdateTypingWpmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update the user's typing WPM for time saved calculations."""
+    current_user.typing_wpm = request.typing_wpm
+    await db.commit()
+
+    return UpdateTypingWpmResponse(
+        typing_wpm=request.typing_wpm,
+        message=f"Typing speed updated to {request.typing_wpm} WPM",
+    )
+
+
+# Achievement definitions - all based on REAL user data
+ACHIEVEMENTS = [
+    # Transcription count milestones
+    {"id": "first_transcription", "name": "First Words", "description": "Complete your first transcription", "icon": "mic", "category": "transcriptions", "threshold": 1, "stat": "total_transcriptions"},
+    {"id": "transcription_10", "name": "Getting Started", "description": "Complete 10 transcriptions", "icon": "trending_up", "category": "transcriptions", "threshold": 10, "stat": "total_transcriptions"},
+    {"id": "transcription_50", "name": "Regular User", "description": "Complete 50 transcriptions", "icon": "star", "category": "transcriptions", "threshold": 50, "stat": "total_transcriptions"},
+    {"id": "transcription_100", "name": "Power User", "description": "Complete 100 transcriptions", "icon": "bolt", "category": "transcriptions", "threshold": 100, "stat": "total_transcriptions"},
+    {"id": "transcription_500", "name": "Transcription Pro", "description": "Complete 500 transcriptions", "icon": "workspace_premium", "category": "transcriptions", "threshold": 500, "stat": "total_transcriptions"},
+    {"id": "transcription_1000", "name": "Transcription Master", "description": "Complete 1,000 transcriptions", "icon": "emoji_events", "category": "transcriptions", "threshold": 1000, "stat": "total_transcriptions"},
+
+    # Word count milestones
+    {"id": "words_100", "name": "First Hundred", "description": "Transcribe 100 words", "icon": "edit_note", "category": "words", "threshold": 100, "stat": "total_words"},
+    {"id": "words_1000", "name": "Wordsmith", "description": "Transcribe 1,000 words", "icon": "description", "category": "words", "threshold": 1000, "stat": "total_words"},
+    {"id": "words_10000", "name": "Prolific Writer", "description": "Transcribe 10,000 words", "icon": "auto_stories", "category": "words", "threshold": 10000, "stat": "total_words"},
+    {"id": "words_50000", "name": "Word Champion", "description": "Transcribe 50,000 words", "icon": "military_tech", "category": "words", "threshold": 50000, "stat": "total_words"},
+    {"id": "words_100000", "name": "Word Legend", "description": "Transcribe 100,000 words", "icon": "diamond", "category": "words", "threshold": 100000, "stat": "total_words"},
+
+    # Audio duration milestones (in seconds)
+    {"id": "audio_60", "name": "First Minute", "description": "Transcribe 1 minute of audio", "icon": "timer", "category": "audio", "threshold": 60, "stat": "total_audio_seconds"},
+    {"id": "audio_600", "name": "Ten Minutes", "description": "Transcribe 10 minutes of audio", "icon": "schedule", "category": "audio", "threshold": 600, "stat": "total_audio_seconds"},
+    {"id": "audio_3600", "name": "Hour of Voice", "description": "Transcribe 1 hour of audio", "icon": "hourglass_bottom", "category": "audio", "threshold": 3600, "stat": "total_audio_seconds"},
+    {"id": "audio_36000", "name": "Marathon Speaker", "description": "Transcribe 10 hours of audio", "icon": "hourglass_full", "category": "audio", "threshold": 36000, "stat": "total_audio_seconds"},
+
+    # Daily activity milestones
+    {"id": "daily_5", "name": "Daily Dabbler", "description": "Complete 5 transcriptions in one day", "icon": "today", "category": "daily", "threshold": 5, "stat": "transcriptions_today"},
+    {"id": "daily_10", "name": "Busy Day", "description": "Complete 10 transcriptions in one day", "icon": "event_available", "category": "daily", "threshold": 10, "stat": "transcriptions_today"},
+    {"id": "daily_25", "name": "Productivity Beast", "description": "Complete 25 transcriptions in one day", "icon": "local_fire_department", "category": "daily", "threshold": 25, "stat": "transcriptions_today"},
+]
+
+
+class AchievementResponse(BaseModel):
+    """Single achievement response."""
+    id: str
+    name: str
+    description: str
+    icon: str
+    category: str
+    unlocked: bool
+    progress: float  # 0.0 to 1.0
+    current_value: int
+    threshold: int
+    unlocked_at: datetime | None = None
+
+
+class AchievementsResponse(BaseModel):
+    """All achievements response."""
+    achievements: list[AchievementResponse]
+    total_unlocked: int
+    total_achievements: int
+
+
+@router.get("/achievements", response_model=AchievementsResponse)
+async def get_my_achievements(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the current user's achievements based on real usage data."""
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Get today's transcripts for daily achievements
+    query = select(Transcript).where(
+        Transcript.user_id == current_user.id,
+        Transcript.created_at >= today,
+    )
+    result = await db.execute(query)
+    today_transcripts = result.scalars().all()
+    transcriptions_today = len(today_transcripts)
+
+    # Build stats dictionary for achievement checking
+    user_stats = {
+        "total_transcriptions": current_user.total_transcriptions,
+        "total_words": current_user.total_words,
+        "total_audio_seconds": current_user.total_audio_seconds,
+        "transcriptions_today": transcriptions_today,
+    }
+
+    achievements_list = []
+    total_unlocked = 0
+
+    for achievement in ACHIEVEMENTS:
+        stat_name = achievement["stat"]
+        current_value = user_stats.get(stat_name, 0)
+        threshold = achievement["threshold"]
+        unlocked = current_value >= threshold
+        progress = min(current_value / threshold, 1.0) if threshold > 0 else 0
+
+        if unlocked:
+            total_unlocked += 1
+
+        achievements_list.append(
+            AchievementResponse(
+                id=achievement["id"],
+                name=achievement["name"],
+                description=achievement["description"],
+                icon=achievement["icon"],
+                category=achievement["category"],
+                unlocked=unlocked,
+                progress=round(progress, 3),
+                current_value=current_value,
+                threshold=threshold,
+                unlocked_at=None,  # We don't track unlock times yet
+            )
+        )
+
+    return AchievementsResponse(
+        achievements=achievements_list,
+        total_unlocked=total_unlocked,
+        total_achievements=len(ACHIEVEMENTS),
     )
 
 
