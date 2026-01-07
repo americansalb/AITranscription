@@ -108,6 +108,10 @@ async def lifespan(app: FastAPI):
                     WHERE table_name = 'users' AND column_name = 'last_usage_reset') THEN
                     ALTER TABLE users ADD COLUMN last_usage_reset TIMESTAMP WITH TIME ZONE;
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = 'typing_wpm') THEN
+                    ALTER TABLE users ADD COLUMN typing_wpm INTEGER DEFAULT 40;
+                END IF;
             END $$;
         """))
 
