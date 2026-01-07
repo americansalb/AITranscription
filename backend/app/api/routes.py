@@ -1,3 +1,5 @@
+import io
+
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -383,3 +385,40 @@ async def voice_stream_status():
         "groq_configured": bool(settings.groq_api_key),
         "anthropic_configured": bool(settings.anthropic_api_key),
     }
+
+
+# ============================================================================
+# Text-to-Speech Endpoint (ElevenLabs)
+# ============================================================================
+
+
+@router.post("/tts")
+async def text_to_speech(
+    text: str = Form(..., description="Text to convert to speech"),
+    voice_id: str | None = Form(default=None, description="Optional ElevenLabs voice ID"),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Convert text to speech using ElevenLabs.
+
+    Returns MP3 audio file. Requires authentication.
+    """
+    from app.services import elevenlabs_tts
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    # Limit text length to prevent abuse
+    if len(text) > 5000:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 5000 characters.")
+
+    audio_data = await elevenlabs_tts.synthesize(text, voice_id)
+
+    if audio_data is None:
+        raise HTTPException(status_code=500, detail="Text-to-speech failed. Check ElevenLabs configuration.")
+
+    return StreamingResponse(
+        io.BytesIO(audio_data),
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": "inline; filename=speech.mp3"}
+    )
