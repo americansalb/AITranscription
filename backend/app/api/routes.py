@@ -377,3 +377,32 @@ async def voice_stream_status():
         "groq_configured": bool(settings.groq_api_key),
         "anthropic_configured": bool(settings.anthropic_api_key),
     }
+
+
+# ============================================================================
+# Speak Endpoint (MCP Integration for Claude Code)
+# ============================================================================
+
+@router.post("/speak")
+async def speak_text(request: dict):
+    """
+    Receive text from Claude Code's MCP speak tool and broadcast to Scribe.
+
+    The Scribe desktop app listens for 'speak' events and uses browser
+    SpeechSynthesis to speak the text aloud.
+    """
+    text = request.get("text", "")
+    if not text:
+        return {"status": "error", "message": "No text provided"}
+
+    # Broadcast the speak event to connected Scribe clients
+    await event_manager.broadcast(
+        VoiceEvent(
+            type="speak",
+            explanation=text,
+            file_path="",
+            timestamp=datetime.utcnow().isoformat(),
+        )
+    )
+
+    return {"status": "ok", "text": text}

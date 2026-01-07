@@ -4,7 +4,7 @@
  */
 
 export interface VoiceEvent {
-  type: 'voice' | 'status' | 'error' | 'connected';
+  type: 'voice' | 'status' | 'error' | 'connected' | 'speak';
   audio_base64?: string;
   explanation?: string;
   file_path?: string;
@@ -104,6 +104,42 @@ class VoiceStreamClient {
     if (event.type === 'voice' && event.audio_base64) {
       this.playAudio(event.audio_base64);
     }
+
+    // Handle speak events using browser TTS
+    if (event.type === 'speak' && event.explanation) {
+      this.speakText(event.explanation);
+    }
+  }
+
+  private speakText(text: string): void {
+    if (!window.speechSynthesis) {
+      console.warn('[VoiceStream] SpeechSynthesis not available');
+      return;
+    }
+
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Try to use a good voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(
+      (v) =>
+        v.name.includes("Samantha") ||
+        v.name.includes("Microsoft Zira") ||
+        v.name.includes("Google") ||
+        v.lang.startsWith("en")
+    );
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    window.speechSynthesis.speak(utterance);
+    console.log('[VoiceStream] Speaking:', text);
   }
 
   private async playAudio(base64Audio: string): Promise<void> {
