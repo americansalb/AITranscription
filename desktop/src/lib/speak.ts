@@ -16,15 +16,7 @@ let currentAudio: HTMLAudioElement | null = null;
  * Get the auth token from localStorage.
  */
 function getAuthToken(): string | null {
-  const tokenData = localStorage.getItem("auth_token");
-  if (!tokenData) return null;
-
-  try {
-    const parsed = JSON.parse(tokenData);
-    return parsed.access_token || tokenData;
-  } catch {
-    return tokenData;
-  }
+  return localStorage.getItem("scribe_token");
 }
 
 /**
