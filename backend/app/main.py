@@ -14,16 +14,21 @@ from app.models.base import Base
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create database tables on startup."""
-    # Import models to register them with Base
+    """Application lifespan - import models and preload resources.
+
+    All database migrations and seeding now happen during build time via:
+    - alembic upgrade head (creates/updates schema)
+    - python -m scripts.seed_admin --force (seeds dev accounts)
+
+    This ensures the app can start quickly and bind to port immediately.
+    """
+    # Import models to register them with Base (required for relationships to work)
     from app.models import user, dictionary, learning  # noqa: F401
 
     # Preload embedding model for faster first request
     from app.services.correction_retriever import preload_embedding_model
     preload_embedding_model()
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
     yield
 
 
