@@ -24,7 +24,7 @@ interface ActionableError {
 }
 
 // Transcript history entry
-interface TranscriptEntry {
+export interface TranscriptEntry {
   id: string;
   rawText: string;
   polishedText: string;
@@ -166,7 +166,6 @@ function App() {
   const [showLearning, setShowLearning] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [confidence, setConfidence] = useState<number | null>(null);
-  const [lastAudioBlob, setLastAudioBlob] = useState<Blob | null>(null);
 
   // Learning system: track original text before editing for feedback
   const [originalPolishedText, setOriginalPolishedText] = useState<string>("");
@@ -356,9 +355,6 @@ function App() {
       const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
       setConfidence(confidenceScore);
 
-      // Save audio blob for potential regeneration
-      setLastAudioBlob(audioBlob);
-
       // Add to history
       addToHistory({
         rawText: response.raw_text,
@@ -545,9 +541,6 @@ function App() {
         const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
         setConfidence(confidenceScore);
 
-        // Save audio blob for regeneration
-        setLastAudioBlob(audioBlob);
-
         // Add to history
         addToHistory({
           rawText: response.raw_text,
@@ -708,7 +701,7 @@ function App() {
         polishedText: response.text,
         context: targetContext,
         formality: targetFormality,
-        confidence,
+        confidence: confidence ?? undefined,
       });
 
       // Auto-inject the new text
@@ -735,7 +728,6 @@ function App() {
     setResult("");
     setRawText("");
     setConfidence(null);
-    setLastAudioBlob(null);
     setStatus("idle");
     showToast("Cleared", "info");
   }, [showToast]);
@@ -892,7 +884,7 @@ function App() {
         ) : (
           <div className="status">
             <span
-              className={`status-dot ${status === "recording" ? "recording" : status === "processing" ? "processing" : status === "success" ? "success" : ""}`}
+              className={`status-dot ${status === "recording" ? "recording" : status === "success" ? "success" : ""}`}
             />
             {getStatusText()}
           </div>
