@@ -205,7 +205,7 @@ function AuthForm({ onSuccess }: { onSuccess: (user: UserResponse) => void }) {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="••••••••"
-          minLength={8}
+          minLength={6}
           required
         />
       </div>
