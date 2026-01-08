@@ -25,9 +25,9 @@ async def lifespan(app: FastAPI):
     # Import models to register them with Base (required for relationships to work)
     from app.models import user, dictionary, learning  # noqa: F401
 
-    # Preload embedding model for faster first request
-    from app.services.correction_retriever import preload_embedding_model
-    preload_embedding_model()
+    # Note: Embedding model loads lazily on first use to reduce startup memory
+    # from app.services.correction_retriever import preload_embedding_model
+    # preload_embedding_model()
 
     yield
 
