@@ -44,8 +44,8 @@ app = FastAPI(
 # CORS configuration for desktop app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Desktop app will connect from localhost
-    allow_credentials=True,
+    allow_origins=["*"],  # Desktop app will connect from various origins
+    allow_credentials=False,  # Must be False when using allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
