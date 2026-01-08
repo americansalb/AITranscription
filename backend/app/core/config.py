@@ -7,14 +7,12 @@ class Settings(BaseSettings):
     # API Keys
     groq_api_key: str = ""
     anthropic_api_key: str = ""
-    elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = "6OzrBCQf8cjERkYgzSg8"  # Default Scribe voice
 
     # Database
     database_url: str = "postgresql+asyncpg://localhost:5432/scribe"
 
     # Auth
-    secret_key: str = "scribe-app-secret-key-change-in-production"
+    secret_key: str = "dev-secret-key-change-in-production"
     access_token_expire_minutes: int = 60 * 24 * 7  # 1 week
 
     # App settings

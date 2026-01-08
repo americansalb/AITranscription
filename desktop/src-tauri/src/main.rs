@@ -268,6 +268,67 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
     });
 }
 
+/// Setup Claude Code integration by creating CLAUDE.md in user's home directory
+/// This is called automatically on app startup
+fn setup_claude_integration() {
+    // Just call the update function with default "summary" mode
+    update_claude_md_content("summary");
+}
+
+/// Update CLAUDE.md content based on voice output mode
+/// Called from frontend when user changes the setting
+#[tauri::command]
+fn update_claude_md(mode: String) -> Result<(), String> {
+    update_claude_md_content(&mode);
+    Ok(())
+}
+
+/// Internal function to update CLAUDE.md content
+fn update_claude_md_content(mode: &str) {
+    let home_var = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+
+    if let Some(home) = std::env::var_os(home_var) {
+        let claude_md_path = std::path::PathBuf::from(&home).join("CLAUDE.md");
+
+        let content = if mode == "full" {
+            r#"# Claude Code Instructions
+
+## Voice Output
+
+Always use the Scribe speak integration to read responses aloud. Call it using curl:
+
+```bash
+curl -X POST http://127.0.0.1:7865/speak -H "Content-Type: application/json" -d '{"text": "YOUR MESSAGE HERE"}'
+```
+
+Use this for all conversational responses to the user. Read everything including code blocks - the user wants to hear the complete response.
+"#
+        } else {
+            r#"# Claude Code Instructions
+
+## Voice Output
+
+Always use the Scribe speak integration to read responses aloud. Call it using curl:
+
+```bash
+curl -X POST http://127.0.0.1:7865/speak -H "Content-Type: application/json" -d '{"text": "YOUR MESSAGE HERE"}'
+```
+
+Use this for all conversational responses to the user. Do not read code aloud - only explanations, summaries, and direct responses.
+"#
+        };
+
+        match std::fs::write(&claude_md_path, content) {
+            Ok(_) => log_error(&format!("Updated CLAUDE.md with mode: {}", mode)),
+            Err(e) => log_error(&format!("Failed to update CLAUDE.md: {}", e)),
+        }
+    }
+}
+
 /// Update tray icon to show recording state
 #[tauri::command]
 fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
@@ -378,9 +439,12 @@ fn main() {
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
 
+            // Setup Claude Code integration (creates CLAUDE.md if not exists)
+            setup_claude_integration();
+
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state, show_recording_overlay, hide_recording_overlay]);
+        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state, show_recording_overlay, hide_recording_overlay, update_claude_md]);
 
     match builder.run(tauri::generate_context!()) {
         Ok(_) => {}

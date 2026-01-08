@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback } from "react";
 
 // Dynamic import for Tauri - will be undefined in browser
 let tauriGlobalShortcut: typeof import("@tauri-apps/plugin-global-shortcut") | null = null;
@@ -7,11 +7,15 @@ let tauriGlobalShortcut: typeof import("@tauri-apps/plugin-global-shortcut") | n
 async function loadTauriPlugin() {
   try {
     if (typeof window !== "undefined" && "__TAURI__" in window) {
+      console.log("Tauri detected, loading global shortcut plugin...");
       tauriGlobalShortcut = await import("@tauri-apps/plugin-global-shortcut");
+      console.log("Global shortcut plugin loaded successfully");
       return true;
+    } else {
+      console.log("Tauri not detected in window");
     }
-  } catch {
-    // Not running in Tauri environment
+  } catch (err) {
+    console.error("Failed to load Tauri global shortcut plugin:", err);
   }
   return false;
 }
@@ -37,116 +41,74 @@ export function useGlobalHotkey({
   onKeyUp,
   enabled = true,
 }: UseGlobalHotkeyOptions) {
-  const [registrationError, setRegistrationError] = useState<string | null>(null);
-  const [registered, setRegistered] = useState(false);
+  const isRegistered = useRef(false);
   const isTauriLoaded = useRef(false);
   const keyDownRef = useRef(onKeyDown);
   const keyUpRef = useRef(onKeyUp);
-  const registeredHotkeyRef = useRef<string | null>(null);
 
   // Keep callback refs up to date
   keyDownRef.current = onKeyDown;
   keyUpRef.current = onKeyUp;
 
-  const unregisterHotkey = useCallback(async (hotkeyToUnregister: string) => {
-    if (!tauriGlobalShortcut || !hotkeyToUnregister) return;
+  const register = useCallback(async () => {
+    if (!enabled || isRegistered.current) return;
 
-    try {
-      await tauriGlobalShortcut.unregister(hotkeyToUnregister);
-      console.log(`Global hotkey unregistered: ${hotkeyToUnregister}`);
-    } catch (error) {
-      console.error(`Failed to unregister global hotkey: ${hotkeyToUnregister}`, error);
+    // Load Tauri plugin if not already loaded
+    if (!isTauriLoaded.current) {
+      isTauriLoaded.current = await loadTauriPlugin();
     }
-  }, []);
 
-  const registerHotkey = useCallback(async (hotkeyToRegister: string) => {
-    if (!tauriGlobalShortcut) return false;
+    if (!tauriGlobalShortcut) {
+      console.log("Global hotkeys not available (not running in Tauri)");
+      return;
+    }
 
     try {
-      await tauriGlobalShortcut.register(hotkeyToRegister, (event) => {
+      console.log(`Attempting to register hotkey: ${hotkey}`);
+      await tauriGlobalShortcut.register(hotkey, (event) => {
+        console.log(`Hotkey event received:`, event);
         if (event.state === "Pressed") {
+          console.log("Key PRESSED - starting recording");
           keyDownRef.current?.();
         } else if (event.state === "Released") {
+          console.log("Key RELEASED - stopping recording");
           keyUpRef.current?.();
         }
       });
-      console.log(`Global hotkey registered: ${hotkeyToRegister}`);
-      return true;
+      isRegistered.current = true;
+      console.log(`Global hotkey registered successfully: ${hotkey}`);
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      setRegistrationError(`Hotkey failed: ${errorMsg}`);
-      console.error(`Failed to register global hotkey: ${hotkeyToRegister}`, error);
-      return false;
+      console.error(`Failed to register global hotkey: ${hotkey}`, error);
     }
-  }, []);
+  }, [hotkey, enabled]);
+
+  const unregister = useCallback(async () => {
+    if (!isRegistered.current || !tauriGlobalShortcut) return;
+
+    try {
+      await tauriGlobalShortcut.unregister(hotkey);
+      isRegistered.current = false;
+      console.log(`Global hotkey unregistered: ${hotkey}`);
+    } catch (error) {
+      console.error(`Failed to unregister global hotkey: ${hotkey}`, error);
+    }
+  }, [hotkey]);
 
   useEffect(() => {
-    let mounted = true;
-
-    const setupHotkey = async () => {
-      if (!enabled) {
-        // Unregister if disabled
-        if (registeredHotkeyRef.current) {
-          await unregisterHotkey(registeredHotkeyRef.current);
-          registeredHotkeyRef.current = null;
-          setRegistered(false);
-        }
-        return;
-      }
-
-      // Load Tauri plugin if not already loaded
-      if (!isTauriLoaded.current) {
-        isTauriLoaded.current = await loadTauriPlugin();
-      }
-
-      if (!tauriGlobalShortcut) {
-        setRegistrationError("Global hotkeys not available (not running in Tauri)");
-        return;
-      }
-
-      // If hotkey changed, unregister the old one first
-      if (registeredHotkeyRef.current && registeredHotkeyRef.current !== hotkey) {
-        await unregisterHotkey(registeredHotkeyRef.current);
-        registeredHotkeyRef.current = null;
-        setRegistered(false);
-      }
-
-      // Register new hotkey if not already registered
-      if (registeredHotkeyRef.current !== hotkey) {
-        const success = await registerHotkey(hotkey);
-        if (mounted && success) {
-          registeredHotkeyRef.current = hotkey;
-          setRegistered(true);
-          setRegistrationError(null);
-        }
-      }
-    };
-
-    setupHotkey();
-
+    register();
     return () => {
-      mounted = false;
-      // Cleanup on unmount
-      if (registeredHotkeyRef.current) {
-        unregisterHotkey(registeredHotkeyRef.current);
-        registeredHotkeyRef.current = null;
-      }
+      unregister();
     };
-  }, [hotkey, enabled, registerHotkey, unregisterHotkey]);
+  }, [register, unregister]);
 
-  return { isRegistered: registered, error: registrationError };
+  return { isRegistered: isRegistered.current };
 }
 
 /**
  * Common hotkey combinations
- *
- * Push-to-talk: Alt+D (Option+D on Mac)
- * - "D" for Dictate - easy to remember
- * - Feels like a dedicated tool, not a system shortcut
- * - One-handed: thumb on Alt/Option, finger on D
  */
 export const HOTKEYS = {
-  PUSH_TO_TALK: "Alt+D",
+  PUSH_TO_TALK: "CommandOrControl+Shift+S",
   TOGGLE_RECORDING: "CommandOrControl+Shift+R",
   CANCEL_RECORDING: "Escape",
 } as const;

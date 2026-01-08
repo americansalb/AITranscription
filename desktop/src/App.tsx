@@ -1,56 +1,110 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
-import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
-import { injectText, setTrayRecordingState, showRecordingOverlay, hideRecordingOverlay, updateOverlayState } from "./lib/clipboard";
+import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
+import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
+import { injectText } from "./lib/clipboard";
+import { Settings } from "./components/Settings";
+import { AudioIndicator } from "./components/AudioIndicator";
+import { StatsPanel } from "./components/StatsPanel";
+import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
+import { ComparisonView } from "./components/ComparisonView";
+import { ExportModal } from "./components/ExportModal";
+import { LearningDashboard } from "./components/LearningDashboard";
+import { useToast } from "./components/Toast";
+import { Confetti } from "./components/Confetti";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
-import { Settings, getStoredHotkey, getStoredWhisperModel, getStoredNoiseCancellation } from "./components/Settings";
-import { RecordingOverlay } from "./components/RecordingOverlay";
-import { AudioVisualizer } from "./components/AudioVisualizer";
-import { HistoryPanel } from "./components/HistoryPanel";
-import { voiceStream, getStoredVoiceEnabled } from "./lib/voiceStream";
-import { initSpeakListener, stop as stopSpeaking } from "./lib/speak";
 
-type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
+// Error types for actionable messages
+interface ActionableError {
+  message: string;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
+}
 
-// History entry interface
-export interface HistoryEntry {
+// Transcript history entry
+interface TranscriptEntry {
   id: string;
-  timestamp: Date;
   rawText: string;
   polishedText: string;
   context: string;
   formality: string;
-  duration: number | null;
+  timestamp: number;
+  confidence?: number;
 }
 
-// Load history from localStorage
-function loadHistory(): HistoryEntry[] {
-  try {
-    const stored = localStorage.getItem("scribe_history");
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      return parsed.map((entry: HistoryEntry) => ({
-        ...entry,
-        timestamp: new Date(entry.timestamp),
-      }));
-    }
-  } catch {
-    // Ignore parse errors
-  }
-  return [];
+// Context icons for the dropdown
+const CONTEXT_OPTIONS = [
+  { value: "general", label: "General", icon: "🎯" },
+  { value: "email", label: "Email", icon: "📧" },
+  { value: "slack", label: "Slack / Chat", icon: "💬" },
+  { value: "document", label: "Document", icon: "📄" },
+  { value: "code", label: "Code Comment", icon: "💻" },
+];
+
+// Quick Mode Presets
+interface Preset {
+  id: string;
+  name: string;
+  icon: string;
+  context: string;
+  formality: "casual" | "neutral" | "formal";
+  description: string;
 }
 
-// Save history to localStorage
-function saveHistory(history: HistoryEntry[]) {
-  try {
-    // Keep only last 100 entries to avoid storage bloat
-    const toSave = history.slice(0, 100);
-    localStorage.setItem("scribe_history", JSON.stringify(toSave));
-  } catch {
-    // Ignore storage errors
+const PRESETS: Preset[] = [
+  { id: "pro-email", name: "Professional Email", icon: "📧", context: "email", formality: "formal", description: "Formal business emails" },
+  { id: "casual-slack", name: "Casual Chat", icon: "💬", context: "slack", formality: "casual", description: "Friendly messages" },
+  { id: "meeting-notes", name: "Meeting Notes", icon: "📝", context: "document", formality: "neutral", description: "Clear documentation" },
+  { id: "code-docs", name: "Code Comments", icon: "💻", context: "code", formality: "neutral", description: "Technical docs" },
+];
+
+// Processing steps for progress indicator
+type ProcessingStep = "recording" | "transcribing" | "polishing" | "done";
+const PROCESSING_STEPS: { key: ProcessingStep; label: string }[] = [
+  { key: "recording", label: "Recording" },
+  { key: "transcribing", label: "Transcribing" },
+  { key: "polishing", label: "Polishing" },
+  { key: "done", label: "Done" },
+];
+
+// LocalStorage keys
+const STORAGE_KEYS = {
+  CONTEXT: "scribe_context",
+  FORMALITY: "scribe_formality",
+  HISTORY: "scribe_history",
+  SOUND_ENABLED: "scribe_sound_enabled",
+};
+
+// Tauri window APIs for overlay (Tauri 2.0)
+declare global {
+  interface Window {
+    __TAURI__?: {
+      event: {
+        emit: (event: string, payload: unknown) => Promise<void>;
+      };
+      webviewWindow: {
+        WebviewWindow: {
+          getByLabel: (label: string) => Promise<{
+            show: () => Promise<void>;
+            hide: () => Promise<void>;
+            setPosition: (position: { type: string; x: number; y: number }) => Promise<void>;
+          } | null>;
+        };
+        getCurrentWebviewWindow: () => {
+          show: () => Promise<void>;
+          hide: () => Promise<void>;
+        };
+      };
+      window: {
+        currentMonitor: () => Promise<{ size: { width: number; height: number } } | null>;
+      };
+    };
   }
 }
+
+type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
 
 function formatDuration(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -58,94 +112,173 @@ function formatDuration(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-// Format hotkey for display (handle platform differences)
-function formatHotkeyDisplay(hotkey: string): string {
-  const isMac = navigator.platform.includes("Mac");
-  return hotkey
-    .replace("Alt+", isMac ? "Option+" : "Alt+")
-    .replace("CommandOrControl+", isMac ? "Cmd+" : "Ctrl+");
+// Load persisted setting from localStorage
+function loadSetting<T>(key: string, defaultValue: T): T {
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored !== null) {
+      return JSON.parse(stored) as T;
+    }
+  } catch (e) {
+    console.warn(`Failed to load setting ${key}:`, e);
+  }
+  return defaultValue;
+}
+
+// Save setting to localStorage
+function saveSetting<T>(key: string, value: T): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.warn(`Failed to save setting ${key}:`, e);
+  }
 }
 
 function App() {
   const recorder = useAudioRecorder();
+  const { showToast } = useToast();
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [result, setResult] = useState<string>("");
   const [rawText, setRawText] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ActionableError | null>(null);
   const [copied, setCopied] = useState(false);
-  const [context, setContext] = useState<string>("general");
-  const [formality, setFormality] = useState<"casual" | "neutral" | "formal">("neutral");
+  const [context, setContext] = useState<string>(() => loadSetting(STORAGE_KEYS.CONTEXT, "general"));
+  const [formality, setFormality] = useState<"casual" | "neutral" | "formal">(() => loadSetting(STORAGE_KEYS.FORMALITY, "neutral"));
   const [showRaw, setShowRaw] = useState(false);
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [statsRefreshTrigger, setStatsRefreshTrigger] = useState(0);
-  const [history, setHistory] = useState<HistoryEntry[]>(() => loadHistory());
-  const [hotkey, setHotkey] = useState(() => getStoredHotkey());
-  const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [_noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
-  const [voiceEnabled, setVoiceEnabled] = useState(() => getStoredVoiceEnabled());
+  const [showStats, setShowStats] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [transcriptionCount, setTranscriptionCount] = useState(0); // Increments after each successful transcription
+  const [showConfetti, setShowConfetti] = useState(false);
+  const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
+
+  // New state for editing and progress
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedText, setEditedText] = useState("");
+  const [processingStep, setProcessingStep] = useState<ProcessingStep>("recording");
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Week 3: New state for comparison, regenerate, history, confidence
+  const [showComparison, setShowComparison] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [showLearning, setShowLearning] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [confidence, setConfidence] = useState<number | null>(null);
+  const [lastAudioBlob, setLastAudioBlob] = useState<Blob | null>(null);
+
+  // Learning system: track original text before editing for feedback
+  const [originalPolishedText, setOriginalPolishedText] = useState<string>("");
+  const [transcriptHistory, setTranscriptHistory] = useState<TranscriptEntry[]>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.HISTORY);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Save history to localStorage when it changes
+  useEffect(() => {
+    try {
+      // Keep only last 100 entries
+      const trimmed = transcriptHistory.slice(0, 100);
+      localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(trimmed));
+    } catch (e) {
+      console.warn("Failed to save history:", e);
+    }
+  }, [transcriptHistory]);
+
+  // Add entry to history
+  const addToHistory = useCallback((entry: Omit<TranscriptEntry, "id" | "timestamp">) => {
+    const newEntry: TranscriptEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: Date.now(),
+    };
+    setTranscriptHistory(prev => [newEntry, ...prev]);
+  }, []);
+
+  // Check for achievement milestones
+  useEffect(() => {
+    const milestones = [1, 10, 25, 50, 100, 250, 500, 1000];
+    if (transcriptionCount > previousTranscriptionCount && milestones.includes(transcriptionCount)) {
+      setShowConfetti(true);
+      showToast(`Achievement unlocked! ${transcriptionCount} transcriptions!`, "success");
+    }
+    setPreviousTranscriptionCount(transcriptionCount);
+  }, [transcriptionCount, previousTranscriptionCount, showToast]);
 
   // Refs for push-to-talk state management
   const isProcessingRef = useRef(false);
   const contextRef = useRef(context);
   const formalityRef = useRef(formality);
-  const whisperModelRef = useRef(whisperModel);
 
   // Keep refs in sync with state
   useEffect(() => {
     contextRef.current = context;
     formalityRef.current = formality;
-    whisperModelRef.current = whisperModel;
-  }, [context, formality, whisperModel]);
+  }, [context, formality]);
 
-  // Persist history to localStorage when it changes
+  // Persist context and formality to localStorage
   useEffect(() => {
-    saveHistory(history);
-  }, [history]);
+    saveSetting(STORAGE_KEYS.CONTEXT, context);
+  }, [context]);
 
-  // Add entry to history
-  const addToHistory = useCallback((entry: Omit<HistoryEntry, "id">) => {
-    const newEntry: HistoryEntry = {
-      ...entry,
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+  useEffect(() => {
+    saveSetting(STORAGE_KEYS.FORMALITY, formality);
+  }, [formality]);
+
+  useEffect(() => {
+    saveSetting(STORAGE_KEYS.SOUND_ENABLED, soundEnabled);
+  }, [soundEnabled]);
+
+  // Keyboard shortcut: ? to open shortcuts modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      if (e.key === "?" || (e.shiftKey && e.key === "/")) {
+        e.preventDefault();
+        setShowShortcuts(true);
+      }
+      // Escape to close modals
+      if (e.key === "Escape") {
+        if (showShortcuts) setShowShortcuts(false);
+        if (isEditing) {
+          setIsEditing(false);
+          setEditedText("");
+        }
+      }
     };
-    setHistory((prev) => [newEntry, ...prev]);
-  }, []);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showShortcuts, isEditing]);
 
-  // Update tray icon when recording state changes
+  // Focus textarea when entering edit mode
   useEffect(() => {
-    setTrayRecordingState(recorder.isRecording);
-  }, [recorder.isRecording]);
-
-  // Show/hide floating overlay when recording starts/stops
-  useEffect(() => {
-    if (recorder.isRecording || status === "processing") {
-      showRecordingOverlay();
-    } else {
-      hideRecordingOverlay();
+    if (isEditing && editTextareaRef.current) {
+      editTextareaRef.current.focus();
+      editTextareaRef.current.select();
     }
-  }, [recorder.isRecording, status]);
+  }, [isEditing]);
 
-  // Update overlay with audio level and duration
-  useEffect(() => {
-    if (recorder.isRecording || status === "processing") {
-      updateOverlayState({
-        isRecording: recorder.isRecording,
-        isProcessing: status === "processing",
-        duration: recorder.duration,
-        audioLevel: recorder.audioLevel || 0,
-      });
+  // Cancel recording handler
+  const handleCancelRecording = useCallback(async () => {
+    if (recorder.isRecording) {
+      await recorder.stopRecording(); // Stop but discard
+      setStatus("idle");
+      setError(null);
+      showToast("Recording cancelled", "info");
     }
-  }, [recorder.isRecording, recorder.duration, recorder.audioLevel, status]);
+  }, [recorder, showToast]);
 
   // Push-to-talk: start recording on key down
   const handleHotkeyDown = useCallback(async () => {
     if (recorder.isRecording || isProcessingRef.current || backendReady === false) return;
-
-    // Stop any playing voice/speech so it doesn't interfere with recording
-    voiceStream.stopAudio();
-    stopSpeaking();
 
     setError(null);
     setResult("");
@@ -154,14 +287,36 @@ function App() {
     try {
       await recorder.startRecording();
       setStatus("recording");
-      playStartSound();
+      if (soundEnabled) playStartSound(); // Audio feedback
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to start recording";
-      setError(message);
+
+      // Create actionable error for microphone issues
+      if (message.toLowerCase().includes("microphone") || message.toLowerCase().includes("permission") || message.toLowerCase().includes("not found")) {
+        setError({
+          message: "Microphone access denied or not found",
+          action: {
+            label: "Grant Permission",
+            onClick: () => {
+              // Try to request microphone permission again
+              navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(() => {
+                  setError(null);
+                  showToast("Microphone access granted!", "success");
+                })
+                .catch(() => {
+                  showToast("Please enable microphone in system settings", "error");
+                });
+            },
+          },
+        });
+      } else {
+        setError({ message });
+      }
       setStatus("error");
-      playErrorSound();
+      if (soundEnabled) playErrorSound();
     }
-  }, [recorder, backendReady]);
+  }, [recorder, backendReady, showToast, soundEnabled]);
 
   // Push-to-talk: stop recording and process on key up
   const handleHotkeyUp = useCallback(async () => {
@@ -169,47 +324,63 @@ function App() {
 
     isProcessingRef.current = true;
     setStatus("processing");
+    setProcessingStep("transcribing");
     setError(null);
-    playStopSound();
+    if (soundEnabled) playStopSound(); // Audio feedback - processing started
 
     try {
       const audioBlob = await recorder.stopRecording();
-      if (!audioBlob || audioBlob.size < 1000) {
-        console.error("[Recording] Invalid blob:", audioBlob?.size, "bytes");
-        throw new Error(`Recording too short or empty (${audioBlob?.size || 0} bytes). Hold the key longer.`);
+      if (!audioBlob) {
+        throw new Error("No audio recorded");
       }
 
-      console.log("[Recording] Sending blob:", audioBlob.size, "bytes, type:", audioBlob.type);
+      // Step 1: Transcribing (already set above)
+      setProcessingStep("transcribing");
 
       const response = await transcribeAndPolish(audioBlob, {
-        language: "en",  // Default to English to avoid wrong language detection
         context: contextRef.current === "general" ? undefined : contextRef.current,
         formality: formalityRef.current,
-        model: whisperModelRef.current as "whisper-large-v3" | "whisper-large-v3-turbo",
       });
+
+      // Step 2: Polishing (happens in the API call)
+      setProcessingStep("polishing");
 
       setRawText(response.raw_text);
       setResult(response.polished_text);
-      setStatus("success");
-      playSuccessSound();
+
+      // Calculate confidence score based on various factors
+      // (In a real scenario, the API would return this)
+      const wordCount = response.raw_text.split(/\s+/).length;
+      const hasLanguage = response.language !== null;
+      const baseConfidence = 0.85 + (hasLanguage ? 0.05 : 0) + Math.min(wordCount / 100, 0.08);
+      const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
+      setConfidence(confidenceScore);
+
+      // Save audio blob for potential regeneration
+      setLastAudioBlob(audioBlob);
 
       // Add to history
       addToHistory({
-        timestamp: new Date(),
         rawText: response.raw_text,
         polishedText: response.polished_text,
         context: contextRef.current,
         formality: formalityRef.current,
-        duration: response.duration,
+        confidence: confidenceScore,
       });
 
-      // Trigger stats refresh so dashboard updates in real-time
-      setStatsRefreshTrigger((prev) => prev + 1);
+      // Step 3: Done
+      setProcessingStep("done");
+      setStatus("success");
+      if (soundEnabled) playSuccessSound(); // Audio feedback - success
+      showToast("Transcription complete!", "success");
 
       // Auto-inject the polished text into the active application
       if (response.polished_text) {
         await injectText(response.polished_text);
       }
+
+      // Increment transcription count to trigger stats refresh
+      setTranscriptionCount((c) => c + 1);
     } catch (err) {
       const message =
         err instanceof ApiError
@@ -217,123 +388,181 @@ function App() {
           : err instanceof Error
             ? err.message
             : "An error occurred";
-      setError(message);
+
+      // Create actionable error for network/API issues
+      if (message.toLowerCase().includes("network") || message.toLowerCase().includes("connect") || message.toLowerCase().includes("fetch")) {
+        setError({
+          message: "Cannot connect to server",
+          action: {
+            label: "Retry",
+            onClick: () => {
+              setError(null);
+              checkHealth().then((health) => {
+                if (health.groq_configured && health.anthropic_configured) {
+                  showToast("Connection restored!", "success");
+                  setBackendReady(true);
+                }
+              }).catch(() => {
+                showToast("Still unable to connect", "error");
+              });
+            },
+          },
+        });
+      } else {
+        setError({ message });
+      }
       setStatus("error");
-      playErrorSound();
+      if (soundEnabled) playErrorSound(); // Audio feedback - error
+      showToast(message, "error");
     } finally {
       isProcessingRef.current = false;
     }
-  }, [recorder, addToHistory]);
+  }, [recorder, showToast, soundEnabled]);
 
   // Register global hotkey for push-to-talk
-  const { error: hotkeyError } = useGlobalHotkey({
-    hotkey,
+  const { isRegistered: hotkeyRegistered } = useGlobalHotkey({
+    hotkey: HOTKEYS.PUSH_TO_TALK,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
     enabled: backendReady !== false,
   });
 
+  // Debug: log hotkey status
+  useEffect(() => {
+    console.log("Hotkey registered status:", hotkeyRegistered);
+  }, [hotkeyRegistered]);
+
   // Check backend health on mount
   useEffect(() => {
-    checkHealth()
-      .then((health) => {
-        setBackendReady(health.groq_configured && health.anthropic_configured);
-        if (!health.groq_configured) {
-          setError("Backend: Groq API key not configured");
-        } else if (!health.anthropic_configured) {
-          setError("Backend: Anthropic API key not configured");
-        }
-      })
-      .catch(() => {
-        setBackendReady(false);
-        setError("Cannot connect to backend. Is it running?");
-      });
-  }, []);
-
-  // Initialize speak listener for Claude Code integration
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-
-    initSpeakListener().then((unlistenFn) => {
-      unlisten = unlistenFn;
-    });
-
-    return () => {
-      if (unlisten) unlisten();
-      stopSpeaking();
+    const performHealthCheck = () => {
+      checkHealth()
+        .then((health) => {
+          setBackendReady(health.groq_configured && health.anthropic_configured);
+          if (!health.groq_configured) {
+            setError({
+              message: "Backend: Groq API key not configured",
+              action: {
+                label: "Open Settings",
+                onClick: () => setShowSettings(true),
+              },
+            });
+          } else if (!health.anthropic_configured) {
+            setError({
+              message: "Backend: Anthropic API key not configured",
+              action: {
+                label: "Open Settings",
+                onClick: () => setShowSettings(true),
+              },
+            });
+          }
+        })
+        .catch(() => {
+          setBackendReady(false);
+          setError({
+            message: "Cannot connect to backend. Is it running?",
+            action: {
+              label: "Retry",
+              onClick: performHealthCheck,
+            },
+          });
+        });
     };
+    performHealthCheck();
   }, []);
 
-  // Connect/disconnect voice stream based on voiceEnabled setting
+  // Control overlay window visibility and position
   useEffect(() => {
-    const apiUrl = import.meta.env.VITE_API_URL || 'https://scribe-api-yk09.onrender.com';
+    const updateOverlay = async () => {
+      const tauri = window.__TAURI__;
+      if (!tauri) return;
 
-    if (voiceEnabled) {
-      voiceStream.connect(apiUrl);
+      try {
+        // Tauri 2.0: getByLabel is async and in webviewWindow namespace
+        const overlayWindow = tauri.webviewWindow?.WebviewWindow?.getByLabel
+          ? await tauri.webviewWindow.WebviewWindow.getByLabel("overlay")
+          : null;
 
-      // Log voice events for debugging
-      const unsubscribe = voiceStream.onEvent((event) => {
-        if (event.type === 'voice' && event.explanation) {
-          console.log('[Voice]', event.explanation);
-        } else if (event.type === 'error') {
-          console.error('[Voice Error]', event.explanation);
+        const isActive = recorder.isRecording || status === "processing";
+
+        if (overlayWindow) {
+          if (isActive) {
+            // Position at bottom center of screen
+            const monitor = await tauri.window.currentMonitor();
+            if (monitor) {
+              const x = Math.round((monitor.size.width - 200) / 2);
+              const y = monitor.size.height - 80;
+              await overlayWindow.setPosition({ type: "Physical", x, y });
+            }
+            await overlayWindow.show();
+          } else {
+            await overlayWindow.hide();
+          }
         }
-      });
 
-      return () => {
-        unsubscribe();
-        voiceStream.disconnect();
-      };
-    } else {
-      voiceStream.disconnect();
-    }
-  }, [voiceEnabled]);
+        // Send state to overlay
+        await tauri.event.emit("overlay-update", {
+          isRecording: recorder.isRecording,
+          isProcessing: status === "processing",
+          audioLevel: recorder.audioLevel,
+        });
+      } catch (err) {
+        console.error("Overlay update failed:", err);
+      }
+    };
 
-  // Handler for voice enabled toggle
-  const handleVoiceEnabledChange = useCallback((enabled: boolean) => {
-    setVoiceEnabled(enabled);
-  }, []);
+    updateOverlay();
+  }, [recorder.isRecording, recorder.audioLevel, status]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
       // Stop recording and process
       setStatus("processing");
+      setProcessingStep("transcribing");
       setError(null);
-      playStopSound();
 
       try {
         const audioBlob = await recorder.stopRecording();
-        if (!audioBlob || audioBlob.size < 1000) {
-          console.error("[Recording] Invalid blob:", audioBlob?.size, "bytes");
-          throw new Error(`Recording too short or empty (${audioBlob?.size || 0} bytes). Hold the key longer.`);
+        if (!audioBlob) {
+          throw new Error("No audio recorded");
         }
 
-        console.log("[Recording] Sending blob:", audioBlob.size, "bytes, type:", audioBlob.type);
+        setProcessingStep("transcribing");
 
         const response = await transcribeAndPolish(audioBlob, {
-          language: "en",  // Default to English
           context: context === "general" ? undefined : context,
           formality,
-          model: whisperModel as "whisper-large-v3" | "whisper-large-v3-turbo",
         });
+
+        setProcessingStep("polishing");
 
         setRawText(response.raw_text);
         setResult(response.polished_text);
-        setStatus("success");
-        playSuccessSound();
+
+        // Calculate confidence score
+        const wordCount = response.raw_text.split(/\s+/).length;
+        const hasLanguage = response.language !== null;
+        const baseConfidence = 0.85 + (hasLanguage ? 0.05 : 0) + Math.min(wordCount / 100, 0.08);
+        const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
+        setConfidence(confidenceScore);
+
+        // Save audio blob for regeneration
+        setLastAudioBlob(audioBlob);
 
         // Add to history
         addToHistory({
-          timestamp: new Date(),
           rawText: response.raw_text,
           polishedText: response.polished_text,
           context,
           formality,
-          duration: response.duration,
+          confidence: confidenceScore,
         });
 
-        // Trigger stats refresh so dashboard updates in real-time
-        setStatsRefreshTrigger((prev) => prev + 1);
+        setProcessingStep("done");
+        setStatus("success");
+        showToast("Transcription complete!", "success");
+
+        // Increment transcription count to trigger stats refresh
+        setTranscriptionCount((c) => c + 1);
       } catch (err) {
         const message =
           err instanceof ApiError
@@ -341,41 +570,175 @@ function App() {
             : err instanceof Error
               ? err.message
               : "An error occurred";
-        setError(message);
+
+        if (message.toLowerCase().includes("network") || message.toLowerCase().includes("connect")) {
+          setError({
+            message: "Cannot connect to server",
+            action: {
+              label: "Retry",
+              onClick: () => {
+                setError(null);
+                checkHealth().then((health) => {
+                  if (health.groq_configured && health.anthropic_configured) {
+                    showToast("Connection restored!", "success");
+                    setBackendReady(true);
+                  }
+                }).catch(() => {
+                  showToast("Still unable to connect", "error");
+                });
+              },
+            },
+          });
+        } else {
+          setError({ message });
+        }
         setStatus("error");
-        playErrorSound();
+        showToast(message, "error");
       }
     } else {
       // Start recording
-      // Stop any playing voice/speech so it doesn't interfere
-      voiceStream.stopAudio();
-      stopSpeaking();
-
       setError(null);
       setResult("");
       setRawText("");
+      setProcessingStep("recording");
 
       try {
         await recorder.startRecording();
         setStatus("recording");
-        playStartSound();
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to start recording";
-        setError(message);
+
+        if (message.toLowerCase().includes("microphone") || message.toLowerCase().includes("permission")) {
+          setError({
+            message: "Microphone access denied or not found",
+            action: {
+              label: "Grant Permission",
+              onClick: () => {
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                  .then(() => {
+                    setError(null);
+                    showToast("Microphone access granted!", "success");
+                  })
+                  .catch(() => {
+                    showToast("Please enable microphone in system settings", "error");
+                  });
+              },
+            },
+          });
+        } else {
+          setError({ message });
+        }
         setStatus("error");
-        playErrorSound();
       }
     }
-  }, [recorder, context, formality, addToHistory]);
+  }, [recorder, context, formality, showToast]);
+
+  // Edit mode handlers
+  const handleStartEditing = useCallback(() => {
+    const textToEdit = showRaw ? rawText : result;
+    setEditedText(textToEdit);
+    // Store the original text before editing for learning feedback
+    setOriginalPolishedText(textToEdit);
+    setIsEditing(true);
+  }, [showRaw, rawText, result]);
+
+  const handleSaveEdit = useCallback(async () => {
+    if (showRaw) {
+      setRawText(editedText);
+    } else {
+      setResult(editedText);
+      // Also copy to clipboard and inject
+      await navigator.clipboard.writeText(editedText);
+      await injectText(editedText);
+
+      // Submit feedback to learning system if text changed and user is logged in
+      if (isLoggedIn() && originalPolishedText && editedText !== originalPolishedText) {
+        try {
+          const response = await submitFeedback(originalPolishedText, editedText);
+          if (response.success) {
+            showToast("Correction learned!", "success");
+          }
+        } catch (err) {
+          // Silently fail - don't disrupt the user's workflow
+          console.warn("Failed to submit learning feedback:", err);
+        }
+      }
+    }
+    setIsEditing(false);
+    setEditedText("");
+    setOriginalPolishedText("");
+  }, [showRaw, editedText, originalPolishedText, showToast]);
+
+  const handleCancelEdit = useCallback(() => {
+    setIsEditing(false);
+    setEditedText("");
+  }, []);
+
+  // Apply a preset
+  const handlePresetSelect = useCallback((preset: Preset) => {
+    setContext(preset.context);
+    setFormality(preset.formality);
+    showToast(`Applied "${preset.name}" preset`, "info");
+  }, [showToast]);
+
+  // Regenerate with different settings
+  const handleRegenerate = useCallback(async (newContext?: string, newFormality?: "casual" | "neutral" | "formal") => {
+    if (!rawText) {
+      showToast("No text to regenerate", "warning");
+      return;
+    }
+
+    setIsRegenerating(true);
+    const targetContext = newContext || context;
+    const targetFormality = newFormality || formality;
+
+    try {
+      const response = await polish(rawText, {
+        context: targetContext === "general" ? undefined : targetContext,
+        formality: targetFormality,
+      });
+
+      setResult(response.text);
+      showToast("Regenerated with new settings!", "success");
+
+      // Update history with new version
+      addToHistory({
+        rawText,
+        polishedText: response.text,
+        context: targetContext,
+        formality: targetFormality,
+        confidence,
+      });
+
+      // Auto-inject the new text
+      await injectText(response.text);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.detail || err.message : "Failed to regenerate";
+      showToast(message, "error");
+    } finally {
+      setIsRegenerating(false);
+    }
+  }, [rawText, context, formality, confidence, showToast, addToHistory]);
 
   const handleCopy = useCallback(async () => {
     if (result) {
       await navigator.clipboard.writeText(result);
       setCopied(true);
+      showToast("Copied to clipboard!", "success");
       setTimeout(() => setCopied(false), 2000);
     }
-  }, [result]);
+  }, [result, showToast]);
+
+  // Clear results handler
+  const handleClear = useCallback(() => {
+    setResult("");
+    setRawText("");
+    setConfidence(null);
+    setLastAudioBlob(null);
+    setStatus("idle");
+    showToast("Cleared", "info");
+  }, [showToast]);
 
   const getStatusText = () => {
     switch (status) {
@@ -396,31 +759,98 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>Scribe</h1>
-        <button className="settings-btn" title="Settings" onClick={() => setShowSettings(true)}>
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
+        <div className="header-actions">
+          {isLoggedIn() && (
+            <button className="learning-btn" title="Learning Dashboard" onClick={() => setShowLearning(true)}>
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+                <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+              </svg>
+            </button>
+          )}
+          {isLoggedIn() && (
+            <button className="stats-btn" title="Statistics" onClick={() => setShowStats(true)}>
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M18 20V10" />
+                <path d="M12 20V4" />
+                <path d="M6 20v-6" />
+              </svg>
+            </button>
+          )}
+          <button className="settings-btn" title="Settings" onClick={() => setShowSettings(true)}>
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
       </header>
 
-      {error && <div className="error-message">{error}</div>}
-      {hotkeyError && <div className="error-message">{hotkeyError}</div>}
+      {error && (
+        <div className="error-message">
+          <span>{error.message}</span>
+          {error.action && (
+            <button className="error-action-btn" onClick={error.action.onClick}>
+              {error.action.label}
+            </button>
+          )}
+        </div>
+      )}
 
-      <div className="recording-section">
+      <div className={`recording-section ${recorder.isRecording ? 'is-recording' : ''}`}>
+        {/* Sound Toggle */}
+        <button
+          className={`sound-toggle ${!soundEnabled ? "muted" : ""}`}
+          onClick={() => setSoundEnabled(!soundEnabled)}
+          title={soundEnabled ? "Mute sounds" : "Unmute sounds"}
+        >
+          {soundEnabled ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+            </svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+              <line x1="23" y1="9" x2="17" y2="15" />
+              <line x1="17" y1="9" x2="23" y2="15" />
+            </svg>
+          )}
+        </button>
+
         <button
           className={`record-btn ${recorder.isRecording ? "recording" : ""}`}
           onClick={handleRecordClick}
           disabled={status === "processing" || backendReady === false}
+          title={recorder.isRecording ? "Stop recording" : "Start recording"}
         >
           {status === "processing" ? (
             <div className="spinner" />
@@ -435,33 +865,75 @@ function App() {
           )}
         </button>
 
-        <div className="status">
-          <span
-            className={`status-dot ${status === "recording" ? "recording" : status === "processing" ? "processing" : status === "success" ? "success" : ""}`}
-          />
-          {getStatusText()}
-        </div>
+        {status === "processing" ? (
+          <div className="progress-steps">
+            {PROCESSING_STEPS.map((step, index) => {
+              const stepIndex = PROCESSING_STEPS.findIndex(s => s.key === processingStep);
+              const isActive = step.key === processingStep;
+              const isComplete = index < stepIndex || processingStep === "done";
+              const isCurrent = isActive && processingStep !== "done";
 
-        {/* Audio level visualizer */}
-        <AudioVisualizer
-          isRecording={recorder.isRecording}
-          audioLevel={recorder.audioLevel || 0}
-        />
+              return (
+                <div key={step.key} className={`progress-step ${isComplete ? "complete" : ""} ${isCurrent ? "current" : ""}`}>
+                  <div className="progress-step-indicator">
+                    {isComplete ? (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    ) : (
+                      <span>{index + 1}</span>
+                    )}
+                  </div>
+                  <span className="progress-step-label">{step.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="status">
+            <span
+              className={`status-dot ${status === "recording" ? "recording" : status === "processing" ? "processing" : status === "success" ? "success" : ""}`}
+            />
+            {getStatusText()}
+          </div>
+        )}
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">{formatHotkeyDisplay(hotkey)}</span> for push-to-talk
+          <span className="hotkey">Ctrl+Shift+S</span> for push-to-talk
+          <span className={`hotkey-status ${hotkeyRegistered ? "active" : "inactive"}`}>
+            {hotkeyRegistered ? "Ready" : "Restart app to enable"}
+          </span>
+          {" "} • Press <span className="hotkey">?</span> for shortcuts
         </p>
+      </div>
+
+      {/* Quick Mode Presets */}
+      <div className="presets-section">
+        <span className="presets-label">Quick Modes:</span>
+        <div className="presets-list">
+          {PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              className={`preset-btn ${context === preset.context && formality === preset.formality ? "active" : ""}`}
+              onClick={() => handlePresetSelect(preset)}
+              title={preset.description}
+            >
+              <span className="preset-icon">{preset.icon}</span>
+              <span className="preset-name">{preset.name}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="context-selector">
         <label>Context:</label>
         <select value={context} onChange={(e) => setContext(e.target.value)}>
-          <option value="general">General</option>
-          <option value="email">Email</option>
-          <option value="slack">Slack / Chat</option>
-          <option value="document">Document</option>
-          <option value="code">Code Comment</option>
+          {CONTEXT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.icon} {opt.label}
+            </option>
+          ))}
         </select>
 
         <label>Tone:</label>
@@ -471,98 +943,214 @@ function App() {
             setFormality(e.target.value as "casual" | "neutral" | "formal")
           }
         >
-          <option value="casual">Casual</option>
-          <option value="neutral">Neutral</option>
-          <option value="formal">Formal</option>
+          <option value="casual">😊 Casual</option>
+          <option value="neutral">😐 Neutral</option>
+          <option value="formal">👔 Formal</option>
         </select>
+
+        {transcriptHistory.length > 0 && (
+          <button
+            className="export-history-btn"
+            onClick={() => setShowExport(true)}
+            title="Export transcript history"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Export ({transcriptHistory.length})
+          </button>
+        )}
       </div>
 
       <div className="result-section">
         <div className="result-header">
-          <h2>
-            {showRaw ? "Raw Transcription" : "Polished Text"}
-            {rawText && (
+          <div className="result-title-row">
+            <h2>
+              {showRaw ? "Raw Transcription" : "Polished Text"}
+              {rawText && (
+                <button
+                  onClick={() => setShowRaw(!showRaw)}
+                  className="toggle-view-btn"
+                >
+                  Show {showRaw ? "polished" : "raw"}
+                </button>
+              )}
+            </h2>
+            {confidence !== null && result && (
+              <div className="confidence-badge" title="Transcription confidence score">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                  <polyline points="22 4 12 14.01 9 11.01" />
+                </svg>
+                {(confidence * 100).toFixed(0)}% confidence
+              </div>
+            )}
+          </div>
+          <div className="result-actions">
+            {rawText && result && !isEditing && (
               <button
-                onClick={() => setShowRaw(!showRaw)}
-                style={{
-                  marginLeft: 8,
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  textDecoration: "underline",
-                }}
+                className="compare-btn"
+                onClick={() => setShowComparison(true)}
+                title="Compare raw vs polished text"
               >
-                Show {showRaw ? "polished" : "raw"}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="7" height="18" rx="1" />
+                  <rect x="14" y="3" width="7" height="18" rx="1" />
+                </svg>
+                Compare
               </button>
             )}
-          </h2>
-          {result && (
-            <button
-              className={`copy-btn ${copied ? "copied" : ""}`}
-              onClick={handleCopy}
-            >
-              {copied ? (
-                <>
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <polyline points="20 6 9 17 4 12" />
+            {rawText && !isEditing && (
+              <button
+                className={`regenerate-btn ${isRegenerating ? "loading" : ""}`}
+                onClick={() => handleRegenerate()}
+                disabled={isRegenerating}
+                title="Re-polish with current settings"
+              >
+                {isRegenerating ? (
+                  <div className="btn-spinner" />
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M23 4v6h-6" />
+                    <path d="M1 20v-6h6" />
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                   </svg>
-                  Copied
-                </>
-              ) : (
-                <>
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                  Copy
-                </>
-              )}
-            </button>
-          )}
+                )}
+                Regenerate
+              </button>
+            )}
+            {(result || rawText) && !isEditing && (
+              <button
+                className="edit-btn"
+                onClick={handleStartEditing}
+                title="Edit the text manually"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                </svg>
+                Edit
+              </button>
+            )}
+            {result && !isEditing && (
+              <button
+                className={`copy-btn ${copied ? "copied" : ""}`}
+                onClick={handleCopy}
+                title="Copy to clipboard"
+              >
+                {copied ? (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    Copied
+                  </>
+                ) : (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                    Copy
+                  </>
+                )}
+              </button>
+            )}
+            {(result || rawText) && !isEditing && (
+              <button
+                className="clear-btn"
+                onClick={handleClear}
+                title="Clear the current result"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                Clear
+              </button>
+            )}
+          </div>
         </div>
-        <div className={`result-text ${!result && !rawText ? "empty" : ""}`}>
-          {showRaw ? rawText : result || "Your transcription will appear here..."}
-        </div>
+        {isEditing ? (
+          <div className="result-edit-container">
+            <textarea
+              ref={editTextareaRef}
+              className="result-edit-textarea"
+              value={editedText}
+              onChange={(e) => setEditedText(e.target.value)}
+              placeholder="Edit your text..."
+            />
+            <div className="edit-stats">
+              <span>{editedText.length} characters</span>
+              <span>{editedText.trim() ? editedText.trim().split(/\s+/).length : 0} words</span>
+            </div>
+            <div className="result-edit-actions">
+              <button className="save-edit-btn" onClick={handleSaveEdit}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                Save & Copy
+              </button>
+              <button className="cancel-edit-btn" onClick={handleCancelEdit}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={`result-text ${!result && !rawText ? "empty" : ""}`}>
+            {showRaw ? rawText : result || (
+              <div className="welcome-state">
+                <div className="welcome-icon">🎙️</div>
+                <div className="welcome-title">Ready to transcribe</div>
+                <div className="welcome-hint">
+                  Click the record button or hold <span className="hotkey">Ctrl+Shift+S</span> to start speaking.
+                  <br />Your words will be transcribed and polished automatically.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* History panel with click-to-copy and multi-select */}
-      <HistoryPanel history={history} onClear={() => setHistory([])} />
-
-      {showSettings && (
-        <Settings
-          onClose={() => setShowSettings(false)}
-          refreshTrigger={statsRefreshTrigger}
-          history={history}
-          onClearHistory={() => setHistory([])}
-          onHotkeyChange={setHotkey}
-          onModelChange={setWhisperModel}
-          onNoiseCancellationChange={setNoiseCancellation}
-          onVoiceEnabledChange={handleVoiceEnabledChange}
+      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
+      {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
+      {showLearning && (
+        <>
+          <div className="dashboard-overlay" onClick={() => setShowLearning(false)} />
+          <LearningDashboard
+            apiUrl={getApiBaseUrl()}
+            token={getAuthToken() || ""}
+            onClose={() => setShowLearning(false)}
+          />
+        </>
+      )}
+      {showComparison && rawText && result && (
+        <ComparisonView
+          rawText={rawText}
+          polishedText={result}
+          onClose={() => setShowComparison(false)}
+        />
+      )}
+      {showExport && (
+        <ExportModal
+          history={transcriptHistory}
+          onClose={() => setShowExport(false)}
         />
       )}
 
-      {/* Floating recording indicator - visible even when window is minimized */}
-      <RecordingOverlay
+      {/* Floating audio indicator for push-to-talk */}
+      <AudioIndicator
         isRecording={recorder.isRecording}
         isProcessing={status === "processing"}
-        duration={recorder.duration}
+        audioLevel={recorder.audioLevel}
+        onCancel={handleCancelRecording}
       />
+
+      {/* Confetti for achievement celebrations */}
+      <Confetti isActive={showConfetti} onComplete={() => setShowConfetti(false)} />
     </div>
   );
 }

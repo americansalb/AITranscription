@@ -5,7 +5,7 @@ export interface AudioRecorderState {
   isPaused: boolean;
   duration: number;
   error: string | null;
-  audioLevel: number;
+  audioLevel: number; // 0-1 normalized audio level
 }
 
 export interface UseAudioRecorderReturn extends AudioRecorderState {
@@ -31,7 +31,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   const durationInterval = useRef<number | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const analyser = useRef<AnalyserNode | null>(null);
-  const animationFrame = useRef<number | null>(null);
+  const audioLevelInterval = useRef<number | null>(null);
 
   const clearDurationInterval = useCallback(() => {
     if (durationInterval.current) {
@@ -40,43 +40,26 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     }
   }, []);
 
-  const cleanupAudioAnalysis = useCallback(() => {
-    if (animationFrame.current) {
-      cancelAnimationFrame(animationFrame.current);
-      animationFrame.current = null;
+  const clearAudioLevelInterval = useCallback(() => {
+    if (audioLevelInterval.current) {
+      clearInterval(audioLevelInterval.current);
+      audioLevelInterval.current = null;
     }
+  }, []);
+
+  const cleanupAudioContext = useCallback(() => {
+    clearAudioLevelInterval();
     if (audioContext.current) {
       audioContext.current.close();
       audioContext.current = null;
     }
     analyser.current = null;
-  }, []);
-
-  const updateAudioLevel = useCallback(() => {
-    if (!analyser.current) return;
-
-    const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
-    analyser.current.getByteFrequencyData(dataArray);
-
-    // Calculate average volume level (0-1)
-    const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
-    const normalizedLevel = Math.min(average / 128, 1); // Normalize to 0-1
-
-    setState((s) => ({ ...s, audioLevel: normalizedLevel }));
-
-    animationFrame.current = requestAnimationFrame(updateAudioLevel);
-  }, []);
+    setState((s) => ({ ...s, audioLevel: 0 }));
+  }, [clearAudioLevelInterval]);
 
   const startRecording = useCallback(async () => {
     try {
       setState((s) => ({ ...s, error: null }));
-
-      // Check if mediaDevices API is available
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error(
-          "Microphone access not available. Please grant microphone permission in System Settings > Privacy & Security > Microphone."
-        );
-      }
 
       // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -87,19 +70,24 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         },
       });
 
-      const audioTracks = stream.getAudioTracks();
-      console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
-      if (audioTracks.length > 0) {
-        console.log("[AudioRecorder] Track:", audioTracks[0].label, "enabled:", audioTracks[0].enabled, "muted:", audioTracks[0].muted);
-      }
-
-      // Set up audio analysis for level metering
+      // Set up audio level analyzer
       audioContext.current = new AudioContext();
       analyser.current = audioContext.current.createAnalyser();
       analyser.current.fftSize = 256;
       const source = audioContext.current.createMediaStreamSource(stream);
       source.connect(analyser.current);
-      updateAudioLevel();
+
+      // Start monitoring audio level
+      const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
+      audioLevelInterval.current = window.setInterval(() => {
+        if (analyser.current) {
+          analyser.current.getByteFrequencyData(dataArray);
+          // Calculate average level (0-255) and normalize to 0-1
+          const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+          const normalized = Math.min(1, average / 128); // Normalize with some headroom
+          setState((s) => ({ ...s, audioLevel: normalized }));
+        }
+      }, 50); // Update 20 times per second for smooth animation
 
       // Determine best supported format
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -113,7 +101,6 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       startTime.current = Date.now();
 
       mediaRecorder.current.ondataavailable = (event) => {
-        console.log("[AudioRecorder] Data available:", event.data.size, "bytes, total chunks:", audioChunks.current.length + 1);
         if (event.data.size > 0) {
           audioChunks.current.push(event.data);
         }
@@ -141,26 +128,21 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       setState((s) => ({ ...s, error: message }));
       throw err;
     }
-  }, [updateAudioLevel]);
+  }, []);
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
     return new Promise((resolve) => {
-      console.log("[AudioRecorder] stopRecording called, state:", mediaRecorder.current?.state);
-
       if (!mediaRecorder.current || mediaRecorder.current.state === "inactive") {
-        console.log("[AudioRecorder] No active recorder, returning null");
         resolve(null);
         return;
       }
 
       clearDurationInterval();
-      cleanupAudioAnalysis();
+      cleanupAudioContext();
 
       mediaRecorder.current.onstop = () => {
         const mimeType = mediaRecorder.current?.mimeType || "audio/webm";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
-
-        console.log("[AudioRecorder] Recording stopped. Chunks:", audioChunks.current.length, "Blob size:", audioBlob.size, "bytes");
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());
@@ -169,7 +151,6 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
           ...s,
           isRecording: false,
           isPaused: false,
-          audioLevel: 0,
         }));
 
         resolve(audioBlob);
@@ -177,7 +158,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
       mediaRecorder.current.stop();
     });
-  }, [clearDurationInterval, cleanupAudioAnalysis]);
+  }, [clearDurationInterval, cleanupAudioContext]);
 
   const pauseRecording = useCallback(() => {
     if (mediaRecorder.current && mediaRecorder.current.state === "recording") {
@@ -207,7 +188,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
   const cancelRecording = useCallback(() => {
     clearDurationInterval();
-    cleanupAudioAnalysis();
+    cleanupAudioContext();
 
     if (mediaRecorder.current) {
       mediaRecorder.current.stream.getTracks().forEach((track) => track.stop());
@@ -222,7 +203,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       error: null,
       audioLevel: 0,
     });
-  }, [clearDurationInterval, cleanupAudioAnalysis]);
+  }, [clearDurationInterval, cleanupAudioContext]);
 
   return {
     ...state,

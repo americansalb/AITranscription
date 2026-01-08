@@ -1,8 +1,6 @@
 /**
- * Audio feedback for recording events
- *
- * Uses Web Audio API to generate simple tones - no external files needed.
- * Sounds are subtle and professional, similar to Wispr Flow.
+ * Sound feedback utilities for transcription events
+ * Uses Web Audio API to generate tones (no external audio files needed)
  */
 
 let audioContext: AudioContext | null = null;
@@ -15,21 +13,11 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Play a simple tone
+ * Play a tone with the given frequency and duration
  */
-function playTone(
-  frequency: number,
-  duration: number,
-  volume: number = 0.3,
-  type: OscillatorType = "sine"
-): void {
+function playTone(frequency: number, duration: number, volume = 0.3): void {
   try {
     const ctx = getAudioContext();
-
-    // Resume context if suspended (required by browsers)
-    if (ctx.state === "suspended") {
-      ctx.resume();
-    }
 
     const oscillator = ctx.createOscillator();
     const gainNode = ctx.createGain();
@@ -37,53 +25,127 @@ function playTone(
     oscillator.connect(gainNode);
     gainNode.connect(ctx.destination);
 
-    oscillator.type = type;
-    oscillator.frequency.setValueAtTime(frequency, ctx.currentTime);
+    oscillator.frequency.value = frequency;
+    oscillator.type = "sine";
 
-    // Smooth fade in/out to avoid clicks
-    gainNode.gain.setValueAtTime(0, ctx.currentTime);
-    gainNode.gain.linearRampToValueAtTime(volume, ctx.currentTime + 0.01);
-    gainNode.gain.linearRampToValueAtTime(0, ctx.currentTime + duration);
+    // Fade in/out to avoid clicks
+    const now = ctx.currentTime;
+    gainNode.gain.setValueAtTime(0, now);
+    gainNode.gain.linearRampToValueAtTime(volume, now + 0.01);
+    gainNode.gain.linearRampToValueAtTime(0, now + duration);
 
-    oscillator.start(ctx.currentTime);
-    oscillator.stop(ctx.currentTime + duration);
+    oscillator.start(now);
+    oscillator.stop(now + duration);
   } catch (error) {
     console.error("Failed to play sound:", error);
   }
 }
 
 /**
- * Sound when recording starts - a quick ascending "boop"
+ * Play the "recording started" sound - ascending tone
  */
 export function playStartSound(): void {
-  // Two quick ascending tones
-  playTone(440, 0.08, 0.25); // A4
-  setTimeout(() => playTone(880, 0.1, 0.2), 60); // A5
+  const ctx = getAudioContext();
+  const now = ctx.currentTime;
+
+  try {
+    // Two quick ascending tones
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc1.frequency.value = 440; // A4
+    osc2.frequency.value = 554; // C#5
+    osc1.type = "sine";
+    osc2.type = "sine";
+
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + 0.15);
+
+    osc1.start(now);
+    osc1.stop(now + 0.08);
+
+    osc2.start(now + 0.08);
+    osc2.stop(now + 0.15);
+  } catch (error) {
+    console.error("Failed to play start sound:", error);
+  }
 }
 
 /**
- * Sound when recording stops - a quick descending "boop"
+ * Play the "recording stopped / processing" sound - descending tone
  */
 export function playStopSound(): void {
-  // Two quick descending tones
-  playTone(660, 0.08, 0.25); // E5
-  setTimeout(() => playTone(440, 0.1, 0.2), 60); // A4
+  const ctx = getAudioContext();
+  const now = ctx.currentTime;
+
+  try {
+    // Two quick descending tones
+    const osc1 = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc1.connect(gain);
+    osc2.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc1.frequency.value = 554; // C#5
+    osc2.frequency.value = 440; // A4
+    osc1.type = "sine";
+    osc2.type = "sine";
+
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + 0.15);
+
+    osc1.start(now);
+    osc1.stop(now + 0.08);
+
+    osc2.start(now + 0.08);
+    osc2.stop(now + 0.15);
+  } catch (error) {
+    console.error("Failed to play stop sound:", error);
+  }
 }
 
 /**
- * Sound when transcription succeeds - a pleasant chime
+ * Play the "success" sound - pleasant chord
  */
 export function playSuccessSound(): void {
-  // Pleasant chord
-  playTone(523, 0.15, 0.15); // C5
-  setTimeout(() => playTone(659, 0.15, 0.15), 50); // E5
-  setTimeout(() => playTone(784, 0.2, 0.12), 100); // G5
+  try {
+    const ctx = getAudioContext();
+    const now = ctx.currentTime;
+
+    // Play a major chord
+    const frequencies = [523, 659, 784]; // C5, E5, G5
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.15, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + 0.3);
+
+    frequencies.forEach(freq => {
+      const osc = ctx.createOscillator();
+      osc.connect(gain);
+      osc.frequency.value = freq;
+      osc.type = "sine";
+      osc.start(now);
+      osc.stop(now + 0.3);
+    });
+  } catch (error) {
+    console.error("Failed to play success sound:", error);
+  }
 }
 
 /**
- * Sound when an error occurs - a subtle low tone
+ * Play the "error" sound - dissonant tone
  */
 export function playErrorSound(): void {
-  playTone(220, 0.2, 0.2); // A3
-  setTimeout(() => playTone(196, 0.25, 0.15), 100); // G3
+  playTone(200, 0.2, 0.25);
 }

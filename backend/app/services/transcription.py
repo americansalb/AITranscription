@@ -4,13 +4,6 @@ from groq import AsyncGroq
 from app.core.config import settings
 
 
-# Available Groq Whisper models
-WHISPER_MODELS = {
-    "whisper-large-v3": "Higher accuracy, slower",
-    "whisper-large-v3-turbo": "Faster, more cost-effective",
-}
-
-
 class TranscriptionService:
     """Handles audio transcription via Groq's Whisper API."""
 
@@ -30,7 +23,6 @@ class TranscriptionService:
         audio_data: bytes,
         filename: str = "audio.wav",
         language: str | None = None,
-        model: str | None = None,
     ) -> dict:
         """
         Transcribe audio data using Groq's Whisper model.
@@ -39,7 +31,6 @@ class TranscriptionService:
             audio_data: Raw audio bytes (supports wav, mp3, m4a, webm, etc.)
             filename: Original filename with extension for format detection
             language: Optional ISO language code (e.g., 'en', 'es', 'fr')
-            model: Whisper model to use ('whisper-large-v3' or 'whisper-large-v3-turbo')
 
         Returns:
             dict with 'text' (transcription) and 'duration' (audio length in seconds)
@@ -48,13 +39,10 @@ class TranscriptionService:
         audio_file = io.BytesIO(audio_data)
         audio_file.name = filename
 
-        # Use specified model or fall back to default
-        whisper_model = model if model in WHISPER_MODELS else settings.whisper_model
-
         # Build transcription parameters
         params = {
             "file": audio_file,
-            "model": whisper_model,
+            "model": settings.whisper_model,
             "response_format": "verbose_json",  # Includes duration and segments
         }
 
@@ -69,7 +57,6 @@ class TranscriptionService:
             "duration": getattr(response, "duration", None),
             "language": getattr(response, "language", language),
             "segments": getattr(response, "segments", None),
-            "model_used": whisper_model,
         }
 
 

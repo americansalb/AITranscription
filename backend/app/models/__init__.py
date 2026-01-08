@@ -1,6 +1,22 @@
 from app.models.base import Base
 from app.models.user import User, SubscriptionTier
 from app.models.dictionary import DictionaryEntry
-from app.models.transcript import Transcript
+from app.models.learning import (
+    CorrectionEmbedding,
+    AudioSample,
+    LearningMetrics,
+    ModelVersion,
+    CorrectionRule,
+)
 
-__all__ = ["Base", "User", "SubscriptionTier", "DictionaryEntry", "Transcript"]
+__all__ = [
+    "Base",
+    "User",
+    "SubscriptionTier",
+    "DictionaryEntry",
+    "CorrectionEmbedding",
+    "AudioSample",
+    "LearningMetrics",
+    "ModelVersion",
+    "CorrectionRule",
+]
