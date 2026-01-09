@@ -38,7 +38,17 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      },
+      "dangerousRemoteDomainIpcAccess": [
+        {
+          "domain": "scribe-api-yk09.onrender.com",
+          "enableTauriAPI": false
+        }
+      ]
     }
   },
   "bundle": {
