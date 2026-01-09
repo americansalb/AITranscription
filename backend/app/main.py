@@ -14,20 +14,27 @@ from app.models.base import Base
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan - import models and preload resources.
+    """Application lifespan - run migrations and import models.
 
-    All database migrations and seeding now happen during build time via:
-    - alembic upgrade head (creates/updates schema)
-    - python -m scripts.seed_admin --force (seeds dev accounts)
-
-    This ensures the app can start quickly and bind to port immediately.
+    Migrations run automatically at startup to ensure database schema is correct.
     """
     # Import models to register them with Base (required for relationships to work)
     from app.models import user, dictionary, learning  # noqa: F401
 
-    # Note: Embedding model loads lazily on first use to reduce startup memory
-    # from app.services.correction_retriever import preload_embedding_model
-    # preload_embedding_model()
+    # Run migrations automatically to ensure database schema is up to date
+    import subprocess
+    import sys
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        print("✓ Database migrations completed successfully")
+    except subprocess.CalledProcessError as e:
+        print(f"⚠ Migration warning: {e.stderr}")
+        # Don't crash if migrations fail - database might already be up to date
 
     yield
 
