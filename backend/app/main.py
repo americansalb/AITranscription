@@ -41,13 +41,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS configuration for desktop app
+# CORS configuration for desktop app and browser
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Desktop app will connect from various origins
-    allow_credentials=False,  # Must be False when using allow_origins=["*"]
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Include API routes
