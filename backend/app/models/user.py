@@ -56,6 +56,13 @@ class User(Base):
     # Usage tracking
     total_audio_seconds: Mapped[int] = mapped_column(default=0)
     total_polish_tokens: Mapped[int] = mapped_column(default=0)
+    total_transcriptions: Mapped[int] = mapped_column(default=0)
+    total_words: Mapped[int] = mapped_column(default=0)
+
+    # User settings
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    typing_wpm: Mapped[int] = mapped_column(default=40)
+    daily_transcription_limit: Mapped[int] = mapped_column(default=100)
 
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
