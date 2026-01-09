@@ -62,7 +62,6 @@ class User(Base):
     # User settings
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     typing_wpm: Mapped[int] = mapped_column(default=40)
-    daily_transcription_limit: Mapped[int] = mapped_column(default=100)
 
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
