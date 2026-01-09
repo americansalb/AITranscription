@@ -41,10 +41,14 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS configuration - allow all origins for Tauri desktop app
+# CORS configuration - allow desktop app origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r".*",  # Allows any origin including tauri://localhost
+    allow_origins=[
+        "http://localhost:1420",  # Vite dev server
+        "http://tauri.localhost",  # Tauri production
+        "tauri://localhost",  # Tauri custom protocol
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
