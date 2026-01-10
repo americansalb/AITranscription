@@ -1112,7 +1112,21 @@ function App() {
         )}
       </div>
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} onHotkeyChange={handleHotkeyChange} />}
+      {showSettings && <Settings
+        onClose={() => setShowSettings(false)}
+        onHotkeyChange={handleHotkeyChange}
+        refreshTrigger={transcriptionCount}
+        history={transcriptHistory.map(t => ({
+          id: t.id,
+          timestamp: new Date(t.timestamp),
+          rawText: t.rawText,
+          polishedText: t.polishedText,
+          context: t.context,
+          formality: t.formality,
+          duration: null
+        }))}
+        onClearHistory={() => setTranscriptHistory([])}
+      />}
       {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
       {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showLearning && (

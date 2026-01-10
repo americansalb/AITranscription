@@ -485,11 +485,25 @@ export interface UserStats {
  * Get the current user's statistics with time saved calculations
  */
 export async function getUserStats(): Promise<UserStats> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats/extended`, {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats`, {
     headers: getAuthHeaders(),
   });
 
-  return handleResponse<UserStats>(response);
+  const data = await handleResponse<UserStatsResponse>(response);
+
+  // Convert to UserStats with calculated fields
+  return {
+    total_transcriptions: data.total_transcriptions,
+    total_words: data.total_words,
+    total_audio_seconds: data.total_audio_seconds,
+    transcriptions_today: data.transcriptions_today,
+    words_today: data.words_today,
+    average_words_per_transcription: data.average_words_per_transcription,
+    average_words_per_minute: data.average_words_per_minute,
+    time_saved_seconds: Math.max(0, (data.total_words / 40) * 60 - data.total_audio_seconds),
+    time_saved_today_seconds: Math.max(0, (data.words_today / 40) * 60),
+    typing_wpm: 40,
+  };
 }
 
 export interface TranscriptItem {
@@ -527,39 +541,33 @@ export interface AchievementsResponse {
  * Get transcript history
  */
 export async function getTranscriptHistory(offset: number = 0, limit: number = 50): Promise<TranscriptItem[]> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/transcripts?offset=${offset}&limit=${limit}`, {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/transcripts?skip=${offset}&limit=${limit}`, {
     headers: getAuthHeaders(),
   });
 
-  const data = await handleResponse<{ transcripts: TranscriptItem[] }>(response);
-  return data.transcripts;
+  return handleResponse<TranscriptItem[]>(response);
 }
 
 /**
  * Get user achievements
+ * Note: Backend endpoint not yet implemented, returns empty achievements
  */
 export async function getUserAchievements(): Promise<AchievementsResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/achievements`, {
-    headers: getAuthHeaders(),
-  });
-
-  return handleResponse<AchievementsResponse>(response);
+  // TODO: Implement backend endpoint
+  return {
+    achievements: [],
+    total_achievements: 0,
+    total_unlocked: 0,
+  };
 }
 
 /**
  * Update user's typing WPM for time saved calculation
+ * Note: Backend endpoint not yet implemented
  */
 export async function updateTypingWpm(wpm: number): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/typing-wpm`, {
-    method: "PUT",
-    headers: {
-      ...getAuthHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ wpm }),
-  });
-
-  await handleResponse<{ success: boolean }>(response);
+  // TODO: Implement backend endpoint
+  console.log("Typing WPM update not yet implemented:", wpm);
 }
 
 // ============================================
