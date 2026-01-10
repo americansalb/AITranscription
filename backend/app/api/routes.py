@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.services import polish_service, transcription_service
+from app.services.tts import tts_service
 
 router = APIRouter()
 
@@ -192,3 +193,47 @@ async def transcribe_and_polish(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
+
+
+@router.post(
+    "/tts",
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def text_to_speech(
+    text: str = Form(..., description="Text to convert to speech"),
+    user: User | None = Depends(get_optional_user),
+):
+    """
+    Convert text to speech using Groq TTS (Orpheus model).
+
+    Used for Claude Code speak integration - when Claude wants to speak responses aloud.
+    Returns MP3 audio data.
+    """
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    # Limit text length to prevent abuse
+    if len(text) > 500:
+        text = text[:500]
+
+    try:
+        from fastapi.responses import Response
+
+        audio_bytes = await tts_service.synthesize(text)
+
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="TTS generation failed")
+
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")

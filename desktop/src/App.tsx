@@ -13,6 +13,7 @@ import { LearningDashboard } from "./components/LearningDashboard";
 import { useToast } from "./components/Toast";
 import { Confetti } from "./components/Confetti";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
+import { initSpeakListener } from "./lib/speak";
 
 // Error types for actionable messages
 interface ActionableError {
@@ -464,6 +465,26 @@ function App() {
         });
     };
     performHealthCheck();
+  }, []);
+
+  // Initialize speak listener for Claude Code integration
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    initSpeakListener()
+      .then((unlistenFn) => {
+        unlisten = unlistenFn;
+        console.log("[App] Speak listener initialized");
+      })
+      .catch((err) => {
+        console.error("[App] Failed to initialize speak listener:", err);
+      });
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
   }, []);
 
   // Control overlay window visibility and position
