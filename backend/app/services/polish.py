@@ -144,29 +144,32 @@ class PolishService:
                 )
                 return raw_text
 
-        # Check 3: Known refusal/commentary phrases
-        refusal_phrases = [
+        # Check 3: Phrases that indicate LLM went off-script
+        # Only flag if phrase is in OUTPUT but NOT in INPUT (LLM added it)
+        llm_added_phrases = [
             "i do not feel comfortable",
-            "i cannot",
-            "i can't",
-            "i won't",
-            "i'm not able",
-            "i notice",
-            "it seems like",
-            "i understand",
-            "let me help",
-            "here is",
-            "here's",
-            "the cleaned text",
-            "offensive",
-            "inappropriate",
-            "harmful",
+            "i cannot process",
+            "i cannot reproduce",
+            "i won't process",
+            "i'm not able to process",
+            "i'm unable to",
+            "the cleaned text is",
+            "here is the cleaned",
+            "here's the cleaned",
+            "offensive language",
+            "inappropriate content",
+            "harmful content",
+            "i apologize",
+            "i'm sorry, but",
         ]
 
         lower_polished = polished_text.lower()
-        for phrase in refusal_phrases:
-            if phrase in lower_polished:
-                logger.warning(f"Detected commentary phrase '{phrase}', returning raw text")
+        lower_raw = raw_text.lower()
+
+        for phrase in llm_added_phrases:
+            # Only flag if LLM added this phrase (not in original)
+            if phrase in lower_polished and phrase not in lower_raw:
+                logger.warning(f"LLM added phrase '{phrase}', returning raw text")
                 return raw_text
 
         return polished_text
