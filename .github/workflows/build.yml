@@ -135,14 +135,25 @@ jobs:
         run: npm run tauri build
 
       # Debug: List all generated bundle files
-      - name: List generated bundle files
-        if: always()
+      - name: List generated bundle files (Unix)
+        if: matrix.platform != 'windows-latest' && always()
         run: |
           echo "=== Bundle directory structure ==="
           ls -R desktop/src-tauri/target/release/bundle/ || echo "Bundle directory not found"
           echo ""
           echo "=== Searching for installer files ==="
           find desktop/src-tauri/target/release -type f \( -name "*.dmg" -o -name "*.app" -o -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" \) -ls || echo "No installer files found"
+
+      # Debug: List all generated bundle files (Windows PowerShell)
+      - name: List generated bundle files (Windows)
+        if: matrix.platform == 'windows-latest' && always()
+        shell: pwsh
+        run: |
+          echo "=== Bundle directory structure ==="
+          Get-ChildItem -Path desktop/src-tauri/target/release/bundle -Recurse | Select-Object Mode, LastWriteTime, Length, Name
+          echo ""
+          echo "=== Searching for installer files ==="
+          Get-ChildItem -Path desktop/src-tauri/target/release -Recurse -Include *.exe,*.msi | Select-Object FullName, Length
 
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
