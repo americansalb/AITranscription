@@ -97,6 +97,80 @@ class PolishService:
 
         return "\n".join(prompt_parts)
 
+    def _validate_output(self, raw_text: str, polished_text: str) -> str:
+        """
+        Validate that polished output is actually a cleaned version of input.
+        Returns raw_text if validation fails (LLM went off-script).
+        """
+        if not polished_text.strip():
+            return raw_text
+
+        # Filler words that are expected to be removed
+        fillers = {"um", "uh", "er", "ah", "hmm", "like", "you know", "i mean"}
+
+        def get_words(text: str) -> set:
+            """Extract meaningful words from text."""
+            words = set()
+            for word in text.lower().split():
+                # Remove punctuation
+                clean = "".join(c for c in word if c.isalnum())
+                if clean and clean not in fillers and len(clean) > 1:
+                    words.add(clean)
+            return words
+
+        raw_words = get_words(raw_text)
+        polished_words = get_words(polished_text)
+
+        # If input is very short, skip validation
+        if len(raw_words) < 3:
+            return polished_text
+
+        # Check 1: Length ratio - output shouldn't be way longer than input
+        # (would indicate commentary/answering)
+        len_ratio = len(polished_text) / len(raw_text) if raw_text else 1
+        if len_ratio > 2.0:
+            logger.warning(
+                f"Output too long ({len_ratio:.1f}x input), returning raw text"
+            )
+            return raw_text
+
+        # Check 2: Word overlap - most input words should appear in output
+        # (would catch if LLM replaced content or answered a question)
+        if raw_words:
+            overlap = len(raw_words & polished_words) / len(raw_words)
+            if overlap < 0.5:
+                logger.warning(
+                    f"Low word overlap ({overlap:.0%}), returning raw text"
+                )
+                return raw_text
+
+        # Check 3: Known refusal/commentary phrases
+        refusal_phrases = [
+            "i do not feel comfortable",
+            "i cannot",
+            "i can't",
+            "i won't",
+            "i'm not able",
+            "i notice",
+            "it seems like",
+            "i understand",
+            "let me help",
+            "here is",
+            "here's",
+            "the cleaned text",
+            "offensive",
+            "inappropriate",
+            "harmful",
+        ]
+
+        lower_polished = polished_text.lower()
+        for phrase in refusal_phrases:
+            if phrase in lower_polished:
+                logger.warning(f"Detected commentary phrase '{phrase}', returning raw text")
+                return raw_text
+
+        return polished_text
+
     async def polish(
         self,
         raw_text: str,
@@ -156,26 +230,9 @@ class PolishService:
 
         polished_text = response.content[0].text if response.content else ""
 
-        # Detect if the LLM refused to process and return raw text instead
-        refusal_phrases = [
-            "I do not feel comfortable",
-            "I cannot process",
-            "I won't process",
-            "I'm not able to",
-            "I cannot reproduce",
-            "I can't help with",
-            "I cannot assist",
-            "I'm unable to",
-            "inappropriate content",
-            "offensive language",
-            "harmful content",
-        ]
-
-        is_refusal = any(phrase.lower() in polished_text.lower() for phrase in refusal_phrases)
-
-        if is_refusal:
-            logger.warning("LLM refused to process text, returning raw transcription")
-            polished_text = raw_text
+        # Validate that the output is actually a cleaned version of the input,
+        # not a refusal, answer, or commentary
+        polished_text = self._validate_output(raw_text, polished_text)
 
         return {
             "text": polished_text,
