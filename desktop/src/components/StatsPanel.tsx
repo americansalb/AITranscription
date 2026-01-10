@@ -132,7 +132,7 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
     try {
       const [statsData, transcriptsData, achievementsData] = await Promise.all([
         getUserStats(),
-        getTranscriptHistory(0, 50),
+        getTranscriptHistory(0, 500), // Load up to 500 entries
         getUserAchievements(),
       ]);
       setStats(statsData);

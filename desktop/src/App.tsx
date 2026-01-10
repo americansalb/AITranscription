@@ -493,40 +493,29 @@ function App() {
     performHealthCheck();
   }, []);
 
-  // Control overlay window visibility and position
+  // Control overlay window visibility
   useEffect(() => {
     const updateOverlay = async () => {
-      const tauri = window.__TAURI__;
-      if (!tauri) return;
+      if (!window.__TAURI__) return;
 
       try {
-        // Tauri 2.0: getByLabel is async and in webviewWindow namespace
-        const overlayWindow = tauri.webviewWindow?.WebviewWindow?.getByLabel
-          ? await tauri.webviewWindow.WebviewWindow.getByLabel("overlay")
-          : null;
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { emit } = await import("@tauri-apps/api/event");
 
         const isActive = recorder.isRecording || status === "processing";
 
-        if (overlayWindow) {
-          if (isActive) {
-            // Position at bottom center of screen
-            const monitor = await tauri.window.currentMonitor();
-            if (monitor) {
-              const x = Math.round((monitor.size.width - 200) / 2);
-              const y = monitor.size.height - 80;
-              await overlayWindow.setPosition({ type: "Physical", x, y });
-            }
-            await overlayWindow.show();
-          } else {
-            await overlayWindow.hide();
-          }
+        // Show or hide the floating overlay window
+        if (isActive) {
+          await invoke("show_recording_overlay");
+        } else {
+          await invoke("hide_recording_overlay");
         }
 
-        // Send state to overlay
-        await tauri.event.emit("overlay-update", {
+        // Send state to overlay window
+        await emit("overlay-update", {
           isRecording: recorder.isRecording,
           isProcessing: status === "processing",
-          audioLevel: recorder.audioLevel,
+          duration: recorder.duration || 0,
         });
       } catch (err) {
         console.error("Overlay update failed:", err);
@@ -534,7 +523,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.audioLevel, status]);
+  }, [recorder.isRecording, recorder.duration, status]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
@@ -1137,16 +1126,6 @@ function App() {
         onClose={() => setShowSettings(false)}
         onHotkeyChange={handleHotkeyChange}
         refreshTrigger={transcriptionCount}
-        history={transcriptHistory.map(t => ({
-          id: t.id,
-          timestamp: new Date(t.timestamp),
-          rawText: t.rawText,
-          polishedText: t.polishedText,
-          context: t.context,
-          formality: t.formality,
-          duration: null
-        }))}
-        onClearHistory={() => setTranscriptHistory([])}
       />}
       {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
       {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}

@@ -4422,3 +4422,85 @@ body {
   color: var(--accent);
   border-color: var(--accent);
 }
+
+/* ========================================
+   Recording Overlay Window Styles
+   ======================================== */
+.overlay-window {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  -webkit-app-region: drag;
+}
+
+.overlay-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: rgba(20, 20, 22, 0.95);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  transition: all 0.2s ease;
+}
+
+.overlay-pill.idle {
+  opacity: 0.7;
+  transform: scale(0.95);
+}
+
+.overlay-pill.recording {
+  border-color: var(--error);
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.3);
+}
+
+.overlay-pill.processing {
+  border-color: var(--accent);
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+}
+
+.overlay-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.overlay-dot.idle {
+  background: var(--text-muted);
+}
+
+.overlay-dot.recording {
+  background: var(--error);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.overlay-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.overlay-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.9); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

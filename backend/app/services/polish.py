@@ -156,6 +156,27 @@ class PolishService:
 
         polished_text = response.content[0].text if response.content else ""
 
+        # Detect if the LLM refused to process and return raw text instead
+        refusal_phrases = [
+            "I do not feel comfortable",
+            "I cannot process",
+            "I won't process",
+            "I'm not able to",
+            "I cannot reproduce",
+            "I can't help with",
+            "I cannot assist",
+            "I'm unable to",
+            "inappropriate content",
+            "offensive language",
+            "harmful content",
+        ]
+
+        is_refusal = any(phrase.lower() in polished_text.lower() for phrase in refusal_phrases)
+
+        if is_refusal:
+            logger.warning("LLM refused to process text, returning raw transcription")
+            polished_text = raw_text
+
         return {
             "text": polished_text,
             "usage": {
