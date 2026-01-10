@@ -173,6 +173,14 @@ function App() {
     setCurrentHotkey(newHotkey);
   }, []);
 
+  // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
+  const formatHotkeyDisplay = useCallback((hotkey: string): string => {
+    const isMac = navigator.platform.includes("Mac");
+    return hotkey
+      .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
+      .replace("Alt", isMac ? "Option" : "Alt");
+  }, []);
+
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
   const [editedText, setEditedText] = useState("");
@@ -911,7 +919,7 @@ function App() {
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">Ctrl+Shift+S</span> for push-to-talk
+          <span className="hotkey">{formatHotkeyDisplay(currentHotkey)}</span> for push-to-talk
           <span className={`hotkey-status ${hotkeyRegistered ? "active" : "inactive"}`}>
             {hotkeyRegistered ? "Ready" : "Restart app to enable"}
           </span>
@@ -1116,7 +1124,7 @@ function App() {
                 <div className="welcome-icon">🎙️</div>
                 <div className="welcome-title">Ready to transcribe</div>
                 <div className="welcome-hint">
-                  Click the record button or hold <span className="hotkey">Ctrl+Shift+S</span> to start speaking.
+                  Click the record button or hold <span className="hotkey">{formatHotkeyDisplay(currentHotkey)}</span> to start speaking.
                   <br />Your words will be transcribed and polished automatically.
                 </div>
               </div>
