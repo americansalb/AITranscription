@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     # API Keys
     groq_api_key: str = ""
     anthropic_api_key: str = ""
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # Default: Rachel
 
     # Database
     database_url: str = "postgresql+asyncpg://localhost:5432/scribe"
