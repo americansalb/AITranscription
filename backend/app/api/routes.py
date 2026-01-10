@@ -1,6 +1,8 @@
+import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_optional_user
@@ -137,6 +139,55 @@ async def polish_text(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
+
+
+@router.post("/polish-stream")
+async def polish_text_stream(
+    request: PolishRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    """
+    Stream polished text using Server-Sent Events.
+
+    This endpoint provides progressive polish results as they arrive from Claude.
+    Falls back to batch /polish endpoint if streaming fails.
+
+    Returns SSE stream with events:
+    - correction_info: Number of learned corrections used
+    - chunk: Text chunks as they arrive
+    - done: Final event with usage statistics
+    - error: Error information if streaming fails
+    """
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    async def event_generator():
+        """Generate Server-Sent Events from polish stream."""
+        try:
+            async for event in polish_service.polish_stream(
+                raw_text=request.text,
+                context=request.context,
+                custom_words=request.custom_words,
+                formality=request.formality,
+                db=db if user else None,
+                user_id=user.id if user else None,
+            ):
+                # Format as SSE: "data: {json}\n\n"
+                yield f"data: {json.dumps(event)}\n\n"
+
+        except Exception as e:
+            error_event = {"type": "error", "data": {"message": str(e)}}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
 
 
 @router.post(

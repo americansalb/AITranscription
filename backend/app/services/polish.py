@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import AsyncGenerator, Optional
 
 from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -169,25 +169,26 @@ class PolishService:
         if not raw_text.strip():
             return {"text": "", "usage": {"input_tokens": 0, "output_tokens": 0}, "corrections_used": 0}
 
-        # Retrieve learned corrections if db session and user_id are provided
-        # TEMPORARILY DISABLED: Embedding model load causing OOM on Render
-        # TODO: Re-enable once we optimize memory usage or upgrade server
+        # Retrieve learned corrections if enabled and db session + user_id are provided
         learned_corrections = []
-        # if db is not None and user_id is not None:
-        #     try:
-        #         retriever = CorrectionRetriever(db, user_id)
-        #         learned_corrections = await retriever.retrieve_relevant_corrections(
-        #             raw_text,
-        #             top_k=5,
-        #             threshold=0.6,
-        #         )
-        #         if learned_corrections:
-        #             logger.info(
-        #                 f"Retrieved {len(learned_corrections)} relevant corrections for user {user_id}"
-        #             )
-        #     except Exception as e:
-        #         logger.warning(f"Failed to retrieve corrections: {e}")
-        #         learned_corrections = []
+        if settings.enable_ml_corrections and db is not None and user_id is not None:
+            try:
+                retriever = CorrectionRetriever(db, user_id)
+                learned_corrections = await retriever.retrieve_relevant_corrections(
+                    raw_text,
+                    top_k=5,
+                    threshold=0.6,
+                )
+                if learned_corrections:
+                    logger.info(
+                        f"Retrieved {len(learned_corrections)} relevant corrections for user {user_id}"
+                    )
+            except MemoryError as e:
+                logger.warning(f"Insufficient memory for ML corrections: {e}")
+                learned_corrections = []
+            except Exception as e:
+                logger.warning(f"Failed to retrieve corrections: {e}")
+                learned_corrections = []
 
         system_prompt = self._build_system_prompt(
             context, custom_words, formality, learned_corrections
@@ -214,6 +215,90 @@ class PolishService:
             },
             "corrections_used": len(learned_corrections),
         }
+
+    async def polish_stream(
+        self,
+        raw_text: str,
+        context: str | None = None,
+        custom_words: list[str] | None = None,
+        formality: str = "neutral",
+        db: AsyncSession | None = None,
+        user_id: int | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Stream polished text using Server-Sent Events.
+
+        Yields events as they arrive from Claude's streaming API.
+
+        Args:
+            Same as polish() method
+
+        Yields:
+            dict with 'type' and 'data' fields:
+            - type: 'correction_info' | 'chunk' | 'done' | 'error'
+            - data: relevant payload
+        """
+        if not raw_text.strip():
+            yield {"type": "done", "data": {"usage": {"input_tokens": 0, "output_tokens": 0}}}
+            return
+
+        # Retrieve learned corrections (same as batch polish)
+        learned_corrections = []
+        if settings.enable_ml_corrections and db is not None and user_id is not None:
+            try:
+                retriever = CorrectionRetriever(db, user_id)
+                learned_corrections = await retriever.retrieve_relevant_corrections(
+                    raw_text,
+                    top_k=5,
+                    threshold=0.6,
+                )
+                if learned_corrections:
+                    logger.info(
+                        f"[Stream] Retrieved {len(learned_corrections)} corrections for user {user_id}"
+                    )
+                    # Send correction info event
+                    yield {
+                        "type": "correction_info",
+                        "data": {"corrections_used": len(learned_corrections)}
+                    }
+            except MemoryError as e:
+                logger.warning(f"Insufficient memory for ML corrections: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to retrieve corrections: {e}")
+
+        system_prompt = self._build_system_prompt(
+            context, custom_words, formality, learned_corrections
+        )
+
+        try:
+            # Use Anthropic streaming API
+            async with self.client.messages.stream(
+                model=settings.haiku_model,
+                max_tokens=4096,
+                system=system_prompt,
+                messages=[{"role": "user", "content": raw_text}],
+            ) as stream:
+                # Stream text chunks as they arrive
+                async for text in stream.text_stream:
+                    yield {"type": "chunk", "data": {"text": text}}
+
+                # Get final message for usage stats
+                final_message = await stream.get_final_message()
+
+                # Send completion event with usage
+                yield {
+                    "type": "done",
+                    "data": {
+                        "usage": {
+                            "input_tokens": final_message.usage.input_tokens,
+                            "output_tokens": final_message.usage.output_tokens,
+                        }
+                    }
+                }
+
+        except Exception as e:
+            logger.error(f"Streaming polish failed: {e}")
+            yield {"type": "error", "data": {"message": str(e)}}
 
 
 # Singleton instance

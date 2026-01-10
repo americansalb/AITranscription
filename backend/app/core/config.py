@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Rate limits
     max_audio_duration_seconds: int = 300  # 5 minutes max per request
 
+    # ML Features (experimental)
+    enable_ml_corrections: bool = False  # Feature flag for embedding-based learning
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

@@ -1,6 +1,8 @@
 """Correction retriever service for embedding-based learning."""
+import gc
 import logging
-from functools import lru_cache
+import psutil
+from contextlib import contextmanager
 from typing import Optional
 
 import numpy as np
@@ -16,19 +18,61 @@ logger = logging.getLogger(__name__)
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
+# Global model reference for lifecycle management
+_embedding_model: Optional[SentenceTransformer] = None
 
-@lru_cache(maxsize=1)
-def get_embedding_model() -> SentenceTransformer:
-    """Load the embedding model (cached singleton)."""
-    logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
-    return SentenceTransformer(EMBEDDING_MODEL)
+
+def get_available_memory_mb() -> float:
+    """Get available system memory in MB."""
+    try:
+        return psutil.virtual_memory().available / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
+@contextmanager
+def get_embedding_model():
+    """Context manager for loading/unloading embedding model.
+
+    Usage:
+        with get_embedding_model() as model:
+            embedding = model.encode(text)
+
+    This ensures the model is loaded on-demand and unloaded after use
+    to minimize memory footprint.
+    """
+    global _embedding_model
+
+    # Check available memory before loading
+    available_mb = get_available_memory_mb()
+    logger.info(f"Available memory: {available_mb:.0f} MB")
+
+    if available_mb < 100 and available_mb > 0:
+        logger.warning(f"Low memory ({available_mb:.0f} MB), skipping model load")
+        raise MemoryError(f"Insufficient memory to load embedding model ({available_mb:.0f} MB available)")
+
+    # Load model if not already loaded
+    if _embedding_model is None:
+        logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
+        logger.info(f"Model loaded. Available memory: {get_available_memory_mb():.0f} MB")
+
+    try:
+        yield _embedding_model
+    finally:
+        # Unload model after use to free memory
+        if _embedding_model is not None:
+            logger.info("Unloading embedding model to free memory")
+            _embedding_model = None
+            gc.collect()  # Force garbage collection
+            logger.info(f"Model unloaded. Available memory: {get_available_memory_mb():.0f} MB")
 
 
 def compute_embedding(text: str) -> list[float]:
     """Compute embedding for a text string."""
-    model = get_embedding_model()
-    embedding = model.encode(text, convert_to_numpy=True)
-    return embedding.tolist()
+    with get_embedding_model() as model:
+        embedding = model.encode(text, convert_to_numpy=True)
+        return embedding.tolist()
 
 
 def compute_correction_embedding(original: str, corrected: str) -> list[float]:
@@ -37,11 +81,11 @@ def compute_correction_embedding(original: str, corrected: str) -> list[float]:
     We embed the combined context to capture the relationship between
     the original and corrected text.
     """
-    model = get_embedding_model()
-    # Combine original and corrected to capture the correction pattern
-    combined = f"Original: {original}\nCorrected: {corrected}"
-    embedding = model.encode(combined, convert_to_numpy=True)
-    return embedding.tolist()
+    with get_embedding_model() as model:
+        # Combine original and corrected to capture the correction pattern
+        combined = f"Original: {original}\nCorrected: {corrected}"
+        embedding = model.encode(combined, convert_to_numpy=True)
+        return embedding.tolist()
 
 
 def classify_correction_type(original: str, corrected: str) -> str:
@@ -294,11 +338,12 @@ class CorrectionRetriever:
         return [s.strip() for s in sentences if s.strip()]
 
 
-# Singleton for embedding model preloading
+# Note: Preloading is no longer used with context manager approach
+# The model is loaded on-demand and unloaded after use to minimize memory footprint
 def preload_embedding_model():
-    """Preload the embedding model at startup."""
-    try:
-        get_embedding_model()
-        logger.info("Embedding model preloaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to preload embedding model: {e}")
+    """Preload function (deprecated with context manager approach).
+
+    With the new context manager approach, the model is loaded on-demand
+    and unloaded after use, so preloading is no longer necessary.
+    """
+    logger.info("Model preloading disabled - using on-demand loading with context manager")
