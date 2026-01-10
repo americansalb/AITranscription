@@ -12,9 +12,9 @@ import {
   DetailedStatsResponse,
   ApiError,
 } from "../lib/api";
-// HistoryEntry defined below
-interface HistoryEntry { id: string; timestamp: Date; rawText: string; polishedText: string; context: string; formality: string; duration: number | null; }
+import type { HistoryEntry } from "../App";
 import { copyToClipboard } from "../lib/clipboard";
+import { getStoredVoiceEnabled, saveVoiceEnabled } from "../lib/voiceStream";
 
 interface SettingsProps {
   onClose: () => void;
@@ -24,11 +24,12 @@ interface SettingsProps {
   onHotkeyChange?: (hotkey: string) => void;
   onModelChange?: (model: string) => void;
   onNoiseCancellationChange?: (enabled: boolean) => void;
+  onVoiceEnabledChange?: (enabled: boolean) => void;
 }
 
 type SettingsTab = "account" | "stats" | "history" | "dictionary" | "preferences";
 
-export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory, onHotkeyChange, onModelChange, onNoiseCancellationChange }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHistory, onHotkeyChange, onModelChange, onNoiseCancellationChange, onVoiceEnabledChange }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
@@ -138,7 +139,7 @@ export function Settings({ onClose, refreshTrigger = 0, history = [], onClearHis
               </div>
             )
           ) : (
-            <Preferences onHotkeyChange={onHotkeyChange} onModelChange={onModelChange} onNoiseCancellationChange={onNoiseCancellationChange} />
+            <Preferences onHotkeyChange={onHotkeyChange} onModelChange={onModelChange} onNoiseCancellationChange={onNoiseCancellationChange} onVoiceEnabledChange={onVoiceEnabledChange} />
           )}
         </div>
       </div>
@@ -472,14 +473,16 @@ interface PreferencesProps {
   onHotkeyChange?: (hotkey: string) => void;
   onModelChange?: (model: string) => void;
   onNoiseCancellationChange?: (enabled: boolean) => void;
+  onVoiceEnabledChange?: (enabled: boolean) => void;
 }
 
-function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange }: PreferencesProps) {
+function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange, onVoiceEnabledChange }: PreferencesProps) {
   const [autoPaste, setAutoPaste] = useState(true);
   const [playSound, setPlaySound] = useState(true);
   const [hotkey, setHotkey] = useState(() => getStoredHotkey());
   const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
   const [noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
+  const [voiceEnabled, setVoiceEnabled] = useState(() => getStoredVoiceEnabled());
   const [showDevSettings, setShowDevSettings] = useState(false);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
   const hotkeyInputRef = useRef<HTMLInputElement>(null);
@@ -500,6 +503,12 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange 
     setNoiseCancellation(enabled);
     saveNoiseCancellation(enabled);
     onNoiseCancellationChange?.(enabled);
+  };
+
+  const handleVoiceEnabledChange = (enabled: boolean) => {
+    setVoiceEnabled(enabled);
+    saveVoiceEnabled(enabled);
+    onVoiceEnabledChange?.(enabled);
   };
 
   // Handle keydown for custom hotkey recording
@@ -550,6 +559,17 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange 
         <span className="toggle-switch" />
       </label>
       <p className="setting-hint">Reduce background noise before transcription (experimental)</p>
+
+      <label className="toggle-setting">
+        <span>Voice explanations (Claude Code)</span>
+        <input
+          type="checkbox"
+          checked={voiceEnabled}
+          onChange={(e) => handleVoiceEnabledChange(e.target.checked)}
+        />
+        <span className="toggle-switch" />
+      </label>
+      <p className="setting-hint">Hear spoken explanations when Claude Code writes or edits files</p>
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>

@@ -32,6 +32,19 @@ export interface TranscriptEntry {
   formality: string;
   timestamp: number;
   confidence?: number;
+  duration?: number | null;
+}
+
+// Settings expects Date for timestamp - create alias with Date type
+export interface HistoryEntry {
+  id: string;
+  rawText: string;
+  polishedText: string;
+  context: string;
+  formality: string;
+  timestamp: Date;
+  confidence?: number;
+  duration?: number | null;
 }
 
 // Context icons for the dropdown
