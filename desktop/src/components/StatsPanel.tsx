@@ -6,7 +6,7 @@ import {
   updateTypingWpm,
   UserStats,
   TranscriptItem,
-  Achievement,
+  AchievementItem,
   AchievementsResponse,
   isLoggedIn,
 } from "../lib/api";
@@ -75,7 +75,7 @@ function getAchievementIcon(iconName: string): JSX.Element {
   return achievementIcons[iconName] || defaultIcon;
 }
 
-function formatThreshold(achievement: Achievement): string {
+function formatThreshold(achievement: AchievementItem): string {
   if (achievement.category === "audio") {
     const seconds = achievement.threshold;
     if (seconds >= 3600) return `${seconds / 3600}h`;
@@ -85,7 +85,7 @@ function formatThreshold(achievement: Achievement): string {
   return achievement.threshold.toLocaleString();
 }
 
-function formatCurrentValue(achievement: Achievement): string {
+function formatCurrentValue(achievement: AchievementItem): string {
   if (achievement.category === "audio") {
     const seconds = achievement.current_value;
     if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`;
@@ -377,8 +377,8 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
               <div className="achievements-list">
                 {/* Unlocked achievements first */}
                 {achievements.achievements
-                  .filter(a => a.unlocked)
-                  .map((achievement) => (
+                  .filter((a: AchievementItem) => a.unlocked)
+                  .map((achievement: AchievementItem) => (
                     <div key={achievement.id} className="achievement-item unlocked">
                       <div className="achievement-icon">
                         {getAchievementIcon(achievement.icon)}
@@ -397,9 +397,9 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
 
                 {/* In-progress achievements */}
                 {achievements.achievements
-                  .filter(a => !a.unlocked)
-                  .sort((a, b) => b.progress - a.progress) // Show closest to completion first
-                  .map((achievement) => (
+                  .filter((a: AchievementItem) => !a.unlocked)
+                  .sort((a: AchievementItem, b: AchievementItem) => b.progress - a.progress) // Show closest to completion first
+                  .map((achievement: AchievementItem) => (
                     <div key={achievement.id} className="achievement-item locked">
                       <div className="achievement-icon">
                         {getAchievementIcon(achievement.icon)}
