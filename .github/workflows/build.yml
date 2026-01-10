@@ -160,9 +160,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Scribe-macOS
-          path: |
-            desktop/src-tauri/target/release/bundle/dmg/*.dmg
-            desktop/src-tauri/target/release/bundle/macos/*.app
+          path: desktop/src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: warn
 
       - name: Upload Windows artifact
@@ -226,9 +224,10 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.tag }}
           name: ${{ steps.release_tag.outputs.name }}
           files: |
-            Scribe-macOS/*
-            Scribe-Windows/*
-            Scribe-Linux/*
+            Scribe-macOS/**/*.dmg
+            Scribe-Windows/**/*.exe
+            Scribe-Linux/**/*.deb
+            Scribe-Linux/**/*.AppImage
           draft: false
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
           generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}
