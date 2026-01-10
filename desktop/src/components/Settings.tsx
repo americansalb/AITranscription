@@ -9,6 +9,9 @@ import {
   ApiError,
 } from "../lib/api";
 
+// Detect if running on macOS
+const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+
 interface SettingsProps {
   onClose: () => void;
 }
@@ -318,7 +321,7 @@ function Preferences() {
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
-        <kbd>Ctrl+Shift+Space</kbd>
+        {isMac ? <kbd>Cmd+Shift+Space</kbd> : <kbd>Ctrl+Shift+Space</kbd>}
       </div>
     </div>
   );

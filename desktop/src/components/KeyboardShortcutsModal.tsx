@@ -1,4 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
+
+// Detect if running on macOS
+const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const modKey = isMac ? "Cmd" : "Ctrl";
 
 interface KeyboardShortcutsModalProps {
   onClose: () => void;
@@ -8,15 +12,15 @@ const SHORTCUTS = [
   {
     category: "Recording",
     items: [
-      { keys: ["Ctrl", "Shift", "S"], description: "Push-to-talk (hold to record)" },
+      { keys: [modKey, "Shift", "S"], description: "Push-to-talk (hold to record)" },
       { keys: ["Esc"], description: "Cancel recording" },
     ],
   },
   {
     category: "Results",
     items: [
-      { keys: ["Ctrl", "C"], description: "Copy result to clipboard" },
-      { keys: ["Ctrl", "A"], description: "Select all text" },
+      { keys: [modKey, "C"], description: "Copy result to clipboard" },
+      { keys: [modKey, "A"], description: "Select all text" },
     ],
   },
   {

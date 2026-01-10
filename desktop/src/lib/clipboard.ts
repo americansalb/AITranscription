@@ -10,6 +10,10 @@
  * This is the most reliable cross-platform approach for universal dictation.
  */
 
+// Detect if running on macOS
+const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const pasteShortcut = isMac ? "Cmd+V" : "Ctrl+V";
+
 // Dynamic import for Tauri clipboard plugin
 let tauriClipboard: typeof import("@tauri-apps/plugin-clipboard-manager") | null = null;
 
@@ -241,7 +245,7 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
       return {
         success: true,
         method: "clipboard",
-        message: "Copied to clipboard. Press Ctrl+V to paste.",
+        message: `Copied to clipboard. Press ${pasteShortcut} to paste.`,
       };
     }
   }
@@ -249,6 +253,6 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
   return {
     success: true,
     method: "clipboard",
-    message: "Copied to clipboard. Press Ctrl+V to paste.",
+    message: `Copied to clipboard. Press ${pasteShortcut} to paste.`,
   };
 }
