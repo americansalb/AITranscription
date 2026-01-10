@@ -16,7 +16,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.services import polish_service, transcription_service
-from app.services.tts import tts_service
+from app.services import elevenlabs_tts
 
 router = APIRouter()
 
@@ -219,10 +219,10 @@ async def text_to_speech(
     try:
         from fastapi.responses import Response
 
-        audio_bytes = await tts_service.synthesize(text)
+        audio_bytes = await elevenlabs_tts.synthesize(text)
 
         if not audio_bytes:
-            raise HTTPException(status_code=500, detail="TTS generation failed")
+            raise HTTPException(status_code=500, detail="ElevenLabs TTS generation failed")
 
         return Response(
             content=audio_bytes,

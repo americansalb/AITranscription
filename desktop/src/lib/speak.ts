@@ -30,23 +30,19 @@ async function playNext(): Promise<void> {
 
   try {
     const token = getAuthToken();
-    if (!token) {
-      console.warn("[Speak] No auth token, falling back to browser TTS");
-      fallbackSpeak(text);
-      isPlaying = false;
-      playNext();
-      return;
-    }
 
     // Call the Scribe TTS endpoint
     const formData = new FormData();
     formData.append("text", text);
 
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const response = await fetch(`${API_URL}/api/v1/tts`, {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-      },
+      headers,
       body: formData,
     });
 

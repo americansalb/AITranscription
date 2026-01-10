@@ -245,9 +245,13 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 continue;
             }
 
-            // Emit event to frontend
-            if let Err(e) = app_handle.emit("speak", &text) {
-                log_error(&format!("Failed to emit speak event: {}", e));
+            // Emit event to frontend - emit to main window specifically
+            if let Some(window) = app_handle.get_webview_window("main") {
+                if let Err(e) = window.emit("speak", &text) {
+                    log_error(&format!("Failed to emit speak event to window: {}", e));
+                }
+            } else {
+                log_error("Main window not found for speak event");
             }
 
             // Respond with success
