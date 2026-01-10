@@ -6,9 +6,6 @@
 const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const API_BASE_URL = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
-// Debug: log the API URL being used
-console.log("API URL configured:", API_BASE_URL);
-
 export interface TranscribeResponse {
   raw_text: string;
   duration: number | null;
@@ -48,9 +45,163 @@ export interface UserResponse {
   id: number;
   email: string;
   full_name: string | null;
-  tier: "access" | "standard" | "enterprise";
+  tier: "access" | "standard" | "enterprise" | "developer";
   is_active: boolean;
   accessibility_verified: boolean;
+}
+
+export interface UserStatsResponse {
+  total_transcriptions: number;
+  total_words: number;
+  total_audio_seconds: number;
+  transcriptions_today: number;
+  words_today: number;
+  average_words_per_transcription: number;
+  average_words_per_minute: number;
+}
+
+export interface ContextStats {
+  context: string;
+  count: number;
+  words: number;
+  percentage: number;
+}
+
+export interface DailyStats {
+  date: string;
+  transcriptions: number;
+  words: number;
+}
+
+export interface HourlyStats {
+  hour: number;
+  transcriptions: number;
+  words: number;
+}
+
+export interface DayOfWeekStats {
+  day: string;
+  day_index: number;
+  transcriptions: number;
+  words: number;
+  percentage: number;
+}
+
+export interface MonthlyStats {
+  month: string;
+  month_label: string;
+  transcriptions: number;
+  words: number;
+  audio_minutes: number;
+}
+
+export interface FormalityStats {
+  formality: string;
+  count: number;
+  words: number;
+  percentage: number;
+}
+
+export interface WordLengthDistribution {
+  range_label: string;
+  min_words: number;
+  max_words: number;
+  count: number;
+  percentage: number;
+}
+
+export interface Achievement {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  earned: boolean;
+  earned_at?: string | null;
+  progress: number;
+  target?: number | null;
+  current?: number | null;
+}
+
+export interface GrowthMetrics {
+  words_wow_change: number;
+  words_mom_change: number;
+  transcriptions_wow_change: number;
+  transcriptions_mom_change: number;
+  last_week_words: number;
+  prev_week_words: number;
+  last_month_words: number;
+  prev_month_words: number;
+}
+
+export interface ProductivityInsights {
+  peak_hour: number;
+  peak_hour_label: string;
+  peak_day: string;
+  avg_session_words: number;
+  avg_session_duration_seconds: number;
+  busiest_week_ever: string | null;
+  busiest_week_words: number;
+  efficiency_score: number;
+}
+
+export interface DetailedStatsResponse {
+  // Totals
+  total_transcriptions: number;
+  total_words: number;
+  total_audio_seconds: number;
+  total_characters: number;
+
+  // Time-based
+  transcriptions_today: number;
+  words_today: number;
+  transcriptions_this_week: number;
+  words_this_week: number;
+  transcriptions_this_month: number;
+  words_this_month: number;
+
+  // Averages
+  average_words_per_transcription: number;
+  average_words_per_minute: number;
+  average_transcriptions_per_day: number;
+  average_audio_duration_seconds: number;
+
+  // Time saved
+  estimated_time_saved_minutes: number;
+
+  // Context breakdown
+  context_breakdown: ContextStats[];
+  formality_breakdown: FormalityStats[];
+
+  // Daily activity (last 7 days)
+  daily_activity: DailyStats[];
+  hourly_activity: HourlyStats[];
+  day_of_week_breakdown: DayOfWeekStats[];
+  monthly_trends: MonthlyStats[];
+  word_length_distribution: WordLengthDistribution[];
+
+  // Streaks
+  current_streak_days: number;
+  longest_streak_days: number;
+
+  // Records
+  most_productive_day: string | null;
+  most_productive_day_words: number;
+  longest_transcription_words: number;
+  shortest_transcription_words: number;
+  fastest_wpm: number;
+  slowest_wpm: number;
+
+  // Growth and productivity
+  growth: GrowthMetrics;
+  productivity: ProductivityInsights;
+
+  // Achievements
+  achievements: Achievement[];
+
+  // Member info
+  member_since: string;
+  days_as_member: number;
+  total_active_days: number;
 }
 
 export class ApiError extends Error {
@@ -85,6 +236,25 @@ export async function checkHealth(): Promise<HealthResponse> {
 }
 
 /**
+ * Get filename with correct extension based on audio MIME type
+ */
+function getAudioFilename(blob: Blob): string {
+  const mimeType = blob.type || "audio/webm";
+  if (mimeType.includes("mp4") || mimeType.includes("m4a")) return "recording.mp4";
+  if (mimeType.includes("ogg")) return "recording.ogg";
+  if (mimeType.includes("wav")) return "recording.wav";
+  return "recording.webm";
+}
+
+// Available Whisper models
+export type WhisperModel = "whisper-large-v3" | "whisper-large-v3-turbo";
+
+export const WHISPER_MODELS: { value: WhisperModel; label: string; description: string }[] = [
+  { value: "whisper-large-v3-turbo", label: "Turbo", description: "Faster, cost-effective" },
+  { value: "whisper-large-v3", label: "Large V3", description: "Higher accuracy" },
+];
+
+/**
  * Transcribe audio and polish the result
  */
 export async function transcribeAndPolish(
@@ -93,10 +263,14 @@ export async function transcribeAndPolish(
     language?: string;
     context?: string;
     formality?: "casual" | "neutral" | "formal";
+    model?: WhisperModel;
   } = {}
 ): Promise<TranscribeAndPolishResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (options.language) {
     formData.append("language", options.language);
@@ -106,6 +280,9 @@ export async function transcribeAndPolish(
   }
   if (options.formality) {
     formData.append("formality", options.formality);
+  }
+  if (options.model) {
+    formData.append("model", options.model);
   }
 
   const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
@@ -124,8 +301,11 @@ export async function transcribe(
   audioBlob: Blob,
   language?: string
 ): Promise<TranscribeResponse> {
+  // Use correct filename based on actual audio format
+  const filename = getAudioFilename(audioBlob);
+
   const formData = new FormData();
-  formData.append("audio", audioBlob, "recording.webm");
+  formData.append("audio", audioBlob, filename);
 
   if (language) {
     formData.append("language", language);
@@ -133,6 +313,7 @@ export async function transcribe(
 
   const response = await fetch(`${API_BASE_URL}/api/v1/transcribe`, {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   });
 
@@ -254,17 +435,38 @@ export function isLoggedIn(): boolean {
   return getAuthToken() !== null;
 }
 
-// Stats and Transcript History types
-export interface TranscriptItem {
-  id: number;
-  raw_text: string;
-  polished_text: string;
-  word_count: number;
-  audio_duration_seconds: number;
-  words_per_minute: number;
-  context: string | null;
-  created_at: string;
+/**
+ * Get the current user's statistics (basic)
+ */
+export async function getBasicUserStats(): Promise<UserStatsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<UserStatsResponse>(response);
 }
+
+/**
+ * Get detailed statistics with insights
+ */
+export async function getDetailedStats(): Promise<DetailedStatsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats/detailed`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<DetailedStatsResponse>(response);
+}
+
+/**
+ * Get the API base URL
+ */
+export function getApiBaseUrl(): string {
+  return API_BASE_URL;
+}
+
+// ============================================
+// User Stats Types (extended version for StatsPanel)
+// ============================================
 
 export interface UserStats {
   total_transcriptions: number;
@@ -274,101 +476,113 @@ export interface UserStats {
   words_today: number;
   average_words_per_transcription: number;
   average_words_per_minute: number;
-  // Time saved calculation
-  typing_wpm: number;
   time_saved_seconds: number;
   time_saved_today_seconds: number;
+  typing_wpm: number;
 }
 
 /**
- * Get current user's statistics
+ * Get the current user's statistics with time saved calculations
  */
 export async function getUserStats(): Promise<UserStats> {
   const response = await fetch(`${API_BASE_URL}/api/v1/auth/stats`, {
     headers: getAuthHeaders(),
   });
 
-  return handleResponse<UserStats>(response);
+  const data = await handleResponse<UserStatsResponse>(response);
+
+  // Convert to UserStats with calculated fields
+  return {
+    total_transcriptions: data.total_transcriptions,
+    total_words: data.total_words,
+    total_audio_seconds: data.total_audio_seconds,
+    transcriptions_today: data.transcriptions_today,
+    words_today: data.words_today,
+    average_words_per_transcription: data.average_words_per_transcription,
+    average_words_per_minute: data.average_words_per_minute,
+    time_saved_seconds: Math.max(0, (data.total_words / 40) * 60 - data.total_audio_seconds),
+    time_saved_today_seconds: Math.max(0, (data.words_today / 40) * 60),
+    typing_wpm: 40,
+  };
 }
 
-/**
- * Get current user's transcript history
- */
-export async function getTranscriptHistory(
-  skip = 0,
-  limit = 50
-): Promise<TranscriptItem[]> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/v1/auth/transcripts?skip=${skip}&limit=${limit}`,
-    {
-      headers: getAuthHeaders(),
-    }
-  );
-
-  return handleResponse<TranscriptItem[]>(response);
+export interface TranscriptItem {
+  id: number;
+  raw_text: string;
+  polished_text: string;
+  word_count: number;
+  audio_duration_seconds: number | null;
+  words_per_minute: number;
+  context: string | null;
+  formality: string | null;
+  created_at: string;
 }
 
-// Achievement types
-export interface Achievement {
+export interface AchievementItem {
   id: string;
   name: string;
   description: string;
   icon: string;
-  category: string;
   unlocked: boolean;
-  progress: number; // 0.0 to 1.0
-  current_value: number;
-  threshold: number;
   unlocked_at: string | null;
+  progress: number;
+  category: string;
+  threshold: number;
+  current_value: number;
 }
 
 export interface AchievementsResponse {
-  achievements: Achievement[];
-  total_unlocked: number;
+  achievements: AchievementItem[];
   total_achievements: number;
+  total_unlocked: number;
 }
 
 /**
- * Get current user's achievements (based on real usage data)
+ * Get transcript history
  */
-export async function getUserAchievements(): Promise<AchievementsResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/achievements`, {
+export async function getTranscriptHistory(offset: number = 0, limit: number = 50): Promise<TranscriptItem[]> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/transcripts?skip=${offset}&limit=${limit}`, {
     headers: getAuthHeaders(),
   });
 
-  return handleResponse<AchievementsResponse>(response);
+  return handleResponse<TranscriptItem[]>(response);
 }
 
 /**
- * Update the user's typing WPM for time saved calculations
+ * Get user achievements
+ * Note: Backend endpoint not yet implemented, returns empty achievements
  */
-export async function updateTypingWpm(typingWpm: number): Promise<{ typing_wpm: number; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/auth/typing-wpm`, {
-    method: "PATCH",
-    headers: {
-      ...getAuthHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ typing_wpm: typingWpm }),
-  });
+export async function getUserAchievements(): Promise<AchievementsResponse> {
+  // TODO: Implement backend endpoint
+  return {
+    achievements: [],
+    total_achievements: 0,
+    total_unlocked: 0,
+  };
+}
 
-  return handleResponse<{ typing_wpm: number; message: string }>(response);
+/**
+ * Update user's typing WPM for time saved calculation
+ * Note: Backend endpoint not yet implemented
+ */
+export async function updateTypingWpm(wpm: number): Promise<void> {
+  // TODO: Implement backend endpoint
+  console.log("Typing WPM update not yet implemented:", wpm);
 }
 
 // ============================================
-// Learning System API
+// Learning System Types and Functions
 // ============================================
 
 export interface LearningStats {
   total_corrections: number;
-  unique_types: number;
   total_applications: number;
-  corrections_by_type: Record<string, number>;
   audio_samples: number;
   audio_duration_seconds: number;
-  ready_for_whisper_training: boolean;
   correction_model_version: string | null;
   whisper_model_version: string | null;
+  corrections_by_type: Record<string, number>;
+  ready_for_whisper_training: boolean;
 }
 
 export interface Correction {
@@ -377,7 +591,7 @@ export interface Correction {
   corrected_text: string;
   correction_type: string | null;
   correction_count: number;
-  created_at: string | null;
+  created_at: string;
 }
 
 export interface CorrectionRule {
@@ -387,31 +601,24 @@ export interface CorrectionRule {
   is_regex: boolean;
   priority: number;
   hit_count: number;
+  created_at: string;
 }
 
 export interface FeedbackResponse {
   success: boolean;
-  correction_id: number | null;
   message: string;
+  correction_id?: number;
 }
 
-export interface TrainModelResponse {
+export interface TrainingResponse {
   success: boolean;
   message: string;
-  version: number | null;
-  training_loss: number | null;
-  training_samples: number | null;
-  epochs_trained: number | null;
 }
 
 /**
- * Submit a correction to improve the learning system
+ * Submit learning feedback when user edits a transcription
  */
-export async function submitFeedback(
-  originalText: string,
-  correctedText: string,
-  audioSampleId?: number
-): Promise<FeedbackResponse> {
+export async function submitFeedback(originalText: string, correctedText: string): Promise<FeedbackResponse> {
   const response = await fetch(`${API_BASE_URL}/api/v1/learning/feedback`, {
     method: "POST",
     headers: {
@@ -421,7 +628,6 @@ export async function submitFeedback(
     body: JSON.stringify({
       original_text: originalText,
       corrected_text: correctedText,
-      audio_sample_id: audioSampleId,
     }),
   });
 
@@ -429,7 +635,7 @@ export async function submitFeedback(
 }
 
 /**
- * Get learning statistics for the current user
+ * Get learning statistics
  */
 export async function getLearningStats(): Promise<LearningStats> {
   const response = await fetch(`${API_BASE_URL}/api/v1/learning/stats`, {
@@ -440,37 +646,49 @@ export async function getLearningStats(): Promise<LearningStats> {
 }
 
 /**
- * Get list of learned corrections
+ * Get user's corrections
  */
-export async function getCorrections(limit = 50): Promise<{ corrections: Correction[]; total: number }> {
+export async function getCorrections(limit: number = 50): Promise<{ corrections: Correction[] }> {
   const response = await fetch(`${API_BASE_URL}/api/v1/learning/corrections?limit=${limit}`, {
     headers: getAuthHeaders(),
   });
 
-  return handleResponse<{ corrections: Correction[]; total: number }>(response);
+  return handleResponse<{ corrections: Correction[] }>(response);
 }
 
 /**
- * Delete a learned correction
+ * Get user's correction rules
  */
-export async function deleteCorrection(correctionId: number): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/learning/corrections/${correctionId}`, {
-    method: "DELETE",
-    headers: getAuthHeaders(),
-  });
-
-  return handleResponse<{ success: boolean; message: string }>(response);
-}
-
-/**
- * Get list of correction rules
- */
-export async function getCorrectionRules(): Promise<{ rules: CorrectionRule[]; total: number }> {
+export async function getCorrectionRules(): Promise<{ rules: CorrectionRule[] }> {
   const response = await fetch(`${API_BASE_URL}/api/v1/learning/rules`, {
     headers: getAuthHeaders(),
   });
 
-  return handleResponse<{ rules: CorrectionRule[]; total: number }>(response);
+  return handleResponse<{ rules: CorrectionRule[] }>(response);
+}
+
+/**
+ * Delete a correction
+ */
+export async function deleteCorrection(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/learning/corrections/${id}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
+
+  await handleResponse<{ success: boolean }>(response);
+}
+
+/**
+ * Delete a correction rule
+ */
+export async function deleteCorrectionRule(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/learning/rules/${id}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
+
+  await handleResponse<{ success: boolean }>(response);
 }
 
 /**
@@ -479,8 +697,8 @@ export async function getCorrectionRules(): Promise<{ rules: CorrectionRule[]; t
 export async function addCorrectionRule(
   pattern: string,
   replacement: string,
-  isRegex = false,
-  priority = 0
+  isRegex: boolean,
+  priority: number
 ): Promise<CorrectionRule> {
   const response = await fetch(`${API_BASE_URL}/api/v1/learning/rules`, {
     method: "POST",
@@ -500,95 +718,25 @@ export async function addCorrectionRule(
 }
 
 /**
- * Delete a correction rule
+ * Train the correction model
  */
-export async function deleteCorrectionRule(ruleId: number): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/learning/rules/${ruleId}`, {
-    method: "DELETE",
-    headers: getAuthHeaders(),
-  });
-
-  return handleResponse<{ success: boolean; message: string }>(response);
-}
-
-/**
- * Train the correction neural network
- */
-export async function trainCorrectionModel(
-  epochs = 10,
-  batchSize = 16,
-  learningRate = 0.0001
-): Promise<TrainModelResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/learning/train`, {
-    method: "POST",
-    headers: {
-      ...getAuthHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      epochs,
-      batch_size: batchSize,
-      learning_rate: learningRate,
-    }),
-  });
-
-  return handleResponse<TrainModelResponse>(response);
-}
-
-/**
- * Train the Whisper model with LoRA
- */
-export async function trainWhisperModel(
-  epochs = 3,
-  batchSize = 4,
-  learningRate = 0.0001
-): Promise<TrainModelResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/v1/learning/train-whisper`, {
-    method: "POST",
-    headers: {
-      ...getAuthHeaders(),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      epochs,
-      batch_size: batchSize,
-      learning_rate: learningRate,
-    }),
-  });
-
-  return handleResponse<TrainModelResponse>(response);
-}
-
-/**
- * Use the hybrid correction system to correct text
- */
-export async function correctTextHybrid(
-  text: string,
-  context?: string,
-  useLlm = true
-): Promise<{
-  original: string;
-  corrected: string;
-  changed: boolean;
-  confidence: number;
-  source: string;
-  corrections_applied: number;
-}> {
-  const params = new URLSearchParams({ text });
-  if (context) params.append("context", context);
-  params.append("use_llm", useLlm.toString());
-
-  const response = await fetch(`${API_BASE_URL}/api/v1/learning/correct?${params}`, {
+export async function trainCorrectionModel(): Promise<TrainingResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/learning/train/corrections`, {
     method: "POST",
     headers: getAuthHeaders(),
   });
 
-  return handleResponse(response);
+  return handleResponse<TrainingResponse>(response);
 }
 
 /**
- * Get the API base URL (for components that need direct access)
+ * Train the Whisper model
  */
-export function getApiBaseUrl(): string {
-  return API_BASE_URL;
+export async function trainWhisperModel(): Promise<TrainingResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/learning/train/whisper`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<TrainingResponse>(response);
 }

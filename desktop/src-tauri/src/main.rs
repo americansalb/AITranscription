@@ -294,6 +294,15 @@ fn update_claude_md_content(mode: &str) {
     if let Some(home) = std::env::var_os(home_var) {
         let claude_md_path = std::path::PathBuf::from(&home).join("CLAUDE.md");
 
+        // If disabled, remove the file entirely
+        if mode == "disabled" {
+            match std::fs::remove_file(&claude_md_path) {
+                Ok(_) => log_error("Removed CLAUDE.md (voice disabled)"),
+                Err(_) => {} // File might not exist, that's fine
+            }
+            return;
+        }
+
         let content = if mode == "full" {
             r#"# Claude Code Instructions
 
@@ -415,20 +424,6 @@ fn main() {
                     }
                 })
                 .build(app)?;
-
-            // When X is clicked, minimize to taskbar instead of quitting
-            // This keeps the app accessible in the taskbar like a normal app
-            if let Some(window) = app.get_webview_window("main") {
-                let window_clone = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Prevent the window from closing
-                        api.prevent_close();
-                        // Minimize to taskbar instead
-                        let _ = window_clone.minimize();
-                    }
-                });
-            }
 
             // Open dev tools for debugging (in both dev and release builds)
             #[cfg(debug_assertions)]

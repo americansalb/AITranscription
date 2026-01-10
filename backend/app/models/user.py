@@ -9,11 +9,13 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.dictionary import DictionaryEntry
+    from app.models.transcript import Transcript
 
 
 class SubscriptionTier(str, Enum):
     """User subscription tiers as defined in the product vision."""
 
+    DEVELOPER = "developer"  # Developer/testing tier (free, unlimited)
     ACCESS = "access"  # At-cost tier for verified disabled users (~$2.50/mo)
     STANDARD = "standard"  # General public ($5/mo)
     ENTERPRISE = "enterprise"  # API/Enterprise tier (custom pricing)
@@ -66,6 +68,11 @@ class User(Base):
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
         "DictionaryEntry",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    transcripts: Mapped[list["Transcript"]] = relationship(
+        "Transcript",
         back_populates="user",
         cascade="all, delete-orphan",
     )

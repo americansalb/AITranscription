@@ -1,9 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
+import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
 import { injectText } from "./lib/clipboard";
-import { Settings } from "./components/Settings";
+import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
 import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
@@ -33,6 +33,19 @@ export interface TranscriptEntry {
   formality: string;
   timestamp: number;
   confidence?: number;
+  duration?: number | null;
+}
+
+// Settings expects Date for timestamp - create alias with Date type
+export interface HistoryEntry {
+  id: string;
+  rawText: string;
+  polishedText: string;
+  context: string;
+  formality: string;
+  timestamp: Date;
+  confidence?: number;
+  duration?: number | null;
 }
 
 // Context icons for the dropdown
@@ -154,6 +167,20 @@ function App() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
+  const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
+
+  // Handle hotkey change from Settings
+  const handleHotkeyChange = useCallback((newHotkey: string) => {
+    setCurrentHotkey(newHotkey);
+  }, []);
+
+  // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
+  const formatHotkeyDisplay = useCallback((hotkey: string): string => {
+    const isMac = navigator.platform.includes("Mac");
+    return hotkey
+      .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
+      .replace("Alt", isMac ? "Option" : "Alt");
+  }, []);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -416,9 +443,9 @@ function App() {
     }
   }, [recorder, showToast, soundEnabled]);
 
-  // Register global hotkey for push-to-talk
+  // Register global hotkey for push-to-talk (uses dynamic hotkey from settings)
   const { isRegistered: hotkeyRegistered } = useGlobalHotkey({
-    hotkey: HOTKEYS.PUSH_TO_TALK,
+    hotkey: currentHotkey,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
     enabled: backendReady !== false,
@@ -487,40 +514,29 @@ function App() {
     };
   }, []);
 
-  // Control overlay window visibility and position
+  // Control overlay window visibility
   useEffect(() => {
     const updateOverlay = async () => {
-      const tauri = window.__TAURI__;
-      if (!tauri) return;
+      if (!window.__TAURI__) return;
 
       try {
-        // Tauri 2.0: getByLabel is async and in webviewWindow namespace
-        const overlayWindow = tauri.webviewWindow?.WebviewWindow?.getByLabel
-          ? await tauri.webviewWindow.WebviewWindow.getByLabel("overlay")
-          : null;
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { emit } = await import("@tauri-apps/api/event");
 
         const isActive = recorder.isRecording || status === "processing";
 
-        if (overlayWindow) {
-          if (isActive) {
-            // Position at bottom center of screen
-            const monitor = await tauri.window.currentMonitor();
-            if (monitor) {
-              const x = Math.round((monitor.size.width - 200) / 2);
-              const y = monitor.size.height - 80;
-              await overlayWindow.setPosition({ type: "Physical", x, y });
-            }
-            await overlayWindow.show();
-          } else {
-            await overlayWindow.hide();
-          }
+        // Show or hide the floating overlay window
+        if (isActive) {
+          await invoke("show_recording_overlay");
+        } else {
+          await invoke("hide_recording_overlay");
         }
 
-        // Send state to overlay
-        await tauri.event.emit("overlay-update", {
+        // Send state to overlay window
+        await emit("overlay-update", {
           isRecording: recorder.isRecording,
           isProcessing: status === "processing",
-          audioLevel: recorder.audioLevel,
+          duration: recorder.duration || 0,
         });
       } catch (err) {
         console.error("Overlay update failed:", err);
@@ -528,7 +544,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.audioLevel, status]);
+  }, [recorder.isRecording, recorder.duration, status]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
@@ -913,7 +929,7 @@ function App() {
 
         <p className="record-hint">
           Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">Ctrl+Shift+S</span> for push-to-talk
+          <span className="hotkey">{formatHotkeyDisplay(currentHotkey)}</span> for push-to-talk
           <span className={`hotkey-status ${hotkeyRegistered ? "active" : "inactive"}`}>
             {hotkeyRegistered ? "Ready" : "Restart app to enable"}
           </span>
@@ -1118,7 +1134,7 @@ function App() {
                 <div className="welcome-icon">🎙️</div>
                 <div className="welcome-title">Ready to transcribe</div>
                 <div className="welcome-hint">
-                  Click the record button or hold <span className="hotkey">Ctrl+Shift+S</span> to start speaking.
+                  Click the record button or hold <span className="hotkey">{formatHotkeyDisplay(currentHotkey)}</span> to start speaking.
                   <br />Your words will be transcribed and polished automatically.
                 </div>
               </div>
@@ -1127,7 +1143,11 @@ function App() {
         )}
       </div>
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showSettings && <Settings
+        onClose={() => setShowSettings(false)}
+        onHotkeyChange={handleHotkeyChange}
+        refreshTrigger={transcriptionCount}
+      />}
       {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
       {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showLearning && (

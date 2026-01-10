@@ -2,6 +2,9 @@ import { useState, useCallback } from "react";
 import { copyToClipboard } from "../lib/clipboard";
 import type { TranscriptEntry } from "../App";
 
+// Detect if running on macOS
+const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+
 interface HistoryPanelProps {
   history: TranscriptEntry[];
   onClear?: () => void;
@@ -119,7 +122,7 @@ export function HistoryPanel({ history, onClear }: HistoryPanelProps) {
       </div>
 
       <div className="main-history-hint">
-        Click to copy • Shift+click to select range • Ctrl+click to toggle
+        Click to copy • Shift+click to select range • ${isMac ? "Cmd" : "Ctrl"}+click to toggle
       </div>
 
       <div className="main-history-list">
