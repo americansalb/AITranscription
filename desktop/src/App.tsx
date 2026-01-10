@@ -1,9 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { useGlobalHotkey, HOTKEYS } from "./hooks/useGlobalHotkey";
+import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
 import { injectText } from "./lib/clipboard";
-import { Settings } from "./components/Settings";
+import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
 import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
@@ -153,6 +153,12 @@ function App() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
+  const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
+
+  // Handle hotkey change from Settings
+  const handleHotkeyChange = useCallback((newHotkey: string) => {
+    setCurrentHotkey(newHotkey);
+  }, []);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -415,9 +421,9 @@ function App() {
     }
   }, [recorder, showToast, soundEnabled]);
 
-  // Register global hotkey for push-to-talk
+  // Register global hotkey for push-to-talk (uses dynamic hotkey from settings)
   const { isRegistered: hotkeyRegistered } = useGlobalHotkey({
-    hotkey: HOTKEYS.PUSH_TO_TALK,
+    hotkey: currentHotkey,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
     enabled: backendReady !== false,
@@ -1106,7 +1112,7 @@ function App() {
         )}
       </div>
 
-      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
+      {showSettings && <Settings onClose={() => setShowSettings(false)} onHotkeyChange={handleHotkeyChange} />}
       {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
       {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showLearning && (
