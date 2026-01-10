@@ -100,22 +100,21 @@ class PolishService:
     def _validate_output(self, raw_text: str, polished_text: str) -> str:
         """
         Validate that polished output is actually a cleaned version of input.
-        Returns raw_text if validation fails (LLM went off-script).
+        If more than 50% different, LLM changed too much - return raw text.
         """
         if not polished_text.strip():
             return raw_text
 
-        # Filler words that are expected to be removed
-        fillers = {"um", "uh", "er", "ah", "hmm", "like", "you know", "i mean"}
+        # Filler words that are expected to be removed (don't count these)
+        fillers = {"um", "uh", "er", "ah", "hmm", "uh huh", "mm", "mhm"}
 
-        def get_words(text: str) -> set:
+        def get_words(text: str) -> list:
             """Extract meaningful words from text."""
-            words = set()
+            words = []
             for word in text.lower().split():
-                # Remove punctuation
                 clean = "".join(c for c in word if c.isalnum())
                 if clean and clean not in fillers and len(clean) > 1:
-                    words.add(clean)
+                    words.append(clean)
             return words
 
         raw_words = get_words(raw_text)
@@ -125,52 +124,22 @@ class PolishService:
         if len(raw_words) < 3:
             return polished_text
 
-        # Check 1: Length ratio - output shouldn't be way longer than input
-        # (would indicate commentary/answering)
-        len_ratio = len(polished_text) / len(raw_text) if raw_text else 1
-        if len_ratio > 2.0:
+        # Calculate similarity: what % of raw words appear in polished output
+        raw_set = set(raw_words)
+        polished_set = set(polished_words)
+
+        if not raw_set:
+            return polished_text
+
+        # Words from input that made it to output
+        preserved = len(raw_set & polished_set) / len(raw_set)
+
+        # If less than 50% of original words are preserved, LLM changed too much
+        if preserved < 0.5:
             logger.warning(
-                f"Output too long ({len_ratio:.1f}x input), returning raw text"
+                f"Only {preserved:.0%} of words preserved, returning raw text"
             )
             return raw_text
-
-        # Check 2: Word overlap - most input words should appear in output
-        # (would catch if LLM replaced content or answered a question)
-        if raw_words:
-            overlap = len(raw_words & polished_words) / len(raw_words)
-            if overlap < 0.5:
-                logger.warning(
-                    f"Low word overlap ({overlap:.0%}), returning raw text"
-                )
-                return raw_text
-
-        # Check 3: Phrases that indicate LLM went off-script
-        # Only flag if phrase is in OUTPUT but NOT in INPUT (LLM added it)
-        llm_added_phrases = [
-            "i do not feel comfortable",
-            "i cannot process",
-            "i cannot reproduce",
-            "i won't process",
-            "i'm not able to process",
-            "i'm unable to",
-            "the cleaned text is",
-            "here is the cleaned",
-            "here's the cleaned",
-            "offensive language",
-            "inappropriate content",
-            "harmful content",
-            "i apologize",
-            "i'm sorry, but",
-        ]
-
-        lower_polished = polished_text.lower()
-        lower_raw = raw_text.lower()
-
-        for phrase in llm_added_phrases:
-            # Only flag if LLM added this phrase (not in original)
-            if phrase in lower_polished and phrase not in lower_raw:
-                logger.warning(f"LLM added phrase '{phrase}', returning raw text")
-                return raw_text
 
         return polished_text
 
