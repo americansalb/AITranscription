@@ -9,6 +9,7 @@ from app.models.base import Base
 
 if TYPE_CHECKING:
     from app.models.dictionary import DictionaryEntry
+    from app.models.transcript import Transcript
 
 
 class SubscriptionTier(str, Enum):
@@ -67,6 +68,11 @@ class User(Base):
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(
         "DictionaryEntry",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    transcripts: Mapped[list["Transcript"]] = relationship(
+        "Transcript",
         back_populates="user",
         cascade="all, delete-orphan",
     )
