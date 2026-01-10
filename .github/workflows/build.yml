@@ -134,6 +134,16 @@ jobs:
         working-directory: desktop
         run: npm run tauri build
 
+      # Debug: List all generated bundle files
+      - name: List generated bundle files
+        if: always()
+        run: |
+          echo "=== Bundle directory structure ==="
+          ls -R desktop/src-tauri/target/release/bundle/ || echo "Bundle directory not found"
+          echo ""
+          echo "=== Searching for installer files ==="
+          find desktop/src-tauri/target/release -type f \( -name "*.dmg" -o -name "*.app" -o -name "*.exe" -o -name "*.deb" -o -name "*.AppImage" \) -ls || echo "No installer files found"
+
       - name: Upload macOS artifact
         if: matrix.platform == 'macos-latest'
         uses: actions/upload-artifact@v4
@@ -142,6 +152,7 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/dmg/*.dmg
             desktop/src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: warn
 
       - name: Upload Windows artifact
         if: matrix.platform == 'windows-latest'
@@ -149,6 +160,7 @@ jobs:
         with:
           name: Scribe-Windows
           path: desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
 
       - name: Upload Linux artifact
         if: matrix.platform == 'ubuntu-22.04'
@@ -158,6 +170,7 @@ jobs:
           path: |
             desktop/src-tauri/target/release/bundle/deb/*.deb
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: warn
 
   release:
     needs: build
