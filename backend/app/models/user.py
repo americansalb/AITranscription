@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 class SubscriptionTier(str, Enum):
     """User subscription tiers as defined in the product vision."""
 
+    DEVELOPER = "developer"  # Developer/testing tier (free, unlimited)
     ACCESS = "access"  # At-cost tier for verified disabled users (~$2.50/mo)
     STANDARD = "standard"  # General public ($5/mo)
     ENTERPRISE = "enterprise"  # API/Enterprise tier (custom pricing)
