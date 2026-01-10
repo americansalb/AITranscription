@@ -100,11 +100,55 @@ class PolishService:
     def _validate_output(self, raw_text: str, polished_text: str) -> str:
         """
         Validate that polished output is actually a cleaned version of input.
-        If more than 50% different, LLM changed too much - return raw text.
+        Detects and removes preambles, refusals, or excessive changes.
         """
         if not polished_text.strip():
             return raw_text
 
+        original_polished = polished_text
+
+        # 1. DETECT AND REMOVE PREAMBLES
+        # Common preamble phrases that Claude adds
+        preamble_phrases = [
+            "here's the cleaned text",
+            "here is the cleaned text",
+            "here's the transcription",
+            "here is the transcription",
+            "i've cleaned up the text",
+            "i have cleaned up the text",
+            "the cleaned version is",
+            "cleaned text:",
+            "transcription:",
+        ]
+
+        # Check first line for preambles
+        lines = polished_text.strip().split('\n')
+        if lines:
+            first_line = lines[0].lower().strip()
+            # If first line is a preamble, remove it
+            for phrase in preamble_phrases:
+                if phrase in first_line:
+                    logger.warning(f"Detected preamble: '{lines[0]}' - removing")
+                    polished_text = '\n'.join(lines[1:]).strip()
+                    break
+
+        # 2. DETECT REFUSALS
+        refusal_phrases = ["i cannot", "i can't", "i won't", "i'm unable", "as an ai"]
+        polished_lower = polished_text.lower()
+        for phrase in refusal_phrases:
+            if phrase in polished_lower:
+                logger.warning(f"Detected refusal phrase: '{phrase}' - returning raw text")
+                return raw_text
+
+        # 3. CHECK LENGTH EXPLOSION (indicates added commentary)
+        # Polished should not be >50% longer than raw (accounting for removed fillers)
+        if len(polished_text) > len(raw_text) * 1.5:
+            logger.warning(
+                f"Output too long ({len(polished_text)} vs {len(raw_text)} chars) - likely added commentary"
+            )
+            return raw_text
+
+        # 4. WORD PRESERVATION CHECK
         # Filler words that are expected to be removed (don't count these)
         fillers = {"um", "uh", "er", "ah", "hmm", "uh huh", "mm", "mhm"}
 
@@ -120,7 +164,7 @@ class PolishService:
         raw_words = get_words(raw_text)
         polished_words = get_words(polished_text)
 
-        # If input is very short, skip validation
+        # If input is very short, return after preamble removal
         if len(raw_words) < 3:
             return polished_text
 
@@ -134,12 +178,16 @@ class PolishService:
         # Words from input that made it to output
         preserved = len(raw_set & polished_set) / len(raw_set)
 
-        # If less than 50% of original words are preserved, LLM changed too much
-        if preserved < 0.5:
+        # STRICTER: If less than 70% of original words are preserved, LLM changed too much
+        if preserved < 0.7:
             logger.warning(
-                f"Only {preserved:.0%} of words preserved, returning raw text"
+                f"Only {preserved:.0%} of words preserved (need 70%), returning raw text"
             )
             return raw_text
+
+        # If we removed a preamble, log success
+        if polished_text != original_polished:
+            logger.info(f"Successfully removed preamble, {preserved:.0%} words preserved")
 
         return polished_text
 
