@@ -1,3 +1,4 @@
+import gc
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -75,15 +76,20 @@ async def transcribe_audio(
     try:
         audio_data = await audio.read()
 
-        # Check file size (max 25MB - Groq's limit)
-        if len(audio_data) > 25 * 1024 * 1024:
-            raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
+        # Check file size (max 10MB to reduce memory pressure on free tier)
+        # Groq supports 25MB but we limit to 10MB for memory efficiency
+        if len(audio_data) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 10MB.")
 
         result = await transcription_service.transcribe(
             audio_data=audio_data,
             filename=audio.filename or "audio.wav",
             language=language,
         )
+
+        # Free audio data memory immediately after transcription
+        del audio_data
+        gc.collect()
 
         return TranscribeResponse(
             raw_text=result["text"],
