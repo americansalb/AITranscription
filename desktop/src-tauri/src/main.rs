@@ -294,6 +294,15 @@ fn update_claude_md_content(mode: &str) {
     if let Some(home) = std::env::var_os(home_var) {
         let claude_md_path = std::path::PathBuf::from(&home).join("CLAUDE.md");
 
+        // If disabled, remove the file entirely
+        if mode == "disabled" {
+            match std::fs::remove_file(&claude_md_path) {
+                Ok(_) => log_error("Removed CLAUDE.md (voice disabled)"),
+                Err(_) => {} // File might not exist, that's fine
+            }
+            return;
+        }
+
         let content = if mode == "full" {
             r#"# Claude Code Instructions
 

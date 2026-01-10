@@ -505,10 +505,22 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
     onNoiseCancellationChange?.(enabled);
   };
 
-  const handleVoiceEnabledChange = (enabled: boolean) => {
+  const handleVoiceEnabledChange = async (enabled: boolean) => {
     setVoiceEnabled(enabled);
     saveVoiceEnabled(enabled);
     onVoiceEnabledChange?.(enabled);
+
+    // Update CLAUDE.md in home directory to enable/disable voice instructions
+    if (window.__TAURI__) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        // When enabled, use "summary" mode (speaks explanations, not code)
+        // When disabled, clear the file so Claude Code doesn't try to speak
+        await invoke("update_claude_md", { mode: enabled ? "summary" : "disabled" });
+      } catch (e) {
+        console.error("Failed to update CLAUDE.md:", e);
+      }
+    }
   };
 
   // Handle keydown for custom hotkey recording
