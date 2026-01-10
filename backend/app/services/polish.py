@@ -120,22 +120,24 @@ class PolishService:
             return {"text": "", "usage": {"input_tokens": 0, "output_tokens": 0}, "corrections_used": 0}
 
         # Retrieve learned corrections if db session and user_id are provided
+        # TEMPORARILY DISABLED: Embedding model load causing OOM on Render
+        # TODO: Re-enable once we optimize memory usage or upgrade server
         learned_corrections = []
-        if db is not None and user_id is not None:
-            try:
-                retriever = CorrectionRetriever(db, user_id)
-                learned_corrections = await retriever.retrieve_relevant_corrections(
-                    raw_text,
-                    top_k=5,
-                    threshold=0.6,
-                )
-                if learned_corrections:
-                    logger.info(
-                        f"Retrieved {len(learned_corrections)} relevant corrections for user {user_id}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to retrieve corrections: {e}")
-                learned_corrections = []
+        # if db is not None and user_id is not None:
+        #     try:
+        #         retriever = CorrectionRetriever(db, user_id)
+        #         learned_corrections = await retriever.retrieve_relevant_corrections(
+        #             raw_text,
+        #             top_k=5,
+        #             threshold=0.6,
+        #         )
+        #         if learned_corrections:
+        #             logger.info(
+        #                 f"Retrieved {len(learned_corrections)} relevant corrections for user {user_id}"
+        #             )
+        #     except Exception as e:
+        #         logger.warning(f"Failed to retrieve corrections: {e}")
+        #         learned_corrections = []
 
         system_prompt = self._build_system_prompt(
             context, custom_words, formality, learned_corrections
