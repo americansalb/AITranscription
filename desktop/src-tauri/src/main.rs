@@ -416,22 +416,21 @@ fn start_recording(
     state: tauri::State<AudioRecorderState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let mut recorder = state.0.lock();
-    recorder.set_app_handle(app);
-    recorder.start()
+    let recorder = state.0.lock();
+    recorder.start(Some(app))
 }
 
 /// Stop recording and return audio data
 #[tauri::command]
 fn stop_recording(state: tauri::State<AudioRecorderState>) -> Result<AudioData, String> {
-    let mut recorder = state.0.lock();
+    let recorder = state.0.lock();
     recorder.stop()
 }
 
 /// Cancel recording without returning data
 #[tauri::command]
 fn cancel_recording(state: tauri::State<AudioRecorderState>) -> Result<(), String> {
-    let mut recorder = state.0.lock();
+    let recorder = state.0.lock();
     recorder.cancel();
     Ok(())
 }
