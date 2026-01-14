@@ -408,7 +408,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
 }
 
 // Global audio recorder state
-struct AudioRecorderState(Mutex<AudioRecorder>);
+struct AudioRecorderState(pub Mutex<AudioRecorder>);
 
 /// Start native audio recording
 #[tauri::command]
