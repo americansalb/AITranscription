@@ -157,15 +157,17 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
     use cpal::{SampleFormat, StreamConfig};
 
     let mut stream: Option<cpal::Stream> = None;
-    let mut samples: Vec<f32> = Vec::new();
     let mut sample_rate: u32 = 44100;
     let mut app_handle: Option<AppHandle> = None;
+    // Shared buffer that persists across commands - accessible by both callback and stop handler
+    let samples_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
 
     loop {
         match command_rx.recv() {
             Ok(AudioCommand::Start(handle)) => {
                 app_handle = handle;
-                samples.clear();
+                // Clear the buffer for new recording
+                samples_buffer.lock().unwrap().clear();
 
                 let host = cpal::default_host();
 
@@ -192,8 +194,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
 
                 println!("[Audio] Starting recording at {} Hz, {} channels", sample_rate, channels);
 
-                // Shared buffer for samples
-                let samples_buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+                // Clone the shared buffer for the audio callback
                 let samples_clone = Arc::clone(&samples_buffer);
                 let app_handle_clone = app_handle.clone();
 
@@ -210,26 +211,34 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                         err_fn,
                         None,
                     ),
-                    SampleFormat::I16 => device.build_input_stream(
-                        &stream_config,
-                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                            let float_data: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                            process_samples(&float_data, channels, &samples_clone, &app_handle_clone);
-                        },
-                        err_fn,
-                        None,
-                    ),
-                    SampleFormat::I32 => device.build_input_stream(
-                        &stream_config,
-                        move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                            let float_data: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
-                            process_samples(&float_data, channels, &samples_clone, &app_handle_clone);
-                        },
-                        err_fn,
-                        None,
-                    ),
+                    SampleFormat::I16 => {
+                        let samples_clone = Arc::clone(&samples_buffer);
+                        let app_handle_clone = app_handle.clone();
+                        device.build_input_stream(
+                            &stream_config,
+                            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                                let float_data: Vec<f32> =
+                                    data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                                process_samples(&float_data, channels, &samples_clone, &app_handle_clone);
+                            },
+                            err_fn,
+                            None,
+                        )
+                    }
+                    SampleFormat::I32 => {
+                        let samples_clone = Arc::clone(&samples_buffer);
+                        let app_handle_clone = app_handle.clone();
+                        device.build_input_stream(
+                            &stream_config,
+                            move |data: &[i32], _: &cpal::InputCallbackInfo| {
+                                let float_data: Vec<f32> =
+                                    data.iter().map(|&s| s as f32 / i32::MAX as f32).collect();
+                                process_samples(&float_data, channels, &samples_clone, &app_handle_clone);
+                            },
+                            err_fn,
+                            None,
+                        )
+                    }
                     _ => {
                         eprintln!("[Audio] Unsupported sample format");
                         *is_recording.lock().unwrap() = false;
@@ -244,11 +253,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                             *is_recording.lock().unwrap() = false;
                             continue;
                         }
-                        // Store reference to samples buffer for later retrieval
-                        samples = Vec::new(); // Will be populated from buffer on stop
                         stream = Some(s);
-                        // Store the buffer reference - we need to keep it accessible
-                        // We'll swap it out when stopping
                         println!("[Audio] Recording started");
                     }
                     Err(e) => {
@@ -256,9 +261,6 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                         *is_recording.lock().unwrap() = false;
                     }
                 }
-
-                // Store samples buffer for retrieval - a bit hacky but works
-                // We'll use a static or thread-local, but for now let's use a different approach
             }
 
             Ok(AudioCommand::Stop(result_tx)) => {
@@ -267,13 +269,11 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     drop(s);
                 }
 
-                // Give a small delay for final samples
+                // Give a small delay for final samples to be processed
                 thread::sleep(std::time::Duration::from_millis(50));
 
-                // Get samples - we need to access the buffer that was written to
-                // This is tricky because the closure owns the Arc
-                // For now, return empty data and fix the architecture
-
+                // Get samples from the shared buffer
+                let samples = samples_buffer.lock().unwrap().clone();
                 let duration_secs = samples.len() as f32 / sample_rate as f32;
 
                 println!("[Audio] Recording stopped: {} samples, {:.2}s", samples.len(), duration_secs);
@@ -289,7 +289,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                 if let Some(s) = stream.take() {
                     drop(s);
                 }
-                samples.clear();
+                samples_buffer.lock().unwrap().clear();
                 app_handle = None;
                 println!("[Audio] Recording cancelled");
             }
