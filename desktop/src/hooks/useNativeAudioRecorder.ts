@@ -65,7 +65,7 @@ export function useNativeAudioRecorder(): UseNativeAudioRecorderReturn {
       if (!("__TAURI__" in window)) return;
 
       try {
-        unlistenRef.current = await listen<AudioLevelEvent>(
+        const unlisten = await listen<AudioLevelEvent>(
           "audio_level",
           (event) => {
             if (mounted) {
@@ -73,6 +73,13 @@ export function useNativeAudioRecorder(): UseNativeAudioRecorderReturn {
             }
           }
         );
+
+        // Only keep listener if still mounted, otherwise cleanup immediately
+        if (mounted) {
+          unlistenRef.current = unlisten;
+        } else {
+          unlisten();
+        }
       } catch (err) {
         console.error("[NativeAudioRecorder] Failed to setup audio level listener:", err);
       }
