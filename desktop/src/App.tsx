@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useAudioRecorder } from "./hooks/useAudioRecorder";
+import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, checkHealth, ApiError } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
@@ -67,7 +67,7 @@ function formatHotkeyDisplay(hotkey: string): string {
 }
 
 function App() {
-  const recorder = useAudioRecorder();
+  const recorder = useUnifiedAudioRecorder();
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [result, setResult] = useState<string>("");
   const [rawText, setRawText] = useState<string>("");

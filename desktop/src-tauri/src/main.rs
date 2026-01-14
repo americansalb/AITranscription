@@ -1,7 +1,11 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
+
+use audio::{AudioData, AudioDevice, AudioRecorder};
 use enigo::{Enigo, Keyboard, Settings};
+use parking_lot::Mutex;
 use std::io::Read;
 use std::thread;
 use std::time::Duration;
@@ -399,6 +403,49 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
     });
 }
 
+// Global audio recorder state
+struct AudioRecorderState(Mutex<AudioRecorder>);
+
+/// Start native audio recording
+#[tauri::command]
+fn start_recording(
+    state: tauri::State<AudioRecorderState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut recorder = state.0.lock();
+    recorder.set_app_handle(app);
+    recorder.start()
+}
+
+/// Stop recording and return audio data
+#[tauri::command]
+fn stop_recording(state: tauri::State<AudioRecorderState>) -> Result<AudioData, String> {
+    let mut recorder = state.0.lock();
+    recorder.stop()
+}
+
+/// Cancel recording without returning data
+#[tauri::command]
+fn cancel_recording(state: tauri::State<AudioRecorderState>) -> Result<(), String> {
+    let mut recorder = state.0.lock();
+    recorder.cancel();
+    Ok(())
+}
+
+/// List available audio input devices
+#[tauri::command]
+fn get_audio_devices(state: tauri::State<AudioRecorderState>) -> Result<Vec<AudioDevice>, String> {
+    let recorder = state.0.lock();
+    recorder.list_devices()
+}
+
+/// Check if currently recording
+#[tauri::command]
+fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, String> {
+    let recorder = state.0.lock();
+    Ok(recorder.is_recording())
+}
+
 /// Update tray icon to show recording state
 #[tauri::command]
 fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
@@ -428,6 +475,7 @@ fn main() {
     log_error("Scribe starting...");
 
     let builder = tauri::Builder::default()
+        .manage(AudioRecorderState(Mutex::new(AudioRecorder::new())))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -514,7 +562,18 @@ fn main() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![simulate_paste, type_text, set_recording_state, show_recording_overlay, hide_recording_overlay]);
+        .invoke_handler(tauri::generate_handler![
+            simulate_paste,
+            type_text,
+            set_recording_state,
+            show_recording_overlay,
+            hide_recording_overlay,
+            start_recording,
+            stop_recording,
+            cancel_recording,
+            get_audio_devices,
+            check_recording
+        ]);
 
     match builder.run(tauri::generate_context!()) {
         Ok(_) => {}
