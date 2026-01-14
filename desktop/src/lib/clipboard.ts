@@ -256,3 +256,58 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
     message: `Copied to clipboard. Press ${pasteShortcut} to paste.`,
   };
 }
+
+/**
+ * Update tray icon to show recording state
+ */
+export async function setTrayRecordingState(recording: boolean): Promise<void> {
+  if (!tauriCore) {
+    await loadTauriCore();
+  }
+
+  if (tauriCore) {
+    try {
+      await tauriCore.invoke("set_recording_state", { recording });
+    } catch (error) {
+      console.error("Failed to set tray recording state:", error);
+    }
+  }
+}
+
+/**
+ * Update the floating overlay window state
+ */
+export interface OverlayState {
+  isRecording: boolean;
+  isProcessing: boolean;
+  duration: number;
+  audioLevel: number;
+}
+
+let tauriEvent: typeof import("@tauri-apps/api/event") | null = null;
+
+async function loadTauriEvent() {
+  try {
+    if (typeof window !== "undefined" && "__TAURI__" in window) {
+      tauriEvent = await import("@tauri-apps/api/event");
+      return true;
+    }
+  } catch {
+    // Not running in Tauri
+  }
+  return false;
+}
+
+export async function updateOverlayState(state: OverlayState): Promise<void> {
+  if (!tauriEvent) {
+    await loadTauriEvent();
+  }
+
+  if (tauriEvent) {
+    try {
+      await tauriEvent.emit("overlay-update", state);
+    } catch (error) {
+      console.error("Failed to update overlay state:", error);
+    }
+  }
+}
