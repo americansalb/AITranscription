@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class SubscriptionTier(str, Enum):
     """User subscription tiers as defined in the product vision."""
 
-    DEVELOPER = "developer"  # Dev team - unlimited usage, no billing
+    DEVELOPER = "developer"  # Developer/testing tier (free, unlimited)
     ACCESS = "access"  # At-cost tier for verified disabled users (~$2.50/mo)
     STANDARD = "standard"  # General public ($5/mo)
     ENTERPRISE = "enterprise"  # API/Enterprise tier (custom pricing)
@@ -31,22 +31,12 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Admin flag
-    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
-
     # Subscription
     tier: Mapped[SubscriptionTier] = mapped_column(
         SQLEnum(SubscriptionTier),
         default=SubscriptionTier.STANDARD,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-    # API rate limiting (0 = unlimited)
-    daily_transcription_limit: Mapped[int] = mapped_column(default=0)
-    daily_transcriptions_used: Mapped[int] = mapped_column(default=0)
-    last_usage_reset: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
 
     # Accessibility verification
     accessibility_verified: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -70,6 +60,10 @@ class User(Base):
     total_polish_tokens: Mapped[int] = mapped_column(default=0)
     total_transcriptions: Mapped[int] = mapped_column(default=0)
     total_words: Mapped[int] = mapped_column(default=0)
+
+    # User settings
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    typing_wpm: Mapped[int] = mapped_column(default=40)
 
     # Relationships
     dictionary_entries: Mapped[list["DictionaryEntry"]] = relationship(

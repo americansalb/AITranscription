@@ -1,9 +1,12 @@
 import { useState, useCallback } from "react";
 import { copyToClipboard } from "../lib/clipboard";
-import type { HistoryEntry } from "../App";
+import type { TranscriptEntry } from "../App";
+
+// Detect if running on macOS
+const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
 
 interface HistoryPanelProps {
-  history: HistoryEntry[];
+  history: TranscriptEntry[];
   onClear?: () => void;
 }
 
@@ -25,7 +28,7 @@ export function HistoryPanel({ history, onClear }: HistoryPanelProps) {
   };
 
   const handleItemClick = useCallback(
-    (entry: HistoryEntry, event: React.MouseEvent) => {
+    (entry: TranscriptEntry, event: React.MouseEvent) => {
       if (event.shiftKey && lastClickedId) {
         // Shift+click: select range
         const lastIndex = history.findIndex((h) => h.id === lastClickedId);
@@ -119,7 +122,7 @@ export function HistoryPanel({ history, onClear }: HistoryPanelProps) {
       </div>
 
       <div className="main-history-hint">
-        Click to copy • Shift+click to select range • Ctrl+click to toggle
+        Click to copy • Shift+click to select range • ${isMac ? "Cmd" : "Ctrl"}+click to toggle
       </div>
 
       <div className="main-history-list">
@@ -133,7 +136,7 @@ export function HistoryPanel({ history, onClear }: HistoryPanelProps) {
               <span className="main-history-text">{entry.polishedText}</span>
             </div>
             <div className="main-history-item-meta">
-              <span className="main-history-time">{formatTime(entry.timestamp)}</span>
+              <span className="main-history-time">{formatTime(new Date(entry.timestamp))}</span>
               <span className="main-history-context">{entry.context}</span>
             </div>
           </div>

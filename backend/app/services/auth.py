@@ -17,17 +17,12 @@ ALGORITHM = "HS256"
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
-    # Truncate to 72 bytes to match how we hash
-    password_bytes = plain_password.encode('utf-8')[:72]
-    return pwd_context.verify(password_bytes.decode('utf-8', errors='ignore'), hashed_password)
+    return pwd_context.verify(plain_password, hashed_password)
 
 
 def hash_password(password: str) -> str:
     """Hash a password for storage."""
-    # bcrypt has a 72-byte limit - truncate to be safe
-    # (UTF-8 chars can be multi-byte, so limit to 72 bytes)
-    password_bytes = password.encode('utf-8')[:72]
-    return pwd_context.hash(password_bytes.decode('utf-8', errors='ignore'))
+    return pwd_context.hash(password)
 
 
 def create_access_token(user_id: int, expires_delta: timedelta | None = None) -> str:

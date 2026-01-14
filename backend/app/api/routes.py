@@ -1,4 +1,7 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+import json
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,13 +16,9 @@ from app.api.schemas import (
 )
 from app.core.config import settings
 from app.core.database import get_db
-from app.models.transcript import Transcript
 from app.models.user import User
 from app.services import polish_service, transcription_service
-from app.services.explanation import explanation_service
-from app.services.tts import tts_service
-from app.services.events import event_manager, VoiceEvent
-from datetime import datetime
+from app.services import elevenlabs_tts
 
 router = APIRouter()
 
@@ -35,33 +34,6 @@ async def health_check():
     )
 
 
-@router.get("/debug/schema")
-async def debug_schema(db: AsyncSession = Depends(get_db)):
-    """Debug endpoint to check database schema."""
-    from sqlalchemy import text
-
-    try:
-        # Check users table columns
-        result = await db.execute(text(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'users' ORDER BY ordinal_position"
-        ))
-        user_columns = [row[0] for row in result.fetchall()]
-
-        # Check if transcripts table exists
-        result = await db.execute(text(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'transcripts')"
-        ))
-        transcripts_exists = result.scalar()
-
-        return {
-            "users_columns": user_columns,
-            "transcripts_table_exists": transcripts_exists,
-            "status": "ok"
-        }
-    except Exception as e:
-        return {"error": str(e), "status": "error"}
-
-
 @router.post(
     "/transcribe",
     response_model=TranscribeResponse,
@@ -70,7 +42,6 @@ async def debug_schema(db: AsyncSession = Depends(get_db)):
 async def transcribe_audio(
     audio: UploadFile = File(..., description="Audio file to transcribe"),
     language: str | None = Form(default=None, description="Optional language code (e.g., 'en')"),
-    model: str | None = Form(default=None, description="Whisper model: 'whisper-large-v3' or 'whisper-large-v3-turbo'"),
 ):
     """
     Transcribe audio using Groq's Whisper API.
@@ -115,14 +86,12 @@ async def transcribe_audio(
             audio_data=audio_data,
             filename=audio.filename or "audio.wav",
             language=language,
-            model=model,
         )
 
         return TranscribeResponse(
             raw_text=result["text"],
             duration=result.get("duration"),
             language=result.get("language"),
-            model_used=result.get("model_used"),
         )
 
     except ValueError as e:
@@ -136,11 +105,16 @@ async def transcribe_audio(
     response_model=PolishResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
-async def polish_text(request: PolishRequest):
+async def polish_text(
+    request: PolishRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
     """
     Polish raw transcription text using Claude Haiku.
 
     Removes filler words, fixes grammar, and formats appropriately for context.
+    If authenticated, uses learned corrections from the user's history.
     """
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -151,6 +125,8 @@ async def polish_text(request: PolishRequest):
             context=request.context,
             custom_words=request.custom_words,
             formality=request.formality,
+            db=db if user else None,
+            user_id=user.id if user else None,
         )
 
         return PolishResponse(
@@ -165,6 +141,55 @@ async def polish_text(request: PolishRequest):
         raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
 
 
+@router.post("/polish-stream")
+async def polish_text_stream(
+    request: PolishRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+):
+    """
+    Stream polished text using Server-Sent Events.
+
+    This endpoint provides progressive polish results as they arrive from Claude.
+    Falls back to batch /polish endpoint if streaming fails.
+
+    Returns SSE stream with events:
+    - correction_info: Number of learned corrections used
+    - chunk: Text chunks as they arrive
+    - done: Final event with usage statistics
+    - error: Error information if streaming fails
+    """
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    async def event_generator():
+        """Generate Server-Sent Events from polish stream."""
+        try:
+            async for event in polish_service.polish_stream(
+                raw_text=request.text,
+                context=request.context,
+                custom_words=request.custom_words,
+                formality=request.formality,
+                db=db if user else None,
+                user_id=user.id if user else None,
+            ):
+                # Format as SSE: "data: {json}\n\n"
+                yield f"data: {json.dumps(event)}\n\n"
+
+        except Exception as e:
+            error_event = {"type": "error", "data": {"message": str(e)}}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
+    )
+
+
 @router.post(
     "/transcribe-and-polish",
     response_model=TranscribeAndPolishResponse,
@@ -175,19 +200,18 @@ async def transcribe_and_polish(
     language: str | None = Form(default=None, description="Optional language code"),
     context: str | None = Form(default=None, description="Context like 'email', 'slack'"),
     formality: str = Form(default="neutral", description="'casual', 'neutral', or 'formal'"),
-    model: str | None = Form(default=None, description="Whisper model: 'whisper-large-v3' or 'whisper-large-v3-turbo'"),
     db: AsyncSession = Depends(get_db),
-    current_user: User | None = Depends(get_optional_user),
+    user: User | None = Depends(get_optional_user),
 ):
     """
     Combined endpoint: transcribe audio and polish the result.
 
     This is the main endpoint for the transcription pipeline.
     Provides both raw and polished text for comparison/debugging.
-    Saves transcript to database if user is authenticated.
+    If authenticated, uses learned corrections from the user's history.
     """
     # First, transcribe
-    transcribe_response = await transcribe_audio(audio=audio, language=language, model=model)
+    transcribe_response = await transcribe_audio(audio=audio, language=language)
 
     if not transcribe_response.raw_text.strip():
         return TranscribeAndPolishResponse(
@@ -198,211 +222,69 @@ async def transcribe_and_polish(
             usage={"input_tokens": 0, "output_tokens": 0},
         )
 
-    # Then, polish
-    polish_request = PolishRequest(
-        text=transcribe_response.raw_text,
-        context=context,
-        formality=formality,
-    )
-    polish_response = await polish_text(polish_request)
-
-    # Save transcript to database
-    raw_text = transcribe_response.raw_text
-    polished_text = polish_response.text
-    duration = transcribe_response.duration or 0.0
-    word_count = len(polished_text.split())
-    char_count = len(polished_text)
-    wpm = (word_count / duration * 60) if duration > 0 else 0.0
-
-    transcript = Transcript(
-        user_id=current_user.id if current_user else None,
-        raw_text=raw_text,
-        polished_text=polished_text,
-        audio_duration_seconds=duration,
-        language=transcribe_response.language,
-        word_count=word_count,
-        character_count=char_count,
-        words_per_minute=round(wpm, 1),
-        context=context,
-        formality=formality,
-    )
-    db.add(transcript)
-
-    # Update user stats if authenticated
-    if current_user:
-        current_user.total_transcriptions += 1
-        current_user.total_words += word_count
-        current_user.total_audio_seconds += int(duration)
-        current_user.daily_transcriptions_used += 1
-
-    await db.commit()
-
-    return TranscribeAndPolishResponse(
-        raw_text=transcribe_response.raw_text,
-        polished_text=polish_response.text,
-        duration=transcribe_response.duration,
-        language=transcribe_response.language,
-        usage={
-            "input_tokens": polish_response.input_tokens,
-            "output_tokens": polish_response.output_tokens,
-        },
-    )
-
-
-# ============================================================================
-# Voice Response Endpoints (Claude Code Integration)
-# ============================================================================
-
-
-@router.post("/claude-event")
-async def handle_claude_event(
-    event: dict,
-    background_tasks: BackgroundTasks,
-):
-    """
-    Receive events from Claude Code hooks.
-
-    This endpoint is called by the Claude Code PostToolUse hook script
-    when code is written or edited. It triggers voice explanation generation.
-    """
-    tool_name = event.get("tool_name", "")
-    tool_input = event.get("tool_input", {})
-
-    # Only process Write and Edit operations
-    if tool_name not in ("Write", "Edit"):
-        return {"status": "ignored", "reason": f"tool {tool_name} not handled"}
-
-    file_path = tool_input.get("file_path", "unknown")
-    content = tool_input.get("content", "") or tool_input.get("new_string", "")
-    old_content = tool_input.get("old_string")
-
-    if not content:
-        return {"status": "ignored", "reason": "no content"}
-
-    # Process in background to respond quickly to the hook
-    background_tasks.add_task(
-        _process_claude_event,
-        tool_name=tool_name,
-        file_path=file_path,
-        content=content,
-        old_content=old_content,
-    )
-
-    return {"status": "accepted", "file_path": file_path}
-
-
-async def _process_claude_event(
-    tool_name: str,
-    file_path: str,
-    content: str,
-    old_content: str | None,
-):
-    """Background task to generate and broadcast voice explanation."""
+    # Then, polish (with learned corrections if authenticated)
     try:
-        # Generate explanation using Haiku
-        explanation = await explanation_service.explain_code_change(
-            file_path=file_path,
-            content=content,
-            operation=tool_name,
-            old_content=old_content,
+        result = await polish_service.polish(
+            raw_text=transcribe_response.raw_text,
+            context=context,
+            formality=formality,
+            db=db if user else None,
+            user_id=user.id if user else None,
         )
 
-        if not explanation:
-            return
-
-        # Convert to speech using Groq TTS
-        audio_bytes = await tts_service.synthesize(explanation)
-
-        if audio_bytes:
-            # Broadcast to all connected clients
-            await event_manager.broadcast(
-                VoiceEvent(
-                    type="voice",
-                    audio_base64=tts_service.audio_to_base64(audio_bytes),
-                    explanation=explanation,
-                    file_path=file_path,
-                    timestamp=datetime.utcnow().isoformat(),
-                )
-            )
-        else:
-            # TTS failed, but still send the text explanation
-            await event_manager.broadcast(
-                VoiceEvent(
-                    type="status",
-                    explanation=explanation,
-                    file_path=file_path,
-                    timestamp=datetime.utcnow().isoformat(),
-                )
-            )
-
+        return TranscribeAndPolishResponse(
+            raw_text=transcribe_response.raw_text,
+            polished_text=result["text"],
+            duration=transcribe_response.duration,
+            language=transcribe_response.language,
+            usage={
+                "input_tokens": result["usage"]["input_tokens"],
+                "output_tokens": result["usage"]["output_tokens"],
+            },
+        )
     except Exception as e:
-        # Broadcast error to clients
-        await event_manager.broadcast(
-            VoiceEvent(
-                type="error",
-                explanation=f"Failed to generate explanation: {str(e)}",
-                file_path=file_path,
-                timestamp=datetime.utcnow().isoformat(),
-            )
+        raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
+
+
+@router.post(
+    "/tts",
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def text_to_speech(
+    text: str = Form(..., description="Text to convert to speech"),
+    user: User | None = Depends(get_optional_user),
+):
+    """
+    Convert text to speech using Groq TTS (Orpheus model).
+
+    Used for Claude Code speak integration - when Claude wants to speak responses aloud.
+    Returns MP3 audio data.
+    """
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    # Limit text length to prevent abuse
+    if len(text) > 500:
+        text = text[:500]
+
+    try:
+        from fastapi.responses import Response
+
+        audio_bytes = await elevenlabs_tts.synthesize(text)
+
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="ElevenLabs TTS generation failed")
+
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=speech.mp3",
+                "Cache-Control": "no-cache",
+            },
         )
 
-
-@router.get("/voice-stream")
-async def voice_stream():
-    """
-    Server-Sent Events endpoint for real-time voice notifications.
-
-    Connect to this endpoint to receive voice explanations as they're generated.
-    Events are JSON-formatted with types: 'connected', 'voice', 'status', 'error'.
-    """
-    return StreamingResponse(
-        event_manager.subscribe(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
-        },
-    )
-
-
-@router.get("/voice-stream/status")
-async def voice_stream_status():
-    """
-    Check voice stream status and connected client count.
-    """
-    return {
-        "status": "active",
-        "connected_clients": event_manager.client_count,
-        "groq_configured": bool(settings.groq_api_key),
-        "anthropic_configured": bool(settings.anthropic_api_key),
-    }
-
-
-# ============================================================================
-# Speak Endpoint (MCP Integration for Claude Code)
-# ============================================================================
-
-@router.post("/speak")
-async def speak_text(request: dict):
-    """
-    Receive text from Claude Code's MCP speak tool and broadcast to Scribe.
-
-    The Scribe desktop app listens for 'speak' events and uses browser
-    SpeechSynthesis to speak the text aloud.
-    """
-    text = request.get("text", "")
-    if not text:
-        return {"status": "error", "message": "No text provided"}
-
-    # Broadcast the speak event to connected Scribe clients
-    await event_manager.broadcast(
-        VoiceEvent(
-            type="speak",
-            explanation=text,
-            file_path="",
-            timestamp=datetime.utcnow().isoformat(),
-        )
-    )
-
-    return {"status": "ok", "text": text}
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")

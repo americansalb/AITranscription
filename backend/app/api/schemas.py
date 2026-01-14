@@ -7,7 +7,6 @@ class TranscribeResponse(BaseModel):
     raw_text: str = Field(description="Raw transcription from Whisper")
     duration: float | None = Field(default=None, description="Audio duration in seconds")
     language: str | None = Field(default=None, description="Detected or specified language")
-    model_used: str | None = Field(default=None, description="Whisper model used for transcription")
 
 
 class PolishRequest(BaseModel):

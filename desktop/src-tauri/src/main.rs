@@ -380,9 +380,13 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 continue;
             }
 
-            // Emit event to frontend
-            if let Err(e) = app_handle.emit("speak", &text) {
-                log_error(&format!("Failed to emit speak event: {}", e));
+            // Emit event to frontend - emit to main window specifically
+            if let Some(window) = app_handle.get_webview_window("main") {
+                if let Err(e) = window.emit("speak", &text) {
+                    log_error(&format!("Failed to emit speak event to window: {}", e));
+                }
+            } else {
+                log_error("Main window not found for speak event");
             }
 
             // Respond with success
@@ -444,6 +448,76 @@ fn get_audio_devices(state: tauri::State<AudioRecorderState>) -> Result<Vec<Audi
 fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, String> {
     let recorder = state.0.lock();
     Ok(recorder.is_recording())
+}
+
+/// Setup Claude Code integration by creating CLAUDE.md in user's home directory
+/// This is called automatically on app startup
+fn setup_claude_integration() {
+    // Just call the update function with default "summary" mode
+    update_claude_md_content("summary");
+}
+
+/// Update CLAUDE.md content based on voice output mode
+/// Called from frontend when user changes the setting
+#[tauri::command]
+fn update_claude_md(mode: String) -> Result<(), String> {
+    update_claude_md_content(&mode);
+    Ok(())
+}
+
+/// Internal function to update CLAUDE.md content
+fn update_claude_md_content(mode: &str) {
+    let home_var = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+
+    if let Some(home) = std::env::var_os(home_var) {
+        let claude_md_path = std::path::PathBuf::from(&home).join("CLAUDE.md");
+
+        // If disabled, remove the file entirely
+        if mode == "disabled" {
+            match std::fs::remove_file(&claude_md_path) {
+                Ok(_) => log_error("Removed CLAUDE.md (voice disabled)"),
+                Err(_) => {} // File might not exist, that's fine
+            }
+            return;
+        }
+
+        let content = if mode == "full" {
+            r#"# Claude Code Instructions
+
+## Voice Output
+
+Always use the Scribe speak integration to read responses aloud. Call it using curl:
+
+```bash
+curl -X POST http://127.0.0.1:7865/speak -H "Content-Type: application/json" -d '{"text": "YOUR MESSAGE HERE"}'
+```
+
+Use this for all conversational responses to the user. Read everything including code blocks - the user wants to hear the complete response.
+"#
+        } else {
+            r#"# Claude Code Instructions
+
+## Voice Output
+
+Always use the Scribe speak integration to read responses aloud. Call it using curl:
+
+```bash
+curl -X POST http://127.0.0.1:7865/speak -H "Content-Type: application/json" -d '{"text": "YOUR MESSAGE HERE"}'
+```
+
+Use this for all conversational responses to the user. Do not read code aloud - only explanations, summaries, and direct responses.
+"#
+        };
+
+        match std::fs::write(&claude_md_path, content) {
+            Ok(_) => log_error(&format!("Updated CLAUDE.md with mode: {}", mode)),
+            Err(e) => log_error(&format!("Failed to update CLAUDE.md: {}", e)),
+        }
+    }
 }
 
 /// Update tray icon to show recording state
@@ -534,20 +608,6 @@ fn main() {
                 })
                 .build(app)?;
 
-            // When X is clicked, minimize to taskbar instead of quitting
-            // This keeps the app accessible in the taskbar like a normal app
-            if let Some(window) = app.get_webview_window("main") {
-                let window_clone = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Prevent the window from closing
-                        api.prevent_close();
-                        // Minimize to taskbar instead
-                        let _ = window_clone.minimize();
-                    }
-                });
-            }
-
             // Open dev tools for debugging (in both dev and release builds)
             #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
@@ -559,6 +619,9 @@ fn main() {
 
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
+
+            // Setup Claude Code integration (creates CLAUDE.md if not exists)
+            setup_claude_integration();
 
             Ok(())
         })
@@ -572,7 +635,8 @@ fn main() {
             stop_recording,
             cancel_recording,
             get_audio_devices,
-            check_recording
+            check_recording,
+            update_claude_md
         ]);
 
     match builder.run(tauri::generate_context!()) {

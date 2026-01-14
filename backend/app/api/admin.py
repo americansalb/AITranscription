@@ -492,6 +492,95 @@ async def make_user_admin(
     return {"message": f"User {user.email} is now an admin"}
 
 
+@router.post("/reset-all-stats")
+async def reset_all_user_stats(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Reset statistics for ALL users while keeping transcript history.
+    This recalculates stats from actual transcript records.
+    """
+    # Get all users
+    result = await db.execute(select(User))
+    users = result.scalars().all()
+
+    reset_count = 0
+    for user in users:
+        # Get actual transcript data for this user
+        transcripts_result = await db.execute(
+            select(Transcript).where(Transcript.user_id == user.id)
+        )
+        transcripts = transcripts_result.scalars().all()
+
+        # Calculate real stats from transcripts
+        total_transcriptions = len(transcripts)
+        total_words = sum(t.word_count for t in transcripts)
+        total_audio_seconds = sum(int(t.audio_duration_seconds) for t in transcripts)
+
+        # Update user with recalculated stats
+        user.total_transcriptions = total_transcriptions
+        user.total_words = total_words
+        user.total_audio_seconds = total_audio_seconds
+        user.total_polish_tokens = 0  # Reset polish tokens (no way to recalculate)
+        user.daily_transcriptions_used = 0  # Reset daily counter
+
+        reset_count += 1
+
+    await db.commit()
+
+    return {
+        "message": f"Reset stats for {reset_count} users based on actual transcript history",
+        "users_reset": reset_count,
+    }
+
+
+@router.post("/reset-user-stats/{user_id}")
+async def reset_single_user_stats(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Reset statistics for a single user while keeping transcript history.
+    This recalculates stats from actual transcript records.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Get actual transcript data for this user
+    transcripts_result = await db.execute(
+        select(Transcript).where(Transcript.user_id == user.id)
+    )
+    transcripts = transcripts_result.scalars().all()
+
+    # Calculate real stats from transcripts
+    total_transcriptions = len(transcripts)
+    total_words = sum(t.word_count for t in transcripts)
+    total_audio_seconds = sum(int(t.audio_duration_seconds) for t in transcripts)
+
+    # Update user with recalculated stats
+    user.total_transcriptions = total_transcriptions
+    user.total_words = total_words
+    user.total_audio_seconds = total_audio_seconds
+    user.total_polish_tokens = 0
+    user.daily_transcriptions_used = 0
+
+    await db.commit()
+
+    return {
+        "message": f"Reset stats for {user.email}",
+        "stats": {
+            "total_transcriptions": total_transcriptions,
+            "total_words": total_words,
+            "total_audio_seconds": total_audio_seconds,
+        }
+    }
+
+
 class BootstrapRequest(BaseModel):
     """Request to bootstrap the first admin."""
     email: EmailStr
@@ -532,6 +621,71 @@ async def bootstrap_admin(
     return {
         "message": f"User {user.email} is now an admin with developer tier",
         "user_id": user.id,
+    }
+
+
+class SeedAdminsRequest(BaseModel):
+    """Request to seed admin accounts."""
+    secret: str
+
+
+@router.post("/seed-admins")
+async def seed_admin_accounts(
+    request: SeedAdminsRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    One-time endpoint to create the initial admin accounts.
+    Requires SECRET_KEY to authorize.
+    """
+    if request.secret != settings.secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid secret key",
+        )
+
+    # Admin accounts to create
+    admin_accounts = [
+        {"email": "iris@aalb.org", "password": "AALB"},
+        {"email": "kenil.thakkar@gmail.com", "password": "AALB"},
+        {"email": "happy102785@gmail.com", "password": "AALB"},
+    ]
+
+    created = []
+    skipped = []
+
+    for account in admin_accounts:
+        # Check if user already exists
+        existing = await get_user_by_email(db, account["email"])
+        if existing:
+            # Update to admin if not already
+            if not existing.is_admin:
+                existing.is_admin = True
+                existing.tier = SubscriptionTier.DEVELOPER
+                existing.daily_transcription_limit = 0
+                skipped.append(f"{account['email']} (updated to admin)")
+            else:
+                skipped.append(f"{account['email']} (already exists)")
+            continue
+
+        # Create new admin user
+        user = User(
+            email=account["email"],
+            hashed_password=hash_password(account["password"]),
+            is_admin=True,
+            tier=SubscriptionTier.DEVELOPER,
+            daily_transcription_limit=0,
+            is_active=True,
+        )
+        db.add(user)
+        created.append(account["email"])
+
+    await db.commit()
+
+    return {
+        "message": "Admin accounts seeded",
+        "created": created,
+        "skipped": skipped,
     }
 
 
@@ -1034,6 +1188,9 @@ ADMIN_DASHBOARD_HTML = '''
 
             <!-- Overview Panel -->
             <div id="overview" class="panel active">
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 16px; gap: 12px;">
+                    <button class="btn btn-danger" onclick="resetAllStats()">Reset All User Stats</button>
+                </div>
                 <div class="stats-grid" id="globalStats">
                     <div class="loading">
                         <div class="spinner"></div>
@@ -1565,6 +1722,32 @@ ADMIN_DASHBOARD_HTML = '''
         document.getElementById('userSearch').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') searchUsers();
         });
+
+        // Reset all user stats
+        async function resetAllStats() {
+            if (!confirm('Are you sure you want to reset stats for ALL users?\\n\\nThis will recalculate stats from actual transcript history.\\nTranscript history will be preserved.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/admin/reset-all-stats`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Reset failed');
+                }
+
+                const result = await response.json();
+                alert(result.message);
+                loadGlobalStats();
+                loadUsers();
+            } catch (err) {
+                alert('Failed to reset stats: ' + err.message);
+            }
+        }
     </script>
 </body>
 </html>
