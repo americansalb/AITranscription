@@ -18,6 +18,12 @@ enigo = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 tiny_http = "0.12"
 
+# Native audio recording
+cpal = "0.15"
+hound = "3.5"
+parking_lot = "0.12"
+base64 = "0.22"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

@@ -61,14 +61,43 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
     try {
       setState((s) => ({ ...s, error: null }));
 
-      // Request microphone access
+      // Check if mediaDevices API is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          "Microphone access not available. Please grant microphone permission in System Settings > Privacy & Security > Microphone."
+        );
+      }
+
+      // Detect platform for appropriate constraints
+      // macOS WebKit ignores some constraints, so we use simpler ones there
+      const isMac = navigator.platform.includes("Mac");
+
+      // Request microphone access with platform-appropriate constraints
+      // Safari/WebKit ignores sampleRate, so don't set it on Mac
+      const audioConstraints: MediaTrackConstraints = isMac
+        ? {
+            echoCancellation: true,
+            noiseSuppression: true,
+            // Don't specify sampleRate on Mac - WebKit ignores it and may cause issues
+          }
+        : {
+            echoCancellation: true,
+            noiseSuppression: true,
+            sampleRate: 44100,
+          };
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100,
-        },
+        audio: audioConstraints,
       });
+
+      const audioTracks = stream.getAudioTracks();
+      console.log("[AudioRecorder] Platform:", isMac ? "macOS" : "other");
+      console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
+      if (audioTracks.length > 0) {
+        const settings = audioTracks[0].getSettings();
+        console.log("[AudioRecorder] Track:", audioTracks[0].label, "enabled:", audioTracks[0].enabled, "muted:", audioTracks[0].muted);
+        console.log("[AudioRecorder] Actual settings:", JSON.stringify(settings));
+      }
 
       // Set up audio level analyzer
       audioContext.current = new AudioContext();
@@ -89,14 +118,38 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         }
       }, 50); // Update 20 times per second for smooth animation
 
-      // Determine best supported format
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : MediaRecorder.isTypeSupported("audio/webm")
-          ? "audio/webm"
-          : "audio/mp4";
+      // Determine best supported format based on platform
+      // macOS WebKit does NOT support WebM - must use MP4
+      // Windows/Linux Chromium supports WebM (preferred for quality)
+      let mimeType: string;
 
-      mediaRecorder.current = new MediaRecorder(stream, { mimeType });
+      // Check what's actually supported and log it
+      const webmOpus = MediaRecorder.isTypeSupported("audio/webm;codecs=opus");
+      const webm = MediaRecorder.isTypeSupported("audio/webm");
+      const mp4 = MediaRecorder.isTypeSupported("audio/mp4");
+      const aac = MediaRecorder.isTypeSupported("audio/aac");
+
+      console.log("[AudioRecorder] Codec support - webm;opus:", webmOpus, "webm:", webm, "mp4:", mp4, "aac:", aac);
+
+      if (webmOpus) {
+        // Chromium-based (Windows WebView2, Linux WebKitGTK with GStreamer)
+        mimeType = "audio/webm;codecs=opus";
+      } else if (mp4) {
+        // macOS WebKit - use MP4 (with AAC codec)
+        mimeType = "audio/mp4";
+      } else if (webm) {
+        // Fallback to plain WebM
+        mimeType = "audio/webm";
+      } else {
+        // Last resort - let browser pick
+        mimeType = "";
+        console.warn("[AudioRecorder] No preferred codec supported, using browser default");
+      }
+
+      console.log("[AudioRecorder] Using mimeType:", mimeType || "(browser default)");
+
+      const recorderOptions: MediaRecorderOptions = mimeType ? { mimeType } : {};
+      mediaRecorder.current = new MediaRecorder(stream, recorderOptions);
       audioChunks.current = [];
       startTime.current = Date.now();
 
@@ -106,7 +159,10 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         }
       };
 
-      mediaRecorder.current.start(100); // Collect data every 100ms
+      // Use longer timeslice on Mac for more reliable recording
+      const timeslice = isMac ? 250 : 100;
+      mediaRecorder.current.start(timeslice);
+      console.log("[AudioRecorder] Started with timeslice:", timeslice, "ms");
 
       // Update duration every 100ms
       durationInterval.current = window.setInterval(() => {
@@ -141,8 +197,10 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       cleanupAudioContext();
 
       mediaRecorder.current.onstop = () => {
-        const mimeType = mediaRecorder.current?.mimeType || "audio/webm";
+        // Use the actual mimeType from the recorder, fallback to mp4 (works on both platforms)
+        const mimeType = mediaRecorder.current?.mimeType || "audio/mp4";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
+        console.log("[AudioRecorder] Final blob mimeType:", mimeType);
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());

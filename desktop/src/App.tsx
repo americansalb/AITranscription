@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useAudioRecorder } from "./hooks/useAudioRecorder";
+import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
-import { injectText } from "./lib/clipboard";
+import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -149,7 +149,7 @@ function saveSetting<T>(key: string, value: T): void {
 }
 
 function App() {
-  const recorder = useAudioRecorder();
+  const recorder = useUnifiedAudioRecorder();
   const { showToast } = useToast();
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [result, setResult] = useState<string>("");
@@ -292,6 +292,21 @@ function App() {
       editTextareaRef.current.select();
     }
   }, [isEditing]);
+
+  // Update tray icon state
+  useEffect(() => {
+    setTrayRecordingState(recorder.isRecording);
+  }, [recorder.isRecording]);
+
+  // Update overlay state (overlay is always visible, just expands/collapses)
+  useEffect(() => {
+    updateOverlayState({
+      isRecording: recorder.isRecording,
+      isProcessing: status === "processing",
+      duration: recorder.duration,
+      audioLevel: recorder.audioLevel || 0,
+    });
+  }, [recorder.isRecording, recorder.duration, recorder.audioLevel, status]);
 
   // Cancel recording handler
   const handleCancelRecording = useCallback(async () => {

@@ -28,9 +28,8 @@ function savePosition(pos: Position): void {
 }
 
 /**
- * Minimal floating recording indicator - Wispr Flow-inspired design.
- * Shows a clean, modern pill when recording/processing.
- * Draggable with position memory.
+ * Minimal floating recording indicator - always visible as a tiny line,
+ * expands when recording/processing.
  */
 export function FloatingOverlay() {
   const [isRecording, setIsRecording] = useState(false);
@@ -41,7 +40,7 @@ export function FloatingOverlay() {
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const windowPosRef = useRef<Position | null>(null);
 
-  // Restore saved position on mount, or position at top-right by default
+  // Restore saved position on mount, or position at top-center by default
   useEffect(() => {
     const initPosition = async () => {
       if (typeof window !== "undefined" && "__TAURI__" in window) {
@@ -51,19 +50,16 @@ export function FloatingOverlay() {
 
           const savedPos = loadSavedPosition();
           if (savedPos) {
-            // Restore saved position
             await appWindow.setPosition(new PhysicalPosition(savedPos.x, savedPos.y));
           } else {
-            // Position at top-right by default
+            // Position at top-center by default
             const monitors = await availableMonitors();
             if (monitors.length > 0) {
               const primary = monitors[0];
               const screenWidth = primary.size.width;
-              const windowWidth = 140;
-              const margin = 16;
-              const topOffset = 50; // Below where title bar/X button would be
-              const x = screenWidth - windowWidth - margin;
-              const y = topOffset;
+              const windowWidth = 160;
+              const x = Math.round((screenWidth - windowWidth) / 2);
+              const y = 8;
               await appWindow.setPosition(new PhysicalPosition(x, y));
               savePosition({ x, y });
             }
@@ -175,7 +171,7 @@ export function FloatingOverlay() {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  // Generate 4 bar heights based on audio level for visualizer
+  // Generate bar heights based on audio level
   const bars = [
     Math.max(0.2, audioLevel * 0.6 + Math.sin(Date.now() / 200) * 0.1),
     Math.max(0.3, audioLevel * 0.9 + Math.sin(Date.now() / 150 + 1) * 0.1),
@@ -183,7 +179,6 @@ export function FloatingOverlay() {
     Math.max(0.2, audioLevel * 0.7 + Math.sin(Date.now() / 160 + 3) * 0.1),
   ];
 
-  // Determine state
   const isActive = isRecording || isProcessing;
 
   return (
@@ -191,34 +186,38 @@ export function FloatingOverlay() {
       className={`floating-overlay-container ${isDragging ? "dragging" : ""}`}
       onMouseDown={handleMouseDown}
     >
-      <div className={`floating-pill ${isRecording ? "recording" : ""} ${isProcessing ? "processing" : ""}`}>
-        {/* Recording indicator dot */}
-        <div className="floating-dot" />
+      <div className={`floating-indicator ${isActive ? "expanded" : "collapsed"} ${isRecording ? "recording" : ""} ${isProcessing ? "processing" : ""}`}>
+        {/* Collapsed state: just a subtle line */}
+        <div className="floating-line" />
 
-        {/* Audio visualizer bars */}
-        {isRecording && (
-          <div className="floating-bars">
-            {bars.map((h, i) => (
-              <div
-                key={i}
-                className="floating-bar"
-                style={{ height: `${Math.min(h, 1) * 100}%` }}
-              />
-            ))}
-          </div>
-        )}
+        {/* Expanded content */}
+        <div className="floating-content">
+          {/* Recording indicator dot */}
+          <div className="floating-dot" />
 
-        {/* Processing spinner */}
-        {isProcessing && (
-          <div className="floating-spinner" />
-        )}
+          {/* Audio visualizer bars */}
+          {isRecording && (
+            <div className="floating-bars">
+              {bars.map((h, i) => (
+                <div
+                  key={i}
+                  className="floating-bar"
+                  style={{ height: `${Math.min(h, 1) * 100}%` }}
+                />
+              ))}
+            </div>
+          )}
 
-        {/* Duration text */}
-        {isActive && (
+          {/* Processing spinner */}
+          {isProcessing && (
+            <div className="floating-spinner" />
+          )}
+
+          {/* Duration text */}
           <span className="floating-text">
             {isProcessing ? "..." : formatDuration(duration)}
           </span>
-        )}
+        </div>
       </div>
     </div>
   );

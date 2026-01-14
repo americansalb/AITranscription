@@ -4406,7 +4406,7 @@ body {
 /* Learning Button in Header */
 .learning-btn {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 8px;
   background: transparent;
