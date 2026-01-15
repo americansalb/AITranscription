@@ -151,7 +151,7 @@ async function showWindow(): Promise<void> {
 
 /**
  * Inject text into the active application using clipboard + paste simulation.
- * No longer hides/shows window - just copies to clipboard and simulates paste.
+ * Hides Scribe window to return focus to previous app, then pastes.
  */
 export async function injectText(text: string): Promise<boolean> {
   // First, copy to clipboard
@@ -165,10 +165,19 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
+      // Hide Scribe window to return focus to the previous app
+      await hideWindow();
+
+      // Now simulate paste - this will paste into the newly focused app
       await tauriCore.invoke("simulate_paste");
+
+      // Show Scribe window again after a short delay
+      setTimeout(() => showWindow(), 300);
       return true;
     } catch (error) {
       console.error("Auto-paste failed:", error);
+      // Show window again if paste failed
+      showWindow();
       // Clipboard still has the text, user can paste manually
       return true;
     }
