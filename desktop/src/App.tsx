@@ -530,9 +530,14 @@ function App() {
   }, []);
 
   // Control overlay window visibility
+  // Skip overlay on macOS - showing windows activates the app and breaks paste
+  const isMacOS = navigator.platform.toUpperCase().includes("MAC");
+
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
+      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
+      if (isMacOS) return;
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -559,7 +564,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.duration, status]);
+  }, [recorder.isRecording, recorder.duration, status, isMacOS]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
