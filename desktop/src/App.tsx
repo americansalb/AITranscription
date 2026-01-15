@@ -407,16 +407,16 @@ function App() {
         confidence: confidenceScore,
       });
 
-      // Step 3: Done
+      // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
+      if (response.polished_text) {
+        await injectText(response.polished_text);
+      }
+
+      // Step 3: Done - show feedback AFTER paste
       setProcessingStep("done");
       setStatus("success");
       if (soundEnabled) playSuccessSound(); // Audio feedback - success
       showToast("Transcription complete!", "success");
-
-      // Auto-inject the polished text into the active application
-      if (response.polished_text) {
-        await injectText(response.polished_text);
-      }
 
       // Increment transcription count to trigger stats refresh
       setTranscriptionCount((c) => c + 1);
