@@ -11,6 +11,7 @@ import {
   ApiError,
 } from "../lib/api";
 import { getStoredVoiceEnabled, saveVoiceEnabled } from "../lib/voiceStream";
+import { formatHotkeyForDisplay } from "../lib/platform";
 
 interface SettingsProps {
   onClose: () => void;
@@ -370,14 +371,6 @@ function keyEventToHotkey(e: KeyboardEvent): string | null {
   parts.push(key);
 
   return parts.join("+");
-}
-
-// Format hotkey for display
-function formatHotkeyForDisplay(hotkey: string): string {
-  const isMac = navigator.platform.includes("Mac");
-  return hotkey
-    .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
-    .replace("Alt", isMac ? "Option" : "Alt");
 }
 
 // Get stored hotkey from localStorage

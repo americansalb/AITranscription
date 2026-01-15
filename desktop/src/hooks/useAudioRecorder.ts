@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { isMacOS } from "../lib/platform";
 
 export interface AudioRecorderState {
   isRecording: boolean;
@@ -68,13 +69,9 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         );
       }
 
-      // Detect platform for appropriate constraints
-      // macOS WebKit ignores some constraints, so we use simpler ones there
-      const isMac = navigator.platform.includes("Mac");
-
       // Request microphone access with platform-appropriate constraints
       // Safari/WebKit ignores sampleRate, so don't set it on Mac
-      const audioConstraints: MediaTrackConstraints = isMac
+      const audioConstraints: MediaTrackConstraints = isMacOS()
         ? {
             echoCancellation: true,
             noiseSuppression: true,
@@ -91,7 +88,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       });
 
       const audioTracks = stream.getAudioTracks();
-      console.log("[AudioRecorder] Platform:", isMac ? "macOS" : "other");
+      console.log("[AudioRecorder] Platform:", isMacOS() ? "macOS" : "other");
       console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
       if (audioTracks.length > 0) {
         const settings = audioTracks[0].getSettings();
@@ -160,7 +157,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       };
 
       // Use longer timeslice on Mac for more reliable recording
-      const timeslice = isMac ? 250 : 100;
+      const timeslice = isMacOS() ? 250 : 100;
       mediaRecorder.current.start(timeslice);
       console.log("[AudioRecorder] Started with timeslice:", timeslice, "ms");
 
