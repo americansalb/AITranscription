@@ -3,6 +3,7 @@ import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
+import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -174,13 +175,6 @@ function App() {
     setCurrentHotkey(newHotkey);
   }, []);
 
-  // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
-  const formatHotkeyDisplay = useCallback((hotkey: string): string => {
-    const isMac = navigator.platform.includes("Mac");
-    return hotkey
-      .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
-      .replace("Alt", isMac ? "Option" : "Alt");
-  }, []);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -531,17 +525,11 @@ function App() {
 
   // Control overlay window visibility
   // Skip overlay on macOS - showing windows activates the app and breaks paste
-  const isMacOS = navigator.platform.toUpperCase().includes("MAC");
-
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
       // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
-      if (isMacOS) return;
-
-      // Skip overlay on macOS - showing any window activates the app which breaks paste
-      const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-      if (isMacOS) return;
+      if (isMacOS()) return;
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -568,7 +556,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.duration, status, isMacOS]);
+  }, [recorder.isRecording, recorder.duration, status]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {

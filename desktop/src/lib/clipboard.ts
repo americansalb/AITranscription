@@ -10,9 +10,10 @@
  * This is the most reliable cross-platform approach for universal dictation.
  */
 
-// Detect if running on macOS
-const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-const pasteShortcut = isMac ? "Cmd+V" : "Ctrl+V";
+import { isMacOS, getPasteShortcut } from "./platform";
+
+// For backward compatibility
+const pasteShortcut = getPasteShortcut();
 
 // Dynamic import for Tauri clipboard plugin
 let tauriClipboard: typeof import("@tauri-apps/plugin-clipboard-manager") | null = null;
