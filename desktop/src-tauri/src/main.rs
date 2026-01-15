@@ -187,7 +187,7 @@ fn type_text(text: String) -> Result<(), String> {
 fn show_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("recording-indicator") {
         let _ = window.show();
-        let _ = window.set_focus();
+        // Don't set_focus - the overlay should not steal focus from the user's app
     }
     Ok(())
 }

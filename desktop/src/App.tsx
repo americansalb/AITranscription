@@ -407,16 +407,16 @@ function App() {
         confidence: confidenceScore,
       });
 
-      // Step 3: Done
+      // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
+      if (response.polished_text) {
+        await injectText(response.polished_text);
+      }
+
+      // Step 3: Done - show feedback AFTER paste
       setProcessingStep("done");
       setStatus("success");
       if (soundEnabled) playSuccessSound(); // Audio feedback - success
       showToast("Transcription complete!", "success");
-
-      // Auto-inject the polished text into the active application
-      if (response.polished_text) {
-        await injectText(response.polished_text);
-      }
 
       // Increment transcription count to trigger stats refresh
       setTranscriptionCount((c) => c + 1);
@@ -530,9 +530,14 @@ function App() {
   }, []);
 
   // Control overlay window visibility
+  // Skip overlay on macOS - showing windows activates the app and breaks paste
+  const isMacOS = navigator.platform.toUpperCase().includes("MAC");
+
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
+      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
+      if (isMacOS) return;
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -559,7 +564,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.duration, status]);
+  }, [recorder.isRecording, recorder.duration, status, isMacOS]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {

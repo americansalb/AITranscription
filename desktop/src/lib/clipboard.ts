@@ -151,7 +151,7 @@ async function showWindow(): Promise<void> {
 
 /**
  * Inject text into the active application using clipboard + paste simulation.
- * No longer hides/shows window - just copies to clipboard and simulates paste.
+ * Just copies to clipboard and simulates paste - no window manipulation.
  */
 export async function injectText(text: string): Promise<boolean> {
   // First, copy to clipboard
@@ -165,6 +165,7 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
+      // Simulate Cmd+V / Ctrl+V - pastes into whatever app has focus
       await tauriCore.invoke("simulate_paste");
       return true;
     } catch (error) {
