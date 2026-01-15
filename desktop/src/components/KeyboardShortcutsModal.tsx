@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 
 // Detect if running on macOS
-const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 const modKey = isMac ? "Cmd" : "Ctrl";
 
 interface KeyboardShortcutsModalProps {

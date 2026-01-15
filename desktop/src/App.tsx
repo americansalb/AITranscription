@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
-import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
+import { injectText, setTrayRecordingState, updateOverlayState, PastePermissionError } from "./lib/clipboard";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -176,7 +176,7 @@ function App() {
 
   // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
   const formatHotkeyDisplay = useCallback((hotkey: string): string => {
-    const isMac = navigator.platform.includes("Mac");
+    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
     return hotkey
       .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
       .replace("Alt", isMac ? "Option" : "Alt");
@@ -335,23 +335,38 @@ function App() {
 
       // Create actionable error for microphone issues
       if (message.toLowerCase().includes("microphone") || message.toLowerCase().includes("permission") || message.toLowerCase().includes("not found")) {
-        setError({
-          message: "Microphone access denied or not found",
-          action: {
-            label: "Grant Permission",
-            onClick: () => {
-              // Try to request microphone permission again
-              navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(() => {
-                  setError(null);
-                  showToast("Microphone access granted!", "success");
-                })
-                .catch(() => {
-                  showToast("Please enable microphone in system settings", "error");
-                });
+        const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+        if (isMacOS) {
+          // On Mac, re-requesting permission doesn't re-prompt - must use System Settings
+          setError({
+            message: "Microphone access denied. Enable in System Settings > Privacy & Security > Microphone.",
+            action: {
+              label: "Open System Settings",
+              onClick: () => {
+                // Open System Settings to Microphone privacy pane
+                window.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+              },
             },
-          },
-        });
+          });
+        } else {
+          setError({
+            message: "Microphone access denied or not found",
+            action: {
+              label: "Grant Permission",
+              onClick: () => {
+                // Try to request microphone permission again (works on Windows/Linux)
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                  .then(() => {
+                    setError(null);
+                    showToast("Microphone access granted!", "success");
+                  })
+                  .catch(() => {
+                    showToast("Please enable microphone in system settings", "error");
+                  });
+              },
+            },
+          });
+        }
       } else {
         setError({ message });
       }
@@ -409,7 +424,26 @@ function App() {
 
       // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
       if (response.polished_text) {
-        await injectText(response.polished_text);
+        try {
+          await injectText(response.polished_text);
+        } catch (pasteError) {
+          if (pasteError instanceof PastePermissionError) {
+            // Show actionable error for Mac accessibility permission
+            setError({
+              message: pasteError.message,
+              action: {
+                label: "Open System Settings",
+                onClick: () => {
+                  // On Mac, open System Settings to Accessibility pane
+                  window.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+                },
+              },
+            });
+            // Still show success since transcription worked, just paste failed
+            showToast("Transcribed! Enable Accessibility to auto-paste.", "warning");
+          }
+          // Continue regardless - text is still in clipboard
+        }
       }
 
       // Step 3: Done - show feedback AFTER paste
@@ -531,7 +565,7 @@ function App() {
 
   // Control overlay window visibility
   // Skip overlay on macOS - showing windows activates the app and breaks paste
-  const isMacOS = navigator.platform.toUpperCase().includes("MAC");
+  const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
   useEffect(() => {
     const updateOverlay = async () => {
@@ -660,22 +694,36 @@ function App() {
           err instanceof Error ? err.message : "Failed to start recording";
 
         if (message.toLowerCase().includes("microphone") || message.toLowerCase().includes("permission")) {
-          setError({
-            message: "Microphone access denied or not found",
-            action: {
-              label: "Grant Permission",
-              onClick: () => {
-                navigator.mediaDevices.getUserMedia({ audio: true })
-                  .then(() => {
-                    setError(null);
-                    showToast("Microphone access granted!", "success");
-                  })
-                  .catch(() => {
-                    showToast("Please enable microphone in system settings", "error");
-                  });
+          const isMacOS = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+          if (isMacOS) {
+            // On Mac, re-requesting permission doesn't re-prompt - must use System Settings
+            setError({
+              message: "Microphone access denied. Enable in System Settings > Privacy & Security > Microphone.",
+              action: {
+                label: "Open System Settings",
+                onClick: () => {
+                  window.open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone");
+                },
               },
-            },
-          });
+            });
+          } else {
+            setError({
+              message: "Microphone access denied or not found",
+              action: {
+                label: "Grant Permission",
+                onClick: () => {
+                  navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(() => {
+                      setError(null);
+                      showToast("Microphone access granted!", "success");
+                    })
+                    .catch(() => {
+                      showToast("Please enable microphone in system settings", "error");
+                    });
+                },
+              },
+            });
+          }
         } else {
           setError({ message });
         }

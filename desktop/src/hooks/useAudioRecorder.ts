@@ -70,7 +70,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
 
       // Detect platform for appropriate constraints
       // macOS WebKit ignores some constraints, so we use simpler ones there
-      const isMac = navigator.platform.includes("Mac");
+      const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
       // Request microphone access with platform-appropriate constraints
       // Safari/WebKit ignores sampleRate, so don't set it on Mac

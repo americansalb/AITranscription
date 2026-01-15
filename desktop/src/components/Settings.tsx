@@ -374,7 +374,7 @@ function keyEventToHotkey(e: KeyboardEvent): string | null {
 
 // Format hotkey for display
 function formatHotkeyForDisplay(hotkey: string): string {
-  const isMac = navigator.platform.includes("Mac");
+  const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   return hotkey
     .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
     .replace("Alt", isMac ? "Option" : "Alt");

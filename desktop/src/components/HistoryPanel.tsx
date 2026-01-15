@@ -3,7 +3,7 @@ import { copyToClipboard } from "../lib/clipboard";
 import type { TranscriptEntry } from "../App";
 
 // Detect if running on macOS
-const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
 interface HistoryPanelProps {
   history: TranscriptEntry[];

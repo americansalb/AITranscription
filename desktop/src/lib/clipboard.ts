@@ -11,7 +11,7 @@
  */
 
 // Detect if running on macOS
-const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 const pasteShortcut = isMac ? "Cmd+V" : "Ctrl+V";
 
 // Dynamic import for Tauri clipboard plugin
@@ -150,8 +150,19 @@ async function showWindow(): Promise<void> {
 }
 
 /**
+ * Error thrown when paste simulation fails due to permission issues
+ */
+export class PastePermissionError extends Error {
+  constructor(message: string, public readonly isMac: boolean) {
+    super(message);
+    this.name = "PastePermissionError";
+  }
+}
+
+/**
  * Inject text into the active application using clipboard + paste simulation.
  * Just copies to clipboard and simulates paste - no window manipulation.
+ * @throws {PastePermissionError} if accessibility permission is denied on Mac
  */
 export async function injectText(text: string): Promise<boolean> {
   // First, copy to clipboard
@@ -169,8 +180,24 @@ export async function injectText(text: string): Promise<boolean> {
       await tauriCore.invoke("simulate_paste");
       return true;
     } catch (error) {
-      console.error("Auto-paste failed:", error);
-      // Clipboard still has the text, user can paste manually
+      const errorMsg = String(error);
+      console.error("Auto-paste failed:", errorMsg);
+
+      // Check for Mac accessibility permission errors
+      // enigo on Mac fails with specific messages when accessibility is denied
+      if (isMac && (
+        errorMsg.toLowerCase().includes("accessibility") ||
+        errorMsg.toLowerCase().includes("permission") ||
+        errorMsg.toLowerCase().includes("not allowed") ||
+        errorMsg.toLowerCase().includes("input simulation")
+      )) {
+        throw new PastePermissionError(
+          "Accessibility permission required. Go to System Settings > Privacy & Security > Accessibility and enable Scribe.",
+          true
+        );
+      }
+
+      // For other errors, clipboard still has the text, user can paste manually
       return true;
     }
   }
