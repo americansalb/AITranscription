@@ -539,13 +539,17 @@ function App() {
       // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
       if (isMacOS) return;
 
+      // Skip overlay on macOS - showing any window activates the app which breaks paste
+      const isMacOS = navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+      if (isMacOS) return;
+
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const { emit } = await import("@tauri-apps/api/event");
 
         const isActive = recorder.isRecording || status === "processing";
 
-        // Show or hide the floating overlay window
+        // Show or hide the floating overlay window (Windows/Linux only)
         if (isActive) {
           await invoke("show_recording_overlay");
         } else {
