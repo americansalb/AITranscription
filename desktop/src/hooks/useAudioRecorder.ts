@@ -184,20 +184,35 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   }, []);
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (!mediaRecorder.current || mediaRecorder.current.state === "inactive") {
         resolve(null);
         return;
       }
 
+      // Add timeout to prevent infinite hang (5 seconds should be more than enough)
+      const timeoutId = setTimeout(() => {
+        console.error("[AudioRecorder] Stop recording timed out after 5 seconds");
+        setState((s) => ({ ...s, error: "Recording stop timed out", isRecording: false }));
+        reject(new Error("Recording stop timed out after 5 seconds"));
+      }, 5000);
+
       clearDurationInterval();
       cleanupAudioContext();
 
       mediaRecorder.current.onstop = () => {
+        clearTimeout(timeoutId);
+
         // Use the actual mimeType from the recorder, fallback to mp4 (works on both platforms)
         const mimeType = mediaRecorder.current?.mimeType || "audio/mp4";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
-        console.log("[AudioRecorder] Final blob mimeType:", mimeType);
+        console.log("[AudioRecorder] Final blob mimeType:", mimeType, "size:", audioBlob.size);
+
+        // Validate blob has data
+        if (audioBlob.size === 0) {
+          reject(new Error("Recording produced no audio data"));
+          return;
+        }
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());
@@ -209,6 +224,15 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         }));
 
         resolve(audioBlob);
+      };
+
+      // Add error handler
+      mediaRecorder.current.onerror = (event) => {
+        clearTimeout(timeoutId);
+        const errorMsg = event instanceof ErrorEvent ? event.message : "Unknown recording error";
+        console.error("[AudioRecorder] Recording error:", errorMsg);
+        setState((s) => ({ ...s, error: errorMsg, isRecording: false }));
+        reject(new Error(errorMsg));
       };
 
       mediaRecorder.current.stop();
