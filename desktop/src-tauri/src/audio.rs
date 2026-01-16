@@ -128,11 +128,13 @@ impl AudioRecorder {
         // Update recording state
         *self.is_recording.lock().unwrap() = false;
 
-        // Wait for result from audio thread with timeout (10 seconds max)
+        // Wait for result from audio thread with timeout
+        // For medical transcription, recordings can be several minutes long
+        // WAV encoding is fast but allow 60 seconds to be safe
         // This prevents infinite hang if audio thread panics or gets stuck
         result_rx
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|e| format!("Audio processing timed out or failed: {}", e))?
+            .recv_timeout(Duration::from_secs(60))
+            .map_err(|e| format!("Audio processing timed out after 60 seconds: {}", e))?
     }
 
     /// Cancel recording without returning data

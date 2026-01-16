@@ -150,6 +150,13 @@ export function useNativeAudioRecorder(): UseNativeAudioRecorderReturn {
       if (!audioData.mime_type) {
         throw new Error("Missing MIME type in audio data");
       }
+      // Validate duration - must be positive and reasonable
+      if (typeof audioData.duration_secs !== "number" || audioData.duration_secs <= 0) {
+        throw new Error("Recording has no audio (0 second duration)");
+      }
+      if (audioData.duration_secs < 0.3) {
+        throw new Error("Recording too short (less than 0.3 seconds)");
+      }
 
       // Convert base64 to Blob
       let binaryString: string;

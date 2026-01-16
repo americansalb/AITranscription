@@ -151,13 +151,31 @@ async function showWindow(): Promise<void> {
 }
 
 /**
+ * Result of text injection attempt
+ */
+export interface InjectTextResult {
+  success: boolean;
+  pasted: boolean;  // true if actually pasted, false if only copied
+  message: string;
+}
+
+/**
  * Inject text into the active application using clipboard + paste simulation.
  * Just copies to clipboard and simulates paste - no window manipulation.
+ *
+ * IMPORTANT: For medical use, caller MUST check result.success and result.pasted
+ * to ensure text was actually delivered to the target application.
  */
-export async function injectText(text: string): Promise<boolean> {
+export async function injectText(text: string): Promise<InjectTextResult> {
   // First, copy to clipboard
   const copied = await copyToClipboard(text);
-  if (!copied) return false;
+  if (!copied) {
+    return {
+      success: false,
+      pasted: false,
+      message: "Failed to copy text to clipboard",
+    };
+  }
 
   // Try to simulate paste via Tauri command
   if (!tauriCore) {
@@ -168,16 +186,29 @@ export async function injectText(text: string): Promise<boolean> {
     try {
       // Simulate Cmd+V / Ctrl+V - pastes into whatever app has focus
       await tauriCore.invoke("simulate_paste");
-      return true;
+      return {
+        success: true,
+        pasted: true,
+        message: "Text pasted successfully",
+      };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
       console.error("Auto-paste failed:", error);
-      // Clipboard still has the text, user can paste manually
-      return true;
+      // Clipboard still has the text, but paste FAILED
+      return {
+        success: false,
+        pasted: false,
+        message: `Paste failed: ${errorMsg}. Text is in clipboard - paste manually with ${getPasteShortcut()}`,
+      };
     }
   }
 
-  // In browser mode, just copy to clipboard
-  return true;
+  // In browser mode, just copy to clipboard (no paste simulation available)
+  return {
+    success: true,
+    pasted: false,
+    message: `Copied to clipboard. Paste with ${getPasteShortcut()}`,
+  };
 }
 
 /**

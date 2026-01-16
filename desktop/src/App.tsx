@@ -403,7 +403,15 @@ function App() {
 
       // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
       if (response.polished_text) {
-        await injectText(response.polished_text);
+        const injectResult = await injectText(response.polished_text);
+        if (!injectResult.success) {
+          // CRITICAL: Paste failed - user MUST be notified
+          throw new Error(injectResult.message);
+        }
+        if (!injectResult.pasted) {
+          // Text is in clipboard but wasn't auto-pasted
+          showToast(injectResult.message, "warning");
+        }
       }
 
       // Step 3: Done - show feedback AFTER paste
@@ -692,7 +700,12 @@ function App() {
       setResult(editedText);
       // Also copy to clipboard and inject
       await navigator.clipboard.writeText(editedText);
-      await injectText(editedText);
+      const injectResult = await injectText(editedText);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      }
 
       // Submit feedback to learning system if text changed and user is logged in
       if (isLoggedIn() && originalPolishedText && editedText !== originalPolishedText) {
@@ -754,7 +767,14 @@ function App() {
       });
 
       // Auto-inject the new text
-      await injectText(response.text);
+      const injectResult = await injectText(response.text);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      } else {
+        showToast("Text regenerated and pasted!", "success");
+      }
     } catch (err) {
       const message = err instanceof ApiError ? err.detail || err.message : "Failed to regenerate";
       showToast(message, "error");
