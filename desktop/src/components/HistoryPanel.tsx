@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import { copyToClipboard } from "../lib/clipboard";
 import type { TranscriptEntry } from "../App";
-import { isMacOS, getModifierKeyName } from "../lib/platform";
+import { getModifierKeyName } from "../lib/platform";
 
 // For display purposes
 const modKey = getModifierKeyName();

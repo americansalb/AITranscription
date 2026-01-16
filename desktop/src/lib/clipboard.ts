@@ -10,7 +10,7 @@
  * This is the most reliable cross-platform approach for universal dictation.
  */
 
-import { isMacOS, getPasteShortcut } from "./platform";
+import { getPasteShortcut } from "./platform";
 
 // For backward compatibility
 const pasteShortcut = getPasteShortcut();
