@@ -8,6 +8,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 /// Commands sent to the audio thread
@@ -127,10 +128,11 @@ impl AudioRecorder {
         // Update recording state
         *self.is_recording.lock().unwrap() = false;
 
-        // Wait for result from audio thread
+        // Wait for result from audio thread with timeout (10 seconds max)
+        // This prevents infinite hang if audio thread panics or gets stuck
         result_rx
-            .recv()
-            .map_err(|e| format!("Failed to receive audio data: {}", e))?
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|e| format!("Audio processing timed out or failed: {}", e))?
     }
 
     /// Cancel recording without returning data

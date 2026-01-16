@@ -285,13 +285,27 @@ export async function transcribeAndPolish(
     formData.append("model", options.model);
   }
 
-  const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-    body: formData,
-  });
+  // Add timeout to prevent infinite hang (60 seconds for transcription)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
 
-  return handleResponse<TranscribeAndPolishResponse>(response);
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return handleResponse<TranscribeAndPolishResponse>(response);
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ApiError("Transcription request timed out after 60 seconds", 408);
+    }
+    throw error;
+  }
 }
 
 /**

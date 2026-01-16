@@ -143,8 +143,22 @@ export function useNativeAudioRecorder(): UseNativeAudioRecorderReturn {
       // Stop native recording and get audio data
       const audioData = await invoke<AudioData>("stop_recording");
 
+      // Validate audio data before processing
+      if (!audioData || typeof audioData.audio_base64 !== "string" || !audioData.audio_base64) {
+        throw new Error("Invalid audio data received from native recorder");
+      }
+      if (!audioData.mime_type) {
+        throw new Error("Missing MIME type in audio data");
+      }
+
       // Convert base64 to Blob
-      const binaryString = atob(audioData.audio_base64);
+      let binaryString: string;
+      try {
+        binaryString = atob(audioData.audio_base64);
+      } catch (decodeError) {
+        throw new Error("Failed to decode audio data: invalid base64");
+      }
+
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
