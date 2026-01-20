@@ -4532,3 +4532,100 @@ body {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ========================================
+   Permission Warning Banner (macOS)
+   ======================================== */
+.permission-warning {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+  color: white;
+  padding: 16px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+  animation: slideDown 0.3s ease-out;
+  backdrop-filter: blur(10px);
+}
+
+.permission-warning-content {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.permission-warning strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: white;
+}
+
+.permission-warning p {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.95;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.permission-warning-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.permission-warning-actions button {
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.permission-btn-primary {
+  background: white;
+  color: #f97316;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.permission-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  background: #fafafa;
+}
+
+.permission-btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.permission-btn-secondary {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  backdrop-filter: blur(10px);
+}
+
+.permission-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.permission-btn-secondary:active {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}

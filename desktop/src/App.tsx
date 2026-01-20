@@ -169,12 +169,24 @@ function App() {
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
+  const [showPermissionWarning, setShowPermissionWarning] = useState(false);
 
   // Handle hotkey change from Settings
   const handleHotkeyChange = useCallback((newHotkey: string) => {
     setCurrentHotkey(newHotkey);
   }, []);
 
+  // Handle permission request (macOS only)
+  const handleRequestPermission = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("request_accessibility_permission");
+      showToast("Please enable Scribe in System Settings, then restart the app", "info");
+    } catch (error) {
+      console.error("Failed to request permission:", error);
+      showToast("Failed to open System Settings. Please open it manually.", "error");
+    }
+  }, [showToast]);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -461,7 +473,7 @@ function App() {
   }, [recorder, showToast, soundEnabled]);
 
   // Register global hotkey for push-to-talk (uses dynamic hotkey from settings)
-  const { isRegistered: hotkeyRegistered } = useGlobalHotkey({
+  const { isRegistered: hotkeyRegistered, permissionGranted } = useGlobalHotkey({
     hotkey: currentHotkey,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
@@ -472,6 +484,16 @@ function App() {
   useEffect(() => {
     console.log("Hotkey registered status:", hotkeyRegistered);
   }, [hotkeyRegistered]);
+
+  // Show permission warning if permission denied (macOS only)
+  useEffect(() => {
+    const isMac = typeof navigator !== "undefined" && navigator.platform.includes("Mac");
+    if (isMac && permissionGranted === false) {
+      setShowPermissionWarning(true);
+    } else if (permissionGranted === true) {
+      setShowPermissionWarning(false);
+    }
+  }, [permissionGranted]);
 
   // Check backend health on mount
   useEffect(() => {
@@ -818,6 +840,27 @@ function App() {
 
   return (
     <div className="app">
+      {/* Permission warning banner (macOS only) */}
+      {showPermissionWarning && (
+        <div className="permission-warning">
+          <div className="permission-warning-content">
+            <strong>⚠️ Accessibility Permission Required</strong>
+            <p>
+              Scribe needs accessibility permission to register global hotkeys for push-to-talk.
+              Click below to open System Settings.
+            </p>
+            <div className="permission-warning-actions">
+              <button onClick={handleRequestPermission} className="permission-btn-primary">
+                Open System Settings
+              </button>
+              <button onClick={() => setShowPermissionWarning(false)} className="permission-btn-secondary">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="header">
         <h1>Scribe</h1>
         <div className="header-actions">

@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 // Dynamic import for Tauri - will be undefined in browser
 let tauriGlobalShortcut: typeof import("@tauri-apps/plugin-global-shortcut") | null = null;
 
-// Try to load Tauri global shortcut plugin
+// Try to load Tauri plugin
 async function loadTauriPlugin() {
   try {
     if (typeof window !== "undefined" && "__TAURI__" in window) {
@@ -45,6 +45,7 @@ export function useGlobalHotkey({
   const isTauriLoaded = useRef(false);
   const isRegistering = useRef(false); // Prevent concurrent registration attempts
   const mountedRef = useRef(true);
+  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
   const keyDownRef = useRef(onKeyDown);
   const keyUpRef = useRef(onKeyUp);
   const currentHotkeyRef = useRef(hotkey);
@@ -53,6 +54,39 @@ export function useGlobalHotkey({
   keyDownRef.current = onKeyDown;
   keyUpRef.current = onKeyUp;
   currentHotkeyRef.current = hotkey;
+
+  // Check if running on macOS
+  const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+
+  // Check accessibility permissions (macOS only)
+  const checkPermissions = useCallback(async () => {
+    // Only check on macOS when running in Tauri
+    if (!isMac || !tauriGlobalShortcut) {
+      setPermissionGranted(true);
+      return true;
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const granted = await invoke<boolean>("check_accessibility_permission");
+      setPermissionGranted(granted);
+
+      if (!granted) {
+        console.error(
+          "❌ Accessibility permission denied. Global hotkeys will not work.\n" +
+          "Please enable Scribe in System Settings > Privacy & Security > Accessibility"
+        );
+      } else {
+        console.log("✅ Accessibility permission granted");
+      }
+
+      return granted;
+    } catch (error) {
+      console.error("Failed to check accessibility permission:", error);
+      setPermissionGranted(false);
+      return false;
+    }
+  }, [isMac]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -80,6 +114,25 @@ export function useGlobalHotkey({
           return;
         }
 
+        // Check permissions first (macOS only)
+        const hasPermission = await checkPermissions();
+        if (!hasPermission) {
+          console.error(
+            `❌ Cannot register hotkey ${hotkey} - accessibility permission denied.\n` +
+            (isMac
+              ? "Go to System Settings > Privacy & Security > Accessibility and enable Scribe."
+              : "Permission check failed.")
+          );
+          isRegistering.current = false;
+          return;
+        }
+
+        // Check if still mounted after permission check
+        if (!mountedRef.current) {
+          isRegistering.current = false;
+          return;
+        }
+
         console.log(`Attempting to register hotkey: ${hotkey}`);
         await tauriGlobalShortcut.register(hotkey, (event) => {
           // Check if still mounted before calling callbacks
@@ -98,7 +151,7 @@ export function useGlobalHotkey({
         // Check if still mounted after registration
         if (mountedRef.current) {
           isRegistered.current = true;
-          console.log(`Global hotkey registered successfully: ${hotkey}`);
+          console.log(`✅ Global hotkey registered successfully: ${hotkey}`);
         } else {
           // Component unmounted during registration, clean up
           try {
@@ -108,7 +161,15 @@ export function useGlobalHotkey({
           }
         }
       } catch (error) {
-        console.error(`Failed to register global hotkey: ${hotkey}`, error);
+        console.error(`❌ Failed to register global hotkey: ${hotkey}`, error);
+
+        // Platform-specific error guidance
+        if (isMac) {
+          console.error(
+            "macOS: If hotkeys don't work, ensure Scribe has accessibility permission.\n" +
+            "Go to System Settings > Privacy & Security > Accessibility"
+          );
+        }
       } finally {
         isRegistering.current = false;
       }
@@ -134,9 +195,9 @@ export function useGlobalHotkey({
 
       unregister();
     };
-  }, [hotkey, enabled]);
+  }, [hotkey, enabled, checkPermissions, isMac]);
 
-  return { isRegistered: isRegistered.current };
+  return { isRegistered: isRegistered.current, permissionGranted };
 }
 
 /**

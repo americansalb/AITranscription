@@ -30,6 +30,9 @@ fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
 use std::fs::OpenOptions;
 use std::io::Write;
 
+// Permission checking module for macOS accessibility
+mod permissions;
+
 /// Log errors to a file for debugging launch issues
 fn log_error(message: &str) {
     // Get home directory based on platform
@@ -464,6 +467,20 @@ fn update_claude_md(mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if accessibility permission is granted (macOS only)
+/// On Windows/Linux, always returns true as permissions aren't required.
+#[tauri::command]
+fn check_accessibility_permission() -> bool {
+    permissions::check_accessibility_permission()
+}
+
+/// Request accessibility permission by opening System Settings (macOS only)
+/// On Windows/Linux, this is a no-op.
+#[tauri::command]
+fn request_accessibility_permission() -> Result<(), String> {
+    permissions::request_accessibility_permission()
+}
+
 /// Internal function to update CLAUDE.md content
 fn update_claude_md_content(mode: &str) {
     let home_var = if cfg!(target_os = "windows") {
@@ -653,7 +670,9 @@ fn main() {
             cancel_recording,
             get_audio_devices,
             check_recording,
-            update_claude_md
+            update_claude_md,
+            check_accessibility_permission,
+            request_accessibility_permission
         ]);
 
     match builder.run(tauri::generate_context!()) {
