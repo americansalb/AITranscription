@@ -622,6 +622,24 @@ fn main() {
             // Setup Claude Code integration (creates CLAUDE.md if not exists)
             setup_claude_integration();
 
+            // macOS-specific: Request wake lock to prevent App Nap during recording
+            // WHY: macOS App Nap suspends audio recording when window is backgrounded
+            // HOW: Wake lock keeps app active, complementing AudioContext keep-alive
+            // PLATFORM: macOS-specific issue, safe to attempt on all platforms
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("
+                        if ('wakeLock' in navigator) {
+                            navigator.wakeLock.request('screen').catch(e => {
+                                console.log('Wake lock not available:', e);
+                            });
+                        }
+                    ");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

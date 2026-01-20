@@ -8,5 +8,7 @@
     <string>Scribe needs accessibility access to simulate keyboard shortcuts for pasting text.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Scribe uses AppleScript to paste text into other applications.</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
 </dict>
 </plist>
