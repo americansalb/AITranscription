@@ -5,19 +5,34 @@
 
 let audioContext: AudioContext | null = null;
 
-function getAudioContext(): AudioContext {
+/**
+ * Get or create the AudioContext, and ensure it's resumed.
+ * Modern browsers suspend AudioContext until user interaction,
+ * so we must resume it before playing sounds.
+ */
+async function getAudioContext(): Promise<AudioContext> {
   if (!audioContext) {
     audioContext = new AudioContext();
   }
+
+  // Resume if suspended (common on Mac/Safari when triggered from global hotkey)
+  if (audioContext.state === "suspended") {
+    try {
+      await audioContext.resume();
+    } catch (e) {
+      console.error("[Sounds] Failed to resume AudioContext:", e);
+    }
+  }
+
   return audioContext;
 }
 
 /**
  * Play a tone with the given frequency and duration
  */
-function playTone(frequency: number, duration: number, volume = 0.3): void {
+async function playTone(frequency: number, duration: number, volume = 0.3): Promise<void> {
   try {
-    const ctx = getAudioContext();
+    const ctx = await getAudioContext();
 
     const oscillator = ctx.createOscillator();
     const gainNode = ctx.createGain();
@@ -37,18 +52,18 @@ function playTone(frequency: number, duration: number, volume = 0.3): void {
     oscillator.start(now);
     oscillator.stop(now + duration);
   } catch (error) {
-    console.error("Failed to play sound:", error);
+    console.error("[Sounds] Failed to play tone:", error);
   }
 }
 
 /**
  * Play the "recording started" sound - ascending tone
  */
-export function playStartSound(): void {
-  const ctx = getAudioContext();
-  const now = ctx.currentTime;
-
+export async function playStartSound(): Promise<void> {
   try {
+    const ctx = await getAudioContext();
+    const now = ctx.currentTime;
+
     // Two quick ascending tones
     const osc1 = ctx.createOscillator();
     const osc2 = ctx.createOscillator();
@@ -73,18 +88,18 @@ export function playStartSound(): void {
     osc2.start(now + 0.08);
     osc2.stop(now + 0.15);
   } catch (error) {
-    console.error("Failed to play start sound:", error);
+    console.error("[Sounds] Failed to play start sound:", error);
   }
 }
 
 /**
  * Play the "recording stopped / processing" sound - descending tone
  */
-export function playStopSound(): void {
-  const ctx = getAudioContext();
-  const now = ctx.currentTime;
-
+export async function playStopSound(): Promise<void> {
   try {
+    const ctx = await getAudioContext();
+    const now = ctx.currentTime;
+
     // Two quick descending tones
     const osc1 = ctx.createOscillator();
     const osc2 = ctx.createOscillator();
@@ -109,16 +124,16 @@ export function playStopSound(): void {
     osc2.start(now + 0.08);
     osc2.stop(now + 0.15);
   } catch (error) {
-    console.error("Failed to play stop sound:", error);
+    console.error("[Sounds] Failed to play stop sound:", error);
   }
 }
 
 /**
  * Play the "success" sound - pleasant chord
  */
-export function playSuccessSound(): void {
+export async function playSuccessSound(): Promise<void> {
   try {
-    const ctx = getAudioContext();
+    const ctx = await getAudioContext();
     const now = ctx.currentTime;
 
     // Play a major chord
@@ -139,13 +154,13 @@ export function playSuccessSound(): void {
       osc.stop(now + 0.3);
     });
   } catch (error) {
-    console.error("Failed to play success sound:", error);
+    console.error("[Sounds] Failed to play success sound:", error);
   }
 }
 
 /**
  * Play the "error" sound - dissonant tone
  */
-export function playErrorSound(): void {
-  playTone(200, 0.2, 0.25);
+export async function playErrorSound(): Promise<void> {
+  await playTone(200, 0.2, 0.25);
 }

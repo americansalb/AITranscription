@@ -25,16 +25,21 @@
       {
         "title": "",
         "label": "recording-indicator",
-        "width": 140,
-        "height": 44,
+        "width": 160,
+        "height": 48,
         "resizable": false,
         "decorations": false,
-        "transparent": false,
+        "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "visible": false,
         "focus": false,
-        "url": "index.html#/overlay"
+        "url": "index.html#/overlay",
+        "windowEffects": {
+          "effects": ["mica"],
+          "state": "followsWindowActiveState",
+          "radius": 22
+        }
       }
     ],
     "security": {

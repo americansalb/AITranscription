@@ -10,9 +10,10 @@
  * This is the most reliable cross-platform approach for universal dictation.
  */
 
-// Detect if running on macOS
-const isMac = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
-const pasteShortcut = isMac ? "Cmd+V" : "Ctrl+V";
+import { getPasteShortcut } from "./platform";
+
+// For backward compatibility
+const pasteShortcut = getPasteShortcut();
 
 // Dynamic import for Tauri clipboard plugin
 let tauriClipboard: typeof import("@tauri-apps/plugin-clipboard-manager") | null = null;
@@ -150,13 +151,31 @@ async function showWindow(): Promise<void> {
 }
 
 /**
- * Inject text into the active application using clipboard + paste simulation.
- * No longer hides/shows window - just copies to clipboard and simulates paste.
+ * Result of text injection attempt
  */
-export async function injectText(text: string): Promise<boolean> {
+export interface InjectTextResult {
+  success: boolean;
+  pasted: boolean;  // true if actually pasted, false if only copied
+  message: string;
+}
+
+/**
+ * Inject text into the active application using clipboard + paste simulation.
+ * Just copies to clipboard and simulates paste - no window manipulation.
+ *
+ * IMPORTANT: For medical use, caller MUST check result.success and result.pasted
+ * to ensure text was actually delivered to the target application.
+ */
+export async function injectText(text: string): Promise<InjectTextResult> {
   // First, copy to clipboard
   const copied = await copyToClipboard(text);
-  if (!copied) return false;
+  if (!copied) {
+    return {
+      success: false,
+      pasted: false,
+      message: "Failed to copy text to clipboard",
+    };
+  }
 
   // Try to simulate paste via Tauri command
   if (!tauriCore) {
@@ -165,17 +184,31 @@ export async function injectText(text: string): Promise<boolean> {
 
   if (tauriCore) {
     try {
+      // Simulate Cmd+V / Ctrl+V - pastes into whatever app has focus
       await tauriCore.invoke("simulate_paste");
-      return true;
+      return {
+        success: true,
+        pasted: true,
+        message: "Text pasted successfully",
+      };
     } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
       console.error("Auto-paste failed:", error);
-      // Clipboard still has the text, user can paste manually
-      return true;
+      // Clipboard still has the text, but paste FAILED
+      return {
+        success: false,
+        pasted: false,
+        message: `Paste failed: ${errorMsg}. Text is in clipboard - paste manually with ${getPasteShortcut()}`,
+      };
     }
   }
 
-  // In browser mode, just copy to clipboard
-  return true;
+  // In browser mode, just copy to clipboard (no paste simulation available)
+  return {
+    success: true,
+    pasted: false,
+    message: `Copied to clipboard. Paste with ${getPasteShortcut()}`,
+  };
 }
 
 /**
@@ -255,4 +288,59 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
     method: "clipboard",
     message: `Copied to clipboard. Press ${pasteShortcut} to paste.`,
   };
+}
+
+/**
+ * Update tray icon to show recording state
+ */
+export async function setTrayRecordingState(recording: boolean): Promise<void> {
+  if (!tauriCore) {
+    await loadTauriCore();
+  }
+
+  if (tauriCore) {
+    try {
+      await tauriCore.invoke("set_recording_state", { recording });
+    } catch (error) {
+      console.error("Failed to set tray recording state:", error);
+    }
+  }
+}
+
+/**
+ * Update the floating overlay window state
+ */
+export interface OverlayState {
+  isRecording: boolean;
+  isProcessing: boolean;
+  duration: number;
+  audioLevel: number;
+}
+
+let tauriEvent: typeof import("@tauri-apps/api/event") | null = null;
+
+async function loadTauriEvent() {
+  try {
+    if (typeof window !== "undefined" && "__TAURI__" in window) {
+      tauriEvent = await import("@tauri-apps/api/event");
+      return true;
+    }
+  } catch {
+    // Not running in Tauri
+  }
+  return false;
+}
+
+export async function updateOverlayState(state: OverlayState): Promise<void> {
+  if (!tauriEvent) {
+    await loadTauriEvent();
+  }
+
+  if (tauriEvent) {
+    try {
+      await tauriEvent.emit("overlay-update", state);
+    } catch (error) {
+      console.error("Failed to update overlay state:", error);
+    }
+  }
 }

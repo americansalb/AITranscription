@@ -4406,7 +4406,7 @@ body {
 /* Learning Button in Header */
 .learning-btn {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 8px;
   background: transparent;
@@ -4436,17 +4436,45 @@ body {
   -webkit-app-region: drag;
 }
 
+/**
+ * Platform-specific overlay pill styles to prevent Windows black box issue.
+ *
+ * WHY: Windows compositor shows black background when window loses focus
+ *      with transparent: true but opaque CSS background.
+ * HOW: Use backdrop-filter on Windows 11, fallback to near-opaque on Win10.
+ *      isolation: isolate creates new stacking context to prevent black box.
+ * PLATFORM: Windows-specific fix, cross-platform safe.
+ * TRADE-OFF: Slight visual difference between platforms for consistency.
+ */
+
+/* Windows 11: Use backdrop-filter for transparency */
+@supports (backdrop-filter: blur(10px)) {
+  .overlay-pill {
+    background: rgba(20, 20, 22, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+}
+
+/* Fallback for Windows 10 */
+@supports not (backdrop-filter: blur(10px)) {
+  .overlay-pill {
+    background: rgba(20, 20, 22, 0.98);
+  }
+}
+
 .overlay-pill {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
   border-radius: 999px;
-  background: rgba(20, 20, 22, 0.95);
   border: 1px solid var(--border);
-  backdrop-filter: blur(10px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   transition: all 0.2s ease;
+  /* Prevent black box on Windows */
+  isolation: isolate;
+  will-change: opacity, transform;
 }
 
 .overlay-pill.idle {

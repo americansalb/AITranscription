@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useAudioRecorder } from "./hooks/useAudioRecorder";
+import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
-import { injectText } from "./lib/clipboard";
+import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
+import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -149,7 +150,7 @@ function saveSetting<T>(key: string, value: T): void {
 }
 
 function App() {
-  const recorder = useAudioRecorder();
+  const recorder = useUnifiedAudioRecorder();
   const { showToast } = useToast();
   const [status, setStatus] = useState<ProcessingStatus>("idle");
   const [result, setResult] = useState<string>("");
@@ -186,14 +187,6 @@ function App() {
       showToast("Failed to open System Settings. Please open it manually.", "error");
     }
   }, [showToast]);
-
-  // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
-  const formatHotkeyDisplay = useCallback((hotkey: string): string => {
-    const isMac = navigator.platform.includes("Mac");
-    return hotkey
-      .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
-      .replace("Alt", isMac ? "Option" : "Alt");
-  }, []);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -306,6 +299,21 @@ function App() {
     }
   }, [isEditing]);
 
+  // Update tray icon state
+  useEffect(() => {
+    setTrayRecordingState(recorder.isRecording);
+  }, [recorder.isRecording]);
+
+  // Update overlay state (overlay is always visible, just expands/collapses)
+  useEffect(() => {
+    updateOverlayState({
+      isRecording: recorder.isRecording,
+      isProcessing: status === "processing",
+      duration: recorder.duration,
+      audioLevel: recorder.audioLevel || 0,
+    });
+  }, [recorder.isRecording, recorder.duration, recorder.audioLevel, status]);
+
   // Cancel recording handler
   const handleCancelRecording = useCallback(async () => {
     if (recorder.isRecording) {
@@ -405,16 +413,24 @@ function App() {
         confidence: confidenceScore,
       });
 
-      // Step 3: Done
+      // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
+      if (response.polished_text) {
+        const injectResult = await injectText(response.polished_text);
+        if (!injectResult.success) {
+          // CRITICAL: Paste failed - user MUST be notified
+          throw new Error(injectResult.message);
+        }
+        if (!injectResult.pasted) {
+          // Text is in clipboard but wasn't auto-pasted
+          showToast(injectResult.message, "warning");
+        }
+      }
+
+      // Step 3: Done - show feedback AFTER paste
       setProcessingStep("done");
       setStatus("success");
       if (soundEnabled) playSuccessSound(); // Audio feedback - success
       showToast("Transcription complete!", "success");
-
-      // Auto-inject the polished text into the active application
-      if (response.polished_text) {
-        await injectText(response.polished_text);
-      }
 
       // Increment transcription count to trigger stats refresh
       setTranscriptionCount((c) => c + 1);
@@ -538,9 +554,12 @@ function App() {
   }, []);
 
   // Control overlay window visibility
+  // Skip overlay on macOS - showing windows activates the app and breaks paste
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
+      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
+      if (isMacOS()) return;
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -548,7 +567,7 @@ function App() {
 
         const isActive = recorder.isRecording || status === "processing";
 
-        // Show or hide the floating overlay window
+        // Show or hide the floating overlay window (Windows/Linux only)
         if (isActive) {
           await invoke("show_recording_overlay");
         } else {
@@ -703,7 +722,12 @@ function App() {
       setResult(editedText);
       // Also copy to clipboard and inject
       await navigator.clipboard.writeText(editedText);
-      await injectText(editedText);
+      const injectResult = await injectText(editedText);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      }
 
       // Submit feedback to learning system if text changed and user is logged in
       if (isLoggedIn() && originalPolishedText && editedText !== originalPolishedText) {
@@ -765,7 +789,14 @@ function App() {
       });
 
       // Auto-inject the new text
-      await injectText(response.text);
+      const injectResult = await injectText(response.text);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      } else {
+        showToast("Text regenerated and pasted!", "success");
+      }
     } catch (err) {
       const message = err instanceof ApiError ? err.detail || err.message : "Failed to regenerate";
       showToast(message, "error");
