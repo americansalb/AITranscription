@@ -12,6 +12,9 @@ let audioQueue: string[] = [];
 let isPlaying = false;
 let currentAudio: HTMLAudioElement | null = null;
 
+// Prevent duplicate listener registration in React StrictMode
+let listenerInitialized = false;
+
 /**
  * Get the auth token from localStorage.
  */
@@ -140,8 +143,17 @@ export function stop(): void {
 /**
  * Initialize the speak listener.
  * Call this once when the app starts.
+ * Protected against React StrictMode double-initialization.
  */
 export async function initSpeakListener(): Promise<() => void> {
+  // Prevent duplicate initialization in React StrictMode
+  if (listenerInitialized) {
+    console.log("[Speak] Listener already initialized, skipping duplicate");
+    return () => {}; // Return no-op cleanup function
+  }
+
+  listenerInitialized = true;
+
   // Preload voices for fallback
   if (window.speechSynthesis) {
     window.speechSynthesis.getVoices();
@@ -153,5 +165,10 @@ export async function initSpeakListener(): Promise<() => void> {
   });
 
   console.log("[Speak] Listener initialized (ElevenLabs)");
-  return unlisten;
+
+  // Return cleanup function that resets the flag
+  return () => {
+    listenerInitialized = false;
+    unlisten();
+  };
 }
