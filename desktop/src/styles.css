@@ -4436,17 +4436,45 @@ body {
   -webkit-app-region: drag;
 }
 
+/**
+ * Platform-specific overlay pill styles to prevent Windows black box issue.
+ *
+ * WHY: Windows compositor shows black background when window loses focus
+ *      with transparent: true but opaque CSS background.
+ * HOW: Use backdrop-filter on Windows 11, fallback to near-opaque on Win10.
+ *      isolation: isolate creates new stacking context to prevent black box.
+ * PLATFORM: Windows-specific fix, cross-platform safe.
+ * TRADE-OFF: Slight visual difference between platforms for consistency.
+ */
+
+/* Windows 11: Use backdrop-filter for transparency */
+@supports (backdrop-filter: blur(10px)) {
+  .overlay-pill {
+    background: rgba(20, 20, 22, 0.85);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+}
+
+/* Fallback for Windows 10 */
+@supports not (backdrop-filter: blur(10px)) {
+  .overlay-pill {
+    background: rgba(20, 20, 22, 0.98);
+  }
+}
+
 .overlay-pill {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
   border-radius: 999px;
-  background: rgba(20, 20, 22, 0.95);
   border: 1px solid var(--border);
-  backdrop-filter: blur(10px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   transition: all 0.2s ease;
+  /* Prevent black box on Windows */
+  isolation: isolate;
+  will-change: opacity, transform;
 }
 
 .overlay-pill.idle {
@@ -4503,4 +4531,101 @@ body {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ========================================
+   Permission Warning Banner (macOS)
+   ======================================== */
+.permission-warning {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+  color: white;
+  padding: 16px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+  animation: slideDown 0.3s ease-out;
+  backdrop-filter: blur(10px);
+}
+
+.permission-warning-content {
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.permission-warning strong {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: white;
+}
+
+.permission-warning p {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.95;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.permission-warning-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.permission-warning-actions button {
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.permission-btn-primary {
+  background: white;
+  color: #f97316;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.permission-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  background: #fafafa;
+}
+
+.permission-btn-primary:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.permission-btn-secondary {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  backdrop-filter: blur(10px);
+}
+
+.permission-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.permission-btn-secondary:active {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+@keyframes slideDown {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
 }

@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { isMacOS } from "../lib/platform";
 
 export interface AudioRecorderState {
   isRecording: boolean;
@@ -68,13 +69,9 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         );
       }
 
-      // Detect platform for appropriate constraints
-      // macOS WebKit ignores some constraints, so we use simpler ones there
-      const isMac = navigator.platform.includes("Mac");
-
       // Request microphone access with platform-appropriate constraints
       // Safari/WebKit ignores sampleRate, so don't set it on Mac
-      const audioConstraints: MediaTrackConstraints = isMac
+      const audioConstraints: MediaTrackConstraints = isMacOS()
         ? {
             echoCancellation: true,
             noiseSuppression: true,
@@ -91,7 +88,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       });
 
       const audioTracks = stream.getAudioTracks();
-      console.log("[AudioRecorder] Platform:", isMac ? "macOS" : "other");
+      console.log("[AudioRecorder] Platform:", isMacOS() ? "macOS" : "other");
       console.log("[AudioRecorder] Got stream with", audioTracks.length, "audio tracks");
       if (audioTracks.length > 0) {
         const settings = audioTracks[0].getSettings();
@@ -160,7 +157,7 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
       };
 
       // Use longer timeslice on Mac for more reliable recording
-      const timeslice = isMac ? 250 : 100;
+      const timeslice = isMacOS() ? 250 : 100;
       mediaRecorder.current.start(timeslice);
       console.log("[AudioRecorder] Started with timeslice:", timeslice, "ms");
 
@@ -187,20 +184,35 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   }, []);
 
   const stopRecording = useCallback(async (): Promise<Blob | null> => {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       if (!mediaRecorder.current || mediaRecorder.current.state === "inactive") {
         resolve(null);
         return;
       }
 
+      // Add timeout to prevent infinite hang (5 seconds should be more than enough)
+      const timeoutId = setTimeout(() => {
+        console.error("[AudioRecorder] Stop recording timed out after 5 seconds");
+        setState((s) => ({ ...s, error: "Recording stop timed out", isRecording: false }));
+        reject(new Error("Recording stop timed out after 5 seconds"));
+      }, 5000);
+
       clearDurationInterval();
       cleanupAudioContext();
 
       mediaRecorder.current.onstop = () => {
+        clearTimeout(timeoutId);
+
         // Use the actual mimeType from the recorder, fallback to mp4 (works on both platforms)
         const mimeType = mediaRecorder.current?.mimeType || "audio/mp4";
         const audioBlob = new Blob(audioChunks.current, { type: mimeType });
-        console.log("[AudioRecorder] Final blob mimeType:", mimeType);
+        console.log("[AudioRecorder] Final blob mimeType:", mimeType, "size:", audioBlob.size);
+
+        // Validate blob has data
+        if (audioBlob.size === 0) {
+          reject(new Error("Recording produced no audio data"));
+          return;
+        }
 
         // Stop all tracks
         mediaRecorder.current?.stream.getTracks().forEach((track) => track.stop());
@@ -212,6 +224,15 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
         }));
 
         resolve(audioBlob);
+      };
+
+      // Add error handler
+      mediaRecorder.current.onerror = (event) => {
+        clearTimeout(timeoutId);
+        const errorMsg = event instanceof ErrorEvent ? event.message : "Unknown recording error";
+        console.error("[AudioRecorder] Recording error:", errorMsg);
+        setState((s) => ({ ...s, error: errorMsg, isRecording: false }));
+        reject(new Error(errorMsg));
       };
 
       mediaRecorder.current.stop();

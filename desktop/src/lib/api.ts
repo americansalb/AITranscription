@@ -285,13 +285,48 @@ export async function transcribeAndPolish(
     formData.append("model", options.model);
   }
 
-  const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-    body: formData,
-  });
+  // Dynamic timeout based on file size
+  // Estimate: ~16KB per second of audio at typical compression
+  // Add generous buffer for network latency and server processing
+  // Minimum 60 seconds, maximum 10 minutes
+  const estimatedDurationSeconds = Math.max(audioBlob.size / 16000, 1);
+  const timeoutMs = Math.min(
+    Math.max((estimatedDurationSeconds + 60) * 1000, 60000),  // min 60 seconds
+    600000  // max 10 minutes
+  );
 
-  return handleResponse<TranscribeAndPolishResponse>(response);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    const data = await handleResponse<TranscribeAndPolishResponse>(response);
+
+    // CRITICAL: Validate response has actual transcription text
+    // For medical use, we cannot accept empty or missing transcriptions
+    if (!data.raw_text || typeof data.raw_text !== "string" || data.raw_text.trim().length === 0) {
+      throw new ApiError("Transcription returned empty - no speech detected in audio", 422, "Please speak clearly and try again");
+    }
+    if (!data.polished_text || typeof data.polished_text !== "string") {
+      throw new ApiError("Text processing failed", 422, "Could not process transcription");
+    }
+
+    return data;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      const timeoutSecs = Math.round(timeoutMs / 1000);
+      throw new ApiError(`Transcription request timed out after ${timeoutSecs} seconds`, 408);
+    }
+    throw error;
+  }
 }
 
 /**

@@ -3,6 +3,7 @@ import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
+import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -168,19 +169,24 @@ function App() {
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
+  const [showPermissionWarning, setShowPermissionWarning] = useState(false);
 
   // Handle hotkey change from Settings
   const handleHotkeyChange = useCallback((newHotkey: string) => {
     setCurrentHotkey(newHotkey);
   }, []);
 
-  // Format hotkey for display (e.g., "CommandOrControl+Shift+S" -> "Ctrl+Shift+S" or "Cmd+Shift+S")
-  const formatHotkeyDisplay = useCallback((hotkey: string): string => {
-    const isMac = navigator.platform.includes("Mac");
-    return hotkey
-      .replace("CommandOrControl", isMac ? "Cmd" : "Ctrl")
-      .replace("Alt", isMac ? "Option" : "Alt");
-  }, []);
+  // Handle permission request (macOS only)
+  const handleRequestPermission = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("request_accessibility_permission");
+      showToast("Please enable Scribe in System Settings, then restart the app", "info");
+    } catch (error) {
+      console.error("Failed to request permission:", error);
+      showToast("Failed to open System Settings. Please open it manually.", "error");
+    }
+  }, [showToast]);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -407,16 +413,24 @@ function App() {
         confidence: confidenceScore,
       });
 
-      // Step 3: Done
+      // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
+      if (response.polished_text) {
+        const injectResult = await injectText(response.polished_text);
+        if (!injectResult.success) {
+          // CRITICAL: Paste failed - user MUST be notified
+          throw new Error(injectResult.message);
+        }
+        if (!injectResult.pasted) {
+          // Text is in clipboard but wasn't auto-pasted
+          showToast(injectResult.message, "warning");
+        }
+      }
+
+      // Step 3: Done - show feedback AFTER paste
       setProcessingStep("done");
       setStatus("success");
       if (soundEnabled) playSuccessSound(); // Audio feedback - success
       showToast("Transcription complete!", "success");
-
-      // Auto-inject the polished text into the active application
-      if (response.polished_text) {
-        await injectText(response.polished_text);
-      }
 
       // Increment transcription count to trigger stats refresh
       setTranscriptionCount((c) => c + 1);
@@ -459,7 +473,7 @@ function App() {
   }, [recorder, showToast, soundEnabled]);
 
   // Register global hotkey for push-to-talk (uses dynamic hotkey from settings)
-  const { isRegistered: hotkeyRegistered } = useGlobalHotkey({
+  const { isRegistered: hotkeyRegistered, permissionGranted } = useGlobalHotkey({
     hotkey: currentHotkey,
     onKeyDown: handleHotkeyDown,
     onKeyUp: handleHotkeyUp,
@@ -470,6 +484,16 @@ function App() {
   useEffect(() => {
     console.log("Hotkey registered status:", hotkeyRegistered);
   }, [hotkeyRegistered]);
+
+  // Show permission warning if permission denied (macOS only)
+  useEffect(() => {
+    const isMac = typeof navigator !== "undefined" && navigator.platform.includes("Mac");
+    if (isMac && permissionGranted === false) {
+      setShowPermissionWarning(true);
+    } else if (permissionGranted === true) {
+      setShowPermissionWarning(false);
+    }
+  }, [permissionGranted]);
 
   // Check backend health on mount
   useEffect(() => {
@@ -530,9 +554,12 @@ function App() {
   }, []);
 
   // Control overlay window visibility
+  // Skip overlay on macOS - showing windows activates the app and breaks paste
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
+      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
+      if (isMacOS()) return;
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -540,7 +567,7 @@ function App() {
 
         const isActive = recorder.isRecording || status === "processing";
 
-        // Show or hide the floating overlay window
+        // Show or hide the floating overlay window (Windows/Linux only)
         if (isActive) {
           await invoke("show_recording_overlay");
         } else {
@@ -695,7 +722,12 @@ function App() {
       setResult(editedText);
       // Also copy to clipboard and inject
       await navigator.clipboard.writeText(editedText);
-      await injectText(editedText);
+      const injectResult = await injectText(editedText);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      }
 
       // Submit feedback to learning system if text changed and user is logged in
       if (isLoggedIn() && originalPolishedText && editedText !== originalPolishedText) {
@@ -757,7 +789,14 @@ function App() {
       });
 
       // Auto-inject the new text
-      await injectText(response.text);
+      const injectResult = await injectText(response.text);
+      if (!injectResult.success) {
+        showToast(injectResult.message, "error");
+      } else if (!injectResult.pasted) {
+        showToast(injectResult.message, "warning");
+      } else {
+        showToast("Text regenerated and pasted!", "success");
+      }
     } catch (err) {
       const message = err instanceof ApiError ? err.detail || err.message : "Failed to regenerate";
       showToast(message, "error");
@@ -801,6 +840,27 @@ function App() {
 
   return (
     <div className="app">
+      {/* Permission warning banner (macOS only) */}
+      {showPermissionWarning && (
+        <div className="permission-warning">
+          <div className="permission-warning-content">
+            <strong>⚠️ Accessibility Permission Required</strong>
+            <p>
+              Scribe needs accessibility permission to register global hotkeys for push-to-talk.
+              Click below to open System Settings.
+            </p>
+            <div className="permission-warning-actions">
+              <button onClick={handleRequestPermission} className="permission-btn-primary">
+                Open System Settings
+              </button>
+              <button onClick={() => setShowPermissionWarning(false)} className="permission-btn-secondary">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="header">
         <h1>Scribe</h1>
         <div className="header-actions">

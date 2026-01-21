@@ -12,5 +12,10 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- CRITICAL: Enable accessibility for global hotkeys and keyboard simulation -->
+    <key>com.apple.security.accessibility</key>
+    <true/>
+    <key>com.apple.security.audio-unit</key>
+    <true/>
 </dict>
 </plist>

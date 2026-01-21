@@ -32,9 +32,14 @@
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": true,
+        "visible": false,
         "focus": false,
-        "url": "index.html#/overlay"
+        "url": "index.html#/overlay",
+        "windowEffects": {
+          "effects": ["mica"],
+          "state": "followsWindowActiveState",
+          "radius": 22
+        }
       }
     ],
     "security": {

@@ -30,6 +30,9 @@ fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
 use std::fs::OpenOptions;
 use std::io::Write;
 
+// Permission checking module for macOS accessibility
+mod permissions;
+
 /// Log errors to a file for debugging launch issues
 fn log_error(message: &str) {
     // Get home directory based on platform
@@ -186,8 +189,8 @@ fn type_text(text: String) -> Result<(), String> {
 #[tauri::command]
 fn show_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("recording-indicator") {
+        // Just show - NEVER set_focus, or it steals focus from the user's app
         let _ = window.show();
-        let _ = window.set_focus();
     }
     Ok(())
 }
@@ -408,7 +411,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
 }
 
 // Global audio recorder state
-struct AudioRecorderState(Mutex<AudioRecorder>);
+struct AudioRecorderState(pub Mutex<AudioRecorder>);
 
 /// Start native audio recording
 #[tauri::command]
@@ -416,22 +419,21 @@ fn start_recording(
     state: tauri::State<AudioRecorderState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let mut recorder = state.0.lock();
-    recorder.set_app_handle(app);
-    recorder.start()
+    let recorder = state.0.lock();
+    recorder.start(Some(app))
 }
 
 /// Stop recording and return audio data
 #[tauri::command]
 fn stop_recording(state: tauri::State<AudioRecorderState>) -> Result<AudioData, String> {
-    let mut recorder = state.0.lock();
+    let recorder = state.0.lock();
     recorder.stop()
 }
 
 /// Cancel recording without returning data
 #[tauri::command]
 fn cancel_recording(state: tauri::State<AudioRecorderState>) -> Result<(), String> {
-    let mut recorder = state.0.lock();
+    let recorder = state.0.lock();
     recorder.cancel();
     Ok(())
 }
@@ -463,6 +465,20 @@ fn setup_claude_integration() {
 fn update_claude_md(mode: String) -> Result<(), String> {
     update_claude_md_content(&mode);
     Ok(())
+}
+
+/// Check if accessibility permission is granted (macOS only)
+/// On Windows/Linux, always returns true as permissions aren't required.
+#[tauri::command]
+fn check_accessibility_permission() -> bool {
+    permissions::check_accessibility_permission()
+}
+
+/// Request accessibility permission by opening System Settings (macOS only)
+/// On Windows/Linux, this is a no-op.
+#[tauri::command]
+fn request_accessibility_permission() -> Result<(), String> {
+    permissions::request_accessibility_permission()
 }
 
 /// Internal function to update CLAUDE.md content
@@ -623,6 +639,24 @@ fn main() {
             // Setup Claude Code integration (creates CLAUDE.md if not exists)
             setup_claude_integration();
 
+            // macOS-specific: Request wake lock to prevent App Nap during recording
+            // WHY: macOS App Nap suspends audio recording when window is backgrounded
+            // HOW: Wake lock keeps app active, complementing AudioContext keep-alive
+            // PLATFORM: macOS-specific issue, safe to attempt on all platforms
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval("
+                        if ('wakeLock' in navigator) {
+                            navigator.wakeLock.request('screen').catch(e => {
+                                console.log('Wake lock not available:', e);
+                            });
+                        }
+                    ");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -636,7 +670,9 @@ fn main() {
             cancel_recording,
             get_audio_devices,
             check_recording,
-            update_claude_md
+            update_claude_md,
+            check_accessibility_permission,
+            request_accessibility_permission
         ]);
 
     match builder.run(tauri::generate_context!()) {
