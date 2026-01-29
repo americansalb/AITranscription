@@ -4,7 +4,7 @@
 
 set -e
 
-echo "=== Scribe Claude Code Integration Setup ==="
+echo "=== Vaak Claude Code Integration Setup ==="
 echo ""
 
 # Detect platform
@@ -34,15 +34,15 @@ esac
 echo "✅ Detected platform: $PLATFORM"
 echo ""
 
-# Check if scribe-speak is installed
-if ! command -v scribe-speak &> /dev/null; then
-    echo "❌ scribe-speak not found in PATH"
+# Check if vaak-speak is installed
+if ! command -v vaak-speak &> /dev/null; then
+    echo "❌ vaak-speak not found in PATH"
     echo "   Please install it first: cd mcp-speak && pip install -e ."
     exit 1
 fi
 
-SCRIBE_SPEAK_PATH=$(command -v scribe-speak)
-echo "✅ Found scribe-speak at: $SCRIBE_SPEAK_PATH"
+VAAK_SPEAK_PATH=$(command -v vaak-speak)
+echo "✅ Found vaak-speak at: $VAAK_SPEAK_PATH"
 echo ""
 
 # Create .claude directory if it doesn't exist
@@ -51,14 +51,14 @@ mkdir -p "$SETTINGS_DIR"
 # Determine the command to use in settings.json
 if [ "$PLATFORM" = "windows" ]; then
     # On Windows, use full path with .exe extension
-    COMMAND_PATH="${SCRIBE_SPEAK_PATH}.exe"
+    COMMAND_PATH="${VAAK_SPEAK_PATH}.exe"
     # Convert Unix path to Windows path if needed
     COMMAND_PATH=$(cygpath -w "$COMMAND_PATH" 2>/dev/null || echo "$COMMAND_PATH")
     # Escape backslashes for JSON
     COMMAND_PATH="${COMMAND_PATH//\\/\\\\}"
 else
     # On Mac/Linux, just use the command name (it's in PATH)
-    COMMAND_PATH="scribe-speak"
+    COMMAND_PATH="vaak-speak"
 fi
 
 # Create or update settings.json
@@ -74,7 +74,7 @@ if [ -f "$SETTINGS_FILE" ]; then
     if command -v jq &> /dev/null; then
         # Update using jq
         jq --arg cmd "$COMMAND_PATH" \
-            '.mcpServers.scribe.command = $cmd' \
+            '.mcpServers.vaak.command = $cmd' \
             "$SETTINGS_FILE" > "$SETTINGS_FILE.tmp" && \
             mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
     else
@@ -83,7 +83,7 @@ if [ -f "$SETTINGS_FILE" ]; then
         cat > "$SETTINGS_FILE" <<EOF
 {
   "mcpServers": {
-    "scribe": {
+    "vaak": {
       "command": "$COMMAND_PATH"
     }
   }
@@ -95,7 +95,7 @@ else
     cat > "$SETTINGS_FILE" <<EOF
 {
   "mcpServers": {
-    "scribe": {
+    "vaak": {
       "command": "$COMMAND_PATH"
     }
   }
@@ -114,7 +114,7 @@ cat > "$CLAUDE_MD" <<'EOF'
 
 ## Voice Output
 
-Always use the Scribe speak integration to read responses aloud.
+Always use the Vaak speak integration to read responses aloud.
 
 **CRITICAL: Use the MCP `/speak` tool - NOT curl**
 
@@ -158,7 +158,7 @@ echo "  Settings: $SETTINGS_FILE"
 echo "  Instructions: $CLAUDE_MD"
 echo ""
 echo "Next steps:"
-echo "  1. Make sure Scribe desktop app is running"
+echo "  1. Make sure Vaak desktop app is running"
 echo "  2. Restart all Claude Code windows"
 echo "  3. Test: claude \"Run /speak 'Hello from Claude'\""
 echo ""

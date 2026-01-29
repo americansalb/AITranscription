@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the scribe-mcp sidecar for the current platform
+# Build the vaak-mcp sidecar for the current platform
 # This script is run before Tauri build
 
 set -e
@@ -22,15 +22,15 @@ case "$OS" in
         else
             TARGET_TRIPLE="x86_64-apple-darwin"
         fi
-        BINARY_NAME="scribe-mcp-$TARGET_TRIPLE"
+        BINARY_NAME="vaak-mcp-$TARGET_TRIPLE"
         ;;
     Linux)
         TARGET_TRIPLE="x86_64-unknown-linux-gnu"
-        BINARY_NAME="scribe-mcp-$TARGET_TRIPLE"
+        BINARY_NAME="vaak-mcp-$TARGET_TRIPLE"
         ;;
     MINGW*|MSYS*|CYGWIN*)
         TARGET_TRIPLE="x86_64-pc-windows-msvc"
-        BINARY_NAME="scribe-mcp-$TARGET_TRIPLE.exe"
+        BINARY_NAME="vaak-mcp-$TARGET_TRIPLE.exe"
         ;;
     *)
         echo "Unknown OS: $OS"
@@ -38,17 +38,17 @@ case "$OS" in
         ;;
 esac
 
-echo "Building scribe-mcp for $TARGET_TRIPLE..."
+echo "Building vaak-mcp for $TARGET_TRIPLE..."
 
 # Build the binary
 cd "$TAURI_DIR"
-cargo build --bin scribe-mcp --release
+cargo build --bin vaak-mcp --release
 
 # Copy to binaries folder
-if [ -f "target/release/scribe-mcp.exe" ]; then
-    cp "target/release/scribe-mcp.exe" "$BINARIES_DIR/$BINARY_NAME"
+if [ -f "target/release/vaak-mcp.exe" ]; then
+    cp "target/release/vaak-mcp.exe" "$BINARIES_DIR/$BINARY_NAME"
 else
-    cp "target/release/scribe-mcp" "$BINARIES_DIR/$BINARY_NAME"
+    cp "target/release/vaak-mcp" "$BINARIES_DIR/$BINARY_NAME"
 fi
 
 echo "Built sidecar: $BINARIES_DIR/$BINARY_NAME"

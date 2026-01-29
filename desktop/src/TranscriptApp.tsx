@@ -144,7 +144,7 @@ function generateRawClaudeMd(blindMode: boolean, detail: number): string {
 
 ## Voice Output
 
-Always use the Scribe speak integration to read responses aloud.
+Always use the Vaak speak integration to read responses aloud.
 
 **CRITICAL: Use the MCP \`/speak\` tool - NOT curl**
 
@@ -857,7 +857,7 @@ export function TranscriptApp() {
                 className="transcript-btn transcript-btn-danger"
                 onClick={() => {
                   if (confirm("Clear all sessions and messages? This cannot be undone.")) {
-                    localStorage.removeItem("scribe_speak_sessions");
+                    localStorage.removeItem("vaak_speak_sessions");
                     setSessions([]);
                     setSelectedSessionId(null);
                   }

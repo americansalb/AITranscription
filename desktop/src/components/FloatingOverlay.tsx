@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 
-const POSITION_STORAGE_KEY = "scribe_overlay_position";
+const POSITION_STORAGE_KEY = "vaak_overlay_position";
 
 interface Position {
   x: number;

@@ -3,7 +3,7 @@
 
 services:
   - type: web
-    name: scribe-api
+    name: vaak-api
     plan: free
     runtime: python
     rootDir: backend
@@ -18,12 +18,12 @@ services:
         generateValue: true
       - key: DATABASE_URL
         fromDatabase:
-          name: scribe-db
+          name: vaak-db
           property: connectionString
     healthCheckPath: /api/v1/health
 
 databases:
-  - name: scribe-db
+  - name: vaak-db
     plan: free
-    databaseName: scribe
-    user: scribe
+    databaseName: vaak
+    user: vaak

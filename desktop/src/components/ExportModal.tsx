@@ -44,7 +44,7 @@ export function ExportModal({ history, onClose }: ExportModalProps) {
     switch (format) {
       case "json":
         content = JSON.stringify(filteredHistory, null, 2);
-        filename = `scribe-transcripts-${Date.now()}.json`;
+        filename = `vaak-transcripts-${Date.now()}.json`;
         mimeType = "application/json";
         break;
 
@@ -70,7 +70,7 @@ export function ExportModal({ history, onClose }: ExportModalProps) {
         });
 
         content = [headers.join(","), ...rows].join("\n");
-        filename = `scribe-transcripts-${Date.now()}.csv`;
+        filename = `vaak-transcripts-${Date.now()}.csv`;
         mimeType = "text/csv";
         break;
 
@@ -85,7 +85,7 @@ export function ExportModal({ history, onClose }: ExportModalProps) {
           if (includePolished && entry.polishedText) lines.push(`\nPolished:\n${entry.polishedText}`);
           return lines.join("\n");
         }).join("\n\n");
-        filename = `scribe-transcripts-${Date.now()}.txt`;
+        filename = `vaak-transcripts-${Date.now()}.txt`;
         mimeType = "text/plain";
         break;
     }

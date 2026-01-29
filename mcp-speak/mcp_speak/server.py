@@ -1,4 +1,4 @@
-"""MCP server that sends speak requests to Scribe desktop app."""
+"""MCP server that sends speak requests to Vaak desktop app."""
 
 import asyncio
 import urllib.request
@@ -12,11 +12,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-SCRIBE_URL = "http://127.0.0.1:7865/speak"
+VAAK_URL = "http://127.0.0.1:7865/speak"
 HEARTBEAT_URL = "http://127.0.0.1:7865/heartbeat"
 HEARTBEAT_INTERVAL_SECONDS = 120  # Send heartbeat every 2 minutes
 
-server = Server("scribe-speak")
+server = Server("vaak-speak")
 
 # Shell/terminal process names to look for when walking up the process tree
 SHELL_NAMES = {
@@ -111,8 +111,8 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-def send_to_scribe(text: str) -> tuple[bool, str]:
-    """Send text to Scribe's local speak endpoint with session ID.
+def send_to_vaak(text: str) -> tuple[bool, str]:
+    """Send text to Vaak's local speak endpoint with session ID.
 
     Returns:
         tuple: (success: bool, instructions: str)
@@ -123,7 +123,7 @@ def send_to_scribe(text: str) -> tuple[bool, str]:
             "session_id": SESSION_ID
         }).encode("utf-8")
         req = urllib.request.Request(
-            SCRIBE_URL,
+            VAAK_URL,
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -141,7 +141,7 @@ def send_to_scribe(text: str) -> tuple[bool, str]:
 
 
 def send_heartbeat() -> bool:
-    """Send heartbeat to Scribe to indicate this session is still active.
+    """Send heartbeat to Vaak to indicate this session is still active.
 
     Returns:
         bool: True if heartbeat was received successfully
@@ -163,7 +163,7 @@ def send_heartbeat() -> bool:
 
 
 async def heartbeat_loop():
-    """Background task that sends heartbeats to Scribe periodically."""
+    """Background task that sends heartbeats to Vaak periodically."""
     # Send initial heartbeat immediately
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, send_heartbeat)
@@ -183,18 +183,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if not text:
         return [TextContent(type="text", text="No text provided to speak.")]
 
-    # Send to Scribe in a thread to not block
+    # Send to Vaak in a thread to not block
     loop = asyncio.get_event_loop()
-    success, instructions = await loop.run_in_executor(None, send_to_scribe, text)
+    success, instructions = await loop.run_in_executor(None, send_to_vaak, text)
 
     if success:
-        # Return instructions from Scribe (contains voice mode/detail settings)
+        # Return instructions from Vaak (contains voice mode/detail settings)
         # This allows Claude to adjust its communication style based on user preferences
         return [TextContent(type="text", text=instructions if instructions else f"Spoke: \"{text}\"")]
     else:
         return [TextContent(
             type="text",
-            text="Could not reach Scribe. Make sure the Scribe desktop app is running."
+            text="Could not reach Vaak. Make sure the Vaak desktop app is running."
         )]
 
 

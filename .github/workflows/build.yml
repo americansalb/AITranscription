@@ -117,7 +117,7 @@ jobs:
         working-directory: desktop
         run: echo "VITE_API_URL=${{ secrets.API_URL }}" > .env
 
-      # Build the scribe-mcp sidecar binary
+      # Build the vaak-mcp sidecar binary
       - name: Build MCP sidecar (Unix)
         if: matrix.platform != 'windows-latest'
         working-directory: desktop
@@ -130,13 +130,13 @@ jobs:
         working-directory: desktop
         shell: pwsh
         run: |
-          # Build the scribe-mcp sidecar
+          # Build the vaak-mcp sidecar
           cd src-tauri
-          cargo build --bin scribe-mcp --release
+          cargo build --bin vaak-mcp --release
 
           # Create binaries directory and copy
           New-Item -ItemType Directory -Path binaries -Force
-          Copy-Item target/release/scribe-mcp.exe binaries/scribe-mcp-x86_64-pc-windows-msvc.exe
+          Copy-Item target/release/vaak-mcp.exe binaries/vaak-mcp-x86_64-pc-windows-msvc.exe
 
       # Build with code signing (macOS with secrets configured)
       - name: Build the app (signed)
@@ -180,7 +180,7 @@ jobs:
         if: matrix.platform == 'macos-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: Scribe-macOS
+          name: Vaak-macOS
           path: desktop/src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: warn
 
@@ -188,7 +188,7 @@ jobs:
         if: matrix.platform == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: Scribe-Windows
+          name: Vaak-Windows
           path: desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: warn
 
@@ -196,7 +196,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
-          name: Scribe-Linux
+          name: Vaak-Linux
           path: |
             desktop/src-tauri/target/release/bundle/deb/*.deb
             desktop/src-tauri/target/release/bundle/appimage/*.AppImage
@@ -220,7 +220,7 @@ jobs:
           echo ""
           echo "Directory structure:"
           ls -la
-          for dir in Scribe-*/; do
+          for dir in Vaak-*/; do
             echo "Contents of $dir:"
             ls -la "$dir" 2>/dev/null || echo "  (empty or not found)"
           done
@@ -245,10 +245,10 @@ jobs:
           tag_name: ${{ steps.release_tag.outputs.tag }}
           name: ${{ steps.release_tag.outputs.name }}
           files: |
-            Scribe-macOS/**/*.dmg
-            Scribe-Windows/**/*.exe
-            Scribe-Linux/**/*.deb
-            Scribe-Linux/**/*.AppImage
+            Vaak-macOS/**/*.dmg
+            Vaak-Windows/**/*.exe
+            Vaak-Linux/**/*.deb
+            Vaak-Linux/**/*.AppImage
           draft: false
           prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
           generate_release_notes: ${{ startsWith(github.ref, 'refs/tags/') }}

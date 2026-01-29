@@ -359,7 +359,7 @@ function keyEventToHotkey(e: KeyboardEvent): string | null {
 // Get stored hotkey from localStorage
 export function getStoredHotkey(): string {
   try {
-    return localStorage.getItem("scribe_hotkey") || "CommandOrControl+Shift+D";
+    return localStorage.getItem("vaak_hotkey") || "CommandOrControl+Shift+D";
   } catch {
     return "CommandOrControl+Shift+D";
   }
@@ -368,7 +368,7 @@ export function getStoredHotkey(): string {
 // Save hotkey to localStorage
 function saveHotkey(hotkey: string) {
   try {
-    localStorage.setItem("scribe_hotkey", hotkey);
+    localStorage.setItem("vaak_hotkey", hotkey);
   } catch {
     // Ignore storage errors
   }
@@ -387,7 +387,7 @@ const DETAIL_LABELS = ['Summary', '', 'Balanced', '', 'Developer'];
 // Get stored whisper model from localStorage
 export function getStoredWhisperModel(): string {
   try {
-    return localStorage.getItem("scribe_whisper_model") || "whisper-large-v3-turbo";
+    return localStorage.getItem("vaak_whisper_model") || "whisper-large-v3-turbo";
   } catch {
     return "whisper-large-v3-turbo";
   }
@@ -396,7 +396,7 @@ export function getStoredWhisperModel(): string {
 // Save whisper model to localStorage
 export function saveWhisperModel(model: string): void {
   try {
-    localStorage.setItem("scribe_whisper_model", model);
+    localStorage.setItem("vaak_whisper_model", model);
   } catch {
     // Ignore storage errors
   }
@@ -405,7 +405,7 @@ export function saveWhisperModel(model: string): void {
 // Get stored noise cancellation preference
 export function getStoredNoiseCancellation(): boolean {
   try {
-    return localStorage.getItem("scribe_noise_cancellation") === "true";
+    return localStorage.getItem("vaak_noise_cancellation") === "true";
   } catch {
     return false;
   }
@@ -414,7 +414,7 @@ export function getStoredNoiseCancellation(): boolean {
 // Save noise cancellation preference
 export function saveNoiseCancellation(enabled: boolean): void {
   try {
-    localStorage.setItem("scribe_noise_cancellation", enabled ? "true" : "false");
+    localStorage.setItem("vaak_noise_cancellation", enabled ? "true" : "false");
   } catch {
     // Ignore storage errors
   }

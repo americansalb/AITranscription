@@ -696,7 +696,7 @@ ADMIN_DASHBOARD_HTML = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scribe Admin Dashboard</title>
+    <title>Vaak Admin Dashboard</title>
     <style>
         :root {
             --bg-primary: #0f0f0f;
@@ -1154,7 +1154,7 @@ ADMIN_DASHBOARD_HTML = '''
     <!-- Login Screen -->
     <div id="loginScreen" class="login-container">
         <div class="login-box">
-            <h1>Scribe Admin</h1>
+            <h1>Vaak Admin</h1>
             <div id="loginError" class="error-message" style="display: none;"></div>
             <form id="loginForm">
                 <div class="form-group">
@@ -1173,7 +1173,7 @@ ADMIN_DASHBOARD_HTML = '''
     <!-- Dashboard -->
     <div id="dashboard" class="dashboard">
         <header class="header">
-            <h1>Scribe Admin Dashboard</h1>
+            <h1>Vaak Admin Dashboard</h1>
             <div class="header-actions">
                 <span class="user-info" id="currentUserEmail"></span>
                 <button class="btn btn-secondary btn-sm" onclick="logout()">Logout</button>

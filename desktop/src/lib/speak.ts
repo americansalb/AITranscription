@@ -1,6 +1,6 @@
 /**
  * Speech synthesis for Claude Code integration.
- * Uses ElevenLabs via the Scribe backend API for high-quality voice.
+ * Uses ElevenLabs via the Vaak backend API for high-quality voice.
  * Now integrated with the queue store for persistent queue management.
  */
 
@@ -9,7 +9,7 @@ import * as queueStore from "./queueStore";
 import type { SpeakEventPayload, QueueItem as QueueStoreItem } from "./queueTypes";
 import { getStoredVoiceEnabled } from "./voiceStream";
 
-const API_URL = import.meta.env.VITE_API_URL || "https://scribe-api-yk09.onrender.com";
+const API_URL = import.meta.env.VITE_API_URL || "https://vaak-api-yk09.onrender.com";
 
 // Legacy audio queue for backward compatibility (will be phased out)
 interface LegacyQueueItem {
@@ -46,7 +46,7 @@ const recentMessages = window.__SPEAK_RECENT_MESSAGES__;
  * Get the auth token from localStorage.
  */
 function getAuthToken(): string | null {
-  return localStorage.getItem("scribe_token");
+  return localStorage.getItem("vaak_token");
 }
 
 /**
@@ -61,7 +61,7 @@ async function playNext(): Promise<void> {
   try {
     const token = getAuthToken();
 
-    // Call the Scribe TTS endpoint
+    // Call the Vaak TTS endpoint
     const formData = new FormData();
     formData.append("text", item.text);
     if (item.session_id) {
@@ -145,7 +145,7 @@ function fallbackSpeak(text: string): void {
 }
 
 /**
- * Speak text using ElevenLabs via Scribe API.
+ * Speak text using ElevenLabs via Vaak API.
  */
 export function speak(text: string, session_id?: string): void {
   if (!text) return;

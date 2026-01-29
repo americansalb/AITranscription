@@ -1,5 +1,5 @@
 /**
- * API client for communicating with the Scribe backend
+ * API client for communicating with the Vaak backend
  */
 
 // Remove trailing slash if present to avoid double slashes in URLs
@@ -399,15 +399,15 @@ let authToken: string | null = null;
 export function setAuthToken(token: string | null) {
   authToken = token;
   if (token) {
-    localStorage.setItem("scribe_token", token);
+    localStorage.setItem("vaak_token", token);
   } else {
-    localStorage.removeItem("scribe_token");
+    localStorage.removeItem("vaak_token");
   }
 }
 
 export function getAuthToken(): string | null {
   if (!authToken) {
-    authToken = localStorage.getItem("scribe_token");
+    authToken = localStorage.getItem("vaak_token");
   }
   return authToken;
 }

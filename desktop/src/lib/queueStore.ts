@@ -579,7 +579,7 @@ export function setVolume(volume: number): void {
 export function setAutoPlay(enabled: boolean): void {
   setState({ autoPlay: enabled });
   try {
-    localStorage.setItem("scribe_queue_autoplay", enabled ? "true" : "false");
+    localStorage.setItem("vaak_queue_autoplay", enabled ? "true" : "false");
     log(`AutoPlay set to ${enabled} and saved`);
   } catch (e) {
     // Ignore storage errors
@@ -589,7 +589,7 @@ export function setAutoPlay(enabled: boolean): void {
 // Load autoPlay from localStorage
 function loadAutoPlay(): boolean {
   try {
-    const stored = localStorage.getItem("scribe_queue_autoplay");
+    const stored = localStorage.getItem("vaak_queue_autoplay");
     return stored !== "false"; // Default to true
   } catch {
     return true;

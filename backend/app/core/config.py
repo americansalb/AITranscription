@@ -11,14 +11,14 @@ class Settings(BaseSettings):
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # Default: Rachel
 
     # Database
-    database_url: str = "postgresql+asyncpg://localhost:5432/scribe"
+    database_url: str = "postgresql+asyncpg://localhost:5432/vaak"
 
     # Auth
     secret_key: str = "dev-secret-key-change-in-production"
     access_token_expire_minutes: int = 60 * 24 * 7  # 1 week
 
     # App settings
-    app_name: str = "Scribe"
+    app_name: str = "Vaak"
     debug: bool = False
 
     # AI Models

@@ -122,7 +122,7 @@ export function OverlayApp() {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const pos = await getCurrentWindow().outerPosition();
         localStorage.setItem(
-          "scribe_overlay_position",
+          "vaak_overlay_position",
           JSON.stringify({ x: pos.x, y: pos.y })
         );
       } catch {
@@ -153,7 +153,7 @@ export function OverlayApp() {
       try {
         const { getCurrentWindow, PhysicalPosition, availableMonitors } =
           await import("@tauri-apps/api/window");
-        const saved = localStorage.getItem("scribe_overlay_position");
+        const saved = localStorage.getItem("vaak_overlay_position");
         if (saved) {
           const { x, y } = JSON.parse(saved);
           await getCurrentWindow().setPosition(new PhysicalPosition(x, y));
@@ -215,7 +215,7 @@ export function OverlayApp() {
         {!isActive && (
           <>
             <div className="overlay-idle-dot" />
-            <span className="overlay-label idle-label">Scribe</span>
+            <span className="overlay-label idle-label">Vaak</span>
           </>
         )}
       </div>

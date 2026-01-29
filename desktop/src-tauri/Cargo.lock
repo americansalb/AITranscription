@@ -3415,32 +3415,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "scribe-desktop"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cpal",
- "enigo",
- "hostname",
- "hound",
- "image",
- "libc",
- "once_cell",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-global-shortcut",
- "tiny_http",
- "ureq",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "selectors"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4650,6 +4624,32 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "vaak-desktop"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cpal",
+ "enigo",
+ "hostname",
+ "hound",
+ "image",
+ "libc",
+ "once_cell",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-global-shortcut",
+ "tiny_http",
+ "ureq",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

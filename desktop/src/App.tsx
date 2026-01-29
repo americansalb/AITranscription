@@ -90,10 +90,10 @@ const PROCESSING_STEPS: { key: ProcessingStep; label: string }[] = [
 
 // LocalStorage keys
 const STORAGE_KEYS = {
-  CONTEXT: "scribe_context",
-  FORMALITY: "scribe_formality",
-  HISTORY: "scribe_history",
-  SOUND_ENABLED: "scribe_sound_enabled",
+  CONTEXT: "vaak_context",
+  FORMALITY: "vaak_formality",
+  HISTORY: "vaak_history",
+  SOUND_ENABLED: "vaak_sound_enabled",
 };
 
 // Tauri window APIs for overlay (Tauri 2.0)
@@ -213,7 +213,7 @@ function App() {
           detail: getStoredVoiceDetail()
         });
 
-        showToast(newEnabled ? "Scribe Speak enabled" : "Scribe Speak disabled", "info");
+        showToast(newEnabled ? "Vaak Speak enabled" : "Vaak Speak disabled", "info");
       } catch (err) {
         console.error("[App] Failed to update CLAUDE.md:", err);
       }
@@ -490,7 +490,7 @@ function App() {
         confidence: confidenceScore,
       });
 
-      // Auto-inject FIRST before any UI feedback (toast/sound might activate Scribe on Mac)
+      // Auto-inject FIRST before any UI feedback (toast/sound might activate Vaak on Mac)
       if (response.polished_text) {
         const injectResult = await injectText(response.polished_text);
         if (!injectResult.success) {
@@ -956,9 +956,9 @@ function App() {
   return (
     <div className="app">
       <header className="header">
-        <h1>Scribe</h1>
+        <h1>Vaak</h1>
         <div className="header-actions">
-          {/* Scribe Speak Toggle - synced with Claude Integration Preferences */}
+          {/* Vaak Speak Toggle - synced with Claude Integration Preferences */}
           <button
             className={`voice-toggle-btn ${voiceEnabled ? "enabled" : "disabled"}`}
             title={voiceEnabled ? "Claude Voice: ON - Synced with Preferences (click to disable)" : "Claude Voice: OFF - Synced with Preferences (click to enable)"}

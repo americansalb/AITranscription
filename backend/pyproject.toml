@@ -1,5 +1,5 @@
 [project]
-name = "scribe-backend"
+name = "vaak-backend"
 version = "0.1.0"
 description = "AI-powered transcription backend with Groq Whisper and Claude Haiku"
 requires-python = ">=3.11"

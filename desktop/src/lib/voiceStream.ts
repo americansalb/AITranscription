@@ -1,5 +1,5 @@
 /**
- * Voice stream client - connects to Scribe backend SSE endpoint
+ * Voice stream client - connects to Vaak backend SSE endpoint
  * and plays audio explanations of Claude Code actions.
  */
 
@@ -210,7 +210,7 @@ export const voiceStream = new VoiceStreamClient();
 
 
 // Storage helpers for voice settings
-const VOICE_ENABLED_KEY = 'scribe_voice_enabled';
+const VOICE_ENABLED_KEY = 'vaak_voice_enabled';
 
 export function getStoredVoiceEnabled(): boolean {
   try {
@@ -229,7 +229,7 @@ export function saveVoiceEnabled(enabled: boolean): void {
 }
 
 // Blind mode storage (replaces old VoiceMode)
-const BLIND_MODE_KEY = 'scribe_blind_mode';
+const BLIND_MODE_KEY = 'vaak_blind_mode';
 
 // Legacy type for backwards compatibility during transition
 export type VoiceMode = 'summary' | 'developer' | 'blind';
@@ -241,7 +241,7 @@ export function getStoredBlindMode(): boolean {
       return stored === 'true';
     }
     // Migration from old voice mode
-    const oldMode = localStorage.getItem('scribe_voice_mode');
+    const oldMode = localStorage.getItem('vaak_voice_mode');
     return oldMode === 'blind';
   } catch {
     return false;
@@ -266,7 +266,7 @@ export function saveVoiceMode(mode: VoiceMode): void {
 }
 
 // Voice detail level storage
-const VOICE_DETAIL_KEY = 'scribe_voice_detail';
+const VOICE_DETAIL_KEY = 'vaak_voice_detail';
 
 export function getStoredVoiceDetail(): number {
   try {
@@ -289,7 +289,7 @@ export function saveVoiceDetail(detail: number): void {
 }
 
 // Voice trigger mode storage
-const VOICE_AUTO_KEY = 'scribe_voice_auto';
+const VOICE_AUTO_KEY = 'vaak_voice_auto';
 
 export function getStoredVoiceAuto(): boolean {
   try {

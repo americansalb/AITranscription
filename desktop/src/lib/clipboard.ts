@@ -113,7 +113,7 @@ async function loadTauriWindow() {
 }
 
 /**
- * Hide the Scribe window to return focus to the previous app
+ * Hide the Vaak window to return focus to the previous app
  */
 async function hideWindow(): Promise<boolean> {
   if (!tauriWindow) {
@@ -134,7 +134,7 @@ async function hideWindow(): Promise<boolean> {
 }
 
 /**
- * Show the Scribe window again
+ * Show the Vaak window again
  */
 async function showWindow(): Promise<void> {
   if (!tauriWindow) {

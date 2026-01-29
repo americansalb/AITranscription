@@ -8,7 +8,7 @@ interface AudioIndicatorProps {
 }
 
 // LocalStorage key for position
-const POSITION_KEY = "scribe_audio_indicator_position";
+const POSITION_KEY = "vaak_audio_indicator_position";
 
 interface Position {
   x: number;

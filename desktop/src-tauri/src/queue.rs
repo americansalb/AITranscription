@@ -192,7 +192,7 @@ pub fn update_queue_item_status(
     duration_ms: Option<i64>,
     error_message: Option<String>,
 ) -> Result<(), String> {
-    eprintln!("Scribe: [Queue] update_queue_item_status called - uuid={}, status={}", uuid, status);
+    eprintln!("Vaak: [Queue] update_queue_item_status called - uuid={}, status={}", uuid, status);
 
     with_db(|conn| {
         let now = now_ms();
@@ -204,7 +204,7 @@ pub fn update_queue_item_status(
                     params![status, now, uuid],
                 )
                 .map_err(|e| format!("Failed to update status: {}", e))?;
-                eprintln!("Scribe: [Queue] Updated {} row(s) to playing", rows);
+                eprintln!("Vaak: [Queue] Updated {} row(s) to playing", rows);
             }
             "completed" => {
                 let rows = conn.execute(
@@ -212,7 +212,7 @@ pub fn update_queue_item_status(
                     params![status, now, duration_ms, uuid],
                 )
                 .map_err(|e| format!("Failed to update status: {}", e))?;
-                eprintln!("Scribe: [Queue] Updated {} row(s) to completed, duration_ms={:?}", rows, duration_ms);
+                eprintln!("Vaak: [Queue] Updated {} row(s) to completed, duration_ms={:?}", rows, duration_ms);
             }
             "failed" => {
                 conn.execute(

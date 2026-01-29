@@ -27,7 +27,7 @@ export interface Session {
 }
 
 // Storage keys
-const SESSIONS_KEY = "scribe_speak_sessions";
+const SESSIONS_KEY = "vaak_speak_sessions";
 
 // Predefined colors for visual distinction (8 colors for 8 Claude instances)
 export const SESSION_COLORS = [

@@ -1,7 +1,7 @@
-//! Scribe MCP Server - Bridges Claude Code to Scribe for voice output
+//! Vaak MCP Server - Bridges Claude Code to Vaak for voice output
 //!
 //! This is a minimal MCP (Model Context Protocol) server that provides a `speak` tool
-//! for Claude Code to send text-to-speech requests to the Scribe desktop app.
+//! for Claude Code to send text-to-speech requests to the Vaak desktop app.
 //!
 //! Session ID is determined using a priority chain of methods for redundancy:
 //! 1. CLAUDE_SESSION_ID env var (explicit override)
@@ -143,7 +143,7 @@ fn get_session_id() -> String {
     // Priority 1: Explicit override via CLAUDE_SESSION_ID
     if let Ok(env_session) = std::env::var("CLAUDE_SESSION_ID") {
         if !env_session.is_empty() {
-            eprintln!("[scribe-mcp] Session source: CLAUDE_SESSION_ID env var");
+            eprintln!("[vaak-mcp] Session source: CLAUDE_SESSION_ID env var");
             return env_session;
         }
     }
@@ -151,7 +151,7 @@ fn get_session_id() -> String {
     // Priority 2: Windows Terminal GUID (WT_SESSION)
     if let Ok(wt_session) = std::env::var("WT_SESSION") {
         if !wt_session.is_empty() {
-            eprintln!("[scribe-mcp] Session source: Windows Terminal (WT_SESSION)");
+            eprintln!("[vaak-mcp] Session source: Windows Terminal (WT_SESSION)");
             return format!("wt-{}", wt_session);
         }
     }
@@ -159,7 +159,7 @@ fn get_session_id() -> String {
     // Priority 3: iTerm2 session ID (macOS)
     if let Ok(iterm_session) = std::env::var("ITERM_SESSION_ID") {
         if !iterm_session.is_empty() {
-            eprintln!("[scribe-mcp] Session source: iTerm2 (ITERM_SESSION_ID)");
+            eprintln!("[vaak-mcp] Session source: iTerm2 (ITERM_SESSION_ID)");
             return format!("iterm-{}", iterm_session);
         }
     }
@@ -167,7 +167,7 @@ fn get_session_id() -> String {
     // Priority 4: Generic terminal session ID (Terminal.app, etc)
     if let Ok(term_session) = std::env::var("TERM_SESSION_ID") {
         if !term_session.is_empty() {
-            eprintln!("[scribe-mcp] Session source: Terminal session (TERM_SESSION_ID)");
+            eprintln!("[vaak-mcp] Session source: Terminal session (TERM_SESSION_ID)");
             return format!("term-{}", term_session);
         }
     }
@@ -175,7 +175,7 @@ fn get_session_id() -> String {
     // Priority 5a: Windows console window handle
     #[cfg(windows)]
     if let Some(hwnd) = get_console_window_handle() {
-        eprintln!("[scribe-mcp] Session source: Windows console handle");
+        eprintln!("[vaak-mcp] Session source: Windows console handle");
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -185,7 +185,7 @@ fn get_session_id() -> String {
     // Priority 5b: Unix TTY path
     #[cfg(unix)]
     if let Some(tty) = get_tty_path() {
-        eprintln!("[scribe-mcp] Session source: TTY path ({})", tty);
+        eprintln!("[vaak-mcp] Session source: TTY path ({})", tty);
         // Sanitize: /dev/pts/3 -> pts-3, /dev/ttys001 -> ttys001
         let clean = tty.replace("/dev/", "").replace("/", "-");
         let hostname = hostname::get()
@@ -195,12 +195,12 @@ fn get_session_id() -> String {
     }
 
     // Priority 6: Fallback hash (deterministic based on system state)
-    eprintln!("[scribe-mcp] Session source: Fallback hash");
+    eprintln!("[vaak-mcp] Session source: Fallback hash");
     generate_fallback_id()
 }
 
-/// Send text to Scribe's local speak endpoint
-fn send_to_scribe(text: &str, session_id: &str) -> Result<(), String> {
+/// Send text to Vaak's local speak endpoint
+fn send_to_vaak(text: &str, session_id: &str) -> Result<(), String> {
     let client = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(5))
         .build();
@@ -215,7 +215,7 @@ fn send_to_scribe(text: &str, session_id: &str) -> Result<(), String> {
         .send_string(&body.to_string())
     {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to send to Scribe: {}", e))
+        Err(e) => Err(format!("Failed to send to Vaak: {}", e))
     }
 }
 
@@ -232,7 +232,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     "tools": {}
                 },
                 "serverInfo": {
-                    "name": "scribe-speak",
+                    "name": "vaak-speak",
                     "version": "1.0.0"
                 }
             })
@@ -267,7 +267,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 let arguments = params.get("arguments")?;
                 let text = arguments.get("text")?.as_str()?;
 
-                match send_to_scribe(text, session_id) {
+                match send_to_vaak(text, session_id) {
                     Ok(_) => {
                         serde_json::json!({
                             "content": [{
@@ -280,7 +280,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         serde_json::json!({
                             "content": [{
                                 "type": "text",
-                                "text": format!("Could not reach Scribe: {}. Make sure the Scribe desktop app is running.", e)
+                                "text": format!("Could not reach Vaak: {}. Make sure the Vaak desktop app is running.", e)
                             }],
                             "isError": true
                         })
@@ -318,7 +318,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
 
 fn main() {
     let session_id = get_session_id();
-    eprintln!("[scribe-mcp] Session ID: {}", session_id);
+    eprintln!("[vaak-mcp] Session ID: {}", session_id);
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

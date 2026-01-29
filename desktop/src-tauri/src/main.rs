@@ -43,7 +43,7 @@ fn log_error(message: &str) {
     };
 
     if let Some(home) = std::env::var_os(home_var) {
-        let log_path = std::path::PathBuf::from(home).join("scribe-error.log");
+        let log_path = std::path::PathBuf::from(home).join("vaak-error.log");
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -54,13 +54,13 @@ fn log_error(message: &str) {
     }
 
     // Also print to stderr for debugging
-    eprintln!("Scribe: {}", message);
+    eprintln!("Vaak: {}", message);
 }
 
 // ==================== Voice Settings Infrastructure ====================
 
-/// Global project path for CLAUDE.md writes
-/// This stores the project directory so we can write CLAUDE.md there
+/// Global project path for settings
+/// This stores the project directory
 static PROJECT_PATH: std::sync::OnceLock<parking_lot::RwLock<Option<String>>> = std::sync::OnceLock::new();
 
 /// Get the project path RwLock, initializing if needed
@@ -94,9 +94,9 @@ fn get_voice_settings_path() -> Option<PathBuf> {
 
     std::env::var_os(home_var).map(|home| {
         if cfg!(target_os = "windows") {
-            PathBuf::from(home).join("Scribe").join("voice-settings.json")
+            PathBuf::from(home).join("Vaak").join("voice-settings.json")
         } else {
-            PathBuf::from(home).join(".scribe").join("voice-settings.json")
+            PathBuf::from(home).join(".vaak").join("voice-settings.json")
         }
     })
 }
@@ -179,8 +179,8 @@ fn save_voice_settings_cmd(blind_mode: bool, detail: u8) -> Result<(), String> {
     save_voice_settings(blind_mode, detail)
 }
 
-/// Tauri command to set the project path for CLAUDE.md writes
-/// This allows the frontend to specify where CLAUDE.md should be written
+/// Tauri command to set the project path
+/// This allows the frontend to specify the project directory
 #[tauri::command]
 fn set_project_path(path: String) -> Result<(), String> {
     let lock = get_project_path_lock();
@@ -389,7 +389,7 @@ fn toggle_transcript_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Get the path to the bundled scribe-mcp sidecar binary
+/// Get the path to the bundled vaak-mcp sidecar binary
 fn get_sidecar_path() -> Option<std::path::PathBuf> {
     // Get the directory where the app is running from
     let exe_path = std::env::current_exe().ok()?;
@@ -397,16 +397,16 @@ fn get_sidecar_path() -> Option<std::path::PathBuf> {
 
     // Determine platform-specific binary name
     #[cfg(target_os = "windows")]
-    let binary_name = "scribe-mcp-x86_64-pc-windows-msvc.exe";
+    let binary_name = "vaak-mcp-x86_64-pc-windows-msvc.exe";
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    let binary_name = "scribe-mcp-aarch64-apple-darwin";
+    let binary_name = "vaak-mcp-aarch64-apple-darwin";
 
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    let binary_name = "scribe-mcp-x86_64-apple-darwin";
+    let binary_name = "vaak-mcp-x86_64-apple-darwin";
 
     #[cfg(target_os = "linux")]
-    let binary_name = "scribe-mcp-x86_64-unknown-linux-gnu";
+    let binary_name = "vaak-mcp-x86_64-unknown-linux-gnu";
 
     // In development, the binary is in target/release or target/debug
     // In production, it's in the resources folder
@@ -429,7 +429,7 @@ fn get_sidecar_path() -> Option<std::path::PathBuf> {
 }
 
 /// Auto-configure Claude Code integration on startup
-/// Creates .mcp.json config so Claude Code can speak through Scribe
+/// Creates .mcp.json config so Claude Code can speak through Vaak
 fn setup_claude_code_integration() {
     use std::fs;
     use std::path::PathBuf;
@@ -450,13 +450,13 @@ fn setup_claude_code_integration() {
     // Get the path to our bundled MCP sidecar
     let sidecar_path = match get_sidecar_path() {
         Some(path) => {
-            log_error(&format!("Found scribe-mcp sidecar at: {:?}", path));
+            log_error(&format!("Found vaak-mcp sidecar at: {:?}", path));
             path.to_string_lossy().to_string()
         }
         None => {
-            // Fallback to scribe-speak if pip-installed (for backwards compatibility)
-            log_error("Sidecar not found, falling back to scribe-speak in PATH");
-            "scribe-speak".to_string()
+            // Fallback to vaak-speak if pip-installed (for backwards compatibility)
+            log_error("Sidecar not found, falling back to vaak-speak in PATH");
+            "vaak-speak".to_string()
         }
     };
 
@@ -470,10 +470,10 @@ fn setup_claude_code_integration() {
         serde_json::json!({})
     };
 
-    // Check if scribe MCP server is already configured with THIS path
+    // Check if vaak MCP server is already configured with THIS path
     let current_command = config
         .get("mcpServers")
-        .and_then(|s| s.get("scribe"))
+        .and_then(|s| s.get("vaak"))
         .and_then(|s| s.get("command"))
         .and_then(|c| c.as_str())
         .unwrap_or("");
@@ -481,12 +481,12 @@ fn setup_claude_code_integration() {
     let needs_update = current_command != sidecar_path;
 
     if needs_update {
-        // Add/update scribe MCP server configuration
+        // Add/update vaak MCP server configuration
         if config.get("mcpServers").is_none() {
             config["mcpServers"] = serde_json::json!({});
         }
 
-        config["mcpServers"]["scribe"] = serde_json::json!({
+        config["mcpServers"]["vaak"] = serde_json::json!({
             "type": "stdio",
             "command": sidecar_path,
             "args": []
@@ -506,7 +506,7 @@ fn setup_claude_code_integration() {
             }
         }
     } else {
-        log_error("Claude Code already configured for Scribe");
+        log_error("Claude Code already configured for Vaak");
     }
 }
 
@@ -652,7 +652,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
             });
 
             // Emit event to frontend - emit to main window
-            log_error(&format!("Scribe: Emitting speak event to MAIN window - Session: {}, Text: {:.50}", session_id, text));
+            log_error(&format!("Vaak: Emitting speak event to MAIN window - Session: {}, Text: {:.50}", session_id, text));
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(e) = window.emit("speak", &payload) {
                     log_error(&format!("Failed to emit speak event to window: {}", e));
@@ -662,7 +662,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
             }
 
             // Also emit to transcript window if it exists
-            log_error(&format!("Scribe: Emitting speak event to TRANSCRIPT window - Session: {}", session_id));
+            log_error(&format!("Vaak: Emitting speak event to TRANSCRIPT window - Session: {}", session_id));
             if let Some(window) = app_handle.get_webview_window("transcript") {
                 let _ = window.emit("speak", &payload);
             }
@@ -736,77 +736,6 @@ fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, Stri
     Ok(recorder.is_recording())
 }
 
-/// Setup Claude Code integration by creating CLAUDE.md in user's home directory
-/// This is called automatically on app startup
-fn setup_claude_integration() {
-    // Just call the update function with default "summary" mode and detail level 3
-    update_claude_md_content(true, false, 3);
-}
-
-/// Update CLAUDE.md content based on voice output mode
-/// Called from frontend when user changes the setting
-#[tauri::command]
-fn update_claude_md(enabled: bool, blind_mode: bool, detail: u8) -> Result<(), String> {
-    let detail_level = detail.clamp(1, 5); // Ensure 1-5 range
-    update_claude_md_content(enabled, blind_mode, detail_level);
-    Ok(())
-}
-
-/// Internal function to update CLAUDE.md content
-/// Writes to BOTH the project directory (if set) and the home directory for maximum compatibility
-fn update_claude_md_content(enabled: bool, blind_mode: bool, detail: u8) {
-    let home_var = if cfg!(target_os = "windows") {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    };
-
-    let content = generate_voice_template(blind_mode, detail);
-    let mode_str = if blind_mode { "blind" } else { "standard" };
-
-    // Get the project path if set
-    let project_path: Option<String> = {
-        let lock = get_project_path_lock();
-        let guard = lock.read();
-        guard.clone()
-    };
-
-    // Write to project directory first (primary location for Claude Code)
-    if let Some(ref proj_path) = project_path {
-        let project_claude_md = std::path::PathBuf::from(proj_path).join("CLAUDE.md");
-
-        if !enabled {
-            match std::fs::remove_file(&project_claude_md) {
-                Ok(_) => log_error(&format!("Removed CLAUDE.md from project dir (voice disabled): {:?}", project_claude_md)),
-                Err(_) => {} // File might not exist, that's fine
-            }
-        } else {
-            match std::fs::write(&project_claude_md, &content) {
-                Ok(_) => log_error(&format!("Updated CLAUDE.md in project dir: {:?} (mode: {}, detail: {})", project_claude_md, mode_str, detail)),
-                Err(e) => log_error(&format!("Failed to write CLAUDE.md to project dir {:?}: {}", project_claude_md, e)),
-            }
-        }
-    } else {
-        log_error("No project path set - CLAUDE.md will only be written to home directory");
-    }
-
-    // Also write to home directory (fallback location)
-    if let Some(home) = std::env::var_os(home_var) {
-        let home_claude_md = std::path::PathBuf::from(&home).join("CLAUDE.md");
-
-        if !enabled {
-            match std::fs::remove_file(&home_claude_md) {
-                Ok(_) => log_error("Removed CLAUDE.md from home dir (voice disabled)"),
-                Err(_) => {} // File might not exist, that's fine
-            }
-        } else {
-            match std::fs::write(&home_claude_md, &content) {
-                Ok(_) => log_error(&format!("Updated CLAUDE.md in home dir: {:?} (mode: {}, detail: {})", home_claude_md, mode_str, detail)),
-                Err(e) => log_error(&format!("Failed to write CLAUDE.md to home dir: {}", e)),
-            }
-        }
-    }
-}
 
 /// Generate voice template based on blind mode and detail level
 fn generate_voice_template(blind_mode: bool, detail: u8) -> String {
@@ -814,7 +743,7 @@ fn generate_voice_template(blind_mode: bool, detail: u8) -> String {
 
 ## Voice Output
 
-Always use the Scribe speak integration to read responses aloud.
+Always use the Vaak speak integration to read responses aloud.
 
 **CRITICAL: Use the MCP `/speak` tool - NOT curl**
 
@@ -918,9 +847,9 @@ fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), Str
         }
 
         let tooltip = if recording {
-            "Scribe - Recording..."
+            "Vaak - Recording..."
         } else {
-            "Scribe - Ready"
+            "Vaak - Ready"
         };
         let _ = tray.set_tooltip(Some(tooltip));
     }
@@ -929,7 +858,7 @@ fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), Str
 
 fn main() {
     // Log startup attempt for debugging
-    log_error("Scribe starting...");
+    log_error("Vaak starting...");
 
     let builder = tauri::Builder::default()
         .manage(AudioRecorderState(Mutex::new(AudioRecorder::new())))
@@ -937,7 +866,7 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Create tray menu
-            let show_item = MenuItemBuilder::with_id("show", "Show Scribe").build(app)?;
+            let show_item = MenuItemBuilder::with_id("show", "Show Vaak").build(app)?;
             let devtools_item = MenuItemBuilder::with_id("devtools", "Open Dev Tools").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
             let menu = MenuBuilder::new(app)
@@ -957,7 +886,7 @@ fn main() {
 
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(icon)
-                .tooltip("Scribe - Ready")
+                .tooltip("Vaak - Ready")
                 .menu(&menu)
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
@@ -1008,10 +937,6 @@ fn main() {
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
 
-            // Don't auto-setup Claude Code integration - let frontend control it
-            // based on user's saved voice preference
-            // Frontend will call update_claude_md() based on localStorage setting
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1028,7 +953,6 @@ fn main() {
             cancel_recording,
             get_audio_devices,
             check_recording,
-            update_claude_md,
             save_voice_settings_cmd,
             set_project_path,
             get_project_path,
@@ -1051,7 +975,7 @@ fn main() {
 
             // Show native error dialog based on platform
             show_error_dialog(&format!(
-                "Scribe failed to start:\n\n{}\n\nCheck ~/scribe-error.log for details.",
+                "Vaak failed to start:\n\n{}\n\nCheck ~/vaak-error.log for details.",
                 e
             ));
 
@@ -1065,7 +989,7 @@ fn main() {
 fn show_error_dialog(message: &str) {
     use std::ptr::null_mut;
     let wide_msg: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-    let wide_title: Vec<u16> = "Scribe Error"
+    let wide_title: Vec<u16> = "Vaak Error"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -1088,7 +1012,7 @@ fn show_error_dialog(message: &str) {
     use std::process::Command;
     // Use osascript to show a native macOS alert dialog
     let script = format!(
-        r#"display dialog "{}" with title "Scribe Error" buttons {{"OK"}} default button "OK" with icon stop"#,
+        r#"display dialog "{}" with title "Vaak Error" buttons {{"OK"}} default button "OK" with icon stop"#,
         message.replace("\"", "\\\"").replace("\n", "\\n")
     );
     let _ = Command::new("osascript").arg("-e").arg(&script).output();
@@ -1099,18 +1023,18 @@ fn show_error_dialog(message: &str) {
     use std::process::Command;
     // Try zenity first (GTK), then kdialog (KDE), then notify-send as fallback
     let zenity = Command::new("zenity")
-        .args(["--error", "--title=Scribe Error", &format!("--text={}", message)])
+        .args(["--error", "--title=Vaak Error", &format!("--text={}", message)])
         .output();
 
     if zenity.is_err() || !zenity.unwrap().status.success() {
         let kdialog = Command::new("kdialog")
-            .args(["--error", message, "--title", "Scribe Error"])
+            .args(["--error", message, "--title", "Vaak Error"])
             .output();
 
         if kdialog.is_err() || !kdialog.unwrap().status.success() {
             // Last resort: notification
             let _ = Command::new("notify-send")
-                .args(["Scribe Error", message])
+                .args(["Vaak Error", message])
                 .output();
         }
     }

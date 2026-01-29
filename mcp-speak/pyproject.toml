@@ -1,7 +1,7 @@
 [project]
-name = "scribe-speak"
+name = "vaak-speak"
 version = "0.1.0"
-description = "MCP server that connects Claude Code to Scribe for voice announcements"
+description = "MCP server that connects Claude Code to Vaak for voice announcements"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scribe-speak = "mcp_speak.server:main"
+vaak-speak = "mcp_speak.server:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -44,10 +44,10 @@ export function RecordingOverlay({
       }
 
       // Show new notification
-      notificationRef.current = new Notification("Scribe Recording", {
+      notificationRef.current = new Notification("Vaak Recording", {
         body: "Recording in progress... Release hotkey to stop.",
         icon: "/icons/32x32.png",
-        tag: "scribe-recording", // Prevents duplicate notifications
+        tag: "vaak-recording", // Prevents duplicate notifications
         silent: true, // Don't play system sound (we have our own)
       });
     } else if (!isRecording && !isProcessing && notificationRef.current) {

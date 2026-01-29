@@ -12,7 +12,7 @@ pub fn get_database_path() -> Option<PathBuf> {
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
             let mut path = PathBuf::from(appdata);
-            path.push("Scribe");
+            path.push("Vaak");
             std::fs::create_dir_all(&path).ok()?;
             path.push("queue.db");
             return Some(path);
@@ -37,7 +37,7 @@ pub fn get_database_path() -> Option<PathBuf> {
 pub fn init_database() -> Result<(), String> {
     let db_path = get_database_path().ok_or("Failed to get database path")?;
 
-    eprintln!("Scribe: Initializing queue database at {:?}", db_path);
+    eprintln!("Vaak: Initializing queue database at {:?}", db_path);
 
     let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
@@ -79,7 +79,7 @@ pub fn init_database() -> Result<(), String> {
     let mut db = DB.lock().map_err(|e| format!("Failed to lock database: {}", e))?;
     *db = Some(conn);
 
-    eprintln!("Scribe: Queue database initialized successfully");
+    eprintln!("Vaak: Queue database initialized successfully");
 
     Ok(())
 }
