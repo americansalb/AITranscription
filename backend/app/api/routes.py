@@ -16,9 +16,11 @@ from app.api.schemas import (
 )
 from app.core.config import settings
 from app.core.database import get_db
+from app.models.transcript import Transcript
 from app.models.user import User
 from app.services import polish_service, transcription_service
 from app.services import elevenlabs_tts
+from app.services.gamification import GamificationService, AchievementService
 
 router = APIRouter()
 
@@ -232,6 +234,57 @@ async def transcribe_and_polish(
             user_id=user.id if user else None,
         )
 
+        # Save transcript to database if user is authenticated
+        if user and db:
+            # Calculate metrics
+            word_count = len(result["text"].split())
+            character_count = len(result["text"])
+            duration = transcribe_response.duration or 0
+            words_per_minute = (word_count / (duration / 60)) if duration > 0 else 0
+
+            # Create transcript record
+            transcript = Transcript(
+                user_id=user.id,
+                raw_text=transcribe_response.raw_text,
+                polished_text=result["text"],
+                audio_duration_seconds=duration,
+                language=transcribe_response.language,
+                word_count=word_count,
+                character_count=character_count,
+                words_per_minute=words_per_minute,
+                context=context,
+                formality=formality,
+                transcript_type="input",
+            )
+            db.add(transcript)
+
+            # Update user statistics
+            user.total_transcriptions += 1
+            user.total_words += word_count
+            user.total_audio_seconds += duration
+            user.total_polish_tokens += result["usage"]["input_tokens"] + result["usage"]["output_tokens"]
+
+            await db.flush()
+
+            # Award XP for transcription
+            try:
+                gamification_service = GamificationService(db)
+                await gamification_service.award_transcription_xp(
+                    user_id=user.id,
+                    word_count=word_count,
+                    transcript_id=transcript.id,
+                )
+
+                # Check for new achievements (async, non-blocking on error)
+                achievement_service = AchievementService(db)
+                await achievement_service.check_achievements(user.id)
+            except Exception as gam_error:
+                # Log but don't fail the transcription
+                import logging
+                logging.getLogger(__name__).warning(f"Gamification error: {gam_error}")
+
+            await db.commit()
+
         return TranscribeAndPolishResponse(
             raw_text=transcribe_response.raw_text,
             polished_text=result["text"],
@@ -252,7 +305,9 @@ async def transcribe_and_polish(
 )
 async def text_to_speech(
     text: str = Form(..., description="Text to convert to speech"),
+    session_id: str | None = Form(default=None, description="Claude Code session identifier"),
     user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Convert text to speech using Groq TTS (Orpheus model).
@@ -263,9 +318,9 @@ async def text_to_speech(
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-    # Limit text length to prevent abuse
-    if len(text) > 500:
-        text = text[:500]
+    # No arbitrary limit - chunking is handled in elevenlabs_tts service
+    # ElevenLabs API limits are respected via automatic chunking
+    full_text = text
 
     try:
         from fastapi.responses import Response
@@ -274,6 +329,35 @@ async def text_to_speech(
 
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="ElevenLabs TTS generation failed")
+
+        # Save as output transcript if user is logged in
+        if user and db:
+            try:
+                word_count = len(full_text.split())
+                character_count = len(full_text)
+
+                transcript = Transcript(
+                    user_id=user.id,
+                    raw_text=full_text,
+                    polished_text=full_text,
+                    audio_duration_seconds=0.0,  # TTS doesn't have input audio duration
+                    language="en",
+                    word_count=word_count,
+                    character_count=character_count,
+                    words_per_minute=0,
+                    context="claude_output",
+                    formality="neutral",
+                    transcript_type="output",
+                    session_id=session_id,
+                )
+                db.add(transcript)
+                await db.commit()
+            except Exception as save_error:
+                print(f"[TTS] Failed to save transcript: {save_error}")
+                import traceback
+                traceback.print_exc()
+                await db.rollback()
+                # Continue anyway - don't fail the TTS request just because we couldn't save
 
         return Response(
             content=audio_bytes,
@@ -285,6 +369,10 @@ async def text_to_speech(
         )
 
     except ValueError as e:
+        print(f"[TTS] ValueError: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
+        print(f"[TTS] Exception: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")

@@ -39,6 +39,12 @@ class Transcript(Base):
     context: Mapped[str | None] = mapped_column(String(50), nullable=True)
     formality: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # Transcript type: 'input' (user recording) or 'output' (Claude speaking)
+    transcript_type: Mapped[str] = mapped_column(String(20), default="input")
+
+    # Session identifier for Claude Code sessions (used for 'output' type)
+    session_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

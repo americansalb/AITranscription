@@ -7,6 +7,7 @@ from app.api import router
 from app.api.auth import router as auth_router
 from app.api.dictionary import router as dictionary_router
 from app.api.learning import router as learning_router
+from app.api.gamification import router as gamification_router
 from app.core.config import settings
 from app.core.database import engine
 from app.models.base import Base
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
     This ensures the app can start quickly and bind to port immediately.
     """
     # Import models to register them with Base (required for relationships to work)
-    from app.models import user, dictionary, learning  # noqa: F401
+    from app.models import user, dictionary, learning, gamification  # noqa: F401
 
     # Note: Embedding model loads lazily on first use to reduce startup memory
     # from app.services.correction_retriever import preload_embedding_model
@@ -55,6 +56,7 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(dictionary_router, prefix="/api/v1")
 app.include_router(learning_router, prefix="/api/v1")
+app.include_router(gamification_router, prefix="/api/v1")
 
 
 @app.get("/")

@@ -1,21 +1,26 @@
-import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { OverlayApp } from "./OverlayApp";
+import { TranscriptApp } from "./TranscriptApp";
 import { ToastProvider } from "./components/Toast";
 import "./styles.css";
 
-// Check if this is the overlay window
-const isOverlay = window.location.hash === "#/overlay";
+// Check window type from hash
+const hash = window.location.hash;
+const isOverlay = hash === "#/overlay";
+const isTranscript = hash === "#/transcript";
 
+// Disabled StrictMode to prevent duplicate event listener registration
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
+  <>
     {isOverlay ? (
       <OverlayApp />
+    ) : isTranscript ? (
+      <TranscriptApp />
     ) : (
       <ToastProvider>
         <App />
       </ToastProvider>
     )}
-  </React.StrictMode>
+  </>
 );

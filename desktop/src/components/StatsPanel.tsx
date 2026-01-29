@@ -1,34 +1,53 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   getUserStats,
   getTranscriptHistory,
   getUserAchievements,
+  getDetailedStats,
   updateTypingWpm,
+  getGamificationProgress,
+  getGamificationAchievements,
+  getLeaderboard,
   UserStats,
   TranscriptItem,
   AchievementItem,
   AchievementsResponse,
+  DetailedStatsResponse,
+  GamificationProgress,
+  AchievementListResponse,
+  LeaderboardResponse,
   isLoggedIn,
 } from "../lib/api";
+import { AchievementCard } from "./gamification/AchievementCard";
+import { XPBar } from "./gamification/XPBar";
+import {
+  getWordEquivalent,
+  getTimeSavedEquivalent,
+  getAudioEquivalent,
+} from "../lib/statsEquivalents";
+import { generateInsights, Insight } from "../lib/insightGenerator";
+import {
+  AnimatedCounter,
+  TrendIndicator,
+  TrendBadge,
+  StreakFlame,
+  TodayProgress,
+  HeatMap,
+  InsightCard,
+  HourlyActivityChart,
+  DayOfWeekChart,
+  MonthlyTrendChart,
+  ContextDonutChart,
+  WordLengthChart,
+} from "./stats";
+import { Confetti } from "./Confetti";
 
 interface StatsPanelProps {
   onClose: () => void;
-  refreshTrigger?: number; // Increment to trigger data refresh
+  refreshTrigger?: number;
 }
 
-function formatDuration(seconds: number): string {
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (hours > 0) {
-    return `${hours}h ${mins}m`;
-  }
-  if (mins > 0) {
-    return `${mins}m ${secs}s`;
-  }
-  return `${secs}s`;
-}
+type TabType = "story" | "insights" | "history" | "achievements";
 
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
@@ -46,7 +65,7 @@ function formatDate(dateString: string): string {
   return date.toLocaleDateString();
 }
 
-// Icon mapping for achievements (simple SVG icons)
+// Icon mapping for achievements
 const achievementIcons: Record<string, JSX.Element> = {
   mic: <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>,
   trending_up: <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6h-6z"/></svg>,
@@ -68,10 +87,14 @@ const achievementIcons: Record<string, JSX.Element> = {
   local_fire_department: <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M19.48 12.35c-1.57-4.08-7.16-4.3-5.81-10.23.1-.44-.37-.78-.75-.55C9.29 3.71 6.68 8 8.87 13.62c.18.46-.36.89-.75.59-1.81-1.37-2-3.34-1.84-4.75.06-.52-.62-.77-.91-.34C4.69 10.16 4 11.84 4 14.37c.38 5.6 5.11 7.32 6.81 7.54 2.43.31 5.06-.14 6.95-1.87 2.08-1.93 2.84-5.01 1.72-7.69z"/></svg>,
 };
 
-// Default icon for unknown types
 const defaultIcon = <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>;
 
-function getAchievementIcon(iconName: string): JSX.Element {
+function getAchievementIcon(iconName: string): JSX.Element | string {
+  // Check if iconName is an emoji (backend sends emojis like "🚀", "📝", etc.)
+  // Emojis typically have code points > 127 or are multi-char sequences
+  if (iconName && (iconName.codePointAt(0) || 0) > 127) {
+    return iconName; // Return emoji directly
+  }
   return achievementIcons[iconName] || defaultIcon;
 }
 
@@ -95,29 +118,64 @@ function formatCurrentValue(achievement: AchievementItem): string {
   return achievement.current_value.toLocaleString();
 }
 
-// Format time saved in a readable way
-function formatTimeSaved(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+// Compute heatmap data from transcripts
+function computeHeatmapData(transcripts: TranscriptItem[]) {
+  const byDate: Record<string, { words: number; count: number }> = {};
+
+  transcripts.forEach(t => {
+    const date = new Date(t.created_at);
+    const dateStr = date.toISOString().split('T')[0];
+    if (!byDate[dateStr]) {
+      byDate[dateStr] = { words: 0, count: 0 };
+    }
+    byDate[dateStr].words += t.word_count;
+    byDate[dateStr].count += 1;
+  });
+
+  return Object.entries(byDate).map(([date, data]) => ({
+    date,
+    words: data.words,
+    count: data.count,
+  }));
+}
+
+// Calculate week-over-week change
+function getWeekOverWeekChange(thisWeek: number, lastWeek: number) {
+  if (lastWeek === 0) {
+    return { percentage: 0, direction: 'same' as const };
   }
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  const change = ((thisWeek - lastWeek) / lastWeek) * 100;
+  const rounded = Math.round(Math.abs(change));
+  if (change > 5) return { percentage: rounded, direction: 'up' as const };
+  if (change < -5) return { percentage: rounded, direction: 'down' as const };
+  return { percentage: 0, direction: 'same' as const };
 }
 
 export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
   const [stats, setStats] = useState<UserStats | null>(null);
+  const [detailedStats, setDetailedStats] = useState<DetailedStatsResponse | null>(null);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [achievements, setAchievements] = useState<AchievementsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"stats" | "history" | "achievements">("stats");
+  const [activeTab, setActiveTab] = useState<TabType>("story");
   const [expandedTranscript, setExpandedTranscript] = useState<number | null>(null);
   const [editingWpm, setEditingWpm] = useState(false);
   const [wpmValue, setWpmValue] = useState("");
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(['Words', 'Streak', 'Transcriptions']));
+  const [showConfetti, setShowConfetti] = useState(false);
+  const [prevUnlockedCount, setPrevUnlockedCount] = useState<number | null>(null);
+
+  // Gamification state
+  const [gamificationProgress, setGamificationProgress] = useState<GamificationProgress | null>(null);
+  const [gamificationAchievements, setGamificationAchievements] = useState<AchievementListResponse | null>(null);
+  const [achievementPage, setAchievementPage] = useState(1); // 1-indexed for API
+  const [achievementCategory, setAchievementCategory] = useState<string>("all");
+  const [achievementRarity, setAchievementRarity] = useState<string>("all");
+  const [showUnlockedOnly, setShowUnlockedOnly] = useState(false);
+  const [loadingAchievements, setLoadingAchievements] = useState(false);
+  const [leaderboard, setLeaderboard] = useState<LeaderboardResponse | null>(null);
+  const [leaderboardMetric, setLeaderboardMetric] = useState<"lifetime_xp" | "achievements" | "words">("lifetime_xp");
 
   const loadData = useCallback(async () => {
     if (!isLoggedIn()) {
@@ -130,24 +188,106 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
     setError(null);
 
     try {
-      const [statsData, transcriptsData, achievementsData] = await Promise.all([
+      const [statsData, transcriptsData, achievementsData, detailedData, gamificationData] = await Promise.all([
         getUserStats(),
-        getTranscriptHistory(0, 500), // Load up to 500 entries
+        getTranscriptHistory(0, 100),
         getUserAchievements(),
+        getDetailedStats(),
+        getGamificationProgress().catch(() => null), // Graceful fallback if not available
       ]);
       setStats(statsData);
       setTranscripts(transcriptsData);
+      setDetailedStats(detailedData);
+      setGamificationProgress(gamificationData);
+
+      // Check for new achievement unlocks
+      if (prevUnlockedCount !== null && achievementsData.total_unlocked > prevUnlockedCount) {
+        setShowConfetti(true);
+      }
+      setPrevUnlockedCount(achievementsData.total_unlocked);
       setAchievements(achievementsData);
+
+      // Load initial achievements page (1-indexed)
+      await loadAchievementsPage(1, achievementCategory, achievementRarity, showUnlockedOnly);
+
+      // Load leaderboard
+      try {
+        const leaderboardData = await getLeaderboard(leaderboardMetric, 50, true);
+        setLeaderboard(leaderboardData);
+      } catch (err) {
+        console.error("Failed to load leaderboard:", err);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load data");
     } finally {
       setLoading(false);
+    }
+  }, [prevUnlockedCount, achievementCategory, achievementRarity, showUnlockedOnly]);
+
+  // Load achievements with pagination and filters
+  const loadAchievementsPage = useCallback(async (
+    page: number,
+    category: string,
+    rarity: string,
+    unlockedOnly: boolean
+  ) => {
+    setLoadingAchievements(true);
+    try {
+      const response = await getGamificationAchievements({
+        page_size: 50,
+        page: page,
+        category: category === "all" ? undefined : category as any,
+        rarity: rarity === "all" ? undefined : rarity as any,
+        unlocked_only: unlockedOnly ? true : undefined,
+      });
+      setGamificationAchievements(response);
+      setAchievementPage(page);
+    } catch (err) {
+      console.error("Failed to load achievements:", err);
+    } finally {
+      setLoadingAchievements(false);
     }
   }, []);
 
   useEffect(() => {
     loadData();
   }, [loadData, refreshTrigger]);
+
+  // Reload achievements when filters change
+  useEffect(() => {
+    if (!loading && gamificationProgress) {
+      loadAchievementsPage(1, achievementCategory, achievementRarity, showUnlockedOnly);
+    }
+  }, [achievementCategory, achievementRarity, showUnlockedOnly, loading, gamificationProgress, loadAchievementsPage]);
+
+  // Reload leaderboard when metric changes
+  useEffect(() => {
+    if (!loading) {
+      getLeaderboard(leaderboardMetric, 50, true)
+        .then(setLeaderboard)
+        .catch(err => console.error("Failed to load leaderboard:", err));
+    }
+  }, [leaderboardMetric, loading]);
+
+  // Generate narrative insights
+  const narrativeInsights = useMemo((): Insight[] => {
+    if (!stats) return [];
+    return generateInsights(stats, detailedStats, achievements?.achievements);
+  }, [stats, detailedStats, achievements]);
+
+  // Compute heatmap data
+  const heatmapData = useMemo(() => computeHeatmapData(transcripts), [transcripts]);
+
+  // Get equivalents
+  const wordEquivalent = stats ? getWordEquivalent(stats.total_words) : null;
+  const timeSavedEquivalent = stats ? getTimeSavedEquivalent(stats.time_saved_seconds) : null;
+  const audioMinutes = stats ? stats.total_audio_seconds / 60 : 0;
+  const audioEquivalent = stats ? getAudioEquivalent(audioMinutes) : null;
+
+  // Week over week change (prev_week_words is the week before the current week)
+  const wordsChange = detailedStats
+    ? getWeekOverWeekChange(detailedStats.words_this_week, detailedStats.growth?.prev_week_words || 0)
+    : { percentage: 0, direction: 'same' as const };
 
   const handleCopyTranscript = async (text: string) => {
     await navigator.clipboard.writeText(text);
@@ -166,7 +306,7 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
     try {
       await updateTypingWpm(newWpm);
       setEditingWpm(false);
-      loadData(); // Refresh to get new time saved calculations
+      loadData();
     } catch (err) {
       console.error("Failed to update WPM:", err);
     }
@@ -177,11 +317,38 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
     setWpmValue("");
   };
 
+  const toggleCategory = (category: string) => {
+    setExpandedCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(category)) {
+        next.delete(category);
+      } else {
+        next.add(category);
+      }
+      return next;
+    });
+  };
+
+  // Group achievements by category
+  const achievementsByCategory = useMemo(() => {
+    if (!achievements) return new Map<string, AchievementItem[]>();
+    const map = new Map<string, AchievementItem[]>();
+    achievements.achievements.forEach(a => {
+      const cat = a.category.charAt(0).toUpperCase() + a.category.slice(1);
+      if (!map.has(cat)) map.set(cat, []);
+      map.get(cat)!.push(a);
+    });
+    return map;
+  }, [achievements]);
+
   return (
     <div className="stats-overlay" onClick={onClose}>
-      <div className="stats-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="stats-panel stats-panel-wide" onClick={(e) => e.stopPropagation()}>
+        {/* Confetti for new achievements */}
+        <Confetti isActive={showConfetti} onComplete={() => setShowConfetti(false)} />
+
         <div className="stats-header">
-          <h2>Statistics</h2>
+          <h2>Your Statistics</h2>
           <button className="close-btn" onClick={onClose}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
@@ -191,10 +358,16 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
 
         <div className="stats-tabs">
           <button
-            className={`stats-tab ${activeTab === "stats" ? "active" : ""}`}
-            onClick={() => setActiveTab("stats")}
+            className={`stats-tab ${activeTab === "story" ? "active" : ""}`}
+            onClick={() => setActiveTab("story")}
           >
-            Overview
+            Your Story
+          </button>
+          <button
+            className={`stats-tab ${activeTab === "insights" ? "active" : ""}`}
+            onClick={() => setActiveTab("insights")}
+          >
+            Insights
           </button>
           <button
             className={`stats-tab ${activeTab === "history" ? "active" : ""}`}
@@ -207,9 +380,9 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
             onClick={() => setActiveTab("achievements")}
           >
             Achievements
-            {achievements && (
+            {gamificationProgress && (
               <span className="achievement-badge">
-                {achievements.total_unlocked}/{achievements.total_achievements}
+                {gamificationProgress.achievements.unlocked}/{gamificationProgress.achievements.total}
               </span>
             )}
           </button>
@@ -226,77 +399,259 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
               <p>{error}</p>
               <button onClick={loadData}>Retry</button>
             </div>
-          ) : activeTab === "stats" && stats ? (
-            <div className="stats-grid">
-              <div className="stat-card primary time-saved">
-                <div className="stat-value">{formatTimeSaved(stats.time_saved_seconds)}</div>
-                <div className="stat-label">Time Saved</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value">{stats.total_transcriptions}</div>
-                <div className="stat-label">Total Transcriptions</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value">{stats.total_words.toLocaleString()}</div>
-                <div className="stat-label">Total Words</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value">{formatDuration(stats.total_audio_seconds)}</div>
-                <div className="stat-label">Audio Transcribed</div>
-              </div>
-              <div className="stat-card accent">
-                <div className="stat-value">{stats.average_words_per_minute}</div>
-                <div className="stat-label">Avg Speaking WPM</div>
-              </div>
-
-              <div className="stat-divider">
-                <span>Today</span>
-              </div>
-
-              <div className="stat-card">
-                <div className="stat-value">{formatTimeSaved(stats.time_saved_today_seconds)}</div>
-                <div className="stat-label">Time Saved Today</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value">{stats.transcriptions_today}</div>
-                <div className="stat-label">Transcriptions Today</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-value">{stats.words_today.toLocaleString()}</div>
-                <div className="stat-label">Words Today</div>
-              </div>
-
-              <div className="stat-divider">
-                <span>Your Typing Speed</span>
-              </div>
-
-              <div className="stat-card wpm-setting" style={{ gridColumn: "span 2" }}>
-                {editingWpm ? (
-                  <div className="wpm-edit">
-                    <input
-                      type="number"
-                      value={wpmValue}
-                      onChange={(e) => setWpmValue(e.target.value)}
-                      min="1"
-                      max="200"
-                      autoFocus
+          ) : activeTab === "story" && stats ? (
+            <div className="story-container">
+              {/* Hero Stats Section */}
+              <div className="hero-stats-section">
+                {/* Primary Hero: Time Saved */}
+                <div className="hero-primary">
+                  <div className="hero-icon">{timeSavedEquivalent?.icon || '⚡'}</div>
+                  <div className="hero-value">
+                    <AnimatedCounter
+                      value={Math.floor(stats.time_saved_seconds / 3600)}
+                      suffix="h "
                     />
-                    <span className="wpm-unit">WPM</span>
-                    <div className="wpm-actions">
-                      <button onClick={handleWpmSave} className="save-btn">Save</button>
-                      <button onClick={handleWpmCancel} className="cancel-btn">Cancel</button>
-                    </div>
+                    <AnimatedCounter
+                      value={Math.floor((stats.time_saved_seconds % 3600) / 60)}
+                      suffix="m"
+                    />
                   </div>
-                ) : (
-                  <div className="wpm-display" onClick={handleWpmEdit}>
-                    <div className="stat-value">{stats.typing_wpm} WPM</div>
-                    <div className="stat-label">Your typing speed (click to edit)</div>
-                    <div className="wpm-hint">
-                      Used to calculate how much time you save by speaking instead of typing
+                  <div className="hero-label">Time Saved</div>
+                  {timeSavedEquivalent && (
+                    <div className="hero-equivalent">
+                      "That's enough time for {timeSavedEquivalent.description}"
                     </div>
+                  )}
+                  {detailedStats && wordsChange.direction !== 'same' && (
+                    <div className="hero-trend">
+                      <TrendBadge
+                        thisWeek={detailedStats.words_this_week}
+                        lastWeek={detailedStats.growth?.prev_week_words || 0}
+                        label="vs last week"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Secondary Heroes */}
+                <div className="hero-secondary-grid">
+                  <div className="hero-secondary">
+                    <div className="hero-icon">{wordEquivalent?.icon || '📚'}</div>
+                    <div className="hero-value">
+                      <AnimatedCounter value={stats.total_words} />
+                    </div>
+                    <div className="hero-label">Total Words</div>
+                    {wordEquivalent && (
+                      <div className="hero-equivalent">{wordEquivalent.description}</div>
+                    )}
                   </div>
-                )}
+
+                  <div className="hero-secondary">
+                    <div className="hero-icon">{audioEquivalent?.icon || '🎤'}</div>
+                    <div className="hero-value">
+                      {Math.floor(audioMinutes / 60) > 0 && (
+                        <AnimatedCounter value={Math.floor(audioMinutes / 60)} suffix="h " />
+                      )}
+                      <AnimatedCounter value={Math.round(audioMinutes % 60)} suffix="m" />
+                    </div>
+                    <div className="hero-label">Audio Time</div>
+                    {audioEquivalent && (
+                      <div className="hero-equivalent">{audioEquivalent.description}</div>
+                    )}
+                  </div>
+                </div>
               </div>
+
+              {/* Streak Display */}
+              {detailedStats && (
+                <StreakFlame
+                  currentStreak={detailedStats.current_streak_days}
+                  bestStreak={detailedStats.longest_streak_days}
+                  hasActivityToday={stats.transcriptions_today > 0}
+                />
+              )}
+
+              {/* Today's Progress */}
+              <TodayProgress
+                wordsToday={stats.words_today}
+                wordsGoal={2000}
+                transcriptionsToday={stats.transcriptions_today}
+                transcriptionsGoal={10}
+                minutesActive={Math.round(stats.time_saved_today_seconds / 60)}
+                minutesGoal={30}
+              />
+
+              {/* Quick Stats Grid */}
+              <div className="quick-stats-grid">
+                <div className="quick-stat">
+                  <div className="quick-stat-value">
+                    <AnimatedCounter value={stats.words_today} />
+                  </div>
+                  <div className="quick-stat-label">Words today</div>
+                </div>
+                <div className="quick-stat">
+                  <div className="quick-stat-value">
+                    <AnimatedCounter value={stats.transcriptions_today} />
+                  </div>
+                  <div className="quick-stat-label">Transcriptions today</div>
+                </div>
+                <div className="quick-stat">
+                  <div className="quick-stat-value">
+                    <AnimatedCounter value={stats.total_transcriptions} />
+                  </div>
+                  <div className="quick-stat-label">Total transcriptions</div>
+                </div>
+                <div className="quick-stat">
+                  <div className="quick-stat-value">{Math.round(stats.average_words_per_minute)}</div>
+                  <div className="quick-stat-label">Avg WPM</div>
+                </div>
+              </div>
+
+              {/* Week Comparison */}
+              {detailedStats && (
+                <div className="week-comparison-section">
+                  <h3 className="section-title">This Week</h3>
+                  <div className="week-comparison-cards">
+                    <div className="week-card current">
+                      <div className="week-card-label">This week</div>
+                      <div className="week-card-value">
+                        <AnimatedCounter value={detailedStats.words_this_week} />
+                      </div>
+                      <div className="week-card-unit">words</div>
+                      {wordsChange.direction !== 'same' && (
+                        <div className={`week-card-change ${wordsChange.direction}`}>
+                          <TrendIndicator
+                            value={detailedStats.words_this_week}
+                            previousValue={detailedStats.growth?.prev_week_words || 0}
+                            size="md"
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <div className="week-card previous">
+                      <div className="week-card-label">Last week</div>
+                      <div className="week-card-value">{(detailedStats.growth?.prev_week_words || 0).toLocaleString()}</div>
+                      <div className="week-card-unit">words</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Personal Records */}
+              {detailedStats && (
+                <div className="personal-records-section">
+                  <h3 className="section-title">
+                    <span className="section-icon">🏅</span>
+                    Personal Records
+                  </h3>
+                  <div className="personal-records-grid">
+                    {detailedStats.most_productive_day_words > 0 && (
+                      <div className="record-card">
+                        <div className="record-card-icon">🏆</div>
+                        <div className="record-card-content">
+                          <div className="record-card-label">Most Words in a Day</div>
+                          <div className="record-card-value">{detailedStats.most_productive_day_words.toLocaleString()} words</div>
+                          {detailedStats.most_productive_day && (
+                            <div className="record-card-date">
+                              {new Date(detailedStats.most_productive_day).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {detailedStats.fastest_wpm > 0 && (
+                      <div className="record-card">
+                        <div className="record-card-icon">⚡</div>
+                        <div className="record-card-content">
+                          <div className="record-card-label">Fastest Speaking Speed</div>
+                          <div className="record-card-value">{Math.round(detailedStats.fastest_wpm)} WPM</div>
+                        </div>
+                      </div>
+                    )}
+                    {detailedStats.longest_transcription_words > 0 && (
+                      <div className="record-card">
+                        <div className="record-card-icon">📝</div>
+                        <div className="record-card-content">
+                          <div className="record-card-label">Longest Transcription</div>
+                          <div className="record-card-value">{detailedStats.longest_transcription_words.toLocaleString()} words</div>
+                        </div>
+                      </div>
+                    )}
+                    {detailedStats.longest_streak_days > 0 && (
+                      <div className="record-card">
+                        <div className="record-card-icon">🔥</div>
+                        <div className="record-card-content">
+                          <div className="record-card-label">Longest Streak</div>
+                          <div className="record-card-value">{detailedStats.longest_streak_days} days</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Typing Speed Setting */}
+              <div className="typing-speed-section">
+                <h3 className="section-title">Your Typing Speed</h3>
+                <div className="stat-card wpm-setting">
+                  {editingWpm ? (
+                    <div className="wpm-edit">
+                      <input
+                        type="number"
+                        value={wpmValue}
+                        onChange={(e) => setWpmValue(e.target.value)}
+                        min="1"
+                        max="200"
+                        autoFocus
+                      />
+                      <span className="wpm-unit">WPM</span>
+                      <div className="wpm-actions">
+                        <button onClick={handleWpmSave} className="save-btn">Save</button>
+                        <button onClick={handleWpmCancel} className="cancel-btn">Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="wpm-display" onClick={handleWpmEdit}>
+                      <div className="stat-value">{stats.typing_wpm} WPM</div>
+                      <div className="stat-label">Click to edit</div>
+                      <div className="wpm-hint">
+                        Used to calculate how much time you save by speaking instead of typing
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : activeTab === "insights" ? (
+            <div className="insights-container">
+              {/* Narrative Insight Cards */}
+              {narrativeInsights.length > 0 ? (
+                <div className="insights-tab">
+                  <div className="insights-header">
+                    <h2>Your Story</h2>
+                    <p className="insights-subtitle">Discover what your data says about you</p>
+                  </div>
+                  <div className="insights-cards">
+                    {narrativeInsights.map((insight, index) => (
+                      <InsightCard key={insight.id} insight={insight} index={index} />
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="insights-empty">
+                  <div className="empty-icon">📊</div>
+                  <h3>Your Story is Being Written</h3>
+                  <p>Keep transcribing to unlock personalized insights!</p>
+                </div>
+              )}
+
+              {/* Activity Heatmap */}
+              {heatmapData.length > 0 && (
+                <div className="heatmap-section">
+                  <h3 className="section-title">Activity Overview</h3>
+                  <HeatMap data={heatmapData} weeks={12} />
+                </div>
+              )}
             </div>
           ) : activeTab === "history" ? (
             <div className="transcript-list">
@@ -306,7 +661,7 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
                   <p className="empty-hint">Start recording to see your history here</p>
                 </div>
               ) : (
-                transcripts.map((t) => (
+                transcripts.slice(0, 50).map((t) => (
                   <div
                     key={t.id}
                     className={`transcript-item ${expandedTranscript === t.id ? "expanded" : ""}`}
@@ -342,86 +697,206 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
                 ))
               )}
             </div>
-          ) : activeTab === "achievements" && achievements ? (
+          ) : activeTab === "achievements" ? (
             <div className="achievements-container">
-              <div className="achievements-summary">
-                <div className="achievements-progress-ring">
-                  <svg viewBox="0 0 100 100">
-                    <circle
-                      className="progress-bg"
-                      cx="50"
-                      cy="50"
-                      r="45"
-                      fill="none"
-                      strokeWidth="8"
-                    />
-                    <circle
-                      className="progress-fill"
-                      cx="50"
-                      cy="50"
-                      r="45"
-                      fill="none"
-                      strokeWidth="8"
-                      strokeDasharray={`${(achievements.total_unlocked / achievements.total_achievements) * 283} 283`}
-                      transform="rotate(-90 50 50)"
-                    />
-                  </svg>
-                  <div className="progress-text">
-                    <span className="progress-count">{achievements.total_unlocked}</span>
-                    <span className="progress-total">/ {achievements.total_achievements}</span>
+              {/* XP Progress Bar */}
+              {gamificationProgress && (
+                <div className="gamification-header">
+                  <XPBar
+                    currentXP={gamificationProgress.current_xp}
+                    level={gamificationProgress.current_level}
+                    xpToNextLevel={gamificationProgress.xp_to_next_level}
+                    tier={gamificationProgress.prestige_tier}
+                    lifetimeXP={gamificationProgress.lifetime_xp}
+                  />
+                  <div className="achievement-summary">
+                    <span className="unlocked-count">
+                      {gamificationProgress.achievements.unlocked} / {gamificationProgress.achievements.total} Achievements
+                    </span>
                   </div>
                 </div>
-                <p className="achievements-label">Achievements Unlocked</p>
-              </div>
+              )}
 
-              <div className="achievements-list">
-                {/* Unlocked achievements first */}
-                {achievements.achievements
-                  .filter((a: AchievementItem) => a.unlocked)
-                  .map((achievement: AchievementItem) => (
-                    <div key={achievement.id} className="achievement-item unlocked">
-                      <div className="achievement-icon">
-                        {getAchievementIcon(achievement.icon)}
+              {/* Your Ranking */}
+              {leaderboard?.user_rank && (
+                <div className="your-ranking-section">
+                  <h3 className="section-title">Your Ranking</h3>
+                  <div className="ranking-card">
+                    <div className="ranking-position">
+                      <span className="rank-number">#{leaderboard.user_rank.rank}</span>
+                      <span className="rank-total">of {leaderboard.user_rank.total_users} users</span>
+                    </div>
+                    <div className="ranking-details">
+                      <div className="ranking-metric">
+                        <span className="metric-label">
+                          {leaderboard.user_rank.metric === "lifetime_xp" ? "Lifetime XP" :
+                           leaderboard.user_rank.metric === "achievements" ? "Achievements" : "Total Words"}
+                        </span>
+                        <span className="metric-value">{leaderboard.user_rank.value.toLocaleString()}</span>
                       </div>
-                      <div className="achievement-info">
-                        <div className="achievement-name">{achievement.name}</div>
-                        <div className="achievement-description">{achievement.description}</div>
-                      </div>
-                      <div className="achievement-status">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
-                        </svg>
+                      <div className="ranking-percentile">
+                        Top {(100 - leaderboard.user_rank.percentile).toFixed(1)}%
                       </div>
                     </div>
-                  ))}
+                  </div>
+                </div>
+              )}
 
-                {/* In-progress achievements */}
-                {achievements.achievements
-                  .filter((a: AchievementItem) => !a.unlocked)
-                  .sort((a: AchievementItem, b: AchievementItem) => b.progress - a.progress) // Show closest to completion first
-                  .map((achievement: AchievementItem) => (
-                    <div key={achievement.id} className="achievement-item locked">
-                      <div className="achievement-icon">
-                        {getAchievementIcon(achievement.icon)}
-                      </div>
-                      <div className="achievement-info">
-                        <div className="achievement-name">{achievement.name}</div>
-                        <div className="achievement-description">{achievement.description}</div>
-                        <div className="achievement-progress">
-                          <div className="progress-bar">
-                            <div
-                              className="progress-fill"
-                              style={{ width: `${achievement.progress * 100}%` }}
-                            />
-                          </div>
-                          <span className="progress-label">
-                            {formatCurrentValue(achievement)} / {formatThreshold(achievement)}
-                          </span>
+              {/* Leaderboard */}
+              <div className="leaderboard-section">
+                <div className="leaderboard-header">
+                  <h3 className="section-title">Leaderboard</h3>
+                  <select
+                    className="leaderboard-metric-select"
+                    value={leaderboardMetric}
+                    onChange={(e) => setLeaderboardMetric(e.target.value as any)}
+                  >
+                    <option value="lifetime_xp">XP</option>
+                    <option value="achievements">Achievements</option>
+                    <option value="words">Words</option>
+                  </select>
+                </div>
+                {leaderboard && leaderboard.leaderboard.length > 0 ? (
+                  <div className="leaderboard-list">
+                    {leaderboard.leaderboard.slice(0, 10).map((entry, index) => (
+                      <div
+                        key={entry.user_id}
+                        className={`leaderboard-entry ${entry.user_id === leaderboard.user_rank?.user_id ? 'is-you' : ''}`}
+                      >
+                        <div className="leaderboard-rank">
+                          {index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `#${entry.rank}`}
+                        </div>
+                        <div className="leaderboard-user">
+                          <span className="leaderboard-name">{entry.display_name}</span>
+                          <span className="leaderboard-level">Lv.{entry.level} {entry.tier}</span>
+                        </div>
+                        <div className="leaderboard-value">
+                          {leaderboardMetric === "lifetime_xp" ? `${(entry.lifetime_xp || 0).toLocaleString()} XP` :
+                           leaderboardMetric === "achievements" ? `${entry.achievements} unlocked` :
+                           `${(entry.total_words || 0).toLocaleString()} words`}
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                ) : (
+                  <div className="empty-state small">
+                    <p>No leaderboard data yet</p>
+                  </div>
+                )}
               </div>
+
+              {/* Filters */}
+              <div className="achievement-filters">
+                <div className="filter-group">
+                  <label>Category:</label>
+                  <select
+                    value={achievementCategory}
+                    onChange={(e) => setAchievementCategory(e.target.value)}
+                  >
+                    <option value="all">All Categories</option>
+                    <option value="volume">Volume</option>
+                    <option value="streak">Streak</option>
+                    <option value="speed">Speed</option>
+                    <option value="context">Context</option>
+                    <option value="formality">Formality</option>
+                    <option value="learning">Learning</option>
+                    <option value="temporal">Temporal</option>
+                    <option value="records">Records</option>
+                    <option value="combo">Combinations</option>
+                    <option value="special">Special</option>
+                  </select>
+                </div>
+                <div className="filter-group">
+                  <label>Rarity:</label>
+                  <select
+                    value={achievementRarity}
+                    onChange={(e) => setAchievementRarity(e.target.value)}
+                  >
+                    <option value="all">All Rarities</option>
+                    <option value="common">Common</option>
+                    <option value="rare">Rare</option>
+                    <option value="epic">Epic</option>
+                    <option value="legendary">Legendary</option>
+                  </select>
+                </div>
+                <div className="filter-group">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={showUnlockedOnly}
+                      onChange={(e) => setShowUnlockedOnly(e.target.checked)}
+                    />
+                    Unlocked only
+                  </label>
+                </div>
+              </div>
+
+              {/* Achievements Grid */}
+              {loadingAchievements ? (
+                <div className="achievements-loading">
+                  <div className="spinner" />
+                  <p>Loading achievements...</p>
+                </div>
+              ) : gamificationAchievements && gamificationAchievements.achievements.length > 0 ? (
+                <>
+                  {/* Category summary */}
+                  <div className="achievement-category-summary">
+                    <span className="summary-text">
+                      Showing {gamificationAchievements.achievements.length} of {gamificationAchievements.total} achievements
+                      {achievementCategory !== "all" && ` in ${achievementCategory}`}
+                      {achievementRarity !== "all" && ` (${achievementRarity})`}
+                    </span>
+                  </div>
+
+                  <div className="achievements-grid gamification">
+                    {gamificationAchievements.achievements.map((achievement) => (
+                      <AchievementCard
+                        key={achievement.id}
+                        achievement={achievement}
+                        compact={false}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Pagination - 1-indexed */}
+                  {gamificationAchievements.total_pages > 1 && (
+                    <div className="achievement-pagination">
+                      <button
+                        className="pagination-btn"
+                        onClick={() => loadAchievementsPage(
+                          achievementPage - 1,
+                          achievementCategory,
+                          achievementRarity,
+                          showUnlockedOnly
+                        )}
+                        disabled={achievementPage <= 1}
+                      >
+                        ← Prev
+                      </button>
+                      <span className="pagination-info">
+                        Page {achievementPage} of {gamificationAchievements.total_pages}
+                      </span>
+                      <button
+                        className="pagination-btn"
+                        onClick={() => loadAchievementsPage(
+                          achievementPage + 1,
+                          achievementCategory,
+                          achievementRarity,
+                          showUnlockedOnly
+                        )}
+                        disabled={achievementPage >= gamificationAchievements.total_pages}
+                      >
+                        Next →
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="empty-state">
+                  <p>No achievements found</p>
+                  <p className="empty-hint">Try changing the filters above</p>
+                </div>
+              )}
             </div>
           ) : null}
         </div>

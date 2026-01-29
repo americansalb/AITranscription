@@ -154,24 +154,43 @@ async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
 @router.post("/login", response_model=TokenResponse)
 async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate and receive an access token."""
-    user = await authenticate_user(db, request.email, request.password)
+    logger.info(f"Login attempt for email: {request.email}")
 
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-            headers={"WWW-Authenticate": "Bearer"},
+    try:
+        user = await authenticate_user(db, request.email, request.password)
+
+        if not user:
+            logger.warning(f"Login failed: Invalid credentials for {request.email}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not user.is_active:
+            logger.warning(f"Login failed: User {request.email} (ID: {user.id}) is inactive")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User account is inactive",
+            )
+
+        logger.info(f"Generating access token for user: {request.email} (ID: {user.id})")
+        access_token = create_access_token(user.id)
+        logger.info(f"Login successful for user: {request.email} (ID: {user.id})")
+
+        return TokenResponse(access_token=access_token)
+    except HTTPException:
+        # Re-raise HTTP exceptions (already logged above)
+        raise
+    except Exception as e:
+        logger.error(
+            f"Unexpected error during login for {request.email}: {type(e).__name__}: {str(e)}",
+            exc_info=True
         )
-
-    if not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login error: {type(e).__name__}",
         )
-
-    access_token = create_access_token(user.id)
-
-    return TokenResponse(access_token=access_token)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -205,6 +224,8 @@ class TranscriptItem(BaseModel):
     audio_duration_seconds: float
     words_per_minute: float
     context: str | None
+    formality: str | None
+    transcript_type: str
     created_at: datetime
 
 
@@ -218,6 +239,7 @@ class UserStatsResponse(BaseModel):
     words_today: int
     average_words_per_transcription: float
     average_words_per_minute: float
+    typing_wpm: int
 
 
 class ContextStats(BaseModel):
@@ -414,6 +436,8 @@ async def get_my_transcripts(
             audio_duration_seconds=t.audio_duration_seconds,
             words_per_minute=t.words_per_minute,
             context=t.context,
+            formality=t.formality,
+            transcript_type=t.transcript_type,
             created_at=t.created_at,
         )
         for t in transcripts
@@ -426,16 +450,41 @@ async def get_my_stats(
     current_user: User = Depends(get_current_user),
 ):
     """Get the current user's statistics."""
-    now = datetime.utcnow()
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    import logging
+    import sys
+    from datetime import timezone
 
-    # Get today's transcripts
+    logger = logging.getLogger(__name__)
+
+    now = datetime.now(timezone.utc)
+    # Use last 24 hours instead of UTC midnight to better match user's local "today"
+    last_24_hours = now - timedelta(hours=24)
+
+    # DEBUG: Log the time range we're querying
+    sys.stderr.write(f"[STATS DEBUG] now={now}, last_24_hours={last_24_hours}\n")
+    sys.stderr.flush()
+
+    # Get today's transcripts (last 24 hours)
     query = select(Transcript).where(
         Transcript.user_id == current_user.id,
-        Transcript.created_at >= today,
+        Transcript.created_at >= last_24_hours,
     )
     result = await db.execute(query)
     today_transcripts = result.scalars().all()
+
+    # DEBUG: Log what we found
+    sys.stderr.write(f"[STATS DEBUG] Found {len(today_transcripts)} transcripts in last 24h for user {current_user.id}\n")
+    sys.stderr.flush()
+
+    # Get ALL transcripts to compare
+    all_query = select(Transcript).where(Transcript.user_id == current_user.id)
+    all_result = await db.execute(all_query)
+    all_trans = all_result.scalars().all()
+    sys.stderr.write(f"[STATS DEBUG] Total transcripts for user: {len(all_trans)}\n")
+    if all_trans:
+        latest = max(all_trans, key=lambda t: t.created_at)
+        sys.stderr.write(f"[STATS DEBUG] Latest transcript created_at: {latest.created_at} (type: {type(latest.created_at)})\n")
+    sys.stderr.flush()
 
     transcriptions_today = len(today_transcripts)
     words_today = sum(t.word_count for t in today_transcripts)
@@ -464,7 +513,27 @@ async def get_my_stats(
         words_today=words_today,
         average_words_per_transcription=round(avg_words, 1),
         average_words_per_minute=round(avg_wpm, 1),
+        typing_wpm=current_user.typing_wpm,
     )
+
+
+class UpdateTypingWpmRequest(BaseModel):
+    """Request to update user's typing WPM."""
+    wpm: int = Field(..., ge=1, le=200, description="Typing speed in words per minute")
+
+
+@router.patch("/settings/typing-wpm")
+async def update_typing_wpm(
+    request: UpdateTypingWpmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update the user's typing WPM for time saved calculations."""
+    current_user.typing_wpm = request.wpm
+    await db.commit()
+    await db.refresh(current_user)
+
+    return {"message": "Typing WPM updated successfully", "typing_wpm": current_user.typing_wpm}
 
 
 @router.get("/stats/detailed", response_model=DetailedStatsResponse)
@@ -477,13 +546,16 @@ async def get_detailed_stats(
     from datetime import timezone
     import calendar
 
+    # Use timezone-aware UTC datetimes to match database storage (DateTime with timezone=True)
     now = datetime.now(timezone.utc)
+    last_24_hours = now - timedelta(hours=24)
+    # Calendar "today" still needed for daily grid, streaks, etc.
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_ago = today - timedelta(days=7)
-    two_weeks_ago = today - timedelta(days=14)
-    month_ago = today - timedelta(days=30)
-    two_months_ago = today - timedelta(days=60)
-    year_ago = today - timedelta(days=365)
+    week_ago = now - timedelta(days=7)
+    two_weeks_ago = now - timedelta(days=14)
+    month_ago = now - timedelta(days=30)
+    two_months_ago = now - timedelta(days=60)
+    year_ago = now - timedelta(days=365)
 
     # Get all user transcripts
     all_transcripts_query = select(Transcript).where(
@@ -504,8 +576,8 @@ async def get_detailed_stats(
     )
     avg_audio_duration = total_audio / len(all_transcripts) if all_transcripts else 0
 
-    # Time-based filtering
-    today_transcripts = [t for t in all_transcripts if t.created_at >= today]
+    # Time-based filtering (using rolling windows)
+    today_transcripts = [t for t in all_transcripts if t.created_at >= last_24_hours]
     week_transcripts = [t for t in all_transcripts if t.created_at >= week_ago]
     prev_week_transcripts = [t for t in all_transcripts if two_weeks_ago <= t.created_at < week_ago]
     month_transcripts = [t for t in all_transcripts if t.created_at >= month_ago]

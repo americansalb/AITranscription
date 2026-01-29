@@ -10,6 +10,7 @@ from app.models.base import Base
 if TYPE_CHECKING:
     from app.models.dictionary import DictionaryEntry
     from app.models.transcript import Transcript
+    from app.models.gamification import UserGamification
 
 
 class SubscriptionTier(str, Enum):
@@ -74,5 +75,11 @@ class User(Base):
     transcripts: Mapped[list["Transcript"]] = relationship(
         "Transcript",
         back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    gamification: Mapped["UserGamification | None"] = relationship(
+        "UserGamification",
+        back_populates="user",
+        uselist=False,
         cascade="all, delete-orphan",
     )

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from jose import JWTError, jwt
@@ -7,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -92,9 +95,22 @@ async def authenticate_user(
     password: str,
 ) -> User | None:
     """Authenticate a user by email and password."""
-    user = await get_user_by_email(db, email)
-    if not user:
+    logger.info(f"Attempting to authenticate user: {email}")
+
+    try:
+        user = await get_user_by_email(db, email)
+        if not user:
+            logger.warning(f"Authentication failed: User not found with email {email}")
+            return None
+
+        logger.info(f"User found: {email} (ID: {user.id}, Active: {user.is_active})")
+
+        if not verify_password(password, user.hashed_password):
+            logger.warning(f"Authentication failed: Invalid password for user {email}")
+            return None
+
+        logger.info(f"Authentication successful for user: {email}")
+        return user
+    except Exception as e:
+        logger.error(f"Error during authentication for {email}: {type(e).__name__}: {str(e)}", exc_info=True)
         return None
-    if not verify_password(password, user.hashed_password):
-        return None
-    return user

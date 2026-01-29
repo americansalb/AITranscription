@@ -227,3 +227,83 @@ export function saveVoiceEnabled(enabled: boolean): void {
     // Ignore storage errors
   }
 }
+
+// Blind mode storage (replaces old VoiceMode)
+const BLIND_MODE_KEY = 'scribe_blind_mode';
+
+// Legacy type for backwards compatibility during transition
+export type VoiceMode = 'summary' | 'developer' | 'blind';
+
+export function getStoredBlindMode(): boolean {
+  try {
+    const stored = localStorage.getItem(BLIND_MODE_KEY);
+    if (stored !== null) {
+      return stored === 'true';
+    }
+    // Migration from old voice mode
+    const oldMode = localStorage.getItem('scribe_voice_mode');
+    return oldMode === 'blind';
+  } catch {
+    return false;
+  }
+}
+
+export function saveBlindMode(enabled: boolean): void {
+  try {
+    localStorage.setItem(BLIND_MODE_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+// Legacy functions for backwards compatibility
+export function getStoredVoiceMode(): VoiceMode {
+  return getStoredBlindMode() ? 'blind' : 'summary';
+}
+
+export function saveVoiceMode(mode: VoiceMode): void {
+  saveBlindMode(mode === 'blind');
+}
+
+// Voice detail level storage
+const VOICE_DETAIL_KEY = 'scribe_voice_detail';
+
+export function getStoredVoiceDetail(): number {
+  try {
+    const detail = localStorage.getItem(VOICE_DETAIL_KEY);
+    const parsed = parseInt(detail || '3', 10);
+    return parsed >= 1 && parsed <= 5 ? parsed : 3;
+  } catch {
+    return 3; // Default to balanced
+  }
+}
+
+export function saveVoiceDetail(detail: number): void {
+  try {
+    if (detail >= 1 && detail <= 5) {
+      localStorage.setItem(VOICE_DETAIL_KEY, detail.toString());
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+// Voice trigger mode storage
+const VOICE_AUTO_KEY = 'scribe_voice_auto';
+
+export function getStoredVoiceAuto(): boolean {
+  try {
+    const auto = localStorage.getItem(VOICE_AUTO_KEY);
+    return auto !== 'false'; // Default to true (automatic)
+  } catch {
+    return true;
+  }
+}
+
+export function saveVoiceAuto(auto: boolean): void {
+  try {
+    localStorage.setItem(VOICE_AUTO_KEY, auto ? 'true' : 'false');
+  } catch {
+    // Ignore storage errors
+  }
+}

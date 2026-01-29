@@ -8,6 +8,15 @@ from app.models.learning import (
     ModelVersion,
     CorrectionRule,
 )
+from app.models.gamification import (
+    AchievementDefinition,
+    UserGamification,
+    UserAchievement,
+    XPTransaction,
+    PrestigeTier,
+    AchievementRarity,
+    AchievementCategory,
+)
 
 __all__ = [
     "Base",
@@ -19,4 +28,11 @@ __all__ = [
     "LearningMetrics",
     "ModelVersion",
     "CorrectionRule",
+    "AchievementDefinition",
+    "UserGamification",
+    "UserAchievement",
+    "XPTransaction",
+    "PrestigeTier",
+    "AchievementRarity",
+    "AchievementCategory",
 ]

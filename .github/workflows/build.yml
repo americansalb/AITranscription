@@ -117,6 +117,27 @@ jobs:
         working-directory: desktop
         run: echo "VITE_API_URL=${{ secrets.API_URL }}" > .env
 
+      # Build the scribe-mcp sidecar binary
+      - name: Build MCP sidecar (Unix)
+        if: matrix.platform != 'windows-latest'
+        working-directory: desktop
+        run: |
+          chmod +x scripts/build-sidecar.sh
+          ./scripts/build-sidecar.sh
+
+      - name: Build MCP sidecar (Windows)
+        if: matrix.platform == 'windows-latest'
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          # Build the scribe-mcp sidecar
+          cd src-tauri
+          cargo build --bin scribe-mcp --release
+
+          # Create binaries directory and copy
+          New-Item -ItemType Directory -Path binaries -Force
+          Copy-Item target/release/scribe-mcp.exe binaries/scribe-mcp-x86_64-pc-windows-msvc.exe
+
       # Build with code signing (macOS with secrets configured)
       - name: Build the app (signed)
         if: matrix.platform == 'macos-latest' && steps.signing.outputs.enabled == 'true'

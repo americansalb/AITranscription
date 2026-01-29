@@ -35,6 +35,23 @@
         "visible": false,
         "focus": false,
         "url": "index.html#/overlay"
+      },
+      {
+        "title": "Claude Sessions - Transcript",
+        "label": "transcript",
+        "width": 900,
+        "height": 700,
+        "resizable": true,
+        "minWidth": 600,
+        "minHeight": 500,
+        "center": false,
+        "x": 100,
+        "y": 100,
+        "visible": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "url": "index.html#/transcript"
       }
     ],
     "security": {
@@ -48,6 +65,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "dmg", "deb", "appimage"],
+    "externalBin": [
+      "binaries/scribe-mcp"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

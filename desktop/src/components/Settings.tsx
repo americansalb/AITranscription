@@ -10,7 +10,7 @@ import {
   UserStatsResponse,
   ApiError,
 } from "../lib/api";
-import { getStoredVoiceEnabled, saveVoiceEnabled } from "../lib/voiceStream";
+import { getStoredVoiceEnabled, saveVoiceEnabled, getStoredBlindMode, saveBlindMode, getStoredVoiceAuto, saveVoiceAuto, getStoredVoiceDetail, saveVoiceDetail } from "../lib/voiceStream";
 import { formatHotkeyForDisplay } from "../lib/platform";
 
 interface SettingsProps {
@@ -20,11 +20,12 @@ interface SettingsProps {
   onModelChange?: (model: string) => void;
   onNoiseCancellationChange?: (enabled: boolean) => void;
   onVoiceEnabledChange?: (enabled: boolean) => void;
+  onViewStats?: () => void;
 }
 
 type SettingsTab = "account" | "dictionary" | "preferences";
 
-export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelChange, onNoiseCancellationChange, onVoiceEnabledChange }: SettingsProps) {
+export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelChange, onNoiseCancellationChange, onVoiceEnabledChange, onViewStats }: SettingsProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>("account");
   const [user, setUser] = useState<UserResponse | null>(null);
   const [stats, setStats] = useState<UserStatsResponse | null>(null);
@@ -99,7 +100,7 @@ export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelC
             <div className="loading">Loading...</div>
           ) : activeTab === "account" ? (
             user ? (
-              <AccountInfo user={user} stats={stats} onLogout={handleLogout} />
+              <AccountInfo user={user} stats={stats} onLogout={handleLogout} onViewStats={onViewStats} />
             ) : (
               <AuthForm onSuccess={setUser} />
             )
@@ -120,24 +121,17 @@ export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelC
   );
 }
 
-// Format seconds to human readable duration
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-  const hours = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  return `${hours}h ${mins}m`;
-}
-
 // Account info when logged in
 function AccountInfo({
   user,
   stats,
   onLogout,
+  onViewStats,
 }: {
   user: UserResponse;
   stats: UserStatsResponse | null;
   onLogout: () => void;
+  onViewStats?: () => void;
 }) {
   const tierLabels: Record<string, string> = {
     access: "Access (Accessibility)",
@@ -159,27 +153,16 @@ function AccountInfo({
       )}
 
       {stats && (
-        <div className="user-stats">
-          <h4>Your Statistics</h4>
-          <div className="stats-grid">
-            <div className="stat-item">
-              <span className="stat-value">{stats.total_transcriptions}</span>
-              <span className="stat-label">Transcriptions</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{stats.total_words.toLocaleString()}</span>
-              <span className="stat-label">Words</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{formatDuration(stats.total_audio_seconds)}</span>
-              <span className="stat-label">Audio Time</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-value">{stats.transcriptions_today}</span>
-              <span className="stat-label">Today</span>
-            </div>
-          </div>
+        <div className="quick-stat">
+          <div className="quick-stat-value">{stats.total_transcriptions.toLocaleString()}</div>
+          <div className="quick-stat-label">Total Transcriptions</div>
         </div>
+      )}
+
+      {onViewStats && (
+        <button className="view-stats-btn" onClick={onViewStats}>
+          View Detailed Statistics
+        </button>
       )}
 
       <button className="logout-btn" onClick={onLogout}>
@@ -376,9 +359,9 @@ function keyEventToHotkey(e: KeyboardEvent): string | null {
 // Get stored hotkey from localStorage
 export function getStoredHotkey(): string {
   try {
-    return localStorage.getItem("scribe_hotkey") || "Alt+D";
+    return localStorage.getItem("scribe_hotkey") || "CommandOrControl+Shift+D";
   } catch {
-    return "Alt+D";
+    return "CommandOrControl+Shift+D";
   }
 }
 
@@ -397,6 +380,9 @@ const WHISPER_MODEL_OPTIONS = [
   { value: "whisper-large-v3-turbo", label: "Turbo (Fast)", description: "Faster, more cost-effective" },
   { value: "whisper-large-v3", label: "Large V3 (Accurate)", description: "Higher accuracy, slower" },
 ];
+
+// Detail level labels: 1 = Summary (simple), 5 = Developer (technical)
+const DETAIL_LABELS = ['Summary', '', 'Balanced', '', 'Developer'];
 
 // Get stored whisper model from localStorage
 export function getStoredWhisperModel(): string {
@@ -448,6 +434,10 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
   const [whisperModel, setWhisperModel] = useState(() => getStoredWhisperModel());
   const [noiseCancellation, setNoiseCancellation] = useState(() => getStoredNoiseCancellation());
   const [voiceEnabled, setVoiceEnabled] = useState(() => getStoredVoiceEnabled());
+  const [blindMode, setBlindMode] = useState(() => getStoredBlindMode());
+  const [voiceDetail, setVoiceDetail] = useState(() => getStoredVoiceDetail());
+  const [voiceAuto, setVoiceAuto] = useState(() => getStoredVoiceAuto());
+  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [showDevSettings, setShowDevSettings] = useState(false);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
   const hotkeyInputRef = useRef<HTMLInputElement>(null);
@@ -475,17 +465,54 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
     saveVoiceEnabled(enabled);
     onVoiceEnabledChange?.(enabled);
 
-    // Update CLAUDE.md in home directory to enable/disable voice instructions
+    // Update CLAUDE.md file
     if (window.__TAURI__) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        // When enabled, use "summary" mode (speaks explanations, not code)
-        // When disabled, clear the file so Claude Code doesn't try to speak
-        await invoke("update_claude_md", { mode: enabled ? "summary" : "disabled" });
+        await invoke("update_claude_md", { enabled, blindMode, detail: voiceDetail });
       } catch (e) {
         console.error("Failed to update CLAUDE.md:", e);
       }
     }
+  };
+
+  const handleBlindModeChange = async (enabled: boolean) => {
+    setBlindMode(enabled);
+    saveBlindMode(enabled);
+
+    // Save voice settings and update CLAUDE.md
+    if (window.__TAURI__) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("save_voice_settings_cmd", { blindMode: enabled, detail: voiceDetail });
+        await invoke("update_claude_md", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
+      } catch (e) {
+        console.error("Failed to save voice settings:", e);
+      }
+    }
+  };
+
+  const handleVoiceDetailChange = async (detail: number) => {
+    setVoiceDetail(detail);
+    saveVoiceDetail(detail);
+
+    // Save voice settings and update CLAUDE.md
+    if (window.__TAURI__) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("save_voice_settings_cmd", { blindMode, detail });
+        await invoke("update_claude_md", { enabled: voiceEnabled, blindMode, detail });
+      } catch (e) {
+        console.error("Failed to save voice settings:", e);
+      }
+    }
+  };
+
+  const handleVoiceAutoChange = (auto: boolean) => {
+    setVoiceAuto(auto);
+    saveVoiceAuto(auto);
+    // TODO: This will be used for future bidirectional communication
+    // For now, just store the preference
   };
 
   // Handle keydown for custom hotkey recording
@@ -537,16 +564,99 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
       </label>
       <p className="setting-hint">Reduce background noise before transcription (experimental)</p>
 
-      <label className="toggle-setting">
-        <span>Voice explanations (Claude Code)</span>
-        <input
-          type="checkbox"
-          checked={voiceEnabled}
-          onChange={(e) => handleVoiceEnabledChange(e.target.checked)}
-        />
-        <span className="toggle-switch" />
-      </label>
-      <p className="setting-hint">Hear spoken explanations when Claude Code writes or edits files</p>
+      {/* Claude Code Voice Settings - Collapsible Section */}
+      <div className="dev-settings-section">
+        <button
+          className="dev-settings-toggle"
+          onClick={() => setShowVoiceSettings(!showVoiceSettings)}
+        >
+          <span>🎙️ Claude Code Voice</span>
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            style={{
+              transform: showVoiceSettings ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 0.2s',
+            }}
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+
+        {showVoiceSettings && (
+          <div className="dev-settings-content">
+            <label className="toggle-setting">
+              <span>Enable voice explanations</span>
+              <input
+                type="checkbox"
+                checked={voiceEnabled}
+                onChange={(e) => handleVoiceEnabledChange(e.target.checked)}
+              />
+              <span className="toggle-switch" />
+            </label>
+            <p className="setting-hint">
+              Hear spoken explanations when Claude Code makes changes
+            </p>
+
+            {voiceEnabled && (
+              <>
+                {/* Blind Mode Toggle */}
+                <label className="toggle-setting">
+                  <span>Blind mode</span>
+                  <input
+                    type="checkbox"
+                    checked={blindMode}
+                    onChange={(e) => handleBlindModeChange(e.target.checked)}
+                  />
+                  <span className="toggle-switch" />
+                </label>
+                <p className="setting-hint">
+                  Treat user as visually impaired - describe visual layouts, positioning, colors, and spatial relationships in detail
+                </p>
+
+                {/* Detail Level Slider */}
+                <div className="detail-slider-container">
+                  <label className="setting-label">
+                    Detail Level: {DETAIL_LABELS[voiceDetail - 1] || voiceDetail}
+                  </label>
+                  <input
+                    type="range"
+                    min="1"
+                    max="5"
+                    step="1"
+                    value={voiceDetail}
+                    onChange={(e) => handleVoiceDetailChange(parseInt(e.target.value))}
+                    className="detail-slider"
+                  />
+                  <div className="slider-labels">
+                    <span>Summary</span>
+                    <span>Balanced</span>
+                    <span>Developer</span>
+                  </div>
+                </div>
+
+                {/* Auto-announce Toggle */}
+                <label className="toggle-setting">
+                  <span>Automatic announcements</span>
+                  <input
+                    type="checkbox"
+                    checked={voiceAuto}
+                    onChange={(e) => handleVoiceAutoChange(e.target.checked)}
+                  />
+                  <span className="toggle-switch" />
+                </label>
+                <p className="setting-hint">
+                  Speak automatically when Claude makes changes (vs manual trigger only)
+                </p>
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="hotkey-setting">
         <span>Push-to-talk hotkey</span>
@@ -565,7 +675,7 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
           {!isRecordingHotkey && (
             <button
               className="hotkey-clear-btn"
-              onClick={() => handleHotkeyChange("Alt+D")}
+              onClick={() => handleHotkeyChange("CommandOrControl+Shift+D")}
               title="Reset to default"
             >
               Reset

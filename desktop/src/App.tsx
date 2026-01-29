@@ -1,12 +1,15 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+// Force reload to pick up hotkey hook changes
 import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
-import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken } from "./lib/api";
+import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken, getUserStats } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
 import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
+import { TranscriptHistory } from "./components/TranscriptHistory";
+import { ClaudeOutputsViewer } from "./components/ClaudeOutputsViewer";
 import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
 import { ComparisonView } from "./components/ComparisonView";
 import { ExportModal } from "./components/ExportModal";
@@ -15,6 +18,7 @@ import { useToast } from "./components/Toast";
 import { Confetti } from "./components/Confetti";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { initSpeakListener } from "./lib/speak";
+import { getStoredVoiceEnabled, saveVoiceEnabled } from "./lib/voiceStream";
 
 // Error types for actionable messages
 interface ActionableError {
@@ -163,18 +167,86 @@ function App() {
   const [backendReady, setBackendReady] = useState<boolean | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [showClaudeOutputs, setShowClaudeOutputs] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [transcriptionCount, setTranscriptionCount] = useState(0); // Increments after each successful transcription
   const [showConfetti, setShowConfetti] = useState(false);
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => getStoredVoiceEnabled());
 
   // Handle hotkey change from Settings
   const handleHotkeyChange = useCallback((newHotkey: string) => {
     setCurrentHotkey(newHotkey);
   }, []);
 
+  // Handle voice toggle - save preference and update CLAUDE.md
+  const handleVoiceToggle = useCallback(async () => {
+    const newEnabled = !voiceEnabled;
+    setVoiceEnabled(newEnabled);
+    saveVoiceEnabled(newEnabled);
+
+    // If disabling voice, clear pending items from queue
+    if (!newEnabled) {
+      const { clearPending } = await import("./lib/queueStore");
+      await clearPending();
+    }
+
+    // Update CLAUDE.md to reflect the new setting
+    if (window.__TAURI__) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { emit } = await import("@tauri-apps/api/event");
+        const { getStoredBlindMode, getStoredVoiceDetail } = await import("./lib/voiceStream");
+        await invoke("update_claude_md", {
+          enabled: newEnabled,
+          blindMode: getStoredBlindMode(),
+          detail: getStoredVoiceDetail(),
+        });
+
+        // Emit event to sync other windows
+        await emit("voice-settings-changed", {
+          voiceEnabled: newEnabled,
+          blindMode: getStoredBlindMode(),
+          detail: getStoredVoiceDetail()
+        });
+
+        showToast(newEnabled ? "Scribe Speak enabled" : "Scribe Speak disabled", "info");
+      } catch (err) {
+        console.error("[App] Failed to update CLAUDE.md:", err);
+      }
+    }
+  }, [voiceEnabled, showToast]);
+
+  // Listen for voice settings changes from other windows
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+
+    let unlisten: (() => void) | undefined;
+
+    const setupListener = async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<{ voiceEnabled: boolean; blindMode: boolean; detail: number }>(
+          "voice-settings-changed",
+          (event) => {
+            console.log("[App] Received voice-settings-changed event:", event.payload);
+            setVoiceEnabled(event.payload.voiceEnabled);
+          }
+        );
+      } catch (err) {
+        console.error("[App] Failed to setup voice settings listener:", err);
+      }
+    };
+
+    setupListener();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // New state for editing and progress
   const [isEditing, setIsEditing] = useState(false);
@@ -219,6 +291,23 @@ function App() {
       timestamp: Date.now(),
     };
     setTranscriptHistory(prev => [newEntry, ...prev]);
+  }, []);
+
+  // Load user's actual transcription count on startup to prevent false milestone celebrations
+  useEffect(() => {
+    const loadUserStats = async () => {
+      if (isLoggedIn()) {
+        try {
+          const stats = await getUserStats();
+          // Initialize both counts to the real total so we don't trigger old milestones
+          setTranscriptionCount(stats.total_transcriptions);
+          setPreviousTranscriptionCount(stats.total_transcriptions);
+        } catch (e) {
+          console.warn("Failed to load user stats:", e);
+        }
+      }
+    };
+    loadUserStats();
   }, []);
 
   // Check for achievement milestones
@@ -531,6 +620,53 @@ function App() {
     };
   }, []);
 
+  // Initialize project path and CLAUDE.md based on voice preference
+  useEffect(() => {
+    const initClaudeMd = async () => {
+      if (!window.__TAURI__) return;
+
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const { getStoredVoiceEnabled, getStoredBlindMode, getStoredVoiceDetail } = await import("./lib/voiceStream");
+
+        // First, set the project path so CLAUDE.md is written to the right location
+        try {
+          const { resourceDir } = await import("@tauri-apps/api/path");
+          const resDir = await resourceDir();
+          // Go up from resources to find project root
+          const projectPath = resDir.replace(/[\\/]desktop[\\/]src-tauri[\\/]target[\\/].*$/, "");
+
+          if (projectPath && projectPath !== resDir) {
+            await invoke("set_project_path", { path: projectPath });
+            console.log("[App] Set project path to:", projectPath);
+          } else {
+            // Fallback: use a known path for this specific project
+            const knownPath = "C:\\Users\\18479\\Desktop\\LOCAL APP TESTING\\AITranscription";
+            await invoke("set_project_path", { path: knownPath });
+            console.log("[App] Set project path to known path:", knownPath);
+          }
+        } catch (pathErr) {
+          // Fallback to a known path if path resolution fails
+          const knownPath = "C:\\Users\\18479\\Desktop\\LOCAL APP TESTING\\AITranscription";
+          await invoke("set_project_path", { path: knownPath });
+          console.log("[App] Set project path to fallback:", knownPath);
+        }
+
+        // Now initialize CLAUDE.md with current settings
+        const enabled = getStoredVoiceEnabled();
+        const blindMode = getStoredBlindMode();
+        const detail = getStoredVoiceDetail();
+
+        await invoke("update_claude_md", { enabled, blindMode, detail });
+        console.log(`[App] CLAUDE.md initialized: enabled=${enabled}, blindMode=${blindMode}, detail=${detail}`);
+      } catch (err) {
+        console.error("[App] Failed to initialize CLAUDE.md:", err);
+      }
+    };
+
+    initClaudeMd();
+  }, []);
+
   // Control overlay window visibility
   // Skip overlay on macOS - showing windows activates the app and breaks paste
   useEffect(() => {
@@ -557,6 +693,7 @@ function App() {
           isRecording: recorder.isRecording,
           isProcessing: status === "processing",
           duration: recorder.duration || 0,
+          audioLevel: recorder.audioLevel || 0,
         });
       } catch (err) {
         console.error("Overlay update failed:", err);
@@ -564,7 +701,7 @@ function App() {
     };
 
     updateOverlay();
-  }, [recorder.isRecording, recorder.duration, status]);
+  }, [recorder.isRecording, recorder.duration, recorder.audioLevel, status]);
 
   const handleRecordClick = useCallback(async () => {
     if (recorder.isRecording) {
@@ -821,6 +958,26 @@ function App() {
       <header className="header">
         <h1>Scribe</h1>
         <div className="header-actions">
+          {/* Scribe Speak Toggle - synced with Claude Integration Preferences */}
+          <button
+            className={`voice-toggle-btn ${voiceEnabled ? "enabled" : "disabled"}`}
+            title={voiceEnabled ? "Claude Voice: ON - Synced with Preferences (click to disable)" : "Claude Voice: OFF - Synced with Preferences (click to enable)"}
+            onClick={handleVoiceToggle}
+          >
+            {voiceEnabled ? (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <line x1="23" y1="9" x2="17" y2="15" />
+                <line x1="17" y1="9" x2="23" y2="15" />
+              </svg>
+            )}
+          </button>
           {isLoggedIn() && (
             <button className="learning-btn" title="Learning Dashboard" onClick={() => setShowLearning(true)}>
               <svg
@@ -856,6 +1013,70 @@ function App() {
               </svg>
             </button>
           )}
+          {isLoggedIn() && (
+            <button className="history-btn" title="History" onClick={() => setShowHistory(true)}>
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 3v5h5" />
+                <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+                <path d="M12 7v5l4 2" />
+              </svg>
+            </button>
+          )}
+          {isLoggedIn() && (
+            <button className="claude-outputs-btn" title="Claude Conversations" onClick={() => setShowClaudeOutputs(true)}>
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </button>
+          )}
+          <button
+            className="claude-integration-btn"
+            title="Claude Integration"
+            onClick={async () => {
+              const { invoke } = await import("@tauri-apps/api/core");
+              await invoke("toggle_transcript_window");
+            }}
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v4" />
+              <path d="M12 18v4" />
+              <path d="M4.93 4.93l2.83 2.83" />
+              <path d="M16.24 16.24l2.83 2.83" />
+              <path d="M2 12h4" />
+              <path d="M18 12h4" />
+              <path d="M4.93 19.07l2.83-2.83" />
+              <path d="M16.24 7.76l2.83-2.83" />
+            </svg>
+            <span className="claude-btn-label">Claude</span>
+          </button>
           <button className="settings-btn" title="Settings" onClick={() => setShowSettings(true)}>
             <svg
               width="20"
@@ -1179,8 +1400,14 @@ function App() {
         onClose={() => setShowSettings(false)}
         onHotkeyChange={handleHotkeyChange}
         refreshTrigger={transcriptionCount}
+        onViewStats={() => {
+          setShowSettings(false);
+          setShowStats(true);
+        }}
       />}
       {showStats && <StatsPanel onClose={() => setShowStats(false)} refreshTrigger={transcriptionCount} />}
+      {showHistory && <TranscriptHistory onClose={() => setShowHistory(false)} refreshTrigger={transcriptionCount} />}
+      {showClaudeOutputs && <ClaudeOutputsViewer onClose={() => setShowClaudeOutputs(false)} refreshTrigger={transcriptionCount} />}
       {showShortcuts && <KeyboardShortcutsModal onClose={() => setShowShortcuts(false)} />}
       {showLearning && (
         <>

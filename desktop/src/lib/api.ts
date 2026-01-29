@@ -58,6 +58,7 @@ export interface UserStatsResponse {
   words_today: number;
   average_words_per_transcription: number;
   average_words_per_minute: number;
+  typing_wpm: number;
 }
 
 export interface ContextStats {
@@ -218,10 +219,22 @@ export class ApiError extends Error {
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
+    // Handle error.detail properly - it might be a string, object, or array (FastAPI validation errors)
+    let errorMessage: string;
+    if (typeof error.detail === "string") {
+      errorMessage = error.detail;
+    } else if (Array.isArray(error.detail)) {
+      // FastAPI validation errors come as array of {loc, msg, type}
+      errorMessage = error.detail.map((e: { msg?: string }) => e.msg || "Validation error").join(", ");
+    } else if (error.detail && typeof error.detail === "object") {
+      errorMessage = JSON.stringify(error.detail);
+    } else {
+      errorMessage = `HTTP ${response.status}`;
+    }
     throw new ApiError(
-      error.detail || `HTTP ${response.status}`,
+      errorMessage,
       response.status,
-      error.detail
+      typeof error.detail === "string" ? error.detail : JSON.stringify(error.detail)
     );
   }
   return response.json();
@@ -527,6 +540,7 @@ export async function getUserStats(): Promise<UserStats> {
   const data = await handleResponse<UserStatsResponse>(response);
 
   // Convert to UserStats with calculated fields
+  const typingWpm = data.typing_wpm || 40;
   return {
     total_transcriptions: data.total_transcriptions,
     total_words: data.total_words,
@@ -535,9 +549,9 @@ export async function getUserStats(): Promise<UserStats> {
     words_today: data.words_today,
     average_words_per_transcription: data.average_words_per_transcription,
     average_words_per_minute: data.average_words_per_minute,
-    time_saved_seconds: Math.max(0, (data.total_words / 40) * 60 - data.total_audio_seconds),
-    time_saved_today_seconds: Math.max(0, (data.words_today / 40) * 60),
-    typing_wpm: 40,
+    time_saved_seconds: Math.max(0, (data.total_words / typingWpm) * 60 - data.total_audio_seconds),
+    time_saved_today_seconds: Math.max(0, (data.words_today / typingWpm) * 60),
+    typing_wpm: typingWpm,
   };
 }
 
@@ -551,6 +565,8 @@ export interface TranscriptItem {
   context: string | null;
   formality: string | null;
   created_at: string;
+  transcript_type: "input" | "output";
+  session_id: string | null;
 }
 
 export interface AchievementItem {
@@ -585,10 +601,9 @@ export async function getTranscriptHistory(offset: number = 0, limit: number = 5
 
 /**
  * Get user achievements
- * Note: Backend endpoint not yet implemented, returns empty achievements
+ * Returns empty - achievements are now displayed directly from detailedStats
  */
 export async function getUserAchievements(): Promise<AchievementsResponse> {
-  // TODO: Implement backend endpoint
   return {
     achievements: [],
     total_achievements: 0,
@@ -598,11 +613,20 @@ export async function getUserAchievements(): Promise<AchievementsResponse> {
 
 /**
  * Update user's typing WPM for time saved calculation
- * Note: Backend endpoint not yet implemented
  */
 export async function updateTypingWpm(wpm: number): Promise<void> {
-  // TODO: Implement backend endpoint
-  console.log("Typing WPM update not yet implemented:", wpm);
+  const response = await fetch(`${API_BASE_URL}/api/v1/auth/settings/typing-wpm`, {
+    method: "PATCH",
+    headers: {
+      ...getAuthHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ wpm }),
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to update typing WPM");
+  }
 }
 
 // ============================================
@@ -774,4 +798,251 @@ export async function trainWhisperModel(): Promise<TrainingResponse> {
   });
 
   return handleResponse<TrainingResponse>(response);
+}
+
+// ============================================
+// Gamification Types and Functions
+// ============================================
+
+export type PrestigeTier = "bronze" | "silver" | "gold" | "platinum" | "diamond" | "master" | "legend";
+export type AchievementRarity = "common" | "rare" | "epic" | "legendary";
+export type AchievementCategory =
+  | "volume"
+  | "streak"
+  | "speed"
+  | "context"
+  | "formality"
+  | "learning"
+  | "temporal"
+  | "records"
+  | "combo"
+  | "special";
+
+export interface TierProgress {
+  current_tier: PrestigeTier;
+  next_tier: PrestigeTier | null;
+  tier_start_xp: number;
+  tier_end_xp: number | null;
+  xp_in_tier: number;
+  progress: number;
+  color: string;
+}
+
+export interface AchievementStats {
+  unlocked: number;
+  total: number;
+  progress: number;
+  by_rarity: {
+    common: number;
+    rare: number;
+    epic: number;
+    legendary: number;
+  };
+}
+
+export interface GamificationProgress {
+  user_id: number;
+  current_level: number;
+  current_xp: number;
+  xp_to_next_level: number;
+  level_progress: number;
+  lifetime_xp: number;
+  prestige_tier: PrestigeTier;
+  tier_color: string;
+  tier_progress: TierProgress;
+  xp_multiplier: number;
+  achievements: AchievementStats;
+  last_xp_earned_at: string | null;
+}
+
+export interface GamificationAchievement {
+  id: string;
+  name: string;
+  description: string;
+  category: AchievementCategory;
+  rarity: AchievementRarity;
+  xp_reward: number;
+  icon: string;
+  tier: number;
+  threshold: number;
+  metric_type: string;
+  is_hidden: boolean;
+  is_unlocked: boolean;
+  current_value: number;
+  progress: number;
+  unlocked_at: string | null;
+}
+
+export interface AchievementListResponse {
+  achievements: GamificationAchievement[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export interface NewlyUnlockedResponse {
+  achievements: GamificationAchievement[];
+  xp_gained: number;
+  level_changes: {
+    current_level: number;
+    prestige_tier: PrestigeTier;
+    lifetime_xp: number;
+  } | null;
+}
+
+export interface XPTransaction {
+  id: number;
+  amount: number;
+  final_amount: number;
+  multiplier: number;
+  source: string;
+  source_id: string | null;
+  description: string | null;
+  level_before: number;
+  level_after: number;
+  created_at: string;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  user_id: number;
+  display_name: string;
+  level: number;
+  tier: PrestigeTier;
+  achievements: number;
+  lifetime_xp?: number;
+  total_words?: number;
+}
+
+export interface LeaderboardResponse {
+  leaderboard: LeaderboardEntry[];
+  user_rank: {
+    user_id: number;
+    rank: number;
+    total_users: number;
+    metric: string;
+    value: number;
+    percentile: number;
+  } | null;
+}
+
+/**
+ * Get the current user's gamification progress
+ */
+export async function getGamificationProgress(): Promise<GamificationProgress> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/progress`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<GamificationProgress>(response);
+}
+
+/**
+ * Check for newly unlocked achievements
+ */
+export async function checkAchievements(): Promise<NewlyUnlockedResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/check`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<NewlyUnlockedResponse>(response);
+}
+
+/**
+ * Get paginated achievements with filters
+ */
+export async function getGamificationAchievements(params: {
+  category?: AchievementCategory;
+  rarity?: AchievementRarity;
+  page?: number;
+  page_size?: number;
+  unlocked_only?: boolean;
+}): Promise<AchievementListResponse> {
+  const searchParams = new URLSearchParams();
+  if (params.category) searchParams.set("category", params.category);
+  if (params.rarity) searchParams.set("rarity", params.rarity);
+  if (params.page) searchParams.set("page", params.page.toString());
+  if (params.page_size) searchParams.set("page_size", params.page_size.toString());
+  if (params.unlocked_only) searchParams.set("unlocked_only", "true");
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/gamification/achievements?${searchParams.toString()}`,
+    {
+      headers: getAuthHeaders(),
+    }
+  );
+
+  return handleResponse<AchievementListResponse>(response);
+}
+
+/**
+ * Get unnotified achievements (for toast notifications)
+ */
+export async function getUnnotifiedAchievements(): Promise<GamificationAchievement[]> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/achievements/unnotified`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<GamificationAchievement[]>(response);
+}
+
+/**
+ * Mark achievements as notified
+ */
+export async function markAchievementsNotified(achievementIds: string[]): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/achievements/mark-notified`, {
+    method: "POST",
+    headers: {
+      ...getAuthHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ achievement_ids: achievementIds }),
+  });
+
+  await handleResponse<{ status: string }>(response);
+}
+
+/**
+ * Get recent XP transactions
+ */
+export async function getXPTransactions(limit: number = 20): Promise<XPTransaction[]> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/transactions?limit=${limit}`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<XPTransaction[]>(response);
+}
+
+/**
+ * Get the leaderboard
+ */
+export async function getLeaderboard(
+  metric: "lifetime_xp" | "achievements" | "words" = "lifetime_xp",
+  limit: number = 100,
+  includeUserRank: boolean = true
+): Promise<LeaderboardResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/gamification/leaderboard?metric=${metric}&limit=${limit}&include_user_rank=${includeUserRank}`,
+    {
+      headers: getAuthHeaders(),
+    }
+  );
+
+  return handleResponse<LeaderboardResponse>(response);
+}
+
+/**
+ * Get available achievement categories and rarities
+ */
+export async function getAchievementCategories(): Promise<{
+  categories: AchievementCategory[];
+  rarities: AchievementRarity[];
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/gamification/categories`, {
+    headers: getAuthHeaders(),
+  });
+
+  return handleResponse<{ categories: AchievementCategory[]; rarities: AchievementRarity[] }>(response);
 }
