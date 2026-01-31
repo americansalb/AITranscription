@@ -432,7 +432,7 @@ export function QueueTab() {
 
         items.forEach((item, idx) => {
           const rect = item.getBoundingClientRect();
-          const midPoint = rect.top + rect.height / 2;
+          const _midPoint = rect.top + rect.height / 2;
           // Use midpoint for more stable drop positioning
           if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
             newDropTarget = idx;

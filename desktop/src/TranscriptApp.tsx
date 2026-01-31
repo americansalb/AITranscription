@@ -429,7 +429,7 @@ export function TranscriptApp() {
   const handleVoiceAutoChange = useCallback((auto: boolean) => {
     setVoiceAuto(auto);
     saveVoiceAuto(auto);
-  });
+  }, []);
 
   // Listen for voice settings changes from other windows
   useEffect(() => {
@@ -473,7 +473,7 @@ export function TranscriptApp() {
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const { appDataDir, resolve } = await import("@tauri-apps/api/path");
+        // @tauri-apps/api/path is imported below where needed
 
         // Get the project directory - this is the AITranscription directory
         // We need to go up from the app data dir to find the project root

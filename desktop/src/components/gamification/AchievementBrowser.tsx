@@ -3,7 +3,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
-import { AchievementCard, Achievement, AchievementRarity, RARITY_COLORS } from "./AchievementCard";
+import { AchievementCard, Achievement, RARITY_COLORS } from "./AchievementCard";
 import { XPBar } from "./XPBar";
 import { PrestigeTier } from "./TierBadge";
 
