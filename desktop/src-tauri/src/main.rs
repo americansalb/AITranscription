@@ -541,8 +541,17 @@ fn setup_claude_code_integration() {
     }
     #[cfg(not(windows))]
     {
-        // On Unix, spaces in paths work fine with the shell
-        hook_command = format!("{} --hook", sidecar_path);
+        // Write a .sh wrapper that quotes the sidecar path (handles spaces on macOS/Linux too)
+        let sh_path = hooks_dir.join("vaak-hook.sh");
+        let sh_content = format!("#!/bin/sh\n\"{}\" --hook\n", sidecar_path);
+        if let Err(e) = fs::write(&sh_path, &sh_content) {
+            log_error(&format!("Failed to write hook wrapper: {}", e));
+            return;
+        }
+        // Make executable
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&sh_path, fs::Permissions::from_mode(0o755));
+        hook_command = sh_path.to_string_lossy().to_string();
     }
 
     let settings_path = home.join(".claude").join("settings.json");
