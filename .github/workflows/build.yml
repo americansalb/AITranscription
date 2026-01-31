@@ -117,28 +117,7 @@ jobs:
         working-directory: desktop
         run: echo "VITE_API_URL=${{ secrets.API_URL }}" > .env
 
-      # Build the vaak-mcp sidecar binary
-      - name: Build MCP sidecar (Unix)
-        if: matrix.platform != 'windows-latest'
-        working-directory: desktop
-        run: |
-          chmod +x scripts/build-sidecar.sh
-          ./scripts/build-sidecar.sh
-          echo "=== Sidecar binaries ==="
-          ls -la src-tauri/binaries/
-
-      - name: Build MCP sidecar (Windows)
-        if: matrix.platform == 'windows-latest'
-        working-directory: desktop
-        shell: pwsh
-        run: |
-          # Build the vaak-mcp sidecar
-          cd src-tauri
-          cargo build --bin vaak-mcp --release
-
-          # Create binaries directory and copy
-          New-Item -ItemType Directory -Path binaries -Force
-          Copy-Item target/release/vaak-mcp.exe binaries/vaak-mcp-x86_64-pc-windows-msvc.exe
+      # Sidecar is built automatically by beforeBuildCommand (npm run build-with-sidecar)
 
       # Build with code signing (macOS with secrets configured)
       - name: Build the app (signed)
