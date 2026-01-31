@@ -9,7 +9,7 @@ import * as queueStore from "./queueStore";
 import type { SpeakEventPayload, QueueItem as QueueStoreItem } from "./queueTypes";
 import { getStoredVoiceEnabled } from "./voiceStream";
 
-const API_URL = import.meta.env.VITE_API_URL || "https://vaak-api-yk09.onrender.com";
+const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:19836";
 
 // Legacy audio queue for backward compatibility (will be phased out)
 interface LegacyQueueItem {

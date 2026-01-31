@@ -58,7 +58,7 @@ function logError(message: string, ...args: unknown[]): void {
 
 // Get API URL from environment
 function getApiUrl(): string {
-  return (import.meta.env?.VITE_API_URL as string) || "http://localhost:8000";
+  return (import.meta.env?.VITE_API_URL as string) || "http://127.0.0.1:19836";
 }
 
 // Notify all listeners of state change

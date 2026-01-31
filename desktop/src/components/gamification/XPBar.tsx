@@ -71,15 +71,15 @@ export function XPBar({
 
   if (compact) {
     return (
-      <div className="xp-bar-compact flex items-center gap-2">
+      <div className="xp-bar-compact">
         <TierBadge tier={tier} level={level} size="sm" />
-        <div className="flex-1">
+        <div className="xp-bar-track-wrap">
           <div
-            className="h-2 rounded-full overflow-hidden"
+            className="xp-bar-track"
             style={{ background: `${tierColor}20` }}
           >
             <div
-              className="h-full rounded-full transition-all duration-300"
+              className="xp-bar-fill"
               style={{
                 width: `${progress}%`,
                 background: `linear-gradient(90deg, ${tierColor} 0%, ${tierColor}CC 100%)`,
@@ -87,7 +87,7 @@ export function XPBar({
             />
           </div>
         </div>
-        <span className="text-xs text-gray-400">
+        <span className="xp-bar-label-sm">
           {displayXP.toLocaleString()}/{xpToNextLevel.toLocaleString()} XP
         </span>
       </div>
@@ -95,73 +95,65 @@ export function XPBar({
   }
 
   return (
-    <div className="xp-bar-full p-4 rounded-xl bg-gray-800/50 border border-gray-700">
-      <div className="flex items-center justify-between mb-3">
+    <div className="xp-bar-full">
+      <div className="xp-bar-header">
         <TierBadge tier={tier} level={level} size="md" />
-        <div className="text-right">
-          <div className="text-sm text-gray-400">Lifetime XP</div>
-          <div className="text-lg font-bold" style={{ color: tierColor }}>
+        <div className="xp-bar-lifetime">
+          <div className="xp-bar-lifetime-label">Lifetime XP</div>
+          <div className="xp-bar-lifetime-value" style={{ color: tierColor }}>
             {lifetimeXP.toLocaleString()}
           </div>
         </div>
       </div>
 
       {/* Level Progress */}
-      <div className="mb-2">
-        <div className="flex justify-between text-sm mb-1">
-          <span className="text-gray-400">Level {level} Progress</span>
-          <span className="text-gray-300">
+      <div className="xp-bar-progress-section">
+        <div className="xp-bar-progress-header">
+          <span className="xp-bar-progress-title">Level {level} Progress</span>
+          <span className="xp-bar-progress-nums">
             {displayXP.toLocaleString()} / {xpToNextLevel.toLocaleString()} XP
           </span>
         </div>
         <div
-          className="h-3 rounded-full overflow-hidden"
+          className="xp-bar-track xp-bar-track-lg"
           style={{ background: `${tierColor}20` }}
         >
           <div
-            className="h-full rounded-full transition-all duration-500 relative overflow-hidden"
+            className="xp-bar-fill"
             style={{
               width: `${progress}%`,
               background: `linear-gradient(90deg, ${tierColor} 0%, ${tierColor}CC 100%)`,
             }}
           >
-            {/* Shimmer effect */}
-            <div
-              className="absolute inset-0 opacity-30"
-              style={{
-                background:
-                  "linear-gradient(90deg, transparent 0%, white 50%, transparent 100%)",
-                animation: "shimmer 2s infinite",
-              }}
-            />
+            <div className="xp-bar-shimmer" />
           </div>
         </div>
-        <div className="text-xs text-gray-500 mt-1">
+        <div className="xp-bar-remaining">
           {(xpToNextLevel - displayXP).toLocaleString()} XP to Level {level + 1}
         </div>
       </div>
 
       {/* Tier Progress */}
       {showTierProgress && tierProgress && tierProgress.tier_end_xp && (
-        <div className="mt-4 pt-3 border-t border-gray-700">
-          <div className="flex justify-between text-sm mb-1">
-            <span className="text-gray-400">
+        <div className="xp-bar-tier-progress">
+          <div className="xp-bar-progress-header">
+            <span className="xp-bar-progress-title">
               {tier.charAt(0).toUpperCase() + tier.slice(1)} Tier Progress
             </span>
-            <span className="text-gray-300">
+            <span className="xp-bar-progress-nums">
               {Math.round(tierProgress.progress * 100)}%
             </span>
           </div>
-          <div className="h-2 rounded-full overflow-hidden bg-gray-700">
+          <div className="xp-bar-track" style={{ background: "var(--bg-tertiary)" }}>
             <div
-              className="h-full rounded-full transition-all duration-500"
+              className="xp-bar-fill"
               style={{
                 width: `${tierProgress.progress * 100}%`,
                 background: `linear-gradient(90deg, ${tierColor}80 0%, ${tierColor} 100%)`,
               }}
             />
           </div>
-          <div className="text-xs text-gray-500 mt-1">
+          <div className="xp-bar-remaining">
             {(
               tierProgress.tier_end_xp - tierProgress.xp_in_tier
             ).toLocaleString()}{" "}
@@ -188,11 +180,8 @@ export function XPIndicator({
   const tierColor = TIER_COLORS[tier];
 
   return (
-    <button
-      onClick={onClick}
-      className="xp-indicator flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 hover:bg-gray-700/50 transition-colors border border-gray-700"
-    >
-      <span className="text-lg">
+    <button onClick={onClick} className="xp-indicator">
+      <span style={{ fontSize: 18 }}>
         {tier === "bronze"
           ? "🥉"
           : tier === "silver"
@@ -207,14 +196,14 @@ export function XPIndicator({
           ? "👑"
           : "🌟"}
       </span>
-      <div className="flex flex-col items-start">
-        <span className="text-xs text-gray-400">Lv.{level}</span>
+      <div className="xp-indicator-info">
+        <span className="xp-indicator-level">Lv.{level}</span>
         <div
-          className="w-16 h-1.5 rounded-full overflow-hidden"
+          className="xp-indicator-bar"
           style={{ background: `${tierColor}30` }}
         >
           <div
-            className="h-full rounded-full"
+            className="xp-indicator-fill"
             style={{
               width: `${progress * 100}%`,
               background: tierColor,

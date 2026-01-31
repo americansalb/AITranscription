@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # App settings
     app_name: str = "Vaak"
     debug: bool = False
+    port: int = 19836  # Fixed high port unlikely to conflict
 
     # AI Models
     whisper_model: str = "whisper-large-v3-turbo"

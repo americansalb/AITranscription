@@ -12,6 +12,7 @@ import {
 } from "../lib/api";
 import { getStoredVoiceEnabled, saveVoiceEnabled, getStoredBlindMode, saveBlindMode, getStoredVoiceAuto, saveVoiceAuto, getStoredVoiceDetail, saveVoiceDetail } from "../lib/voiceStream";
 import { formatHotkeyForDisplay } from "../lib/platform";
+import { getPolishEnabled, savePolishEnabled } from "../App";
 
 interface SettingsProps {
   onClose: () => void;
@@ -34,16 +35,13 @@ export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelC
   // Fetch user and stats on mount and when refreshTrigger changes
   useEffect(() => {
     if (isLoggedIn()) {
-      Promise.all([getCurrentUser(), getUserStats()])
-        .then(([userData, statsData]) => {
-          setUser(userData);
-          setStats(statsData);
-        })
-        .catch(() => {
-          setUser(null);
-          setStats(null);
-        })
+      getCurrentUser()
+        .then((userData) => setUser(userData))
+        .catch(() => setUser(null))
         .finally(() => setLoading(false));
+      getUserStats()
+        .then((statsData) => setStats(statsData))
+        .catch(() => setStats(null));
     } else {
       setLoading(false);
     }
@@ -437,6 +435,7 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
   const [blindMode, setBlindMode] = useState(() => getStoredBlindMode());
   const [voiceDetail, setVoiceDetail] = useState(() => getStoredVoiceDetail());
   const [voiceAuto, setVoiceAuto] = useState(() => getStoredVoiceAuto());
+  const [polishEnabled, setPolishEnabled] = useState(() => getPolishEnabled());
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [showDevSettings, setShowDevSettings] = useState(false);
   const [isRecordingHotkey, setIsRecordingHotkey] = useState(false);
@@ -484,7 +483,7 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
     if (window.__TAURI__) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("save_voice_settings_cmd", { blindMode: enabled, detail: voiceDetail });
+        await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
       } catch (e) {
         console.error("Failed to save voice settings:", e);
@@ -500,7 +499,7 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
     if (window.__TAURI__) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("save_voice_settings_cmd", { blindMode, detail });
+        await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode, detail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode, detail });
       } catch (e) {
         console.error("Failed to save voice settings:", e);
@@ -563,6 +562,20 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
         <span className="toggle-switch" />
       </label>
       <p className="setting-hint">Reduce background noise before transcription (experimental)</p>
+
+      <label className="toggle-setting">
+        <span>LLM Polish (Cloud Haiku)</span>
+        <input
+          type="checkbox"
+          checked={polishEnabled}
+          onChange={(e) => {
+            setPolishEnabled(e.target.checked);
+            savePolishEnabled(e.target.checked);
+          }}
+        />
+        <span className="toggle-switch" />
+      </label>
+      <p className="setting-hint">When off, transcriptions skip LLM polishing for faster output</p>
 
       {/* Claude Code Voice Settings - Collapsible Section */}
       <div className="dev-settings-section">

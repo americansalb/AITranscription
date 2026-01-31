@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -160,7 +160,7 @@ class GamificationService:
                 select(
                     func.count(Transcript.id),
                     func.coalesce(func.sum(Transcript.word_count), 0)
-                ).where(Transcript.user_id == user_id)
+                ).where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             )
             row = result.one()
             total_transcriptions = int(row[0] or 0)
@@ -443,7 +443,7 @@ class AchievementService:
         # Get transcript aggregates
         result = await self.db.execute(
             select(func.sum(Transcript.character_count))
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
         )
         metrics["total_characters"] = result.scalar() or 0
 
@@ -478,7 +478,7 @@ class AchievementService:
         # Get all dates with transcriptions
         result = await self.db.execute(
             select(func.date(Transcript.created_at))
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .distinct()
             .order_by(func.date(Transcript.created_at))
         )
@@ -553,27 +553,33 @@ class AchievementService:
         }
 
     async def _calculate_speed_metrics(self, user_id: int) -> dict[str, Any]:
-        """Calculate speed-related metrics."""
+        """Calculate speed-related metrics.
+
+        Filters out very short transcriptions (< 5s audio or < 10 words)
+        to avoid inflated WPM from accidental/tiny recordings.
+        """
+        speed_filter = and_(
+            Transcript.user_id == user_id, Transcript.transcript_type == "input",
+            Transcript.words_per_minute.isnot(None),
+            Transcript.audio_duration_seconds >= 5,
+            Transcript.word_count >= 10,
+        )
+
         result = await self.db.execute(
             select(
                 func.max(Transcript.words_per_minute),
                 func.avg(Transcript.words_per_minute),
             )
-            .where(
-                and_(
-                    Transcript.user_id == user_id,
-                    Transcript.words_per_minute.isnot(None)
-                )
-            )
+            .where(speed_filter)
         )
         row = result.one()
 
-        # Count high-speed transcriptions
+        # Count high-speed transcriptions (150+ WPM)
         result = await self.db.execute(
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    speed_filter,
                     Transcript.words_per_minute >= 150
                 )
             )
@@ -584,7 +590,7 @@ class AchievementService:
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    speed_filter,
                     Transcript.words_per_minute >= 200
                 )
             )
@@ -606,7 +612,7 @@ class AchievementService:
                 func.count(Transcript.id),
                 func.sum(Transcript.word_count),
             )
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .group_by(Transcript.context)
         )
         rows = result.all()
@@ -628,7 +634,7 @@ class AchievementService:
                 func.count(Transcript.id),
                 func.sum(Transcript.word_count),
             )
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .group_by(Transcript.formality)
         )
         rows = result.all()
@@ -691,7 +697,7 @@ class AchievementService:
                 func.extract("hour", Transcript.created_at).label("hour"),
                 func.count(Transcript.id),
             )
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .group_by("hour")
         )
         for hour, count in result.all():
@@ -703,7 +709,7 @@ class AchievementService:
                 func.extract("dow", Transcript.created_at).label("dow"),
                 func.count(Transcript.id),
             )
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .group_by("dow")
         )
         for dow, count in result.all():
@@ -714,7 +720,7 @@ class AchievementService:
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    Transcript.user_id == user_id, Transcript.transcript_type == "input",
                     func.extract("hour", Transcript.created_at) < 7
                 )
             )
@@ -726,7 +732,7 @@ class AchievementService:
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    Transcript.user_id == user_id, Transcript.transcript_type == "input",
                     func.extract("hour", Transcript.created_at) >= 22
                 )
             )
@@ -738,7 +744,7 @@ class AchievementService:
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    Transcript.user_id == user_id, Transcript.transcript_type == "input",
                     or_(
                         func.extract("dow", Transcript.created_at) == 0,
                         func.extract("dow", Transcript.created_at) == 6,
@@ -753,7 +759,7 @@ class AchievementService:
             select(func.count(Transcript.id))
             .where(
                 and_(
-                    Transcript.user_id == user_id,
+                    Transcript.user_id == user_id, Transcript.transcript_type == "input",
                     func.extract("dow", Transcript.created_at).between(1, 5)
                 )
             )
@@ -767,7 +773,7 @@ class AchievementService:
         # Longest single transcription
         result = await self.db.execute(
             select(func.max(Transcript.word_count))
-            .where(Transcript.user_id == user_id)
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
         )
         longest_transcription = result.scalar() or 0
 
@@ -791,21 +797,55 @@ class AchievementService:
                 age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
                 account_age_months = age_days // 30
 
-        # Daily/weekly/monthly records
-        result = await self.db.execute(
-            select(func.max(func.sum(Transcript.word_count)))
-            .where(Transcript.user_id == user_id)
+        # Daily records — use subquery to avoid nested aggregates
+        daily_sums = (
+            select(func.sum(Transcript.word_count).label("daily_words"))
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
             .group_by(func.date(Transcript.created_at))
+            .subquery()
+        )
+        result = await self.db.execute(
+            select(func.max(daily_sums.c.daily_words))
         )
         daily_word_record = result.scalar() or 0
+
+        # Weekly records — sum words per ISO year-week (PostgreSQL)
+        weekly_sums = (
+            select(func.sum(Transcript.word_count).label("weekly_words"))
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
+            .group_by(
+                func.extract("isoyear", Transcript.created_at),
+                func.extract("week", Transcript.created_at),
+            )
+            .subquery()
+        )
+        result = await self.db.execute(
+            select(func.max(weekly_sums.c.weekly_words))
+        )
+        weekly_word_record = result.scalar() or 0
+
+        # Monthly records — sum words per year-month (PostgreSQL)
+        monthly_sums = (
+            select(func.sum(Transcript.word_count).label("monthly_words"))
+            .where(Transcript.user_id == user_id, Transcript.transcript_type == "input")
+            .group_by(
+                func.extract("year", Transcript.created_at),
+                func.extract("month", Transcript.created_at),
+            )
+            .subquery()
+        )
+        result = await self.db.execute(
+            select(func.max(monthly_sums.c.monthly_words))
+        )
+        monthly_word_record = result.scalar() or 0
 
         return {
             "longest_transcription": longest_transcription,
             "time_saved_minutes": time_saved_minutes,
             "account_age_months": account_age_months,
             "daily_word_record": daily_word_record,
-            "weekly_word_record": daily_word_record * 5,  # Simplified estimate
-            "monthly_word_record": daily_word_record * 20,  # Simplified estimate
+            "weekly_word_record": weekly_word_record,
+            "monthly_word_record": monthly_word_record,
         }
 
     async def _calculate_achievement_metrics(self, user_id: int) -> dict[str, Any]:
@@ -881,13 +921,13 @@ class AchievementService:
                 self.db.add(user_achievement)
                 await self.db.flush()
 
-            # Skip if already unlocked
-            if user_achievement.is_unlocked:
-                continue
-
-            # Get current value from metrics
+            # Always update current_value so display stays accurate
             current_value = metrics.get(definition.metric_type, 0)
             user_achievement.current_value = current_value
+
+            # Skip unlock logic if already unlocked
+            if user_achievement.is_unlocked:
+                continue
 
             # Check if threshold is met
             if current_value >= definition.threshold:
@@ -934,11 +974,23 @@ class AchievementService:
         query = select(AchievementDefinition)
 
         if category:
-            # Column is now VARCHAR, compare directly with string
             query = query.where(AchievementDefinition.category == category.lower())
         if rarity:
-            # Column is now VARCHAR, compare directly with string
             query = query.where(AchievementDefinition.rarity == rarity.lower())
+
+        # If unlocked_only, filter to only definitions the user has unlocked
+        if unlocked_only:
+            query = query.where(
+                exists(
+                    select(UserAchievement.id).where(
+                        and_(
+                            UserAchievement.achievement_id == AchievementDefinition.id,
+                            UserAchievement.user_id == user_id,
+                            UserAchievement.is_unlocked == True,
+                        )
+                    )
+                )
+            )
 
         # Get total count
         count_query = select(func.count()).select_from(query.subquery())
@@ -946,8 +998,8 @@ class AchievementService:
         total = result.scalar() or 0
 
         # Apply pagination
-        query = query.offset((page - 1) * page_size).limit(page_size)
         query = query.order_by(AchievementDefinition.category, AchievementDefinition.tier)
+        query = query.offset((page - 1) * page_size).limit(page_size)
 
         result = await self.db.execute(query)
         definitions = result.scalars().all()
@@ -969,9 +1021,6 @@ class AchievementService:
         for definition in definitions:
             ua = user_achievements.get(definition.id)
             is_unlocked = ua.is_unlocked if ua else False
-
-            if unlocked_only and not is_unlocked:
-                continue
 
             achievements.append({
                 "id": definition.id,

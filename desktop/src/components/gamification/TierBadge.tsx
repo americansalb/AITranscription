@@ -57,23 +57,14 @@ export function TierBadge({
   size = "md",
   showLevel = true,
 }: TierBadgeProps) {
-  const sizeClasses = useMemo(() => {
+  const sizeStyles = useMemo(() => {
     switch (size) {
       case "sm":
-        return {
-          container: "h-6 px-2 text-xs gap-1",
-          icon: "text-sm",
-        };
+        return { height: 24, padding: "0 8px", fontSize: 12, iconSize: 14, gap: 4 };
       case "lg":
-        return {
-          container: "h-10 px-4 text-base gap-2",
-          icon: "text-xl",
-        };
+        return { height: 40, padding: "0 16px", fontSize: 16, iconSize: 22, gap: 8 };
       default:
-        return {
-          container: "h-8 px-3 text-sm gap-1.5",
-          icon: "text-lg",
-        };
+        return { height: 32, padding: "0 12px", fontSize: 14, iconSize: 18, gap: 6 };
     }
   }, [size]);
 
@@ -81,23 +72,26 @@ export function TierBadge({
 
   return (
     <div
-      className={`tier-badge tier-badge-${tier} inline-flex items-center rounded-full font-semibold ${sizeClasses.container}`}
+      className={`tier-badge tier-badge-${size} ${isLegend ? "tier-badge-legend" : ""}`}
       style={{
+        display: "inline-flex",
+        alignItems: "center",
+        borderRadius: 9999,
+        fontWeight: 600,
+        height: sizeStyles.height,
+        padding: sizeStyles.padding,
+        fontSize: sizeStyles.fontSize,
+        gap: sizeStyles.gap,
         background: TIER_GRADIENTS[tier],
         color: isLegend || tier === "gold" ? "#1a1a1a" : "#fff",
         boxShadow: `0 2px 8px ${TIER_COLORS[tier]}40`,
         border: `1px solid ${TIER_COLORS[tier]}80`,
       }}
     >
-      <span className={sizeClasses.icon}>{TIER_ICONS[tier]}</span>
-      <span className="capitalize">{tier}</span>
+      <span style={{ fontSize: sizeStyles.iconSize }}>{TIER_ICONS[tier]}</span>
+      <span style={{ textTransform: "capitalize" }}>{tier}</span>
       {showLevel && (
-        <span
-          className="ml-1 opacity-80"
-          style={{
-            fontSize: "0.85em",
-          }}
-        >
+        <span style={{ fontSize: "0.85em", opacity: 0.8, marginLeft: 2 }}>
           Lv.{level}
         </span>
       )}

@@ -240,7 +240,9 @@ async def transcribe_and_polish(
             word_count = len(result["text"].split())
             character_count = len(result["text"])
             duration = transcribe_response.duration or 0
-            words_per_minute = (word_count / (duration / 60)) if duration > 0 else 0
+            # Cap WPM at 300 to prevent inflated values from short recordings
+            raw_wpm = (word_count / (duration / 60)) if duration > 0 else 0
+            words_per_minute = min(raw_wpm, 250.0) if duration >= 5 else 0
 
             # Create transcript record
             transcript = Transcript(
@@ -261,7 +263,7 @@ async def transcribe_and_polish(
             # Update user statistics
             user.total_transcriptions += 1
             user.total_words += word_count
-            user.total_audio_seconds += duration
+            user.total_audio_seconds += int(duration)
             user.total_polish_tokens += result["usage"]["input_tokens"] + result["usage"]["output_tokens"]
 
             await db.flush()

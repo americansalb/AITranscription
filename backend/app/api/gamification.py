@@ -166,30 +166,37 @@ async def check_achievements(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Check for and unlock any newly earned achievements."""
-    service = AchievementService(db)
-    newly_unlocked = await service.check_achievements(current_user.id)
+    import sys, traceback
+    try:
+        service = AchievementService(db)
+        newly_unlocked = await service.check_achievements(current_user.id)
 
-    # Calculate total XP gained from new achievements
-    xp_gained = sum(a["xp_reward"] for a in newly_unlocked)
+        # Calculate total XP gained from new achievements
+        xp_gained = sum(a["xp_reward"] for a in newly_unlocked)
 
-    # Get updated progress if there were new achievements
-    level_changes = None
-    if newly_unlocked:
-        gamification_service = GamificationService(db)
-        progress = await gamification_service.get_user_progress(current_user.id)
-        level_changes = {
-            "current_level": progress["current_level"],
-            "prestige_tier": progress["prestige_tier"],
-            "lifetime_xp": progress["lifetime_xp"],
+        # Get updated progress if there were new achievements
+        level_changes = None
+        if newly_unlocked:
+            gamification_service = GamificationService(db)
+            progress = await gamification_service.get_user_progress(current_user.id)
+            level_changes = {
+                "current_level": progress["current_level"],
+                "prestige_tier": progress["prestige_tier"],
+                "lifetime_xp": progress["lifetime_xp"],
+            }
+
+        await db.commit()
+
+        return {
+            "achievements": newly_unlocked,
+            "xp_gained": xp_gained,
+            "level_changes": level_changes,
         }
-
-    await db.commit()
-
-    return {
-        "achievements": newly_unlocked,
-        "xp_gained": xp_gained,
-        "level_changes": level_changes,
-    }
+    except Exception as e:
+        sys.stderr.write(f"[GAMIFICATION CHECK ERROR] {type(e).__name__}: {e}\n")
+        sys.stderr.write(traceback.format_exc())
+        sys.stderr.flush()
+        raise
 
 
 @router.get("/achievements", response_model=AchievementListResponse)
@@ -198,7 +205,7 @@ async def get_achievements(
     rarity: str | None = Query(default=None, description="Filter by rarity"),
     unlocked_only: bool = Query(default=False, description="Only show unlocked achievements"),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=50, ge=1, le=100),
+    page_size: int = Query(default=50, ge=1, le=2000),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:

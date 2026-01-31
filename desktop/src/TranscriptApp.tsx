@@ -18,6 +18,7 @@ import {
 } from "./lib/sessionManager";
 import { transcriptListener } from "./lib/transcriptListener";
 import { QueueTab } from "./components/QueueTab";
+import { CollabTab } from "./components/CollabTab";
 import {
   getStoredVoiceEnabled,
   saveVoiceEnabled,
@@ -30,7 +31,7 @@ import {
 } from "./lib/voiceStream";
 
 // Tab type for navigation
-type TabType = "preferences" | "sessions" | "queue";
+type TabType = "preferences" | "sessions" | "queue" | "collab";
 
 // Detail level labels
 const DETAIL_LABELS = ['Summary', '', 'Balanced', '', 'Developer'];
@@ -387,7 +388,7 @@ export function TranscriptApp() {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const { emit } = await import("@tauri-apps/api/event");
-        await invoke("save_voice_settings_cmd", { blindMode: enabled, detail: voiceDetail });
+        await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
 
         // Emit event to sync other windows
@@ -410,7 +411,7 @@ export function TranscriptApp() {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         const { emit } = await import("@tauri-apps/api/event");
-        await invoke("save_voice_settings_cmd", { blindMode, detail });
+        await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode, detail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode, detail });
 
         // Emit event to sync other windows
@@ -717,6 +718,12 @@ export function TranscriptApp() {
         >
           Queue
         </button>
+        <button
+          className={`main-tab ${activeTab === "collab" ? "active" : ""}`}
+          onClick={() => setActiveTab("collab")}
+        >
+          Collab
+        </button>
       </div>
 
       {/* Preferences Tab */}
@@ -837,6 +844,9 @@ export function TranscriptApp() {
 
       {/* Queue Tab */}
       {activeTab === "queue" && <QueueTab />}
+
+      {/* Collab Tab */}
+      {activeTab === "collab" && <CollabTab />}
 
       {/* Sessions Tab */}
       {activeTab === "sessions" && (

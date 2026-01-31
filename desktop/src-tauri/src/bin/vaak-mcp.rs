@@ -199,6 +199,24 @@ fn get_session_id() -> String {
     generate_fallback_id()
 }
 
+/// Send a POST request to a Vaak HTTP endpoint and return the response body
+fn post_to_vaak(endpoint: &str, body: &serde_json::Value) -> Result<String, String> {
+    let client = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+
+    let url = format!("http://127.0.0.1:7865{}", endpoint);
+    match client.post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+    {
+        Ok(resp) => {
+            resp.into_string().map_err(|e| format!("Failed to read response: {}", e))
+        }
+        Err(e) => Err(format!("Failed to reach Vaak at {}: {}", endpoint, e))
+    }
+}
+
 /// Send text to Vaak's local speak endpoint
 fn send_to_vaak(text: &str, session_id: &str) -> Result<(), String> {
     let client = ureq::AgentBuilder::new()
@@ -256,6 +274,52 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         },
                         "required": ["text"]
                     }
+                },
+                {
+                    "name": "collab_join",
+                    "description": "Join a Claude-to-Claude collaboration session. Two Claude Code sessions can collaborate by joining the same project directory — one as 'Architect' and one as 'Developer'. The project_dir is the shared key.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "role": {
+                                "type": "string",
+                                "description": "Your role in the collaboration, e.g. 'Architect' or 'Developer'"
+                            },
+                            "project_dir": {
+                                "type": "string",
+                                "description": "Absolute path to the project directory (shared key for the collaboration)"
+                            }
+                        },
+                        "required": ["role", "project_dir"]
+                    }
+                },
+                {
+                    "name": "collab_send",
+                    "description": "Send a message to your collaboration partner. You must have joined a collaboration first with collab_join. Messages are appended to a shared .vaak/collab.md file that both sessions and the human can read.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "The message to send to your collaboration partner"
+                            }
+                        },
+                        "required": ["message"]
+                    }
+                },
+                {
+                    "name": "collab_check",
+                    "description": "Check for new messages from your collaboration partner. Pass the last message number you've seen (0 to get all messages). Returns new messages and whether your partner is still active.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "last_seen": {
+                                "type": "integer",
+                                "description": "The message number you last read. Use 0 to get all messages."
+                            }
+                        },
+                        "required": ["last_seen"]
+                    }
                 }]
             })
         }
@@ -273,6 +337,92 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{
                                 "type": "text",
                                 "text": format!("Spoke: \"{}\"", text)
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Could not reach Vaak: {}. Make sure the Vaak desktop app is running.", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "collab_join" {
+                let arguments = params.get("arguments")?;
+                let role = arguments.get("role")?.as_str()?;
+                let project_dir = arguments.get("project_dir")?.as_str()?;
+
+                let body = serde_json::json!({
+                    "session_id": session_id,
+                    "role": role,
+                    "project_dir": project_dir
+                });
+
+                match post_to_vaak("/collab/join", &body) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Could not reach Vaak: {}. Make sure the Vaak desktop app is running.", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "collab_send" {
+                let arguments = params.get("arguments")?;
+                let message = arguments.get("message")?.as_str()?;
+
+                let body = serde_json::json!({
+                    "session_id": session_id,
+                    "message": message
+                });
+
+                match post_to_vaak("/collab/send", &body) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Could not reach Vaak: {}. Make sure the Vaak desktop app is running.", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "collab_check" {
+                let arguments = params.get("arguments")?;
+                let last_seen = arguments.get("last_seen").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                let body = serde_json::json!({
+                    "session_id": session_id,
+                    "last_seen": last_seen
+                });
+
+                match post_to_vaak("/collab/check", &body) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp
                             }]
                         })
                     }
@@ -316,7 +466,68 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
     }))
 }
 
+/// Read voice settings and print hook instruction for Claude Code's UserPromptSubmit hook.
+/// Called when the binary is invoked with --hook flag.
+fn run_hook() {
+    use std::path::PathBuf;
+    use std::fs;
+
+    // Locate voice-settings.json
+    let settings_path = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA")
+            .map(|appdata| PathBuf::from(appdata).join("Vaak").join("voice-settings.json"))
+    } else {
+        std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".vaak").join("voice-settings.json"))
+    };
+
+    // Defaults
+    let mut enabled = true;
+    let mut blind_mode = false;
+    let mut detail: u8 = 3;
+
+    if let Some(path) = settings_path {
+        if let Ok(contents) = fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
+                enabled = json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                blind_mode = json.get("blind_mode").and_then(|v| v.as_bool()).unwrap_or(false);
+                detail = json.get("detail").and_then(|v| v.as_u64()).unwrap_or(3) as u8;
+            }
+        }
+    }
+
+    // If voice is disabled, output nothing
+    if !enabled {
+        return;
+    }
+
+    let speak_msg = "IMPORTANT: You MUST call the mcp__vaak__speak tool to speak every response aloud. Call speak for EVERY response, including confirmations, explanations, errors, and questions.";
+
+    let detail_msg = match detail {
+        1 => "Keep explanations extremely brief - one sentence summaries only. Use simple, layperson terms.",
+        2 => "Be concise - provide essential information without unnecessary detail. Minimize jargon.",
+        3 => "Provide balanced detail - enough context to understand without overwhelming.",
+        4 => "Be thorough - include context, rationale, and implications. Use technical terminology freely.",
+        5 => "Provide exhaustive detail - comprehensive explanations including edge cases, patterns, and implementation specifics. Full technical depth.",
+        _ => "Provide balanced detail.",
+    };
+
+    if blind_mode {
+        let blind_msg = "The user is blind and cannot see the screen. Describe ALL visual elements including: exact file paths, code structure with indentation levels, spatial positioning of UI elements, colors, borders, spacing measurements, hierarchical relationships, and how components are organized. Never assume they can see anything.";
+        println!("{} {} {}", speak_msg, blind_msg, detail_msg);
+    } else {
+        println!("{} {}", speak_msg, detail_msg);
+    }
+}
+
 fn main() {
+    // Check for --hook flag: print voice preference instructions and exit
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--hook") {
+        run_hook();
+        return;
+    }
+
     let session_id = get_session_id();
     eprintln!("[vaak-mcp] Session ID: {}", session_id);
 

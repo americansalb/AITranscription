@@ -3,7 +3,7 @@
  */
 
 // Remove trailing slash if present to avoid double slashes in URLs
-const rawUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const rawUrl = import.meta.env.VITE_API_URL || "http://127.0.0.1:19836";
 const API_BASE_URL = rawUrl.endsWith("/") ? rawUrl.slice(0, -1) : rawUrl;
 
 export interface TranscribeResponse {
@@ -230,6 +230,11 @@ async function handleResponse<T>(response: Response): Promise<T> {
       errorMessage = JSON.stringify(error.detail);
     } else {
       errorMessage = `HTTP ${response.status}`;
+    }
+    // Auto-logout on expired/invalid token so user can re-authenticate
+    if (response.status === 401) {
+      authToken = null;
+      localStorage.removeItem("vaak_token");
     }
     throw new ApiError(
       errorMessage,

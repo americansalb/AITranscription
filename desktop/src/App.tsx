@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 // Force reload to pick up hotkey hook changes
 import { useUnifiedAudioRecorder } from "./hooks/useUnifiedAudioRecorder";
 import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
-import { transcribeAndPolish, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken, getUserStats } from "./lib/api";
+import { transcribeAndPolish, transcribe, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken, getUserStats } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
 import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
 import { Settings, getStoredHotkey } from "./components/Settings";
@@ -19,6 +19,38 @@ import { Confetti } from "./components/Confetti";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { initSpeakListener } from "./lib/speak";
 import { getStoredVoiceEnabled, saveVoiceEnabled } from "./lib/voiceStream";
+
+// One-time migration from old "scribe_*" localStorage keys to "vaak_*"
+function migrateLocalStorageKeys() {
+  if (localStorage.getItem("vaak_keys_migrated")) return;
+  const keyMap: [string, string][] = [
+    ["scribe_token", "vaak_token"],
+    ["scribe_context", "vaak_context"],
+    ["scribe_formality", "vaak_formality"],
+    ["scribe_history", "vaak_history"],
+    ["scribe_sound_enabled", "vaak_sound_enabled"],
+    ["scribe_overlay_position", "vaak_overlay_position"],
+    ["scribe_speak_sessions", "vaak_speak_sessions"],
+    ["scribe_voice_enabled", "vaak_voice_enabled"],
+    ["scribe_blind_mode", "vaak_blind_mode"],
+    ["scribe_voice_mode", "vaak_voice_mode"],
+    ["scribe_voice_detail", "vaak_voice_detail"],
+    ["scribe_voice_auto", "vaak_voice_auto"],
+    ["scribe_hotkey", "vaak_hotkey"],
+    ["scribe_whisper_model", "vaak_whisper_model"],
+    ["scribe_noise_cancellation", "vaak_noise_cancellation"],
+    ["scribe_audio_indicator_position", "vaak_audio_indicator_position"],
+    ["scribe_queue_autoplay", "vaak_queue_autoplay"],
+  ];
+  for (const [oldKey, newKey] of keyMap) {
+    const val = localStorage.getItem(oldKey);
+    if (val !== null && localStorage.getItem(newKey) === null) {
+      localStorage.setItem(newKey, val);
+    }
+  }
+  localStorage.setItem("vaak_keys_migrated", "1");
+}
+migrateLocalStorageKeys();
 
 // Error types for actionable messages
 interface ActionableError {
@@ -94,7 +126,17 @@ const STORAGE_KEYS = {
   FORMALITY: "vaak_formality",
   HISTORY: "vaak_history",
   SOUND_ENABLED: "vaak_sound_enabled",
+  POLISH_ENABLED: "vaak_polish_enabled",
 };
+
+export function getPolishEnabled(): boolean {
+  const stored = localStorage.getItem(STORAGE_KEYS.POLISH_ENABLED);
+  return stored === null ? true : stored === "true";
+}
+
+export function savePolishEnabled(enabled: boolean): void {
+  localStorage.setItem(STORAGE_KEYS.POLISH_ENABLED, String(enabled));
+}
 
 // Tauri window APIs for overlay (Tauri 2.0)
 declare global {
@@ -462,37 +504,48 @@ function App() {
       // Step 1: Transcribing (already set above)
       setProcessingStep("transcribing");
 
-      const response = await transcribeAndPolish(audioBlob, {
-        context: contextRef.current === "general" ? undefined : contextRef.current,
-        formality: formalityRef.current,
-      });
+      let rawText: string;
+      let polishedText: string;
+      let language: string | null = null;
 
-      // Step 2: Polishing (happens in the API call)
-      setProcessingStep("polishing");
+      if (getPolishEnabled()) {
+        const response = await transcribeAndPolish(audioBlob, {
+          context: contextRef.current === "general" ? undefined : contextRef.current,
+          formality: formalityRef.current,
+        });
+        setProcessingStep("polishing");
+        rawText = response.raw_text;
+        polishedText = response.polished_text;
+        language = response.language;
+      } else {
+        const response = await transcribe(audioBlob);
+        rawText = response.raw_text;
+        polishedText = response.raw_text;
+        language = response.language;
+      }
 
-      setRawText(response.raw_text);
-      setResult(response.polished_text);
+      setRawText(rawText);
+      setResult(polishedText);
 
       // Calculate confidence score based on various factors
-      // (In a real scenario, the API would return this)
-      const wordCount = response.raw_text.split(/\s+/).length;
-      const hasLanguage = response.language !== null;
+      const wordCount = rawText.split(/\s+/).length;
+      const hasLanguage = language !== null;
       const baseConfidence = 0.85 + (hasLanguage ? 0.05 : 0) + Math.min(wordCount / 100, 0.08);
       const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
       setConfidence(confidenceScore);
 
       // Add to history
       addToHistory({
-        rawText: response.raw_text,
-        polishedText: response.polished_text,
+        rawText,
+        polishedText,
         context: contextRef.current,
         formality: formalityRef.current,
         confidence: confidenceScore,
       });
 
       // Auto-inject FIRST before any UI feedback (toast/sound might activate Vaak on Mac)
-      if (response.polished_text) {
-        const injectResult = await injectText(response.polished_text);
+      if (polishedText) {
+        const injectResult = await injectText(polishedText);
         if (!injectResult.success) {
           // CRITICAL: Paste failed - user MUST be notified
           throw new Error(injectResult.message);
@@ -718,27 +771,40 @@ function App() {
 
         setProcessingStep("transcribing");
 
-        const response = await transcribeAndPolish(audioBlob, {
-          context: context === "general" ? undefined : context,
-          formality,
-        });
+        let rawText: string;
+        let polishedText: string;
+        let language: string | null = null;
 
-        setProcessingStep("polishing");
+        if (getPolishEnabled()) {
+          const response = await transcribeAndPolish(audioBlob, {
+            context: context === "general" ? undefined : context,
+            formality,
+          });
+          setProcessingStep("polishing");
+          rawText = response.raw_text;
+          polishedText = response.polished_text;
+          language = response.language;
+        } else {
+          const response = await transcribe(audioBlob);
+          rawText = response.raw_text;
+          polishedText = response.raw_text;
+          language = response.language;
+        }
 
-        setRawText(response.raw_text);
-        setResult(response.polished_text);
+        setRawText(rawText);
+        setResult(polishedText);
 
         // Calculate confidence score
-        const wordCount = response.raw_text.split(/\s+/).length;
-        const hasLanguage = response.language !== null;
+        const wordCount = rawText.split(/\s+/).length;
+        const hasLanguage = language !== null;
         const baseConfidence = 0.85 + (hasLanguage ? 0.05 : 0) + Math.min(wordCount / 100, 0.08);
         const confidenceScore = Math.min(baseConfidence + Math.random() * 0.02, 0.99);
         setConfidence(confidenceScore);
 
         // Add to history
         addToHistory({
-          rawText: response.raw_text,
-          polishedText: response.polished_text,
+          rawText,
+          polishedText,
           context,
           formality,
           confidence: confidenceScore,

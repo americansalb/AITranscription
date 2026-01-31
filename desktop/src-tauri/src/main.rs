@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod collab;
 mod database;
 mod queue;
 
@@ -71,13 +72,18 @@ fn get_project_path_lock() -> &'static parking_lot::RwLock<Option<String>> {
 /// Voice settings structure
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 struct VoiceSettings {
+    #[serde(default = "default_enabled")]
+    enabled: bool,     // true = voice output active
     blind_mode: bool,  // true = describe visuals for blind users
     detail: u8,        // 1 = summary, 3 = balanced, 5 = developer
 }
 
+fn default_enabled() -> bool { true }
+
 impl Default for VoiceSettings {
     fn default() -> Self {
         Self {
+            enabled: true,
             blind_mode: false,
             detail: 3,
         }
@@ -102,7 +108,7 @@ fn get_voice_settings_path() -> Option<PathBuf> {
 }
 
 /// Save voice settings to file
-fn save_voice_settings(blind_mode: bool, detail: u8) -> Result<(), String> {
+fn save_voice_settings(enabled: bool, blind_mode: bool, detail: u8) -> Result<(), String> {
     let settings_path = get_voice_settings_path()
         .ok_or("Could not determine settings path")?;
 
@@ -113,6 +119,7 @@ fn save_voice_settings(blind_mode: bool, detail: u8) -> Result<(), String> {
     }
 
     let settings = VoiceSettings {
+        enabled,
         blind_mode,
         detail: detail.clamp(1, 5),
     };
@@ -123,7 +130,7 @@ fn save_voice_settings(blind_mode: bool, detail: u8) -> Result<(), String> {
     fs::write(&settings_path, json)
         .map_err(|e| format!("Failed to write settings file: {}", e))?;
 
-    log_error(&format!("Saved voice settings: blind_mode={}, detail={}", blind_mode, detail));
+    log_error(&format!("Saved voice settings: enabled={}, blind_mode={}, detail={}", enabled, blind_mode, detail));
     Ok(())
 }
 
@@ -175,8 +182,8 @@ fn generate_instruction_text(blind_mode: bool, detail: u8) -> String {
 
 /// Tauri command to save voice settings
 #[tauri::command]
-fn save_voice_settings_cmd(blind_mode: bool, detail: u8) -> Result<(), String> {
-    save_voice_settings(blind_mode, detail)
+fn save_voice_settings_cmd(enabled: bool, blind_mode: bool, detail: u8) -> Result<(), String> {
+    save_voice_settings(enabled, blind_mode, detail)
 }
 
 /// Tauri command to set the project path
@@ -451,7 +458,9 @@ fn setup_claude_code_integration() {
     let sidecar_path = match get_sidecar_path() {
         Some(path) => {
             log_error(&format!("Found vaak-mcp sidecar at: {:?}", path));
-            path.to_string_lossy().to_string()
+            // Strip Windows extended-length path prefix (\\?\) that canonicalize() adds
+            let path_str = path.to_string_lossy().to_string();
+            path_str.strip_prefix(r"\\?\").unwrap_or(&path_str).to_string()
         }
         None => {
             // Fallback to vaak-speak if pip-installed (for backwards compatibility)
@@ -508,6 +517,96 @@ fn setup_claude_code_integration() {
     } else {
         log_error("Claude Code already configured for Vaak");
     }
+
+    // --- Install UserPromptSubmit hook using the sidecar binary ---
+    // The sidecar supports --hook flag: reads voice-settings.json and prints instructions to stdout.
+    // We write a .cmd wrapper to handle paths with spaces on Windows.
+    let hooks_dir = home.join(".claude").join("hooks");
+    if let Err(e) = fs::create_dir_all(&hooks_dir) {
+        log_error(&format!("Failed to create hooks dir: {}", e));
+        return;
+    }
+
+    let hook_command;
+    #[cfg(windows)]
+    {
+        // Write a .cmd wrapper that quotes the sidecar path (handles spaces)
+        let cmd_path = hooks_dir.join("vaak-hook.cmd");
+        let cmd_content = format!("@echo off\n\"{}\" --hook\n", sidecar_path.replace('/', "\\"));
+        if let Err(e) = fs::write(&cmd_path, &cmd_content) {
+            log_error(&format!("Failed to write hook wrapper: {}", e));
+            return;
+        }
+        hook_command = cmd_path.to_string_lossy().replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        // On Unix, spaces in paths work fine with the shell
+        hook_command = format!("{} --hook", sidecar_path);
+    }
+
+    let settings_path = home.join(".claude").join("settings.json");
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        match fs::read_to_string(&settings_path) {
+            Ok(content) => serde_json::from_str(&content).unwrap_or(serde_json::json!({})),
+            Err(_) => serde_json::json!({}),
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    // Check if hook is already configured with correct command
+    let hook_already_configured = settings
+        .get("hooks")
+        .and_then(|h| h.get("UserPromptSubmit"))
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter().any(|entry| {
+                entry.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .map(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(|c| c.as_str())
+                                .map(|c| c == hook_command || c.contains("vaak-hook"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if !hook_already_configured {
+        if settings.get("hooks").is_none() {
+            settings["hooks"] = serde_json::json!({});
+        }
+        settings["hooks"]["UserPromptSubmit"] = serde_json::json!([
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": hook_command
+                    }
+                ]
+            }
+        ]);
+
+        match serde_json::to_string_pretty(&settings) {
+            Ok(json_str) => {
+                if let Err(e) = fs::write(&settings_path, json_str) {
+                    log_error(&format!("Failed to write settings.json: {}", e));
+                } else {
+                    log_error(&format!("Configured UserPromptSubmit hook: {}", hook_command));
+                }
+            }
+            Err(e) => {
+                log_error(&format!("Failed to serialize settings.json: {}", e));
+            }
+        }
+    } else {
+        log_error("UserPromptSubmit hook already configured");
+    }
 }
 
 /// Start local HTTP server for Claude Code speak integration
@@ -523,6 +622,8 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 return;
             }
         };
+
+        let collab_store = std::sync::Mutex::new(collab::CollabStore::new());
 
         for mut request in server.incoming_requests() {
             let url = request.url().to_string();
@@ -566,6 +667,187 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 continue;
             }
 
+            // ===== Collab endpoints =====
+            if method == "POST" && url == "/collab/join" {
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_ok() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let session_id = json.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+                        let role = json.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                        let project_dir = json.get("project_dir").and_then(|s| s.as_str()).unwrap_or("");
+
+                        if session_id.is_empty() || role.is_empty() || project_dir.is_empty() {
+                            let response = Response::from_string(r#"{"error":"Missing session_id, role, or project_dir"}"#)
+                                .with_status_code(400)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        let result = collab_store.lock().unwrap().join(session_id, role, project_dir);
+                        match result {
+                            Ok(val) => {
+                                // Emit event to frontend
+                                let state_json = collab_store.lock().unwrap().get_state();
+                                if let Some(window) = app_handle.get_webview_window("transcript") {
+                                    let _ = window.emit("collab-update", &state_json);
+                                }
+                                let response = Response::from_string(val.to_string())
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => {
+                                let err_body = serde_json::json!({"error": e}).to_string();
+                                let response = Response::from_string(err_body)
+                                    .with_status_code(409)
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                let response = Response::from_string("Bad Request").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if method == "POST" && url == "/collab/send" {
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_ok() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let session_id = json.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+                        let message = json.get("message").and_then(|s| s.as_str()).unwrap_or("");
+
+                        if session_id.is_empty() || message.is_empty() {
+                            let response = Response::from_string(r#"{"error":"Missing session_id or message"}"#)
+                                .with_status_code(400)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        let result = collab_store.lock().unwrap().send(session_id, message);
+                        match result {
+                            Ok(val) => {
+                                // Emit collab-message event with full state
+                                let state_json = collab_store.lock().unwrap().get_state();
+                                if let Some(window) = app_handle.get_webview_window("transcript") {
+                                    let _ = window.emit("collab-update", &state_json);
+                                    // Also emit per-message event
+                                    let collabs = state_json.get("collaborations").and_then(|c| c.as_array());
+                                    if let Some(collabs) = collabs {
+                                        // Find the collab that has this session
+                                        for c in collabs {
+                                            let participants = c.get("participants").and_then(|p| p.as_array());
+                                            if let Some(ps) = participants {
+                                                if ps.iter().any(|p| p.get("session_id").and_then(|s| s.as_str()) == Some(session_id)) {
+                                                    let _ = window.emit("collab-message", serde_json::json!({"collaboration": c}));
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                let response = Response::from_string(val.to_string())
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => {
+                                let err_body = serde_json::json!({"error": e}).to_string();
+                                let response = Response::from_string(err_body)
+                                    .with_status_code(400)
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                let response = Response::from_string("Bad Request").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if method == "POST" && url == "/collab/check" {
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_ok() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let session_id = json.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+                        let last_seen = json.get("last_seen").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+                        if session_id.is_empty() {
+                            let response = Response::from_string(r#"{"error":"Missing session_id"}"#)
+                                .with_status_code(400)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        let result = collab_store.lock().unwrap().check(session_id, last_seen);
+                        match result {
+                            Ok(val) => {
+                                let response = Response::from_string(val.to_string())
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => {
+                                let err_body = serde_json::json!({"error": e}).to_string();
+                                let response = Response::from_string(err_body)
+                                    .with_status_code(400)
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                let response = Response::from_string("Bad Request").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            if method == "POST" && url == "/collab/leave" {
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_ok() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                        let session_id = json.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+
+                        if session_id.is_empty() {
+                            let response = Response::from_string(r#"{"error":"Missing session_id"}"#)
+                                .with_status_code(400)
+                                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                            let _ = request.respond(response);
+                            continue;
+                        }
+
+                        let result = collab_store.lock().unwrap().leave(session_id);
+                        match result {
+                            Ok(val) => {
+                                let state_json = collab_store.lock().unwrap().get_state();
+                                if let Some(window) = app_handle.get_webview_window("transcript") {
+                                    let _ = window.emit("collab-update", &state_json);
+                                }
+                                let response = Response::from_string(val.to_string())
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                            Err(e) => {
+                                let err_body = serde_json::json!({"error": e}).to_string();
+                                let response = Response::from_string(err_body)
+                                    .with_status_code(400)
+                                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                                let _ = request.respond(response);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                let response = Response::from_string("Bad Request").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
             // Only accept POST to /speak
             if method != "POST" || url != "/speak" {
                 let response = Response::from_string("Not Found").with_status_code(404);
@@ -599,6 +881,21 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
 
             if text.is_empty() {
                 let response = Response::from_string("No text provided").with_status_code(400);
+                let _ = request.respond(response);
+                continue;
+            }
+
+            // Check if voice is enabled — if not, respond OK but don't queue or emit
+            let voice_settings = load_voice_settings();
+            if !voice_settings.enabled {
+                let response_body = serde_json::json!({
+                    "status": "ok",
+                    "skipped": true,
+                    "reason": "voice disabled"
+                }).to_string();
+                let response = Response::from_string(response_body)
+                    .with_status_code(200)
+                    .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
                 let _ = request.respond(response);
                 continue;
             }
@@ -736,6 +1033,12 @@ fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, Stri
     Ok(recorder.is_recording())
 }
 
+
+/// Save voice settings when toggled from frontend (voice on/off, blind mode, detail)
+#[tauri::command]
+fn update_claude_md(enabled: bool, blind_mode: bool, detail: u8) -> Result<(), String> {
+    save_voice_settings(enabled, blind_mode, detail)
+}
 
 /// Generate voice template based on blind mode and detail level
 fn generate_voice_template(blind_mode: bool, detail: u8) -> String {
@@ -953,6 +1256,7 @@ fn main() {
             cancel_recording,
             get_audio_devices,
             check_recording,
+            update_claude_md,
             save_voice_settings_cmd,
             set_project_path,
             get_project_path,
