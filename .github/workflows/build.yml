@@ -124,6 +124,8 @@ jobs:
         run: |
           chmod +x scripts/build-sidecar.sh
           ./scripts/build-sidecar.sh
+          echo "=== Sidecar binaries ==="
+          ls -la src-tauri/binaries/
 
       - name: Build MCP sidecar (Windows)
         if: matrix.platform == 'windows-latest'
