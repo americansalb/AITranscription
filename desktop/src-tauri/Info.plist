@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Scribe needs microphone access to transcribe your voice recordings.</string>
+    <string>Vaak needs microphone access to transcribe your voice recordings.</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Scribe needs accessibility access to simulate keyboard shortcuts for pasting text.</string>
+    <string>Vaak needs accessibility access to simulate keyboard shortcuts for pasting text.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Scribe uses AppleScript to paste text into other applications.</string>
+    <string>Vaak uses AppleScript to paste text into other applications.</string>
 </dict>
 </plist>
