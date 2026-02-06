@@ -527,7 +527,7 @@ export function TranscriptApp() {
         // For development, use the current working directory approach
         try {
           // Try to get the resource directory first (where the app is running from)
-          const { resourceDir } = await import("@tauri-apps/api/path");
+          const { resourceDir, appDataDir } = await import("@tauri-apps/api/path");
           const resDir = await resourceDir();
           // Go up from resources to find project root
           // In dev: resources is in target/debug or target/release
@@ -538,16 +538,21 @@ export function TranscriptApp() {
             await invoke("set_project_path", { path: projectPath });
             console.log("[TranscriptApp] Set project path to:", projectPath);
           } else {
-            // Fallback: use a known path for this specific project
-            const knownPath = "C:\\Users\\18479\\Desktop\\LOCAL APP TESTING\\AITranscription";
-            await invoke("set_project_path", { path: knownPath });
-            console.log("[TranscriptApp] Set project path to known path:", knownPath);
+            // Fallback: use the platform-agnostic app data directory
+            const appData = await appDataDir();
+            await invoke("set_project_path", { path: appData });
+            console.log("[TranscriptApp] Set project path to app data dir:", appData);
           }
         } catch (pathErr) {
-          // Fallback to a known path if path resolution fails
-          const knownPath = "C:\\Users\\18479\\Desktop\\LOCAL APP TESTING\\AITranscription";
-          await invoke("set_project_path", { path: knownPath });
-          console.log("[TranscriptApp] Set project path to fallback:", knownPath);
+          try {
+            // Fallback: use the platform-agnostic app data directory
+            const { appDataDir } = await import("@tauri-apps/api/path");
+            const appData = await appDataDir();
+            await invoke("set_project_path", { path: appData });
+            console.log("[TranscriptApp] Set project path to app data fallback:", appData);
+          } catch {
+            console.warn("[TranscriptApp] Could not resolve project path on this platform");
+          }
         }
 
         // After setting project path, sync CLAUDE.md with current settings

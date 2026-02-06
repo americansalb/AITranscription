@@ -23,7 +23,7 @@ pub fn get_database_path() -> Option<PathBuf> {
     {
         if let Ok(home) = std::env::var("HOME") {
             let mut path = PathBuf::from(home);
-            path.push(".scribe");
+            path.push(".vaak");
             std::fs::create_dir_all(&path).ok()?;
             path.push("queue.db");
             return Some(path);
