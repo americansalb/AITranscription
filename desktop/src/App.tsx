@@ -646,6 +646,7 @@ function App() {
       } else {
         setError({ message });
       }
+      setProcessingStep("recording");
       setStatus("error");
       if (soundEnabled) playErrorSound(); // Audio feedback - error
       showToast(message, "error");
