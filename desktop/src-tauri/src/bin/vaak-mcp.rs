@@ -2198,7 +2198,7 @@ fn run_hook() {
 
     // Voice instructions only when enabled
     if enabled {
-        let speak_msg = "IMPORTANT: You MUST call the mcp__vaak__speak tool to speak every response aloud. Call speak for EVERY response, including confirmations, explanations, errors, and questions.";
+        let speak_msg = "IMPORTANT: You MUST call the mcp__vaak__speak tool to speak responses aloud to the user. When on a team project, use project_send for ALL team communication FIRST, then call speak with a SHORT summary for your local terminal user. The board is for the team. Speak is for the human at your terminal. Never use speak as a substitute for project_send.";
 
         let detail_msg = match detail {
             1 => "Keep explanations extremely brief - one sentence summaries only. Use simple, layperson terms.",
