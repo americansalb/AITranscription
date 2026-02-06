@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build-sidecar": "cd src-tauri && cargo build --bin vaak-mcp --release && node ../scripts/copy-sidecar.js",
+    "build-sidecar": "cd src-tauri && cargo build --bin vaak-mcp --release && node ../scripts/copy-sidecar.cjs",
     "build-with-sidecar": "npm run build-sidecar && npm run build",
     "preview": "vite preview",
     "tauri": "tauri"
