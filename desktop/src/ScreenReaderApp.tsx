@@ -12,7 +12,7 @@ import {
   saveSRVoiceId,
 } from "./lib/voiceStream";
 import { keyEventToHotkey } from "./components/Settings";
-import { formatHotkeyForDisplay } from "./lib/platform";
+import { formatHotkeyForDisplay, isWindows } from "./lib/platform";
 import "./styles/screen-reader.css";
 
 const SR_DETAIL_LABELS = ["Brief", "Concise", "Balanced", "Thorough", "Exhaustive"];
@@ -165,36 +165,47 @@ export function ScreenReaderApp() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a3 3 0 0 0-3 3v4a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/></svg>
               Accessibility
             </h2>
-            <div className="sr-row">
-              <div>
-                <div className="sr-row-label">UI Automation Tree</div>
-                <div className="sr-row-desc">Send element names, types, and coordinates alongside screenshots for precise interaction</div>
+            {isWindows() ? (
+              <>
+                <div className="sr-row">
+                  <div>
+                    <div className="sr-row-label">UI Automation Tree</div>
+                    <div className="sr-row-desc">Send element names, types, and coordinates alongside screenshots for precise interaction</div>
+                  </div>
+                  <button className={`sr-toggle ${uiaEnabled ? "active" : ""}`} onClick={() => {
+                    const next = !uiaEnabled;
+                    setUiaEnabled(next);
+                    localStorage.setItem("vaak_sr_uia", String(next));
+                  }} />
+                </div>
+                <div className="sr-row">
+                  <div>
+                    <div className="sr-row-label">Focus Tracking</div>
+                    <div className="sr-row-desc">Automatically announce focused elements as you Tab through the UI (no API calls)</div>
+                  </div>
+                  <button className={`sr-toggle ${focusTrackingEnabled ? "active" : ""}`} onClick={async () => {
+                    const next = !focusTrackingEnabled;
+                    setFocusTrackingEnabled(next);
+                    localStorage.setItem("vaak_sr_focus_tracking", String(next));
+                    if (window.__TAURI__) {
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        await invoke("set_focus_tracking", { enabled: next });
+                      } catch (e) {
+                        console.error("Failed to toggle focus tracking:", e);
+                      }
+                    }
+                  }} />
+                </div>
+              </>
+            ) : (
+              <div className="sr-row">
+                <div>
+                  <div className="sr-row-label">Platform Notice</div>
+                  <div className="sr-row-desc">UI Automation Tree and Focus Tracking are available on Windows only. Screen capture and voice descriptions work on all platforms.</div>
+                </div>
               </div>
-              <button className={`sr-toggle ${uiaEnabled ? "active" : ""}`} onClick={() => {
-                const next = !uiaEnabled;
-                setUiaEnabled(next);
-                localStorage.setItem("vaak_sr_uia", String(next));
-              }} />
-            </div>
-            <div className="sr-row">
-              <div>
-                <div className="sr-row-label">Focus Tracking</div>
-                <div className="sr-row-desc">Automatically announce focused elements as you Tab through the UI (no API calls)</div>
-              </div>
-              <button className={`sr-toggle ${focusTrackingEnabled ? "active" : ""}`} onClick={async () => {
-                const next = !focusTrackingEnabled;
-                setFocusTrackingEnabled(next);
-                localStorage.setItem("vaak_sr_focus_tracking", String(next));
-                if (window.__TAURI__) {
-                  try {
-                    const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("set_focus_tracking", { enabled: next });
-                  } catch (e) {
-                    console.error("Failed to toggle focus tracking:", e);
-                  }
-                }
-              }} />
-            </div>
+            )}
           </div>
 
           {/* Vision Settings */}

@@ -361,5 +361,10 @@ fn format_element(out: &mut String, el: &UiaElement, indent: usize) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn capture_uia_tree() -> Result<UiaTree, String> {
-    Err("UI Automation is only available on Windows".to_string())
+    Ok(UiaTree {
+        window_title: String::new(),
+        process_name: String::new(),
+        element_count: 0,
+        elements: Vec::new(),
+    })
 }
