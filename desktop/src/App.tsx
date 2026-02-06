@@ -736,7 +736,7 @@ function App() {
 
         // First, set the project path so CLAUDE.md is written to the right location
         try {
-          const { resourceDir, appDataDir } = await import("@tauri-apps/api/path");
+          const { resourceDir } = await import("@tauri-apps/api/path");
           const resDir = await resourceDir();
           // Go up from resources to find project root
           const projectPath = resDir.replace(/[\\/]desktop[\\/]src-tauri[\\/]target[\\/].*$/, "");
@@ -745,21 +745,10 @@ function App() {
             await invoke("set_project_path", { path: projectPath });
             console.log("[App] Set project path to:", projectPath);
           } else {
-            // Fallback: use the platform-agnostic app data directory
-            const appData = await appDataDir();
-            await invoke("set_project_path", { path: appData });
-            console.log("[App] Set project path to app data dir:", appData);
+            console.warn("[App] Could not detect project root from resourceDir:", resDir);
           }
         } catch (pathErr) {
-          try {
-            // Fallback: use the platform-agnostic app data directory
-            const { appDataDir } = await import("@tauri-apps/api/path");
-            const appData = await appDataDir();
-            await invoke("set_project_path", { path: appData });
-            console.log("[App] Set project path to app data fallback:", appData);
-          } catch {
-            console.warn("[App] Could not resolve project path on this platform");
-          }
+          console.warn("[App] Could not resolve project path:", pathErr);
         }
 
         // Now initialize CLAUDE.md with current settings

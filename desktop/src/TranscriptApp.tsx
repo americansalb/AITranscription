@@ -527,7 +527,7 @@ export function TranscriptApp() {
         // For development, use the current working directory approach
         try {
           // Try to get the resource directory first (where the app is running from)
-          const { resourceDir, appDataDir } = await import("@tauri-apps/api/path");
+          const { resourceDir } = await import("@tauri-apps/api/path");
           const resDir = await resourceDir();
           // Go up from resources to find project root
           // In dev: resources is in target/debug or target/release
@@ -538,21 +538,10 @@ export function TranscriptApp() {
             await invoke("set_project_path", { path: projectPath });
             console.log("[TranscriptApp] Set project path to:", projectPath);
           } else {
-            // Fallback: use the platform-agnostic app data directory
-            const appData = await appDataDir();
-            await invoke("set_project_path", { path: appData });
-            console.log("[TranscriptApp] Set project path to app data dir:", appData);
+            console.warn("[TranscriptApp] Could not detect project root from resourceDir:", resDir);
           }
         } catch (pathErr) {
-          try {
-            // Fallback: use the platform-agnostic app data directory
-            const { appDataDir } = await import("@tauri-apps/api/path");
-            const appData = await appDataDir();
-            await invoke("set_project_path", { path: appData });
-            console.log("[TranscriptApp] Set project path to app data fallback:", appData);
-          } catch {
-            console.warn("[TranscriptApp] Could not resolve project path on this platform");
-          }
+          console.warn("[TranscriptApp] Could not resolve project path:", pathErr);
         }
 
         // After setting project path, sync CLAUDE.md with current settings
