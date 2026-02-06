@@ -19,6 +19,8 @@ import { Confetti } from "./components/Confetti";
 import { playStartSound, playStopSound, playSuccessSound, playErrorSound } from "./lib/sounds";
 import { initSpeakListener } from "./lib/speak";
 import { getStoredVoiceEnabled, saveVoiceEnabled } from "./lib/voiceStream";
+import { onRecordingStart, onRecordingStop } from "./lib/interruptManager";
+import { QueueSlidePanel } from "./components/QueueSlidePanel";
 
 // One-time migration from old "scribe_*" localStorage keys to "vaak_*"
 function migrateLocalStorageKeys() {
@@ -195,6 +197,31 @@ function saveSetting<T>(key: string, value: T): void {
   }
 }
 
+function ScreenReaderButton() {
+  return (
+    <button
+      className="screen-reader-btn"
+      title="Screen Reader Settings"
+      onClick={async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("toggle_screen_reader_window");
+        } catch (err) {
+          console.error("Failed to open screen reader window:", err);
+        }
+      }}
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+        <line x1="8" y1="21" x2="16" y2="21" />
+        <line x1="12" y1="17" x2="12" y2="21" />
+        <circle cx="12" cy="10" r="2" />
+      </svg>
+      <span className="screen-reader-btn-label">Screen</span>
+    </button>
+  );
+}
+
 function App() {
   const recorder = useUnifiedAudioRecorder();
   const { showToast } = useToast();
@@ -218,6 +245,7 @@ function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => getStoredVoiceEnabled());
+  const [showQueuePanel, setShowQueuePanel] = useState(false);
 
   // Handle hotkey change from Settings
   const handleHotkeyChange = useCallback((newHotkey: string) => {
@@ -423,6 +451,15 @@ function App() {
     setTrayRecordingState(recorder.isRecording);
   }, [recorder.isRecording]);
 
+  // Feature 3: Interrupt-on-Record - auto-pause TTS when recording
+  useEffect(() => {
+    if (recorder.isRecording) {
+      onRecordingStart();
+    } else {
+      onRecordingStop();
+    }
+  }, [recorder.isRecording]);
+
   // Update overlay state (overlay is always visible, just expands/collapses)
   useEffect(() => {
     updateOverlayState({
@@ -443,9 +480,13 @@ function App() {
     }
   }, [recorder, showToast]);
 
+  // Guard against double-firing from native hook + Tauri plugin
+  const isStartingRecordingRef = useRef(false);
+
   // Push-to-talk: start recording on key down
   const handleHotkeyDown = useCallback(async () => {
-    if (recorder.isRecording || isProcessingRef.current || backendReady === false) return;
+    if (recorder.isRecording || isProcessingRef.current || backendReady === false || isStartingRecordingRef.current) return;
+    isStartingRecordingRef.current = true;
 
     setError(null);
     setResult("");
@@ -482,6 +523,8 @@ function App() {
       }
       setStatus("error");
       if (soundEnabled) playErrorSound();
+    } finally {
+      isStartingRecordingRef.current = false;
     }
   }, [recorder, backendReady, showToast, soundEnabled]);
 
@@ -508,6 +551,7 @@ function App() {
       let polishedText: string;
       let language: string | null = null;
 
+      let transcriptSaved = false;
       if (getPolishEnabled()) {
         const response = await transcribeAndPolish(audioBlob, {
           context: contextRef.current === "general" ? undefined : contextRef.current,
@@ -517,11 +561,13 @@ function App() {
         rawText = response.raw_text;
         polishedText = response.polished_text;
         language = response.language;
+        transcriptSaved = response.saved;
       } else {
         const response = await transcribe(audioBlob);
         rawText = response.raw_text;
         polishedText = response.raw_text;
         language = response.language;
+        transcriptSaved = false; // transcribe-only doesn't save
       }
 
       setRawText(rawText);
@@ -560,7 +606,13 @@ function App() {
       setProcessingStep("done");
       setStatus("success");
       if (soundEnabled) playSuccessSound(); // Audio feedback - success
-      showToast("Transcription complete!", "success");
+
+      // Warn if transcript wasn't saved (user not logged in)
+      if (!transcriptSaved && getPolishEnabled()) {
+        showToast("⚠️ Not logged in - transcript not saved to your account!", "warning");
+      } else {
+        showToast("Transcription complete!", "success");
+      }
 
       // Increment transcription count to trigger stats refresh
       setTranscriptionCount((c) => c + 1);
@@ -775,6 +827,7 @@ function App() {
         let polishedText: string;
         let language: string | null = null;
 
+        let transcriptSaved = false;
         if (getPolishEnabled()) {
           const response = await transcribeAndPolish(audioBlob, {
             context: context === "general" ? undefined : context,
@@ -784,11 +837,13 @@ function App() {
           rawText = response.raw_text;
           polishedText = response.polished_text;
           language = response.language;
+          transcriptSaved = response.saved;
         } else {
           const response = await transcribe(audioBlob);
           rawText = response.raw_text;
           polishedText = response.raw_text;
           language = response.language;
+          transcriptSaved = false; // transcribe-only doesn't save
         }
 
         setRawText(rawText);
@@ -812,7 +867,13 @@ function App() {
 
         setProcessingStep("done");
         setStatus("success");
-        showToast("Transcription complete!", "success");
+
+        // Warn if transcript wasn't saved (user not logged in)
+        if (!transcriptSaved && getPolishEnabled()) {
+          showToast("⚠️ Not logged in - transcript not saved to your account!", "warning");
+        } else {
+          showToast("Transcription complete!", "success");
+        }
 
         // Increment transcription count to trigger stats refresh
         setTranscriptionCount((c) => c + 1);
@@ -1024,11 +1085,11 @@ function App() {
       <header className="header">
         <h1>Vaak</h1>
         <div className="header-actions">
-          {/* Vaak Speak Toggle - synced with Claude Integration Preferences */}
+          {/* Voice Queue Panel Toggle */}
           <button
             className={`voice-toggle-btn ${voiceEnabled ? "enabled" : "disabled"}`}
-            title={voiceEnabled ? "Claude Voice: ON - Synced with Preferences (click to disable)" : "Claude Voice: OFF - Synced with Preferences (click to enable)"}
-            onClick={handleVoiceToggle}
+            title="Voice Queue (click to open)"
+            onClick={() => setShowQueuePanel(!showQueuePanel)}
           >
             {voiceEnabled ? (
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1113,6 +1174,7 @@ function App() {
               </svg>
             </button>
           )}
+          <ScreenReaderButton />
           <button
             className="claude-integration-btn"
             title="Claude Integration"
@@ -1509,6 +1571,14 @@ function App() {
 
       {/* Confetti for achievement celebrations */}
       <Confetti isActive={showConfetti} onComplete={() => setShowConfetti(false)} />
+
+      {/* Queue Slide-Out Panel */}
+      <QueueSlidePanel
+        isOpen={showQueuePanel}
+        onClose={() => setShowQueuePanel(false)}
+        voiceEnabled={voiceEnabled}
+        onVoiceToggle={handleVoiceToggle}
+      />
     </div>
   );
 }

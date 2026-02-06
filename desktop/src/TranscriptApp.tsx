@@ -7,6 +7,7 @@ import {
   renameSession,
   changeSessionColor,
   updateSessionHeartbeat,
+  createSessionFromHeartbeat,
   isSessionActive,
   clearSessionMessages,
   deleteSession,
@@ -17,7 +18,6 @@ import {
   type SpeakMessage,
 } from "./lib/sessionManager";
 import { transcriptListener } from "./lib/transcriptListener";
-import { QueueTab } from "./components/QueueTab";
 import { CollabTab } from "./components/CollabTab";
 import {
   getStoredVoiceEnabled,
@@ -29,9 +29,23 @@ import {
   getStoredVoiceAuto,
   saveVoiceAuto,
 } from "./lib/voiceStream";
+import { getStoredPriorityEnabled, savePriorityEnabled } from "./lib/priorityClassifier";
+import {
+  getStoredAnnounceSession,
+  saveAnnounceSession,
+  getStoredUniqueVoices,
+  saveUniqueVoices,
+  getAvailableVoices,
+  fetchAvailableVoices,
+  saveVoiceAssignment,
+  getVoiceAssignments,
+  updateSessionCache,
+  getDefaultVoice,
+  saveDefaultVoice,
+} from "./lib/queueStore";
 
 // Tab type for navigation
-type TabType = "preferences" | "sessions" | "queue" | "collab";
+type TabType = "preferences" | "sessions" | "collab";
 
 // Detail level labels
 const DETAIL_LABELS = ['Summary', '', 'Balanced', '', 'Developer'];
@@ -340,6 +354,8 @@ export function TranscriptApp() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<TabType>("preferences");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesTopRef = useRef<HTMLDivElement>(null);
+  const [messageSort, setMessageSort] = useState<"newest" | "oldest">("newest");
 
   // Voice settings state
   const [voiceEnabled, setVoiceEnabled] = useState(() => getStoredVoiceEnabled());
@@ -349,6 +365,15 @@ export function TranscriptApp() {
 
   // Preview panel state
   const [showInstructionPreview, setShowInstructionPreview] = useState(false);
+
+  // Feature 4: Priority queue toggle
+  const [priorityEnabled, setPriorityEnabled] = useState(() => getStoredPriorityEnabled());
+  // Feature 7: Voice settings
+  const [announceSession, setAnnounceSession] = useState(() => getStoredAnnounceSession());
+  const [uniqueVoices, setUniqueVoices] = useState(() => getStoredUniqueVoices());
+  const [voices, setVoices] = useState<{ voice_id: string; name: string }[]>([]);
+  const [voiceAssignments, setVoiceAssignments] = useState<Record<string, string>>(() => getVoiceAssignments());
+  const [defaultVoice, setDefaultVoice] = useState(() => getDefaultVoice());
 
   // Voice settings handlers
   const handleVoiceEnabledChange = useCallback(async (enabled: boolean) => {
@@ -461,10 +486,32 @@ export function TranscriptApp() {
     };
   }, []);
 
-  // Save sessions whenever they change
+  // Save sessions whenever they change + sync session cache for queue (Feature 8)
   useEffect(() => {
     saveSessions(sessions);
-  }, [sessions]);
+    // Update queueStore session cache so queue items get session name/color
+    updateSessionCache(sessions.map(s => ({
+      id: s.id,
+      name: s.name,
+      color: s.color,
+      voiceId: voiceAssignments[s.id],
+    })));
+    // Sync session names to backend so CollabTab (main window) can access them
+    if (sessions.length > 0) {
+      fetch("http://127.0.0.1:7865/sessions/names", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions: sessions.map(s => ({ id: s.id, name: s.name })) }),
+      }).catch(() => { /* backend not running */ });
+    }
+  }, [sessions, voiceAssignments]);
+
+  // Feature 7: Fetch available voices on mount
+  useEffect(() => {
+    fetchAvailableVoices().then(() => {
+      setVoices(getAvailableVoices());
+    });
+  }, []);
 
   // Initialize project path and sync CLAUDE.md on mount
   useEffect(() => {
@@ -570,19 +617,12 @@ export function TranscriptApp() {
           console.log(`[TranscriptApp] Heartbeat for existing session: ${existingSession.name}`);
           return updateSessionHeartbeat(currentSessions, sessionId, timestamp);
         } else {
-          // Create a placeholder session for heartbeat from unknown session
-          console.log(`[TranscriptApp] Heartbeat from new session: ${sessionId}`);
-          const sessionNumber = currentSessions.length + 1;
-          const newSession: Session = {
-            id: sessionId,
-            name: `Claude #${sessionNumber}`,
-            color: SESSION_COLORS[(sessionNumber - 1) % SESSION_COLORS.length],
-            messages: [],
-            createdAt: timestamp,
-            lastActivity: timestamp,
-            lastHeartbeat: timestamp,
-            isAutoNamed: true,
-          };
+          // Create a new session from heartbeat so it appears in the sessions list
+          const newSession = createSessionFromHeartbeat(sessionId, currentSessions, timestamp);
+          console.log(`[TranscriptApp] New session created from heartbeat: ${newSession.name} (${sessionId})`);
+          if (!selectedSessionId) {
+            setSelectedSessionId(newSession.id);
+          }
           return [newSession, ...currentSessions];
         }
       });
@@ -598,12 +638,14 @@ export function TranscriptApp() {
     };
   }, []); // Empty dependency array - only run once on mount
 
-  // Auto-scroll to latest message when selected session changes
+  // Auto-scroll to top when selected session changes (newest messages are at top)
   useEffect(() => {
-    if (messagesEndRef.current) {
+    if (messageSort === "newest" && messagesTopRef.current) {
+      messagesTopRef.current.scrollIntoView({ behavior: "smooth" });
+    } else if (messageSort === "oldest" && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [selectedSessionId, sessions]);
+  }, [selectedSessionId, sessions, messageSort]);
 
   const handleRenameSession = useCallback(
     (sessionId: string) => {
@@ -713,12 +755,6 @@ export function TranscriptApp() {
           Sessions
         </button>
         <button
-          className={`main-tab ${activeTab === "queue" ? "active" : ""}`}
-          onClick={() => setActiveTab("queue")}
-        >
-          Queue
-        </button>
-        <button
           className={`main-tab ${activeTab === "collab" ? "active" : ""}`}
           onClick={() => setActiveTab("collab")}
         >
@@ -813,6 +849,96 @@ export function TranscriptApp() {
                     <span className="toggle-switch" />
                   </label>
                 </div>
+
+                <div className="preference-divider" />
+
+                {/* Feature 4: Smart Priority Queue */}
+                <div className="preference-item">
+                  <div className="preference-info">
+                    <h3>Smart Priority Queue</h3>
+                    <p>Auto-classify messages by urgency (errors jump to front)</p>
+                  </div>
+                  <label className="toggle-switch-wrapper">
+                    <input
+                      type="checkbox"
+                      checked={priorityEnabled}
+                      onChange={(e) => {
+                        setPriorityEnabled(e.target.checked);
+                        savePriorityEnabled(e.target.checked);
+                      }}
+                    />
+                    <span className="toggle-switch" />
+                  </label>
+                </div>
+
+                <div className="preference-divider" />
+
+                {/* Feature 7: Unique voices per session */}
+                <div className="preference-item">
+                  <div className="preference-info">
+                    <h3>Unique Voices per Session</h3>
+                    <p>Each Claude session auto-gets a different ElevenLabs voice</p>
+                  </div>
+                  <label className="toggle-switch-wrapper">
+                    <input
+                      type="checkbox"
+                      checked={uniqueVoices}
+                      onChange={(e) => {
+                        setUniqueVoices(e.target.checked);
+                        saveUniqueVoices(e.target.checked);
+                      }}
+                    />
+                    <span className="toggle-switch" />
+                  </label>
+                </div>
+
+                <div className="preference-divider" />
+
+                {/* Default Voice selector */}
+                {voices.length > 0 && (
+                  <>
+                    <div className="preference-item">
+                      <div className="preference-info">
+                        <h3>Default Voice</h3>
+                        <p>The ElevenLabs voice used when no session-specific voice is assigned</p>
+                      </div>
+                      <select
+                        className="session-voice-select"
+                        value={defaultVoice}
+                        onChange={(e) => {
+                          const vid = e.target.value;
+                          setDefaultVoice(vid);
+                          saveDefaultVoice(vid);
+                        }}
+                      >
+                        {voices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="preference-divider" />
+                  </>
+                )}
+
+                {/* Feature 7/8: Announce session name */}
+                <div className="preference-item">
+                  <div className="preference-info">
+                    <h3>Announce Session Name</h3>
+                    <p>Speak session name before each queue item (e.g. "From Build Server: ...")</p>
+                  </div>
+                  <label className="toggle-switch-wrapper">
+                    <input
+                      type="checkbox"
+                      checked={announceSession}
+                      onChange={(e) => {
+                        setAnnounceSession(e.target.checked);
+                        saveAnnounceSession(e.target.checked);
+                      }}
+                    />
+                    <span className="toggle-switch" />
+                  </label>
+                </div>
               </>
             )}
           </div>
@@ -842,11 +968,10 @@ export function TranscriptApp() {
         </div>
       )}
 
-      {/* Queue Tab */}
-      {activeTab === "queue" && <QueueTab />}
-
-      {/* Collab Tab */}
-      {activeTab === "collab" && <CollabTab />}
+      {/* Collab Tab — always mounted so event listeners stay active */}
+      <div style={{ display: activeTab === "collab" ? "flex" : "none", flex: 1, minHeight: 0 }}>
+        <CollabTab />
+      </div>
 
       {/* Sessions Tab */}
       {activeTab === "sessions" && (
@@ -978,6 +1103,13 @@ export function TranscriptApp() {
               </div>
               <div className="transcript-main-actions">
                 <button
+                  className={`transcript-btn${messageSort === "newest" ? " active" : ""}`}
+                  onClick={() => setMessageSort(messageSort === "newest" ? "oldest" : "newest")}
+                  title={`Sort: ${messageSort === "newest" ? "Newest first" : "Oldest first"}`}
+                >
+                  {messageSort === "newest" ? "⬆️ Newest" : "⬇️ Oldest"}
+                </button>
+                <button
                   className="transcript-btn"
                   onClick={() => handleRenameSession(selectedSession.id)}
                   title="Rename session"
@@ -1021,6 +1153,24 @@ export function TranscriptApp() {
                     </div>
                   )}
                 </div>
+                {/* Feature 7: Voice selector per session */}
+                {voices.length > 0 && (
+                  <select
+                    className="session-voice-select"
+                    value={voiceAssignments[selectedSession.id] || ''}
+                    onChange={(e) => {
+                      const vid = e.target.value;
+                      saveVoiceAssignment(selectedSession.id, vid);
+                      setVoiceAssignments({ ...voiceAssignments, [selectedSession.id]: vid });
+                    }}
+                    title="Assign voice"
+                  >
+                    <option value="">Default Voice</option>
+                    {voices.map((v) => (
+                      <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                    ))}
+                  </select>
+                )}
                 <button
                   className="transcript-btn"
                   onClick={() => handleCopyAllMessages(selectedSession.id)}
@@ -1053,7 +1203,8 @@ export function TranscriptApp() {
                 </div>
               ) : (
                 <>
-                  {[...selectedSession.messages].reverse().map((message) => (
+                  <div ref={messagesTopRef} />
+                  {(messageSort === "newest" ? [...selectedSession.messages].reverse() : selectedSession.messages).map((message) => (
                     <div key={message.id} className="transcript-message">
                       <div className="transcript-message-header">
                         <span className="transcript-message-time">

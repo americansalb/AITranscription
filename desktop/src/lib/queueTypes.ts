@@ -1,6 +1,9 @@
 // Queue item status
 export type QueueItemStatus = 'pending' | 'playing' | 'paused' | 'completed' | 'failed';
 
+// Priority level for smart queue
+export type PriorityLevel = 'critical' | 'normal' | 'low';
+
 // Queue item from the database
 export interface QueueItem {
   id: number;
@@ -14,6 +17,15 @@ export interface QueueItem {
   completedAt?: number;
   durationMs?: number;
   errorMessage?: string;
+  // Feature 5: Message batching
+  batchCount?: number;
+  // Feature 7: Per-session voice
+  voiceId?: string;
+  // Feature 8: Session identity
+  sessionName?: string;
+  sessionColor?: string;
+  // Feature 4: Priority
+  priority?: PriorityLevel;
 }
 
 // Queue state for the UI
@@ -25,6 +37,10 @@ export interface QueueState {
   autoPlay: boolean;
   volume: number;
   currentPosition: number; // Playback position in ms for pause/resume
+  // Feature 3: Interrupt state
+  interrupted: boolean;
+  // Feature 1: Playback speed
+  playbackSpeed: number;
 }
 
 // Payload from the speak event

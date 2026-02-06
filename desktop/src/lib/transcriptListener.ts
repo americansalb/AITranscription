@@ -49,8 +49,8 @@ class TranscriptListener {
     if (heartbeatCallback) this.heartbeatCallback = heartbeatCallback;
     this.initialized = true;
 
-    // Listen for speak events
-    this.unlistenSpeak = await listen<SpeakMessage>("speak", (event) => {
+    // Listen for speak-transcript events (display only, no TTS — TTS is handled by main window)
+    this.unlistenSpeak = await listen<SpeakMessage>("speak-transcript", (event) => {
       const message = event.payload;
 
       // Create unique message ID for deduplication

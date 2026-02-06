@@ -1,440 +1,484 @@
 use serde::{Deserialize, Serialize};
+
+// ==================== Session Registry ====================
+
 use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A participant in a collaboration
+/// Info about an active Claude Code session
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Participant {
-    pub role: String,
+pub struct SessionInfo {
     pub session_id: String,
-    pub joined_at: String,
     pub last_heartbeat: u64,
+    pub hostname: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub name: String,
 }
 
-/// A single message in the collaboration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CollabMessage {
-    pub number: u32,
-    pub role: String,
-    pub timestamp: String,
-    pub text: String,
+/// Tracks active Claude Code sessions via heartbeats
+pub struct SessionRegistry {
+    sessions: HashMap<String, SessionInfo>,
+    names: HashMap<String, String>,
 }
 
-/// Sidecar state (collab-state.json)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CollabState {
-    pub collab_id: String,
-    pub project_dir: String,
-    pub created_at: String,
-    pub participants: Vec<Participant>,
-    pub message_count: u32,
-    pub messages: Vec<CollabMessage>,
-    pub last_activity: String,
-}
-
-/// In-memory collaboration store, keyed by project_dir
-pub struct CollabStore {
-    collabs: HashMap<String, CollabState>,
-}
-
-fn now_iso() -> String {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    // Simple ISO-ish timestamp
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!(
-        "{}T{:02}:{:02}:{:02}Z",
-        chrono_date_from_epoch(secs),
-        hours,
-        mins,
-        s
-    )
-}
-
-fn chrono_date_from_epoch(epoch_secs: u64) -> String {
-    // Simple date calculation
-    let days = epoch_secs / 86400;
-    let mut y = 1970u64;
-    let mut remaining = days;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let leap = is_leap(y);
-    let month_days: [u64; 12] = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 0;
-    for md in &month_days {
-        if remaining < *md {
-            break;
-        }
-        remaining -= *md;
-        m += 1;
-    }
-    format!("{}-{:02}-{:02}", y, m + 1, remaining + 1)
-}
-
-fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-fn time_short() -> String {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs();
-    let hours = (secs % 86400) / 3600;
-    let mins = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", hours, mins, s)
-}
-
-fn generate_collab_id() -> String {
-    let now = now_millis();
-    let suffix: String = (0..6)
-        .map(|i| {
-            let idx = ((now >> (i * 5)) % 36) as u8;
-            if idx < 10 {
-                (b'0' + idx) as char
-            } else {
-                (b'a' + (idx - 10)) as char
-            }
-        })
-        .collect();
-    suffix
-}
-
-fn vaak_dir(project_dir: &str) -> PathBuf {
-    Path::new(project_dir).join(".vaak")
-}
-
-fn collab_md_path(project_dir: &str) -> PathBuf {
-    vaak_dir(project_dir).join("collab.md")
-}
-
-fn collab_state_path(project_dir: &str) -> PathBuf {
-    vaak_dir(project_dir).join("collab-state.json")
-}
-
-impl CollabStore {
+impl SessionRegistry {
     pub fn new() -> Self {
         Self {
-            collabs: HashMap::new(),
+            sessions: HashMap::new(),
+            names: HashMap::new(),
         }
     }
 
-    /// Join or create a collaboration
-    pub fn join(
-        &mut self,
-        session_id: &str,
-        role: &str,
-        project_dir: &str,
-    ) -> Result<serde_json::Value, String> {
-        let normalized = project_dir.replace('\\', "/");
+    pub fn update_heartbeat(&mut self, session_id: &str, cwd: Option<&str>) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
 
-        // Load from disk if not in memory
-        if !self.collabs.contains_key(&normalized) {
-            if let Some(state) = self.load_state(&normalized) {
-                self.collabs.insert(normalized.clone(), state);
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        let stored_name = self.names.get(session_id).cloned().unwrap_or_default();
+
+        self.sessions.entry(session_id.to_string())
+            .and_modify(|s| {
+                s.last_heartbeat = now;
+                if let Some(c) = cwd {
+                    if !c.is_empty() {
+                        s.cwd = c.to_string();
+                    }
+                }
+                if s.name.is_empty() && !stored_name.is_empty() {
+                    s.name = stored_name.clone();
+                }
+            })
+            .or_insert(SessionInfo {
+                session_id: session_id.to_string(),
+                last_heartbeat: now,
+                hostname,
+                cwd: cwd.unwrap_or("").to_string(),
+                name: stored_name,
+            });
+    }
+
+    pub fn set_session_names(&mut self, names: &[(String, String)]) {
+        for (session_id, name) in names {
+            self.names.insert(session_id.clone(), name.clone());
+            if let Some(info) = self.sessions.get_mut(session_id) {
+                info.name = name.clone();
             }
         }
+    }
 
-        if let Some(state) = self.collabs.get(&normalized) {
-            // Check if role is already taken by a different session
-            for p in &state.participants {
-                if p.role == role && p.session_id != session_id {
-                    return Err(format!("Role '{}' is already taken by session {}", role, p.session_id));
-                }
-                if p.session_id == session_id {
-                    // Already joined - just return current state
-                    let partner = state.participants.iter().find(|pp| pp.session_id != session_id);
-                    return Ok(serde_json::json!({
-                        "collab_id": state.collab_id,
-                        "status": if partner.is_some() { "paired" } else { "waiting" },
-                        "partner": partner.map(|p| serde_json::json!({
-                            "role": p.role,
-                            "session_id": p.session_id
-                        })),
-                        "message_count": state.message_count
-                    }));
-                }
-            }
-            if state.participants.len() >= 2 {
-                return Err("Collaboration full (2 participants max)".to_string());
-            }
-        }
+    pub fn get_all_names(&self) -> &HashMap<String, String> {
+        &self.names
+    }
 
-        // Create or join
-        let state = self.collabs.entry(normalized.clone()).or_insert_with(|| {
-            let now = now_iso();
-            CollabState {
-                collab_id: generate_collab_id(),
-                project_dir: normalized.clone(),
-                created_at: now.clone(),
-                participants: Vec::new(),
-                message_count: 0,
-                messages: Vec::new(),
-                last_activity: now,
+    pub fn get_active(&self) -> Vec<&SessionInfo> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        self.sessions.values()
+            .filter(|s| (now - s.last_heartbeat) < 120_000)
+            .collect()
+    }
+}
+
+// ==================== Project Types (for desktop app UI) ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleConfig {
+    pub title: String,
+    pub description: String,
+    pub max_instances: u32,
+    pub permissions: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub roles: HashMap<String, RoleConfig>,
+    pub settings: ProjectSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    pub heartbeat_timeout_seconds: u64,
+    pub message_retention_days: u64,
+    #[serde(default)]
+    pub workflow_type: Option<String>,
+    #[serde(default)]
+    pub auto_collab: Option<bool>,
+    #[serde(default)]
+    pub human_in_loop: Option<bool>,
+    #[serde(default)]
+    pub workflow_colors: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionBinding {
+    pub role: String,
+    pub instance: u32,
+    pub session_id: String,
+    pub claimed_at: String,
+    pub last_heartbeat: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsFile {
+    pub bindings: Vec<SessionBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardMessage {
+    pub id: u64,
+    pub from: String,
+    pub to: String,
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub timestamp: String,
+    pub subject: String,
+    pub body: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleStatus {
+    pub slug: String,
+    pub title: String,
+    pub active_instances: u32,
+    pub max_instances: u32,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileClaim {
+    pub role_instance: String,
+    pub files: Vec<String>,
+    pub description: String,
+    pub claimed_at: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParsedProject {
+    pub config: ProjectConfig,
+    pub sessions: Vec<SessionBinding>,
+    pub messages: Vec<BoardMessage>,
+    pub role_statuses: Vec<RoleStatus>,
+    pub claims: Vec<FileClaim>,
+}
+
+/// Public wrapper for parse_iso_epoch (used by main.rs for claims staleness check)
+pub fn parse_iso_epoch_pub(iso: &str) -> Option<u64> {
+    parse_iso_epoch(iso)
+}
+
+/// Parse ISO 8601 timestamp to epoch seconds (for heartbeat age comparison)
+fn parse_iso_epoch(iso: &str) -> Option<u64> {
+    let iso = iso.trim_end_matches('Z');
+    let (date_part, time_part) = iso.split_once('T')?;
+    let dp: Vec<&str> = date_part.split('-').collect();
+    let tp: Vec<&str> = time_part.split(':').collect();
+    if dp.len() != 3 || tp.len() != 3 { return None; }
+    let (year, month, day): (u64, u64, u64) = (dp[0].parse().ok()?, dp[1].parse().ok()?, dp[2].parse().ok()?);
+    let (hour, min, sec): (u64, u64, u64) = (tp[0].parse().ok()?, tp[1].parse().ok()?, tp[2].parse().ok()?);
+    let mut total_days: u64 = 0;
+    for y in 1970..year {
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        total_days += if leap { 366 } else { 365 };
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let md: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 0..(month.saturating_sub(1) as usize) {
+        total_days += md.get(m).copied().unwrap_or(30);
+    }
+    total_days += day.saturating_sub(1);
+    Some(total_days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
+/// Parse a .vaak/ project directory into structured data for the UI.
+/// Automatically cleans stale sessions (heartbeat older than timeout).
+pub fn parse_project_dir(dir: &str) -> Option<ParsedProject> {
+    let vaak_dir = Path::new(dir).join(".vaak");
+
+    // 1. Read project.json
+    let config: ProjectConfig = serde_json::from_str(
+        &std::fs::read_to_string(vaak_dir.join("project.json")).ok()?
+    ).ok()?;
+
+    // 2. Read sessions.json (may not exist yet)
+    let mut sessions_file: SessionsFile = std::fs::read_to_string(vaak_dir.join("sessions.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(SessionsFile { bindings: vec![] });
+
+    // 2b. Compute staleness for display only — NEVER remove sessions here.
+    // Removal only happens in handle_project_join when a new agent needs the slot.
+    let timeout_secs = config.settings.heartbeat_timeout_seconds;
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    // 3. Read board.jsonl (may not exist yet) — one JSON per line
+    let mut messages: Vec<BoardMessage> = std::fs::read_to_string(vaak_dir.join("board.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    // 3b. Apply message retention filtering (0 = keep all)
+    let retention_days = config.settings.message_retention_days;
+    if retention_days > 0 {
+        let max_age_secs = retention_days * 86400;
+        messages.retain(|msg| {
+            match parse_iso_epoch(&msg.timestamp) {
+                Some(msg_secs) => now_secs.saturating_sub(msg_secs) <= max_age_secs,
+                None => true, // keep messages with unparseable timestamps
             }
         });
+    }
 
-        let participant = Participant {
-            role: role.to_string(),
+    // 4. Compute role statuses from config + sessions (with heartbeat-based staleness)
+    let role_statuses = compute_role_statuses(&config, &sessions_file.bindings, now_secs, timeout_secs);
+
+    // 5. Read claims.json and filter stale entries
+    let gone_threshold = (timeout_secs as f64 * 2.5) as u64;
+    let claims = read_claims_filtered(&vaak_dir, &sessions_file.bindings, now_secs, gone_threshold);
+
+    Some(ParsedProject {
+        config,
+        sessions: sessions_file.bindings,
+        messages,
+        role_statuses,
+        claims,
+    })
+}
+
+/// Read claims.json and filter out stale entries whose session is gone.
+fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: u64, gone_threshold: u64) -> Vec<FileClaim> {
+    let claims_path = vaak_dir.join("claims.json");
+    let content = match std::fs::read_to_string(&claims_path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let claims_map: std::collections::HashMap<String, serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(_) => return vec![],
+    };
+
+    let mut result = Vec::new();
+    let mut any_removed = false;
+    let mut clean_map = serde_json::Map::new();
+
+    for (key, val) in &claims_map {
+        let session_id = val.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
+        // Check if this session is still active (not gone)
+        let binding = bindings.iter().find(|b| b.session_id == session_id);
+        let is_stale = match binding {
+            None => true, // No binding at all
+            Some(b) => {
+                let age = parse_iso_epoch(&b.last_heartbeat)
+                    .map(|hb| now_secs.saturating_sub(hb))
+                    .unwrap_or(u64::MAX);
+                age > gone_threshold
+            }
+        };
+
+        if is_stale {
+            any_removed = true;
+            continue;
+        }
+
+        // Parse into FileClaim
+        let files: Vec<String> = val.get("files")
+            .and_then(|f| f.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let description = val.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+        let claimed_at = val.get("claimed_at").and_then(|c| c.as_str()).unwrap_or("").to_string();
+
+        result.push(FileClaim {
+            role_instance: key.clone(),
+            files,
+            description,
+            claimed_at,
             session_id: session_id.to_string(),
-            joined_at: now_iso(),
-            last_heartbeat: now_millis(),
-        };
-        state.participants.push(participant);
-        let _ = state;
-
-        // Write files
-        self.write_files(&normalized)?;
-
-        let state = self.collabs.get(&normalized).unwrap();
-        let partner = state
-            .participants
-            .iter()
-            .find(|p| p.session_id != session_id);
-        Ok(serde_json::json!({
-            "collab_id": state.collab_id,
-            "status": if partner.is_some() { "paired" } else { "waiting" },
-            "partner": partner.map(|p| serde_json::json!({
-                "role": p.role,
-                "session_id": p.session_id
-            })),
-            "message_count": state.message_count
-        }))
+        });
+        clean_map.insert(key.clone(), val.clone());
     }
 
-    /// Send a message
-    pub fn send(
-        &mut self,
-        session_id: &str,
-        message: &str,
-    ) -> Result<serde_json::Value, String> {
-        // Find which collab this session belongs to
-        let project_dir = self
-            .collabs
-            .iter()
-            .find(|(_, s)| s.participants.iter().any(|p| p.session_id == session_id))
-            .map(|(k, _)| k.clone())
-            .ok_or("Session not in any collaboration. Call collab_join first.")?;
+    // Write back cleaned version if any were removed
+    if any_removed {
+        if let Ok(s) = serde_json::to_string_pretty(&clean_map) {
+            let _ = std::fs::write(&claims_path, s);
+        }
+    }
 
-        let state = self.collabs.get_mut(&project_dir).unwrap();
+    result
+}
 
-        // Find the role for this session
-        let role = state
-            .participants
-            .iter()
-            .find(|p| p.session_id == session_id)
-            .map(|p| p.role.clone())
-            .ok_or("Session not found in collaboration")?;
+fn compute_role_statuses(config: &ProjectConfig, bindings: &[SessionBinding], now_secs: u64, timeout_secs: u64) -> Vec<RoleStatus> {
+    let auto_collab = config.settings.auto_collab.unwrap_or(false);
+    let gone_threshold = (timeout_secs as f64 * 2.5) as u64;
+    config.roles.iter().map(|(slug, role)| {
+        let role_bindings: Vec<&SessionBinding> = bindings.iter()
+            .filter(|b| b.role == *slug && b.status == "active")
+            .collect();
+        let total = role_bindings.len() as u32;
 
-        state.message_count += 1;
-        let msg = CollabMessage {
-            number: state.message_count,
-            role: role.clone(),
-            timestamp: time_short(),
-            text: message.to_string(),
-        };
-        state.messages.push(msg.clone());
-        state.last_activity = now_iso();
-
-        // Update heartbeat
-        for p in &mut state.participants {
-            if p.session_id == session_id {
-                p.last_heartbeat = now_millis();
+        let mut fresh_count = 0u32;
+        let mut idle_count = 0u32;
+        let mut gone_count = 0u32;
+        for b in &role_bindings {
+            let age = parse_iso_epoch(&b.last_heartbeat)
+                .map(|hb| now_secs.saturating_sub(hb))
+                .unwrap_or(u64::MAX);
+            if age <= timeout_secs {
+                fresh_count += 1;
+            } else if age <= gone_threshold {
+                idle_count += 1;
+            } else if auto_collab {
+                // When auto_collab is on, never mark sessions as "gone" —
+                // treat them as idle so they persist in the UI
+                idle_count += 1;
+            } else {
+                gone_count += 1;
             }
         }
 
-        let msg_count = state.message_count;
-        let role_copy = role.clone();
-        let _ = state;
+        let status = if fresh_count > 0 {
+            "active"
+        } else if idle_count > 0 {
+            "idle"
+        } else if gone_count > 0 {
+            "gone"
+        } else {
+            "vacant"
+        };
 
-        self.write_files(&project_dir)?;
-
-        Ok(serde_json::json!({
-            "message_number": msg_count,
-            "role": role_copy
-        }))
-    }
-
-    /// Check for new messages
-    pub fn check(
-        &mut self,
-        session_id: &str,
-        last_seen: u32,
-    ) -> Result<serde_json::Value, String> {
-        // Find which collab this session belongs to
-        let project_dir = self
-            .collabs
-            .iter()
-            .find(|(_, s)| s.participants.iter().any(|p| p.session_id == session_id))
-            .map(|(k, _)| k.clone())
-            .ok_or("Session not in any collaboration. Call collab_join first.")?;
-
-        let state = self.collabs.get_mut(&project_dir).unwrap();
-
-        // Update heartbeat for this session
-        for p in &mut state.participants {
-            if p.session_id == session_id {
-                p.last_heartbeat = now_millis();
-            }
+        RoleStatus {
+            slug: slug.clone(),
+            title: role.title.clone(),
+            active_instances: total,
+            max_instances: role.max_instances,
+            status: status.to_string(),
         }
+    }).collect()
+}
 
-        let new_messages: Vec<&CollabMessage> = state
-            .messages
-            .iter()
-            .filter(|m| m.number > last_seen)
-            .collect();
+/// Remove session bindings whose heartbeat age exceeds timeout * 2.5 (gone threshold).
+/// Uses file locking to safely modify sessions.json.
+/// Returns true if any bindings were removed.
+pub fn cleanup_gone_sessions(dir: &str) -> bool {
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let sessions_path = vaak_dir.join("sessions.json");
+    let lock_path = vaak_dir.join("board.lock");
 
-        // Check partner activity (active if heartbeat within 30s)
-        let now = now_millis();
-        let partner_active = state
-            .participants
-            .iter()
-            .any(|p| p.session_id != session_id && (now - p.last_heartbeat) < 30_000);
+    // Read current sessions
+    let content = match std::fs::read_to_string(&sessions_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut sessions: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
 
-        Ok(serde_json::json!({
-            "messages": new_messages,
-            "latest_message_number": state.message_count,
-            "partner_active": partner_active
-        }))
+    // Read project settings
+    let config_path = vaak_dir.join("project.json");
+    let config_val = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+
+    // If auto_collab is on, NEVER clean up sessions — they should persist indefinitely
+    let auto_collab = config_val.as_ref()
+        .and_then(|v| v.get("settings")?.get("auto_collab")?.as_bool())
+        .unwrap_or(false);
+    if auto_collab {
+        return false;
     }
 
-    /// Leave a collaboration
-    pub fn leave(&mut self, session_id: &str) -> Result<serde_json::Value, String> {
-        let project_dir = self
-            .collabs
-            .iter()
-            .find(|(_, s)| s.participants.iter().any(|p| p.session_id == session_id))
-            .map(|(k, _)| k.clone())
-            .ok_or("Session not in any collaboration")?;
+    let timeout_secs = config_val.as_ref()
+        .and_then(|v| v.get("settings")?.get("heartbeat_timeout_seconds")?.as_u64())
+        .unwrap_or(120);
+    let gone_threshold = (timeout_secs as f64 * 2.5) as u64;
 
-        {
-            let state = self.collabs.get_mut(&project_dir).unwrap();
-            state.participants.retain(|p| p.session_id != session_id);
-            state.last_activity = now_iso();
-        }
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-        self.write_files(&project_dir)?;
+    let bindings = match sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+        Some(b) => b,
+        None => return false,
+    };
 
-        // If no participants left, remove from memory
-        let empty = self.collabs.get(&project_dir).map(|s| s.participants.is_empty()).unwrap_or(false);
-        if empty {
-            self.collabs.remove(&project_dir);
-        }
+    let before_len = bindings.len();
+    bindings.retain(|b| {
+        let hb = b.get("last_heartbeat").and_then(|h| h.as_str()).unwrap_or("");
+        let age = parse_iso_epoch(hb)
+            .map(|hb_secs| now_secs.saturating_sub(hb_secs))
+            .unwrap_or(u64::MAX);
+        age <= gone_threshold
+    });
 
-        Ok(serde_json::json!({"status": "left"}))
+    if bindings.len() == before_len {
+        return false; // Nothing to clean up
     }
 
-    /// Get current state for frontend
-    pub fn get_state(&self) -> serde_json::Value {
-        let collabs: Vec<serde_json::Value> = self
-            .collabs
-            .values()
-            .map(|s| {
-                serde_json::json!({
-                    "collab_id": s.collab_id,
-                    "project_dir": s.project_dir,
-                    "participants": s.participants,
-                    "message_count": s.message_count,
-                    "messages": s.messages,
-                    "last_activity": s.last_activity
-                })
-            })
-            .collect();
-        serde_json::json!({ "collaborations": collabs })
+    // Acquire file lock and write back
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 { return false; }
+
+        let result = match serde_json::to_string_pretty(&sessions) {
+            Ok(s) => std::fs::write(&sessions_path, s).is_ok(),
+            Err(_) => false,
+        };
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
     }
 
-    fn load_state(&self, project_dir: &str) -> Option<CollabState> {
-        let path = collab_state_path(project_dir);
-        let content = fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&content).ok()
-    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 { return false; }
 
-    fn write_files(&self, project_dir: &str) -> Result<(), String> {
-        let state = self.collabs.get(project_dir).ok_or("Collab not found")?;
+        let result = match serde_json::to_string_pretty(&sessions) {
+            Ok(s) => std::fs::write(&sessions_path, s).is_ok(),
+            Err(_) => false,
+        };
 
-        // Ensure .vaak directory exists
-        let dir = vaak_dir(project_dir);
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .vaak dir: {}", e))?;
-
-        // Write collab-state.json
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| format!("Failed to serialize state: {}", e))?;
-        fs::write(collab_state_path(project_dir), &json)
-            .map_err(|e| format!("Failed to write state file: {}", e))?;
-
-        // Write collab.md
-        let md = self.render_markdown(state);
-        fs::write(collab_md_path(project_dir), &md)
-            .map_err(|e| format!("Failed to write collab.md: {}", e))?;
-
-        Ok(())
-    }
-
-    fn render_markdown(&self, state: &CollabState) -> String {
-        let mut md = format!(
-            "<!-- vaak-collab v1 | collab_id: {} | created: {} -->\n\n",
-            state.collab_id, state.created_at
-        );
-
-        // Extract project name from path
-        let project_name = state
-            .project_dir
-            .rsplit('/')
-            .next()
-            .unwrap_or(&state.project_dir);
-        md.push_str(&format!("# Collaboration: {}\n\n", project_name));
-
-        md.push_str("## Participants\n");
-        for p in &state.participants {
-            md.push_str(&format!(
-                "- **{}** (session: {}) - joined {}\n",
-                p.role,
-                &p.session_id[..p.session_id.len().min(12)],
-                p.joined_at
-            ));
-        }
-        md.push_str("\n---\n\n");
-
-        for msg in &state.messages {
-            md.push_str(&format!(
-                "### [{:03}] {} ({})\n{}\n\n---\n\n",
-                msg.number, msg.role, msg.timestamp, msg.text
-            ));
-        }
-
-        md
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
     }
 }

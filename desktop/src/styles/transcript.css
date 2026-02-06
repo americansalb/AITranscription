@@ -295,6 +295,22 @@
   color: white;
 }
 
+/* Session Voice Selector (Feature 7) */
+.session-voice-select {
+  padding: 4px 8px;
+  border: 1px solid #38444d;
+  border-radius: 6px;
+  background: #192734;
+  color: #d9d9d9;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 140px;
+}
+
+.session-voice-select:hover {
+  border-color: #1da1f2;
+}
+
 /* Color Picker */
 .color-picker-container {
   position: relative;

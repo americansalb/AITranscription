@@ -303,7 +303,7 @@ pub fn clear_completed_items(older_than_days: Option<i64>) -> Result<i64, String
             )
             .map_err(|e| format!("Failed to clear items: {}", e))?
         } else {
-            conn.execute("DELETE FROM queue_items WHERE status = 'completed'", [])
+            conn.execute("DELETE FROM queue_items WHERE status IN ('completed', 'failed')", [])
                 .map_err(|e| format!("Failed to clear items: {}", e))?
         };
         Ok(deleted as i64)

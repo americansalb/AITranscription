@@ -148,6 +148,30 @@ export function getOrCreateSession(
 
 
 /**
+ * Create a new session from a heartbeat (no message required)
+ */
+export function createSessionFromHeartbeat(
+  sessionId: string,
+  existingSessions: Session[],
+  timestamp: number
+): Session {
+  const sessionNumber = getNextSessionNumber(existingSessions);
+  const newSession: Session = {
+    id: sessionId,
+    name: `Claude #${sessionNumber}`,
+    color: getSessionColor(sessionNumber - 1),
+    messages: [],
+    createdAt: timestamp,
+    lastActivity: timestamp,
+    lastHeartbeat: timestamp,
+    isAutoNamed: false,
+  };
+
+  console.log(`[SessionManager] CREATING new session from heartbeat: ${newSession.name} (${newSession.id})`);
+  return newSession;
+}
+
+/**
  * Add message to session
  */
 export function addMessageToSession(

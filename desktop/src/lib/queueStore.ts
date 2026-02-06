@@ -3,6 +3,21 @@ import type { QueueItem, QueueState, QueueItemStatus } from "./queueTypes";
 import * as db from "./queueDatabase";
 import { getStoredVoiceEnabled } from "./voiceStream";
 
+// Check if this is the main window (has audio playback) or a secondary window
+const hash = window.location.hash;
+const isMainWindow = !hash.includes("/transcript") && !hash.includes("/queue");
+
+// Send playback command to main window via Tauri event
+async function sendPlaybackCommand(command: string, args?: Record<string, unknown>): Promise<void> {
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("queue-playback-command", { command, ...args });
+    log(`Sent playback command to main window: ${command}`);
+  } catch (e) {
+    logError("Failed to send playback command:", e);
+  }
+}
+
 // Default state
 const defaultState: QueueState = {
   items: [],
@@ -12,6 +27,8 @@ const defaultState: QueueState = {
   autoPlay: true,
   volume: 1.0,
   currentPosition: 0,
+  interrupted: false,
+  playbackSpeed: 1.0,
 };
 
 // Store listeners
@@ -27,6 +44,9 @@ let audioStartTime: number = 0;
 let audioDurationMs: number = 0;
 let audioCurrentTimeMs: number = 0;
 
+// Shared playback info (updated by main window, read by all windows)
+let sharedPlaybackInfo = { currentTimeMs: 0, durationMs: 0 };
+
 // Get real audio playback info
 export function getAudioPlaybackInfo(): { currentTimeMs: number; durationMs: number } {
   if (currentAudio) {
@@ -38,10 +58,29 @@ export function getAudioPlaybackInfo(): { currentTimeMs: number; durationMs: num
       : audioDurationMs;
     return { currentTimeMs, durationMs };
   }
+  // Non-main windows use shared info from broadcasts
+  if (!isMainWindow) {
+    return sharedPlaybackInfo;
+  }
   return {
     currentTimeMs: audioCurrentTimeMs,
     durationMs: audioDurationMs,
   };
+}
+
+// Seek to a position in the current audio (in milliseconds)
+export function seek(positionMs: number): void {
+  log(`seek(${positionMs}ms) called`);
+  if (!isMainWindow) {
+    sendPlaybackCommand("seek", { positionMs });
+    return;
+  }
+  if (currentAudio && !isNaN(currentAudio.duration)) {
+    const clampedMs = Math.max(0, Math.min(positionMs, currentAudio.duration * 1000));
+    currentAudio.currentTime = clampedMs / 1000;
+    audioCurrentTimeMs = clampedMs;
+    log(`Seeked to ${clampedMs}ms`);
+  }
 }
 
 // Mutex to prevent race conditions when starting playback
@@ -67,10 +106,50 @@ function notify(): void {
   listeners.forEach((listener) => listener());
 }
 
+// Broadcast state to other windows via Tauri events
+async function broadcastState(): Promise<void> {
+  if (!isMainWindow) return; // Only main window broadcasts
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    // Send serializable subset of state (no functions/audio elements)
+    await emit("queue-state-sync", {
+      isPlaying: state.isPlaying,
+      isPaused: state.isPaused,
+      autoPlay: state.autoPlay,
+      volume: state.volume,
+      currentPosition: state.currentPosition,
+      interrupted: state.interrupted,
+      playbackSpeed: state.playbackSpeed,
+      currentItem: state.currentItem,
+      items: state.items,
+    });
+  } catch {
+    // Ignore broadcast errors
+  }
+}
+
+// Broadcast playback position to other windows
+let lastBroadcastTime = 0;
+async function broadcastPlaybackInfo(): Promise<void> {
+  if (!isMainWindow) return;
+  // Throttle to every 200ms to avoid flooding
+  const now = Date.now();
+  if (now - lastBroadcastTime < 200) return;
+  lastBroadcastTime = now;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    const info = getAudioPlaybackInfo();
+    await emit("queue-playback-info", info);
+  } catch {
+    // Ignore
+  }
+}
+
 // Update state and notify
 function setState(partial: Partial<QueueState>): void {
   state = { ...state, ...partial };
   notify();
+  broadcastState();
 }
 
 // Get current state (immutable)
@@ -87,7 +166,7 @@ export function subscribe(listener: Listener): () => void {
 // Load items from database
 export async function loadItems(): Promise<void> {
   try {
-    const items = await db.getQueueItems({ limit: 200 });
+    const items = await db.getQueueItems({});
 
     // Count by status for debugging
     const pending = items.filter(i => i.status === "pending").length;
@@ -100,7 +179,7 @@ export async function loadItems(): Promise<void> {
       log(`Loaded ${items.length} items: ${pending} pending, ${playing} playing, ${completed} completed, ${failed} failed`);
     }
 
-    setState({ items });
+    setState({ items: enrichWithSessionInfo(items) });
   } catch (error) {
     logError("Failed to load items:", error);
   }
@@ -110,14 +189,35 @@ export async function loadItems(): Promise<void> {
 let autoStartTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Add item to queue (called when speak event arrives)
-export async function addItem(text: string, sessionId: string, existingItem?: QueueItem): Promise<QueueItem | null> {
+export async function addItem(text: string, sessionId: string, existingItem?: QueueItem, _batchCount?: number, voiceIdOverride?: string): Promise<QueueItem | null> {
   log(`Adding item: "${text.substring(0, 50)}..." (session: ${sessionId})`);
   log(`Current state: isPlaying=${state.isPlaying}, isPaused=${state.isPaused}, isStartingPlayback=${isStartingPlayback}, autoPlay=${state.autoPlay}, items=${state.items.length}`);
 
   try {
     // If we already have the item from the backend event, use it
     const item = existingItem || await db.addQueueItem(text, sessionId);
+    // Apply voice override if provided (e.g. screen reader voice)
+    if (voiceIdOverride) {
+      item.voiceId = voiceIdOverride;
+    }
     log(`Item created with uuid: ${item.uuid}, position: ${item.position}`);
+
+    // Enrich with session info
+    if (item.sessionId.startsWith("screen-reader")) {
+      // Auto-label screen reader items (Alt+R describe / Alt+A ask)
+      item.sessionName = item.sessionId.startsWith("screen-reader-ask")
+        ? "Screen Reader (Ask)"
+        : item.sessionId.startsWith("screen-reader-err")
+          ? "Screen Reader (Error)"
+          : "Screen Reader";
+      item.sessionColor = "#6366f1"; // Indigo to distinguish from Claude sessions
+    } else {
+      const cached = sessionCache[item.sessionId];
+      if (cached) {
+        item.sessionName = cached.name;
+        item.sessionColor = cached.color;
+      }
+    }
 
     // Add to local state
     const newItems = [...state.items, item];
@@ -227,6 +327,7 @@ export async function playNext(): Promise<void> {
 // Play a specific item
 export async function playItem(uuid: string): Promise<void> {
   log(`playItem(${uuid}) called`);
+  pauseRequested = false; // Reset any stale pause request
 
   // Check if voice is enabled - this is the master control
   if (!getStoredVoiceEnabled()) {
@@ -260,14 +361,29 @@ export async function playItem(uuid: string): Promise<void> {
     });
     log(`State updated: isPlaying=true, currentItem=${uuid}`);
 
-    // Release mutex AFTER setting isPlaying=true to prevent race conditions
-    isStartingPlayback = false;
-    log("Mutex released - isStartingPlayback = false");
-
     // Call TTS API
     const formData = new FormData();
     formData.append("text", item.text);
     formData.append("session_id", item.sessionId);
+
+    // Pass voice_id if assigned (check cache, then localStorage fallback, then default)
+    const DEFAULT_VOICE_ID = getDefaultVoice();
+    // For screen reader sessions, ALWAYS use the SR voice from settings
+    let srVoice: string | undefined;
+    if (item.sessionId.startsWith("screen-reader")) {
+      try {
+        const stored = localStorage.getItem("vaak-sr-settings");
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          srVoice = parsed.voice_id;
+        }
+      } catch {}
+    }
+    // For SR sessions: item.voiceId (from Rust emit) > localStorage SR voice > default
+    // For non-SR sessions: item.voiceId > session cache > voice assignments > default
+    const voiceId = srVoice || item.voiceId || sessionCache[item.sessionId]?.voiceId || getVoiceAssignments()[item.sessionId] || DEFAULT_VOICE_ID;
+    log(`[playItem] voiceId resolved: ${voiceId} (item.voiceId=${item.voiceId}, srVoice=${srVoice}, sessionId=${item.sessionId})`);
+    formData.append("voice_id", voiceId);
 
     const apiUrl = getApiUrl();
     log(`Calling TTS API at ${apiUrl}/api/v1/tts`);
@@ -330,10 +446,12 @@ export async function playItem(uuid: string): Promise<void> {
       }
     };
 
-    // Track time updates for more accurate progress
+    // Track time updates for more accurate progress + broadcast to other windows
     currentAudio.ontimeupdate = () => {
       if (currentAudio) {
         audioCurrentTimeMs = currentAudio.currentTime * 1000;
+        // Broadcast position to other windows
+        broadcastPlaybackInfo();
       }
     };
 
@@ -384,7 +502,17 @@ export async function playItem(uuid: string): Promise<void> {
     try {
       await currentAudio.play();
       log(`Audio playback started successfully for ${uuid}`);
+      isStartingPlayback = false;
+      log("Mutex released - playback confirmed started");
       log(`Post-play state: volume=${currentAudio.volume}, muted=${currentAudio.muted}, paused=${currentAudio.paused}, currentTime=${currentAudio.currentTime}`);
+
+      // Check if pause was requested during TTS fetch
+      if (pauseRequested) {
+        log("Pause was requested during TTS fetch — pausing now");
+        pauseRequested = false;
+        currentAudio.pause();
+        setState({ isPaused: true, isPlaying: false, currentPosition: 0 });
+      }
     } catch (playError) {
       logError(`Play() promise rejected for ${uuid}:`, playError);
       throw playError;
@@ -469,14 +597,28 @@ async function onItemFailed(uuid: string, errorMessage: string): Promise<void> {
   }
 }
 
+// Flag to handle pause requested during TTS fetch (before audio element exists)
+let pauseRequested = false;
+
 // Pause playback
 export function pause(): void {
   log("pause() called");
+  if (!isMainWindow) {
+    setState({ isPaused: true });
+    sendPlaybackCommand("pause");
+    return;
+  }
   if (currentAudio && state.isPlaying) {
     currentAudio.pause();
     const position = (Date.now() - audioStartTime);
     setState({ isPaused: true, isPlaying: false, currentPosition: position });
+    pauseRequested = false;
     log(`Paused at position ${position}ms`);
+  } else if (state.isPlaying && !currentAudio) {
+    // Audio is "playing" state but TTS fetch hasn't completed yet — defer pause
+    log("pause() - audio not ready yet, setting pauseRequested flag");
+    pauseRequested = true;
+    setState({ isPaused: true, isPlaying: false });
   } else {
     log("pause() - no audio playing");
   }
@@ -485,6 +627,12 @@ export function pause(): void {
 // Resume playback
 export function resume(): void {
   log("resume() called");
+  if (!isMainWindow) {
+    setState({ isPaused: false });
+    sendPlaybackCommand("resume");
+    return;
+  }
+  pauseRequested = false; // Clear any pending pause request
   if (currentAudio && state.isPaused) {
     currentAudio.play();
     audioStartTime = Date.now() - state.currentPosition;
@@ -498,6 +646,17 @@ export function resume(): void {
 // Toggle play/pause
 export function togglePlayPause(): void {
   log(`togglePlayPause() - isPlaying=${state.isPlaying}, isPaused=${state.isPaused}`);
+  if (!isMainWindow) {
+    // Toggle local isPaused state immediately for UI responsiveness
+    const hasPlayingItem = state.items.some(i => i.status === "playing");
+    if (state.isPaused) {
+      setState({ isPaused: false });
+    } else if (hasPlayingItem) {
+      setState({ isPaused: true });
+    }
+    sendPlaybackCommand("togglePlayPause");
+    return;
+  }
   if (state.isPlaying) {
     pause();
   } else if (state.isPaused) {
@@ -507,9 +666,59 @@ export function togglePlayPause(): void {
   }
 }
 
+// Stop playback entirely (don't advance to next item)
+export function stopPlayback(): void {
+  log("stopPlayback() called");
+  if (!isMainWindow) {
+    setState({ isPaused: false });
+    sendPlaybackCommand("stopPlayback");
+    return;
+  }
+
+  // Finalize current item BEFORE clearing audio to prevent onended/onerror race
+  if (state.currentItem) {
+    finalizedItems.add(state.currentItem.uuid);
+  }
+
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = "";
+    currentAudio = null;
+  }
+
+  if (state.currentItem) {
+    // Mark current as completed (not pending — pending causes auto-replay)
+    log(`Marking current item ${state.currentItem.uuid} as completed (stopped)`);
+    db.updateQueueItemStatus(state.currentItem.uuid, "completed").catch(logError);
+
+    const updatedItems = state.items.map((i) =>
+      i.uuid === state.currentItem!.uuid
+        ? { ...i, status: "completed" as QueueItemStatus }
+        : i
+    );
+    setState({ items: updatedItems, currentItem: null, isPlaying: false, isPaused: false });
+  } else {
+    setState({ currentItem: null, isPlaying: false, isPaused: false });
+  }
+
+  isStartingPlayback = false;
+  pauseRequested = false;
+  log("Playback stopped");
+}
+
 // Skip to next item
 export function skipNext(): void {
   log("skipNext() called");
+  if (!isMainWindow) {
+    sendPlaybackCommand("skipNext");
+    return;
+  }
+
+  // Finalize current item BEFORE clearing audio to prevent onended/onerror race
+  if (state.currentItem) {
+    finalizedItems.add(state.currentItem.uuid);
+  }
+
   if (currentAudio) {
     log("Stopping current audio");
     currentAudio.pause();
@@ -536,6 +745,16 @@ export function skipNext(): void {
 // Skip to previous item (replay last completed)
 export function skipPrevious(): void {
   log("skipPrevious() called");
+  if (!isMainWindow) {
+    sendPlaybackCommand("skipPrevious");
+    return;
+  }
+
+  // Finalize current item BEFORE clearing audio to prevent onended/onerror race
+  if (state.currentItem) {
+    finalizedItems.add(state.currentItem.uuid);
+  }
+
   const completedItems = state.items
     .filter((item) => item.status === "completed")
     .sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
@@ -673,4 +892,167 @@ export async function initQueueStore(): Promise<void> {
   // Reset any items stuck in "playing" state from previous session
   await resetStuckItems();
   log(`Queue store initialized with ${state.items.length} items, autoPlay=${state.autoPlay}`);
+
+  // Listen for playback info broadcasts from main window (for progress bar)
+  if (!isMainWindow) {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      await listen<{ currentTimeMs: number; durationMs: number }>("queue-playback-info", (event) => {
+        sharedPlaybackInfo = event.payload;
+      });
+      log("Playback info listener registered for transcript window");
+    } catch (e) {
+      logError("Failed to register playback info listener:", e);
+    }
+  }
+
+  // Listen for playback commands from other windows (transcript window)
+  if (isMainWindow) {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      await listen<{ command: string }>("queue-playback-command", (event) => {
+        const { command } = event.payload;
+        log(`Received playback command from other window: ${command}`);
+        switch (command) {
+          case "pause": pause(); break;
+          case "resume": resume(); break;
+          case "togglePlayPause": togglePlayPause(); break;
+          case "skipNext": skipNext(); break;
+          case "skipPrevious": skipPrevious(); break;
+          case "stopPlayback": stopPlayback(); break;
+          case "seek": seek((event.payload as unknown as { positionMs: number }).positionMs); break;
+          default: log(`Unknown playback command: ${command}`);
+        }
+      });
+      log("Playback command listener registered for cross-window control");
+    } catch (e) {
+      logError("Failed to register playback command listener:", e);
+    }
+  }
+}
+
+// ==================== Feature 7: Unique voices per session ====================
+
+const UNIQUE_VOICES_KEY = 'vaak_unique_voices';
+
+export function getStoredUniqueVoices(): boolean {
+  try {
+    return localStorage.getItem(UNIQUE_VOICES_KEY) === 'true';
+  } catch { return false; }
+}
+
+export function saveUniqueVoices(enabled: boolean): void {
+  try {
+    localStorage.setItem(UNIQUE_VOICES_KEY, enabled ? 'true' : 'false');
+  } catch {}
+}
+
+// Default voice (fallback when no session-specific voice is set)
+const DEFAULT_VOICE_KEY = 'vaak_default_voice';
+const HARDCODED_DEFAULT_VOICE = 'TlLCuK5N2ARR6OHBwD53'; // AALB
+
+export function getDefaultVoice(): string {
+  try {
+    return localStorage.getItem(DEFAULT_VOICE_KEY) || HARDCODED_DEFAULT_VOICE;
+  } catch { return HARDCODED_DEFAULT_VOICE; }
+}
+
+export function saveDefaultVoice(voiceId: string): void {
+  try {
+    localStorage.setItem(DEFAULT_VOICE_KEY, voiceId);
+  } catch {}
+}
+
+// Voice assignments per session
+const VOICE_ASSIGNMENTS_KEY = 'vaak_voice_assignments';
+
+export function getVoiceAssignments(): Record<string, string> {
+  try {
+    const stored = localStorage.getItem(VOICE_ASSIGNMENTS_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch { return {}; }
+}
+
+export function saveVoiceAssignment(sessionId: string, voiceId: string): void {
+  try {
+    const assignments = getVoiceAssignments();
+    assignments[sessionId] = voiceId;
+    localStorage.setItem(VOICE_ASSIGNMENTS_KEY, JSON.stringify(assignments));
+  } catch {}
+}
+
+// Available voices cache
+let availableVoices: { voice_id: string; name: string }[] = [];
+
+export function getAvailableVoices(): { voice_id: string; name: string }[] {
+  return availableVoices;
+}
+
+export async function fetchAvailableVoices(): Promise<void> {
+  try {
+    const apiUrl = getApiUrl();
+    const response = await fetch(`${apiUrl}/api/v1/voices`);
+    if (response.ok) {
+      const data = await response.json();
+      availableVoices = data.voices || [];
+      log(`Fetched ${availableVoices.length} available voices`);
+    }
+  } catch (error) {
+    logError("Failed to fetch voices:", error);
+  }
+}
+
+// ==================== Feature 8: Session identity cache ====================
+
+interface SessionCacheEntry {
+  name: string;
+  color: string;
+  voiceId?: string;
+}
+
+const sessionCache: Record<string, SessionCacheEntry> = {};
+
+// Enrich queue items with session name/color from cache
+function enrichWithSessionInfo(items: QueueItem[]): QueueItem[] {
+  return items.map(item => {
+    if (item.sessionId.startsWith("screen-reader")) {
+      const sessionName = item.sessionId.startsWith("screen-reader-ask")
+        ? "Screen Reader (Ask)"
+        : item.sessionId.startsWith("screen-reader-err")
+          ? "Screen Reader (Error)"
+          : "Screen Reader";
+      return { ...item, sessionName, sessionColor: "#6366f1" };
+    }
+    const cached = sessionCache[item.sessionId];
+    if (cached && (!item.sessionName || !item.sessionColor)) {
+      return { ...item, sessionName: cached.name, sessionColor: cached.color };
+    }
+    return item;
+  });
+}
+
+export function updateSessionCache(sessions: { id: string; name: string; color: string; voiceId?: string }[]): void {
+  for (const s of sessions) {
+    sessionCache[s.id] = { name: s.name, color: s.color, voiceId: s.voiceId };
+  }
+  // Re-enrich current items with updated session info
+  if (state.items.length > 0) {
+    setState({ items: enrichWithSessionInfo(state.items) });
+  }
+}
+
+// ==================== Feature 8: Announce session toggle ====================
+
+const ANNOUNCE_SESSION_KEY = 'vaak_announce_session';
+
+export function getStoredAnnounceSession(): boolean {
+  try {
+    return localStorage.getItem(ANNOUNCE_SESSION_KEY) === 'true';
+  } catch { return false; }
+}
+
+export function saveAnnounceSession(enabled: boolean): void {
+  try {
+    localStorage.setItem(ANNOUNCE_SESSION_KEY, enabled ? 'true' : 'false');
+  } catch {}
 }

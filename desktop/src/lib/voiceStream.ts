@@ -307,3 +307,50 @@ export function saveVoiceAuto(auto: boolean): void {
     // Ignore storage errors
   }
 }
+
+// Screen reader settings storage
+const SR_MODEL_KEY = 'vaak_sr_model';
+const SR_DETAIL_KEY = 'vaak_sr_detail';
+const SR_FOCUS_KEY = 'vaak_sr_focus';
+const SR_HOTKEY_KEY = 'vaak_sr_hotkey';
+const SR_VOICE_KEY = 'vaak_sr_voice_id';
+const DEFAULT_SR_VOICE_ID = 'jiIkqWtTmS0GBz46iqA0'; // Ravi
+
+export function getStoredSRVoiceId(): string {
+  try {
+    return localStorage.getItem(SR_VOICE_KEY) || DEFAULT_SR_VOICE_ID;
+  } catch {
+    return DEFAULT_SR_VOICE_ID;
+  }
+}
+
+export function saveSRVoiceId(voiceId: string): void {
+  try {
+    localStorage.setItem(SR_VOICE_KEY, voiceId);
+  } catch {}
+}
+
+export function getStoredSRModel(): string {
+  try { return localStorage.getItem(SR_MODEL_KEY) || 'claude-3-5-haiku-20241022'; } catch { return 'claude-3-5-haiku-20241022'; }
+}
+export function saveSRModel(model: string): void {
+  try { localStorage.setItem(SR_MODEL_KEY, model); } catch {}
+}
+export function getStoredSRDetail(): number {
+  try { const v = parseInt(localStorage.getItem(SR_DETAIL_KEY) || '5', 10); return v >= 1 && v <= 5 ? v : 5; } catch { return 5; }
+}
+export function saveSRDetail(detail: number): void {
+  try { localStorage.setItem(SR_DETAIL_KEY, detail.toString()); } catch {}
+}
+export function getStoredSRFocus(): string {
+  try { return localStorage.getItem(SR_FOCUS_KEY) || 'code'; } catch { return 'code'; }
+}
+export function saveSRFocus(focus: string): void {
+  try { localStorage.setItem(SR_FOCUS_KEY, focus); } catch {}
+}
+export function getStoredSRHotkey(): string {
+  try { return localStorage.getItem(SR_HOTKEY_KEY) || 'Alt+R'; } catch { return 'Alt+R'; }
+}
+export function saveSRHotkey(hotkey: string): void {
+  try { localStorage.setItem(SR_HOTKEY_KEY, hotkey); } catch {}
+}

@@ -7,11 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_optional_user
 from app.api.schemas import (
+    ComputerUseRequest,
+    ComputerUseResponse,
+    DescribeScreenRequest,
+    DescribeScreenResponse,
     ErrorResponse,
     HealthResponse,
     PolishRequest,
     PolishResponse,
+    ScreenReaderChatRequest,
+    ScreenReaderChatResponse,
     TranscribeAndPolishResponse,
+    TranscribeBase64Request,
     TranscribeResponse,
 )
 from app.core.config import settings
@@ -296,6 +303,7 @@ async def transcribe_and_polish(
                 "input_tokens": result["usage"]["input_tokens"],
                 "output_tokens": result["usage"]["output_tokens"],
             },
+            saved=bool(user),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
@@ -308,6 +316,7 @@ async def transcribe_and_polish(
 async def text_to_speech(
     text: str = Form(..., description="Text to convert to speech"),
     session_id: str | None = Form(default=None, description="Claude Code session identifier"),
+    voice_id: str | None = Form(default=None, description="ElevenLabs voice ID for per-session voice"),
     user: User | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -327,7 +336,7 @@ async def text_to_speech(
     try:
         from fastapi.responses import Response
 
-        audio_bytes = await elevenlabs_tts.synthesize(text)
+        audio_bytes = await elevenlabs_tts.synthesize(text, voice_id=voice_id)
 
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="ElevenLabs TTS generation failed")
@@ -378,3 +387,186 @@ async def text_to_speech(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+
+
+@router.post(
+    "/tts/stream",
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def text_to_speech_stream(
+    text: str = Form(..., description="Text to convert to speech"),
+    session_id: str | None = Form(default=None, description="Claude Code session identifier"),
+    voice_id: str | None = Form(default=None, description="ElevenLabs voice ID"),
+):
+    """
+    Stream text-to-speech audio using ElevenLabs streaming API.
+
+    Returns chunked audio data for lower latency playback (~200ms to first audio).
+    """
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    async def audio_stream():
+        async for chunk in elevenlabs_tts.synthesize_stream(text, voice_id=voice_id):
+            yield chunk
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": "inline; filename=speech.mp3",
+            "Cache-Control": "no-cache",
+            "Transfer-Encoding": "chunked",
+        },
+    )
+
+
+@router.post(
+    "/describe-screen",
+    response_model=DescribeScreenResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def describe_screen(request: DescribeScreenRequest):
+    """Describe a screenshot using Claude Vision API."""
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+
+    try:
+        from app.services.screen_reader import screen_reader_service
+
+        result = await screen_reader_service.describe(
+            image_base64=request.image_base64,
+            blind_mode=request.blind_mode,
+            detail=request.detail,
+            model=request.model,
+            focus=request.focus,
+            uia_tree=request.uia_tree,
+        )
+        return DescribeScreenResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Screen description failed: {str(e)}")
+
+
+@router.post(
+    "/transcribe-base64",
+    response_model=TranscribeResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+)
+async def transcribe_audio_base64(request: TranscribeBase64Request):
+    """
+    Transcribe base64-encoded audio using Groq's Whisper API.
+
+    Accepts JSON with base64-encoded WAV audio instead of multipart form upload.
+    Used by the Rust desktop client for push-to-talk screen reader questions.
+    """
+    import base64
+
+    try:
+        audio_data = base64.b64decode(request.audio_base64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 audio data")
+
+    if len(audio_data) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Audio file too large. Maximum size is 25MB.")
+
+    try:
+        result = await transcription_service.transcribe(
+            audio_data=audio_data,
+            filename="recording.wav",
+            language=request.language,
+        )
+
+        return TranscribeResponse(
+            raw_text=result["text"],
+            duration=result.get("duration"),
+            language=result.get("language"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+@router.post(
+    "/screen-reader-chat",
+    response_model=ScreenReaderChatResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def screen_reader_chat(request: ScreenReaderChatRequest):
+    """
+    Multi-turn conversation about a screenshot.
+
+    The image is included in the first user message. Follow-up questions
+    reference the same screenshot through conversation context.
+    """
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="Messages cannot be empty")
+
+    try:
+        from app.services.screen_reader import screen_reader_service
+
+        result = await screen_reader_service.chat(
+            image_base64=request.image_base64,
+            messages=request.messages,
+            blind_mode=request.blind_mode,
+            detail=request.detail,
+            model=request.model,
+            focus=request.focus,
+            uia_tree=request.uia_tree,
+        )
+        return ScreenReaderChatResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Screen reader chat failed: {str(e)}")
+
+
+@router.post(
+    "/computer-use",
+    response_model=ComputerUseResponse,
+    responses={500: {"model": ErrorResponse}},
+)
+async def computer_use(request: ComputerUseRequest):
+    """
+    Single-turn computer use call. Rust drives the tool_use loop,
+    calling this endpoint repeatedly until stop_reason is 'end_turn'.
+    """
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+
+    if not request.messages:
+        raise HTTPException(status_code=400, detail="Messages cannot be empty")
+
+    try:
+        from app.services.screen_reader import screen_reader_service
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Convert pydantic models to dicts for the service
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
+        logger.warning(f"[ComputerUse] messages count={len(messages)}, display={request.display_width}x{request.display_height}")
+
+        result = await screen_reader_service.computer_use(
+            messages=messages,
+            display_width=request.display_width,
+            display_height=request.display_height,
+            model=request.model,
+            uia_tree=request.uia_tree,
+        )
+        logger.warning(f"[ComputerUse] success: stop_reason={result.get('stop_reason')}, blocks={len(result.get('content', []))}")
+        return ComputerUseResponse(**result)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Computer use failed: {str(e)}")
+
+
+@router.get("/voices")
+async def get_voices():
+    """
+    Get available ElevenLabs voices.
+
+    Returns a list of voice objects with voice_id and name.
+    Used for per-session voice assignment.
+    """
+    voices = await elevenlabs_tts.get_available_voices()
+    return {"voices": voices}

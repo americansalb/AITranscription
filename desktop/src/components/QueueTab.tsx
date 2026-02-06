@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useQueueStore } from "../lib/queueStore";
 import * as queueStore from "../lib/queueStore";
 import type { QueueItem } from "../lib/queueTypes";
+import { queueSync } from "../lib/queueSync";
 import "../styles/queue.css";
 
 // Format relative time
@@ -22,6 +23,37 @@ function formatTime(ms: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+// Session color badge component (Feature 8)
+function SessionBadge({ name, color }: { name?: string; color?: string }) {
+  if (!name && !color) return null;
+  return (
+    <span className="session-badge" style={{ borderColor: color || '#3b82f6' }}>
+      {color && <span className="session-badge-dot" style={{ backgroundColor: color }} />}
+      <span className="session-badge-name">{name || 'Unknown'}</span>
+    </span>
+  );
+}
+
+// Batch count indicator (Feature 5)
+function BatchIndicator({ count }: { count?: number }) {
+  if (!count || count <= 1) return null;
+  return (
+    <span className="batch-indicator" title={`${count} messages combined`}>
+      {count} msgs
+    </span>
+  );
+}
+
+// Priority badge (Feature 4)
+function PriorityBadge({ priority }: { priority?: string }) {
+  if (!priority || priority === 'normal') return null;
+  return (
+    <span className={`priority-badge priority-${priority}`}>
+      {priority === 'critical' ? '!' : priority}
+    </span>
+  );
+}
+
 // Now Playing Card Component
 function NowPlayingCard({
   item,
@@ -37,46 +69,45 @@ function NowPlayingCard({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  // Update time from real audio element every 100ms while playing
+  // Listen for playback info from main window via Tauri events
+  useEffect(() => {
+    let cleanup: (() => void) | null = null;
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen<{ currentTimeMs: number; durationMs: number }>("queue-playback-info", (event) => {
+        setCurrentTime(event.payload.currentTimeMs);
+        if (event.payload.durationMs > 0) {
+          setDuration(event.payload.durationMs);
+        }
+      }).then((unlisten) => {
+        cleanup = unlisten;
+      });
+    });
+    return () => { cleanup?.(); };
+  }, []);
+
+  // Also poll local audio info (for main window) as fallback
   useEffect(() => {
     if (!isPlaying && !isPaused) return;
 
     const updateTime = () => {
       const info = queueStore.getAudioPlaybackInfo();
-      setCurrentTime(info.currentTimeMs);
-      if (info.durationMs > 0) {
-        setDuration(info.durationMs);
+      if (info.currentTimeMs > 0 || info.durationMs > 0) {
+        setCurrentTime(info.currentTimeMs);
+        if (info.durationMs > 0) {
+          setDuration(info.durationMs);
+        }
       }
     };
 
-    // Initial update
     updateTime();
-
-    const interval = setInterval(updateTime, 100);
+    const interval = setInterval(updateTime, 250);
     return () => clearInterval(interval);
   }, [isPlaying, isPaused]);
 
-  // Use real duration if available, otherwise estimate from text length
   const displayDuration = duration > 0
     ? duration
     : (item.durationMs || (item.text.split(/\s+/).length / 150) * 60 * 1000);
   const progress = displayDuration > 0 ? Math.min((currentTime / displayDuration) * 100, 100) : 0;
-
-  const handlePlayPause = () => {
-    queueStore.togglePlayPause();
-  };
-
-  const handleSkipPrevious = () => {
-    queueStore.skipPrevious();
-  };
-
-  const handleSkipNext = () => {
-    queueStore.skipNext();
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    queueStore.setVolume(parseFloat(e.target.value));
-  };
 
   return (
     <div className="now-playing-card">
@@ -87,22 +118,50 @@ function NowPlayingCard({
           </span>
           <span className="label-text">{isPaused ? "PAUSED" : "NOW PLAYING"}</span>
         </div>
+        {/* Feature 8: Session identity in now playing */}
+        <SessionBadge name={item.sessionName} color={item.sessionColor} />
       </div>
 
       <div className="now-playing-card-content">
         <div className="now-playing-text-full">{item.text}</div>
+        <div className="now-playing-meta-row">
+          <BatchIndicator count={item.batchCount} />
+          <PriorityBadge priority={item.priority} />
+        </div>
       </div>
 
       <div className="now-playing-progress-bar">
-        <div className="progress-track">
-          <div
-            className="progress-fill"
-            style={{ width: `${progress}%` }}
-          />
-          <div
-            className="progress-thumb"
-            style={{ left: `${progress}%` }}
-          />
+        <div
+          className="progress-track"
+          role="slider"
+          aria-label="Seek audio position"
+          aria-valuemin={0}
+          aria-valuemax={Math.round(displayDuration)}
+          aria-valuenow={Math.round(currentTime)}
+          tabIndex={0}
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const fraction = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            const seekMs = fraction * displayDuration;
+            queueStore.seek(seekMs);
+            setCurrentTime(seekMs);
+          }}
+          onKeyDown={(e) => {
+            const step = displayDuration * 0.05; // 5% per key press
+            if (e.key === "ArrowRight") {
+              const newTime = Math.min(currentTime + step, displayDuration);
+              queueStore.seek(newTime);
+              setCurrentTime(newTime);
+            } else if (e.key === "ArrowLeft") {
+              const newTime = Math.max(currentTime - step, 0);
+              queueStore.seek(newTime);
+              setCurrentTime(newTime);
+            }
+          }}
+          style={{ cursor: "pointer" }}
+        >
+          <div className="progress-fill" style={{ width: `${progress}%` }} />
+          <div className="progress-thumb" style={{ left: `${progress}%` }} />
         </div>
         <div className="progress-times">
           <span>{formatTime(currentTime)}</span>
@@ -112,21 +171,13 @@ function NowPlayingCard({
 
       <div className="now-playing-controls">
         <div className="playback-controls">
-          <button
-            className="control-btn"
-            onClick={handleSkipPrevious}
-            title="Previous"
-          >
+          <button className="control-btn" onClick={() => queueStore.skipPrevious()} title="Previous">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <path d="M6 6h2v12H6V6zm3.5 6l8.5 6V6l-8.5 6z"/>
             </svg>
           </button>
 
-          <button
-            className="control-btn primary"
-            onClick={handlePlayPause}
-            title={isPlaying && !isPaused ? "Pause" : "Play"}
-          >
+          <button className="control-btn primary" onClick={() => queueStore.togglePlayPause()} title={isPlaying && !isPaused ? "Pause" : "Play"}>
             {isPlaying && !isPaused ? (
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>
@@ -138,13 +189,15 @@ function NowPlayingCard({
             )}
           </button>
 
-          <button
-            className="control-btn"
-            onClick={handleSkipNext}
-            title="Next"
-          >
+          <button className="control-btn" onClick={() => queueStore.skipNext()} title="Next">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <path d="M6 18l8.5-6L6 6v12zm8.5 0V6h2v12h-2z"/>
+            </svg>
+          </button>
+
+          <button className="control-btn" onClick={() => queueStore.stopPlayback()} title="Stop">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12"/>
             </svg>
           </button>
         </div>
@@ -161,10 +214,9 @@ function NowPlayingCard({
               max="1"
               step="0.1"
               value={volume}
-              onChange={handleVolumeChange}
+              onChange={(e) => queueStore.setVolume(parseFloat(e.target.value))}
             />
           </div>
-
         </div>
       </div>
     </div>
@@ -192,7 +244,7 @@ function DropIndicator({ show }: { show: boolean }) {
   return <div className="drop-indicator" />;
 }
 
-// Up Next Item Component with mouse-based reordering
+// Up Next Item Component
 function UpNextItem({
   item,
   index,
@@ -215,49 +267,39 @@ function UpNextItem({
   return (
     <>
       <DropIndicator show={showDropBefore} />
-      <div
-        className={`up-next-item ${isBeingDragged ? "dragging" : ""}`}
-        data-index={index}
-      >
-      <div
-        className="drag-handle"
-        onMouseDown={(e) => {
-          e.preventDefault();
-          console.log("[UpNextItem] Mouse down on drag handle, index:", index);
-          onStartDrag(index);
-        }}
-      >
-        <span></span>
-        <span></span>
-        <span></span>
-      </div>
-      <div className="up-next-content">
-        <div className="up-next-text">{item.text}</div>
-        <div className="up-next-meta">
-          <span className="meta-time">{formatTimeAgo(item.createdAt)}</span>
+      <div className={`up-next-item ${isBeingDragged ? "dragging" : ""}`} data-index={index}>
+        <div
+          className="drag-handle"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            onStartDrag(index);
+          }}
+        >
+          <span></span><span></span><span></span>
+        </div>
+        <div className="up-next-content">
+          <div className="up-next-text">{item.text}</div>
+          <div className="up-next-meta">
+            {/* Feature 8: Session badge */}
+            <SessionBadge name={item.sessionName} color={item.sessionColor} />
+            <BatchIndicator count={item.batchCount} />
+            <PriorityBadge priority={item.priority} />
+            <span className="meta-time">{formatTimeAgo(item.createdAt)}</span>
+          </div>
+        </div>
+        <div className="up-next-actions">
+          <button className="action-btn play-btn" onClick={onPlay} title="Play now">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7L8 5z"/>
+            </svg>
+          </button>
+          <button className="action-btn remove-btn" onClick={onRemove} title="Remove">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/>
+            </svg>
+          </button>
         </div>
       </div>
-      <div className="up-next-actions">
-        <button
-          className="action-btn play-btn"
-          onClick={onPlay}
-          title="Play now"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M8 5v14l11-7L8 5z"/>
-          </svg>
-        </button>
-        <button
-          className="action-btn remove-btn"
-          onClick={onRemove}
-          title="Remove"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/>
-          </svg>
-        </button>
-      </div>
-    </div>
       <DropIndicator show={showDropAfter} />
     </>
   );
@@ -291,6 +333,8 @@ function HistoryItem({
       <div className="history-content">
         <div className="history-text">{item.text}</div>
         <div className="history-meta">
+          {/* Feature 8: Session badge in history */}
+          <SessionBadge name={item.sessionName} color={item.sessionColor} />
           {isCompleted && item.durationMs && (
             <span className="meta-duration">{(item.durationMs / 1000).toFixed(1)}s</span>
           )}
@@ -300,7 +344,7 @@ function HistoryItem({
               onClick={() => setShowError(!showError)}
               title="Click to show error details"
             >
-              Error {showError ? "▲" : "▼"}
+              Error {showError ? "\u25B2" : "\u25BC"}
             </button>
           )}
           <span className="meta-time">
@@ -313,11 +357,7 @@ function HistoryItem({
           </div>
         )}
       </div>
-      <button
-        className="action-btn replay-btn"
-        onClick={onReplay}
-        title="Replay"
-      >
+      <button className="action-btn replay-btn" onClick={onReplay} title="Replay">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
           <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
         </svg>
@@ -330,32 +370,37 @@ export function QueueTab() {
   const state = useQueueStore();
   const [, forceUpdate] = React.useState(0);
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
-
-  // Track if dragging to pause polling
   const isDraggingRef = React.useRef(false);
 
-  // Poll for updates every 250ms (balance between responsiveness and performance)
-  // NOTE: Audio playback is handled by the MAIN window, not this transcript window
-  // Polling is paused while dragging to prevent choppy reordering
+  // Feature 6: Use BroadcastChannel sync instead of 250ms polling.
+  // Only do a periodic load as fallback, much less frequently.
   useEffect(() => {
+    // Initial load
+    queueStore.loadItems();
+
+    // Listen for cross-window updates (instant)
+    const unsubSync = queueSync.onRemoteUpdate(() => {
+      if (!isDraggingRef.current) {
+        queueStore.loadItems();
+        forceUpdate((n) => n + 1);
+      }
+    });
+
+    // Fallback polling at 2s (much less frequent, only for safety)
     const interval = setInterval(() => {
-      // Skip polling while dragging to prevent choppy UI
       if (isDraggingRef.current) return;
       queueStore.loadItems();
       forceUpdate((n) => n + 1);
-    }, 250);
-    return () => clearInterval(interval);
+    }, 2000);
+
+    return () => {
+      clearInterval(interval);
+      unsubSync();
+    };
   }, []);
 
-  // Load items on mount
-  useEffect(() => {
-    queueStore.loadItems();
-  }, []);
-
-  // Get current playing item for display
   const playingItem = state.currentItem || state.items.find((i) => i.status === "playing");
 
-  // Separate items by status
   const pendingItems = state.items
     .filter((i) => i.status === "pending")
     .sort((a, b) => a.position - b.position);
@@ -364,16 +409,10 @@ export function QueueTab() {
     .filter((i) => i.status === "completed" || i.status === "failed")
     .sort((a, b) => (b.completedAt || b.createdAt) - (a.completedAt || a.createdAt));
 
-  const handlePlay = (uuid: string) => {
-    queueStore.playItem(uuid);
-  };
-
-  const handleRemove = (uuid: string) => {
-    queueStore.removeItem(uuid);
-  };
+  const handlePlay = (uuid: string) => queueStore.playItem(uuid);
+  const handleRemove = (uuid: string) => queueStore.removeItem(uuid);
 
   const handleReplay = async (item: QueueItem) => {
-    // Add the item back to the queue and play it
     await queueStore.addItem(item.text, item.sessionId);
   };
 
@@ -383,34 +422,26 @@ export function QueueTab() {
     }
   };
 
-  const handleClearHistory = () => {
-    queueStore.clearCompleted();
-  };
+  const handleClearHistory = () => queueStore.clearCompleted();
 
   // Mouse-based drag state
   const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
   const [dropTargetIndex, setDropTargetIndex] = useState<number | null>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
-
-  // Use refs to avoid re-registering event listeners on every render
   const draggingIndexRef = React.useRef<number | null>(null);
   const dropTargetIndexRef = React.useRef<number | null>(null);
   const pendingItemsRef = React.useRef(pendingItems);
 
-  // Keep refs in sync
   React.useEffect(() => {
     pendingItemsRef.current = pendingItems;
   }, [pendingItems]);
 
-  // Start dragging
   const handleStartDrag = (index: number) => {
-    console.log("[QueueTab] Starting drag from index:", index);
-    isDraggingRef.current = true; // Pause polling
+    isDraggingRef.current = true;
     setDraggingIndex(index);
     draggingIndexRef.current = index;
   };
 
-  // Handle mouse move during drag - using refs to avoid dependency issues
   useEffect(() => {
     if (draggingIndex === null) return;
 
@@ -418,25 +449,17 @@ export function QueueTab() {
     let rafId: number | null = null;
 
     const handleMouseMove = (e: MouseEvent) => {
-      // Cancel any pending RAF to throttle updates
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
-
+      if (rafId !== null) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         if (!listRef.current) return;
-
-        // Find which item we're hovering over
         const items = listRef.current.querySelectorAll('.up-next-item');
         let newDropTarget: number | null = null;
-
         items.forEach((item, idx) => {
           const rect = item.getBoundingClientRect();
           if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
             newDropTarget = idx;
           }
         });
-
         if (newDropTarget !== lastDropTarget) {
           lastDropTarget = newDropTarget;
           dropTargetIndexRef.current = newDropTarget;
@@ -446,32 +469,25 @@ export function QueueTab() {
     };
 
     const handleMouseUp = async () => {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
+      if (rafId !== null) cancelAnimationFrame(rafId);
 
       const currentDragging = draggingIndexRef.current;
       const currentDropTarget = dropTargetIndexRef.current;
       const items = pendingItemsRef.current;
 
-      console.log("[QueueTab] Mouse up - dragging:", currentDragging, "dropTarget:", currentDropTarget);
-
       if (currentDragging !== null && currentDropTarget !== null && currentDragging !== currentDropTarget) {
         const sourceItem = items[currentDragging];
         const targetItem = items[currentDropTarget];
-
         if (sourceItem && targetItem) {
-          console.log("[QueueTab] Reordering", sourceItem.uuid, "to position", targetItem.position);
           try {
             await queueStore.reorderItem(sourceItem.uuid, targetItem.position);
-            console.log("[QueueTab] Reorder complete");
           } catch (err) {
             console.error("[QueueTab] Reorder failed:", err);
           }
         }
       }
 
-      isDraggingRef.current = false; // Resume polling
+      isDraggingRef.current = false;
       draggingIndexRef.current = null;
       dropTargetIndexRef.current = null;
       setDraggingIndex(null);
@@ -482,13 +498,11 @@ export function QueueTab() {
     document.addEventListener('mouseup', handleMouseUp);
 
     return () => {
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-      }
+      if (rafId !== null) cancelAnimationFrame(rafId);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingIndex]); // Only depend on draggingIndex, not dropTargetIndex or pendingItems
+  }, [draggingIndex]);
 
   return (
     <div className="queue-tab-redesign">
@@ -547,12 +561,9 @@ export function QueueTab() {
         </div>
       </section>
 
-      {/* Section 3: History (Collapsible) */}
+      {/* Section 3: History */}
       <section className={`queue-section history-section ${historyCollapsed ? "collapsed" : ""}`}>
-        <div
-          className="section-header clickable"
-          onClick={() => setHistoryCollapsed(!historyCollapsed)}
-        >
+        <div className="section-header clickable" onClick={() => setHistoryCollapsed(!historyCollapsed)}>
           <div className="section-title">
             <span className="title-text">HISTORY</span>
             {historyItems.length > 0 && (
@@ -560,17 +571,8 @@ export function QueueTab() {
             )}
           </div>
           <div className="section-header-right">
-            <button
-              className="collapse-btn"
-              title={historyCollapsed ? "Expand" : "Collapse"}
-            >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                className={`collapse-icon ${historyCollapsed ? "collapsed" : ""}`}
-              >
+            <button className="collapse-btn" title={historyCollapsed ? "Expand" : "Collapse"}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" className={`collapse-icon ${historyCollapsed ? "collapsed" : ""}`}>
                 <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
               </svg>
             </button>

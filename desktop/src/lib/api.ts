@@ -27,6 +27,7 @@ export interface TranscribeAndPolishResponse {
     input_tokens: number;
     output_tokens: number;
   };
+  saved: boolean;
 }
 
 export interface HealthResponse {
@@ -1036,6 +1037,30 @@ export async function getLeaderboard(
   );
 
   return handleResponse<LeaderboardResponse>(response);
+}
+
+/**
+ * Describe a screenshot using Claude Vision API
+ */
+export async function describeScreen(imageBase64: string, blindMode: boolean, detail: number): Promise<{
+  description: string;
+  input_tokens: number;
+  output_tokens: number;
+}> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/describe-screen`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      image_base64: imageBase64,
+      blind_mode: blindMode,
+      detail: detail,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.text().catch(() => "Unknown error");
+    throw new ApiError(`Screen description failed`, response.status, error);
+  }
+  return response.json();
 }
 
 /**

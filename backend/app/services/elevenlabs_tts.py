@@ -1,6 +1,7 @@
-"""ElevenLabs Text-to-Speech service with chunking for long text."""
+"""ElevenLabs Text-to-Speech service with chunking for long text and streaming support."""
 
 import re
+from typing import AsyncIterator
 import httpx
 from app.core.config import settings
 
@@ -59,7 +60,7 @@ async def synthesize_chunk(text: str, voice_id: str, headers: dict) -> bytes | N
 
     data = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": "eleven_turbo_v2_5",
         "voice_settings": {
             "stability": 0.5,
             "similarity_boost": 0.75,
@@ -78,6 +79,48 @@ async def synthesize_chunk(text: str, voice_id: str, headers: dict) -> bytes | N
     except Exception as e:
         print(f"ElevenLabs TTS error: {e}")
         return None
+
+
+async def synthesize_stream(text: str, voice_id: str | None = None) -> AsyncIterator[bytes]:
+    """Stream TTS audio chunks for faster time-to-first-audio.
+
+    Yields audio bytes as they arrive from ElevenLabs streaming API.
+    """
+    if not settings.elevenlabs_api_key:
+        return
+
+    voice = voice_id or settings.elevenlabs_voice_id
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}/stream"
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": settings.elevenlabs_api_key,
+    }
+
+    data = {
+        "text": text,
+        "model_id": "eleven_turbo_v2_5",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+        },
+        "optimize_streaming_latency": 3,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            async with client.stream("POST", url, json=data, headers=headers, timeout=REQUEST_TIMEOUT) as response:
+                if response.status_code != 200:
+                    print(f"ElevenLabs streaming error: {response.status_code}")
+                    return
+
+                async for chunk in response.aiter_bytes(chunk_size=4096):
+                    if chunk:
+                        yield chunk
+    except Exception as e:
+        print(f"ElevenLabs streaming error: {e}")
 
 
 async def synthesize(text: str, voice_id: str | None = None) -> bytes | None:
@@ -119,3 +162,38 @@ async def synthesize(text: str, voice_id: str | None = None) -> bytes | None:
     # Concatenate MP3 audio (MP3 files can be simply concatenated)
     print(f"[TTS] Concatenating {len(audio_parts)} audio chunks")
     return b''.join(audio_parts)
+
+
+async def get_available_voices() -> list[dict]:
+    """Fetch available voices from ElevenLabs API."""
+    if not settings.elevenlabs_api_key:
+        return []
+
+    headers = {
+        "xi-api-key": settings.elevenlabs_api_key,
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers=headers,
+                timeout=30.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                voices = []
+                for v in data.get("voices", []):
+                    voices.append({
+                        "voice_id": v["voice_id"],
+                        "name": v["name"],
+                        "category": v.get("category", ""),
+                        "labels": v.get("labels", {}),
+                    })
+                return voices
+            else:
+                print(f"Failed to fetch voices: {response.status_code}")
+                return []
+    except Exception as e:
+        print(f"Failed to fetch voices: {e}")
+        return []

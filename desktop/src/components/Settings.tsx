@@ -323,7 +323,7 @@ function DictionaryManager() {
 }
 
 // Convert keyboard event to Tauri hotkey format
-function keyEventToHotkey(e: KeyboardEvent): string | null {
+export function keyEventToHotkey(e: KeyboardEvent): string | null {
   // Don't capture if only modifier keys pressed
   if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
     return null;

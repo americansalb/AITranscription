@@ -1,4 +1,10 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+# Resolve .env relative to this file (backend/.env) so it works regardless of CWD
+_THIS_DIR = Path(__file__).resolve().parent  # app/core/
+_ENV_FILE = _THIS_DIR.parent.parent / ".env"  # backend/.env
 
 
 class Settings(BaseSettings):
@@ -8,7 +14,7 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     anthropic_api_key: str = ""
     elevenlabs_api_key: str = ""
-    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # Default: Rachel
+    elevenlabs_voice_id: str = "TlLCuK5N2ARR6OHBwD53"  # Default: AALB
 
     # Database
     database_url: str = "postgresql+asyncpg://localhost:5432/vaak"
@@ -25,6 +31,7 @@ class Settings(BaseSettings):
     # AI Models
     whisper_model: str = "whisper-large-v3-turbo"
     haiku_model: str = "claude-3-5-haiku-20241022"
+    vision_model: str = "claude-3-5-haiku-20241022"
 
     # Rate limits
     max_audio_duration_seconds: int = 300  # 5 minutes max per request
@@ -33,7 +40,7 @@ class Settings(BaseSettings):
     enable_ml_corrections: bool = False  # Feature flag for embedding-based learning
 
     model_config = {
-        "env_file": ".env",
+        "env_file": str(_ENV_FILE),
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }

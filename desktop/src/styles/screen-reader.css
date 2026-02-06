@@ -1,0 +1,315 @@
+/* Screen Reader Settings Window */
+
+/* Tab Navigation (matches transcript window tabs) */
+.screen-reader-app .main-tab-nav {
+  display: flex;
+  background: #15202b;
+  border-bottom: 1px solid #38444d;
+  padding: 0 16px;
+}
+
+.screen-reader-app .main-tab {
+  padding: 14px 24px;
+  background: none;
+  border: none;
+  color: #8899a6;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s ease;
+}
+
+.screen-reader-app .main-tab:hover {
+  color: #e1e8ed;
+}
+
+.screen-reader-app .main-tab.active {
+  color: #1da1f2;
+}
+
+.screen-reader-app .main-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: #1da1f2;
+  border-radius: 3px 3px 0 0;
+}
+
+.screen-reader-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #0f1419;
+  color: #e1e8ed;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow-y: auto;
+}
+
+.screen-reader-app .sr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #38444d;
+  background: #15202b;
+}
+
+.screen-reader-app .sr-header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #e1e8ed;
+}
+
+.screen-reader-app .sr-header .sr-subtitle {
+  font-size: 12px;
+  color: #8899a6;
+  margin-top: 2px;
+}
+
+.screen-reader-app .sr-content {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  flex: 1;
+}
+
+/* Section */
+.screen-reader-app .sr-section {
+  background: #15202b;
+  border: 1px solid #38444d;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.screen-reader-app .sr-section h2 {
+  margin: 0 0 16px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1da1f2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.screen-reader-app .sr-section h2 svg {
+  flex-shrink: 0;
+}
+
+/* Setting row */
+.screen-reader-app .sr-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+}
+
+.screen-reader-app .sr-row + .sr-row {
+  border-top: 1px solid #253341;
+}
+
+.screen-reader-app .sr-row-label {
+  font-size: 14px;
+  color: #e1e8ed;
+}
+
+.screen-reader-app .sr-row-desc {
+  font-size: 12px;
+  color: #8899a6;
+  margin-top: 2px;
+}
+
+/* Toggle switch */
+.screen-reader-app .sr-toggle {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: #38444d;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+  border: none;
+  padding: 0;
+}
+
+.screen-reader-app .sr-toggle.active {
+  background: #1da1f2;
+}
+
+.screen-reader-app .sr-toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.screen-reader-app .sr-toggle.active::after {
+  transform: translateX(20px);
+}
+
+/* Select */
+.screen-reader-app .sr-select {
+  background: #253341;
+  border: 1px solid #38444d;
+  border-radius: 8px;
+  color: #e1e8ed;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-width: 180px;
+  cursor: pointer;
+  outline: none;
+}
+
+.screen-reader-app .sr-select:focus {
+  border-color: #1da1f2;
+}
+
+/* Slider */
+.screen-reader-app .sr-slider-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.screen-reader-app .sr-slider-value {
+  font-size: 12px;
+  color: #1da1f2;
+  text-align: right;
+  font-weight: 600;
+}
+
+.screen-reader-app .sr-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: #38444d;
+  border-radius: 3px;
+  outline: none;
+}
+
+.screen-reader-app .sr-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: #1da1f2;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+/* Hotkey input */
+.screen-reader-app .sr-hotkey-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.screen-reader-app .sr-hotkey-input {
+  background: #253341;
+  border: 1px solid #38444d;
+  border-radius: 8px;
+  color: #e1e8ed;
+  padding: 8px 12px;
+  font-size: 13px;
+  width: 120px;
+  text-align: center;
+  outline: none;
+  cursor: pointer;
+}
+
+.screen-reader-app .sr-hotkey-input.recording {
+  border-color: #1da1f2;
+  animation: pulse-border 1s infinite;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: #1da1f2; }
+  50% { border-color: #38444d; }
+}
+
+.screen-reader-app .sr-reset-btn {
+  background: #253341;
+  border: 1px solid #38444d;
+  border-radius: 8px;
+  color: #8899a6;
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.screen-reader-app .sr-reset-btn:hover {
+  color: #e1e8ed;
+  border-color: #8899a6;
+}
+
+/* Voice row with preview */
+.screen-reader-app .sr-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.screen-reader-app .sr-preview-btn {
+  background: #253341;
+  border: 1px solid #38444d;
+  border-radius: 8px;
+  color: #8899a6;
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.screen-reader-app .sr-preview-btn:hover {
+  color: #1da1f2;
+  border-color: #1da1f2;
+}
+
+/* Status section */
+.screen-reader-app .sr-status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.screen-reader-app .sr-status-item {
+  background: #253341;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.screen-reader-app .sr-status-label {
+  font-size: 11px;
+  color: #8899a6;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.screen-reader-app .sr-status-value {
+  font-size: 14px;
+  color: #e1e8ed;
+  font-weight: 600;
+}
+
+.screen-reader-app .sr-status-value.connected {
+  color: #17bf63;
+}
+
+.screen-reader-app .sr-status-value.disconnected {
+  color: #e0245e;
+}

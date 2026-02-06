@@ -8,6 +8,8 @@ import { listen } from "@tauri-apps/api/event";
 import * as queueStore from "./queueStore";
 import type { SpeakEventPayload, QueueItem as QueueStoreItem } from "./queueTypes";
 import { getStoredVoiceEnabled } from "./voiceStream";
+import { setBatchCallback, batchMessage, clearBatch } from "./messageBatcher";
+import { initShortcutHandler } from "./shortcutHandler";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:19836";
 
@@ -209,11 +211,21 @@ export async function initSpeakListener(): Promise<() => void> {
     await queueStore.initQueueStore();
   }
 
+  // Feature 5: Set up message batcher callback
+  setBatchCallback((text, sessionId, batchCount) => {
+    console.log(`[Speak] Batched ${batchCount} messages, adding to queue`);
+    queueStore.addItem(text, sessionId, undefined, batchCount);
+  });
+
+  // Feature 1: Initialize keyboard shortcuts
+  const cleanupShortcuts = initShortcutHandler();
+
   interface SpeakPayload {
     text: string;
     session_id: string;
     timestamp: number;
     queue_item?: QueueStoreItem;
+    voice_id?: string;
   }
 
   const unlisten = await listen<SpeakPayload>("speak", (event) => {
@@ -251,17 +263,42 @@ export async function initSpeakListener(): Promise<() => void> {
     // Use queue store for playback if enabled
     console.log(`[Speak] USE_QUEUE_STORE: ${USE_QUEUE_STORE}`);
     if (USE_QUEUE_STORE) {
-      // Add to queue store - it will handle playback
-      console.log(`[Speak] Calling queueStore.addItem...`);
-      queueStore.addItem(payload.text, payload.session_id, payload.queue_item)
-        .then((item) => {
-          console.log(`[Speak] Successfully added to queue:`, item?.uuid);
-        })
-        .catch((error) => {
-          console.error("[Speak] Failed to add to queue store:", error);
-          // Fallback to legacy speak
-          speak(payload.text);
-        });
+      // Use the queue_item from the backend payload if available (already in DB)
+      // Backend sends snake_case, convert to camelCase for TypeScript
+      const rawItem = payload.queue_item as Record<string, unknown> | undefined;
+      const existingItem = rawItem ? {
+        id: rawItem.id as number,
+        uuid: rawItem.uuid as string,
+        sessionId: (rawItem.session_id || rawItem.sessionId) as string,
+        text: rawItem.text as string,
+        status: (rawItem.status || 'pending') as QueueStoreItem['status'],
+        position: rawItem.position as number,
+        createdAt: (rawItem.created_at || rawItem.createdAt) as number,
+        startedAt: (rawItem.started_at || rawItem.startedAt) as number | undefined,
+        completedAt: (rawItem.completed_at || rawItem.completedAt) as number | undefined,
+        durationMs: (rawItem.duration_ms || rawItem.durationMs) as number | undefined,
+        errorMessage: (rawItem.error_message || rawItem.errorMessage) as string | undefined,
+      } as QueueStoreItem : undefined;
+      if (payload.voice_id) {
+        // Voice override (e.g. screen reader) — bypass batcher, add directly with voice
+        console.log(`[Speak] Voice override: ${payload.voice_id}, adding directly to queue`);
+        // Persist SR voice to localStorage so playback always uses it
+        if (payload.session_id?.startsWith("screen-reader")) {
+          localStorage.setItem("vaak-sr-settings", JSON.stringify({ voice_id: payload.voice_id }));
+        }
+        queueStore.addItem(payload.text, payload.session_id, existingItem, undefined, payload.voice_id);
+      } else if (existingItem) {
+        // Backend already created queue item — add directly, skip batcher to avoid duplicate DB insert
+        console.log(`[Speak] Using existing queue item from backend: ${existingItem.uuid}`);
+        queueStore.addItem(payload.text, payload.session_id, existingItem);
+      } else {
+        // Feature 5: Route through message batcher
+        console.log(`[Speak] Routing through batcher...`);
+        const wasBatched = batchMessage(payload.text, payload.session_id);
+        if (!wasBatched) {
+          console.log(`[Speak] Message sent immediately (critical or bypass)`);
+        }
+      }
     } else {
       // Legacy behavior
       speak(payload.text);
@@ -278,10 +315,57 @@ export async function initSpeakListener(): Promise<() => void> {
     }
   });
 
+  // Listen for focus tracking immediate-priority speak events
+  const unlistenFocusTrack = await listen<{ text: string; session_id: string; timestamp: number }>("speak-immediate", (event) => {
+    const payload = event.payload;
+    console.log(`[Speak] Focus tracker: "${payload.text}"`);
+    if (!getStoredVoiceEnabled()) return;
+
+    // Interrupt current playback and speak immediately
+    queueStore.stopPlayback();
+    queueStore.addItem(payload.text, payload.session_id);
+  });
+
+  // Listen for screen reader events (earcon feedback)
+  const { earcons } = await import("./earcons");
+  const unlistenSRStart = await listen("screen-reader-start", () => {
+    console.log("[Speak] Screen reader started - playing earcon");
+    earcons.screenReaderStart();
+  });
+  const unlistenSRDone = await listen("screen-reader-done", () => {
+    console.log("[Speak] Screen reader done - playing earcon");
+    earcons.screenReaderDone();
+  });
+  const unlistenSRError = await listen<string>("screen-reader-error", (event) => {
+    console.log("[Speak] Screen reader error:", event.payload);
+    earcons.screenReaderError();
+  });
+
+  // Listen for screen reader stop-speaking events (Alt+R or Alt+A pressed = stop current audio)
+  const { stopPlayback } = await import("./queueStore");
+  const unlistenSRStop = await listen("screen-reader-stop-speaking", () => {
+    console.log("[Speak] Screen reader stop-speaking - stopping playback");
+    stopPlayback();
+  });
+
+  // Listen for Alt+A screen reader ask events (earcon feedback)
+  const unlistenSRAskStart = await listen("screen-reader-ask-start", () => {
+    console.log("[Speak] Screen reader ask started - playing earcon");
+    earcons.screenReaderAskStart();
+  });
+  const unlistenSRAskDone = await listen("screen-reader-ask-done", () => {
+    console.log("[Speak] Screen reader ask done - playing earcon");
+    earcons.screenReaderAskDone();
+  });
+  const unlistenSRAskError = await listen<string>("screen-reader-ask-error", (event) => {
+    console.log("[Speak] Screen reader ask error:", event.payload);
+    earcons.screenReaderAskError();
+  });
+
   // Store unlisten in window to persist across hot reloads
   window.__SPEAK_GLOBAL_UNLISTEN__ = unlisten;
 
-  console.log("[Speak] Listener initialized (ElevenLabs) - stored in window");
+  console.log("[Speak] Listener initialized (ElevenLabs + screen reader earcons) - stored in window");
 
   // Return cleanup function
   return () => {
@@ -290,7 +374,16 @@ export async function initSpeakListener(): Promise<() => void> {
       window.__SPEAK_GLOBAL_UNLISTEN__();
       window.__SPEAK_GLOBAL_UNLISTEN__ = null;
     }
-    // Reset the flag so HMR can re-initialize properly
+    unlistenSRStart();
+    unlistenSRDone();
+    unlistenSRError();
+    unlistenSRStop();
+    unlistenSRAskStart();
+    unlistenSRAskDone();
+    unlistenSRAskError();
+    unlistenFocusTrack();
+    cleanupShortcuts();
+    clearBatch();
     window.__SPEAK_LISTENER_INITIALIZED__ = false;
     console.log("[Speak] Reset initialized flag for HMR");
   };

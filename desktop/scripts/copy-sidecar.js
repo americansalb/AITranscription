@@ -1,8 +1,12 @@
 // Copy the built vaak-mcp sidecar binary to the binaries directory
 // with the correct platform-specific name that Tauri expects.
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const tauriDir = path.join(__dirname, '..', 'src-tauri');
 const binariesDir = path.join(tauriDir, 'binaries');
@@ -35,6 +39,41 @@ const dst = path.join(binariesDir, dstName);
 // Create binaries dir if needed
 fs.mkdirSync(binariesDir, { recursive: true });
 
-// Copy
-fs.copyFileSync(src, dst);
+// Copy — handle EBUSY/EPERM on Windows (running sidecar processes lock the file)
+try {
+  fs.copyFileSync(src, dst);
+} catch (err) {
+  if (err.code === 'EBUSY' || err.code === 'EPERM') {
+    // On Windows, a running .exe can sometimes be renamed but not overwritten.
+    // Try multiple rename strategies:
+    let renamed = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const suffix = attempt === 0 ? '.old' : `.old${attempt}`;
+      const oldDst = dst + suffix;
+      try { fs.unlinkSync(oldDst); } catch (_) { /* ignore */ }
+      try {
+        fs.renameSync(dst, oldDst);
+        console.log(`Destination locked — renamed old binary to ${path.basename(oldDst)}`);
+        renamed = true;
+        break;
+      } catch (renameErr) {
+        console.log(`Rename attempt ${attempt} failed: ${renameErr.code}`);
+      }
+    }
+    if (!renamed) {
+      // If we can't even rename, try deleting the destination
+      try {
+        fs.unlinkSync(dst);
+        console.log('Deleted locked destination file');
+      } catch (delErr) {
+        console.error(`Cannot rename or delete locked binary: ${delErr.code}`);
+        console.error('Kill all vaak-mcp processes and try again.');
+        process.exit(1);
+      }
+    }
+    fs.copyFileSync(src, dst);
+  } else {
+    throw err;
+  }
+}
 console.log(`Copied sidecar: ${dst}`);
