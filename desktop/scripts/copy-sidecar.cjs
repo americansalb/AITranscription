@@ -1,12 +1,8 @@
 // Copy the built vaak-mcp sidecar binary to the binaries directory
 // with the correct platform-specific name that Tauri expects.
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const tauriDir = path.join(__dirname, '..', 'src-tauri');
 const binariesDir = path.join(tauriDir, 'binaries');
