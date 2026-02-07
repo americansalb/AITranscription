@@ -6,6 +6,7 @@ mod collab;
 mod database;
 mod focus_tracker;
 mod keyboard_hook;
+mod launcher;
 mod queue;
 mod uia_capture;
 
@@ -1733,7 +1734,7 @@ fn watch_project_dir(dir: String) -> Result<serde_json::Value, String> {
     // Store mtimes for all watched files
     let project_mtime = vaak_dir.join("project.json").metadata().ok().and_then(|m| m.modified().ok());
     let sessions_mtime = vaak_dir.join("sessions.json").metadata().ok().and_then(|m| m.modified().ok());
-    let board_mtime = vaak_dir.join("board.jsonl").metadata().ok().and_then(|m| m.modified().ok());
+    let board_mtime = collab::active_board_path(&effective_dir).metadata().ok().and_then(|m| m.modified().ok());
     let claims_mtime = vaak_dir.join("claims.json").metadata().ok().and_then(|m| m.modified().ok());
     *get_project_last_mtimes().lock() = (project_mtime, sessions_mtime, board_mtime, claims_mtime);
 
@@ -1841,9 +1842,12 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
     std::fs::write(vaak_dir.join("sessions.json"), "{\"bindings\":[]}")
         .map_err(|e| format!("Failed to write sessions.json: {}", e))?;
 
-    // Create empty board.jsonl
+    // Create empty board.jsonl (default section uses root .vaak/ path)
     std::fs::write(vaak_dir.join("board.jsonl"), "")
         .map_err(|e| format!("Failed to write board.jsonl: {}", e))?;
+
+    // Create sections directory for future use
+    let _ = std::fs::create_dir_all(vaak_dir.join("sections"));
 
     // Write default role briefings for all four roles
     let briefings: &[(&str, &str)] = &[
@@ -1863,7 +1867,7 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
-    let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+    let board_path = collab::active_board_path(&dir);
     let content = std::fs::read_to_string(&board_path)
         .map_err(|e| format!("Failed to read board.jsonl: {}", e))?;
 
@@ -1892,7 +1896,7 @@ fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
 
 #[tauri::command]
 fn clear_all_messages(dir: String) -> Result<(), String> {
-    let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+    let board_path = collab::active_board_path(&dir);
     std::fs::write(&board_path, "")
         .map_err(|e| format!("Failed to truncate board.jsonl: {}", e))?;
     Ok(())
@@ -2010,8 +2014,570 @@ fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), S
 }
 
 #[tauri::command]
+fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(), String> {
+    if let Some(ref dm) = discussion_mode {
+        if dm != "open" && dm != "directed" {
+            return Err(format!("Invalid communication mode '{}'. Must be 'open' or 'directed'. (Discussion formats like 'delphi'/'oxford' are set when starting a discussion, not here.)", dm));
+        }
+    }
+
+    let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if let Some(settings) = config.get_mut("settings") {
+        match &discussion_mode {
+            Some(dm) => { settings["discussion_mode"] = serde_json::Value::String(dm.clone()); }
+            None => { settings.as_object_mut().map(|o| o.remove("discussion_mode")); }
+        }
+    }
+
+    let now = {
+        let dur = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = dur.as_secs();
+        let hours = (secs % 86400) / 3600;
+        let mins = (secs % 3600) / 60;
+        let s = secs % 60;
+        let days = secs / 86400;
+        let mut y = 1970u64;
+        let mut remaining = days;
+        loop {
+            let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+            if remaining < diy { break; }
+            remaining -= diy;
+            y += 1;
+        }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0u64;
+        for i in 0..12 {
+            if remaining < month_days[i] { break; }
+            remaining -= month_days[i];
+            m = i as u64 + 1;
+        }
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
+    };
+    config["updated_at"] = serde_json::Value::String(now);
+
+    let pretty = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(&config_path, pretty)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    Ok(())
+}
+
+// ==================== Discussion Control Commands ====================
+
+#[tauri::command]
+fn start_discussion(
+    dir: String,
+    mode: String,
+    topic: String,
+    moderator: Option<String>,
+    participants: Vec<String>,
+) -> Result<(), String> {
+    let valid_modes = ["delphi", "oxford", "red_team", "continuous"];
+    if !valid_modes.contains(&mode.as_str()) {
+        return Err(format!("Invalid discussion mode '{}'. Must be one of: {}", mode, valid_modes.join(", ")));
+    }
+    if topic.trim().is_empty() {
+        return Err("Topic cannot be empty.".to_string());
+    }
+    if participants.is_empty() {
+        return Err("At least one participant is required.".to_string());
+    }
+
+    let now = iso_now();
+    let is_continuous = mode == "continuous";
+
+    // Continuous mode starts in "reviewing" phase with no rounds —
+    // rounds are auto-created when developers post status messages.
+    // "reviewing" = ready for next auto-trigger (consistent with post-close phase).
+    let (initial_round, initial_phase, initial_rounds) = if is_continuous {
+        (0, "reviewing".to_string(), Vec::new())
+    } else {
+        (1, "submitting".to_string(), vec![collab::DiscussionRound {
+            number: 1,
+            opened_at: now.clone(),
+            closed_at: None,
+            submissions: Vec::new(),
+            aggregate_message_id: None,
+            trigger_message_id: None,
+            trigger_from: None,
+            author: None,
+            trigger_subject: None,
+            auto_triggered: None,
+            topic: None,
+        }])
+    };
+
+    let mut settings = collab::DiscussionSettings::default();
+    if is_continuous {
+        settings.max_rounds = 999;
+        settings.auto_close_timeout_seconds = 60;
+    }
+
+    let state = collab::DiscussionState {
+        active: true,
+        mode: Some(mode),
+        topic,
+        started_at: Some(now.clone()),
+        moderator,
+        participants,
+        current_round: initial_round,
+        phase: Some(initial_phase),
+        paused_at: None,
+        expire_at: None,
+        previous_phase: None,
+        rounds: initial_rounds,
+        settings,
+    };
+
+    if !collab::write_discussion(&dir, &state) {
+        return Err("Failed to write discussion.json".to_string());
+    }
+
+    // Post announcement to board.jsonl so agents see the discussion started
+    let board_path = collab::active_board_path(&dir);
+    let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+    let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+    let mode_ref = state.mode.as_deref().unwrap_or("unknown");
+    let topic_ref = &state.topic;
+    let mod_ref = state.moderator.as_deref().unwrap_or("none");
+    let parts_ref = state.participants.join(", ");
+    let announcement_body = if is_continuous {
+        format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
+            topic_ref, mod_ref, parts_ref)
+    } else {
+        format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
+            mode_ref, topic_ref, mod_ref, parts_ref)
+    };
+    let announcement = serde_json::json!({
+        "id": msg_id,
+        "from": "system",
+        "to": "all",
+        "type": "moderation",
+        "timestamp": state.started_at,
+        "subject": format!("{} discussion started: {}", mode_ref, topic_ref),
+        "body": announcement_body,
+        "metadata": {
+            "discussion_action": "start",
+            "mode": mode_ref,
+            "round": 1
+        }
+    });
+    if let Ok(line) = serde_json::to_string(&announcement) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn close_discussion_round(dir: String) -> Result<String, String> {
+    // Wrap the entire read-modify-write in a single lock acquisition
+    // to prevent the dual-writer race with MCP sidecar submissions.
+    // Without this, MCP-written submissions could be wiped when we
+    // read discussion.json, modify it, and write it back.
+    collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+        if state.phase.as_deref() != Some("submitting") {
+            return Err(format!("Cannot close round — current phase is '{}'.", state.phase.as_deref().unwrap_or("none")));
+        }
+
+        let now = iso_now();
+        let round_num = state.current_round;
+
+        // Collect submission message IDs from current round
+        let submission_ids: Vec<u64> = state.rounds.last()
+            .map(|r| r.submissions.iter().map(|s| s.message_id).collect())
+            .unwrap_or_default();
+
+        // Read board.jsonl to find submission bodies
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let mut bodies: Vec<String> = Vec::new();
+
+        if !submission_ids.is_empty() {
+            // Use tracked submission IDs
+            for line in board_content.lines() {
+                if line.trim().is_empty() { continue; }
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                    let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if submission_ids.contains(&id) {
+                        let body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(empty)");
+                        bodies.push(body.to_string());
+                    }
+                }
+            }
+        } else {
+            // Fallback: scan board.jsonl for type="submission" messages in this round's time window
+            let opened_at = state.rounds.last()
+                .map(|r| r.opened_at.as_str())
+                .unwrap_or("");
+            for line in board_content.lines() {
+                if line.trim().is_empty() { continue; }
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                    let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    let ts = msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                    if msg_type == "submission" && ts >= opened_at {
+                        let body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(empty)");
+                        bodies.push(body.to_string());
+                    }
+                }
+            }
+        }
+
+        let topic = &state.topic;
+        let total = bodies.len();
+        let is_continuous_close = state.mode.as_deref() == Some("continuous");
+
+        let aggregate = if is_continuous_close {
+            // Continuous mode: lightweight tally (not anonymized)
+            if total == 0 {
+                format!("## Continuous Review Round {} — APPROVED\n**Change:** {}\n**Result:** No objections (silence = consent)", round_num, topic)
+            } else {
+                let mut agree_count = 0usize;
+                let mut disagree_list: Vec<String> = Vec::new();
+                let mut alternative_list: Vec<String> = Vec::new();
+                for body in &bodies {
+                    let lower = body.trim().to_lowercase();
+                    if lower.starts_with("agree") || lower == "lgtm" || lower == "approved" || lower == "+1" {
+                        agree_count += 1;
+                    } else if lower.starts_with("disagree") || lower.starts_with("object") || lower.starts_with("-1") {
+                        disagree_list.push(body.clone());
+                    } else if lower.starts_with("alternative") || lower.starts_with("suggest") || lower.starts_with("instead") {
+                        alternative_list.push(body.clone());
+                    } else {
+                        disagree_list.push(body.clone());
+                    }
+                }
+                let verdict = if disagree_list.is_empty() && alternative_list.is_empty() { "APPROVED" } else { "DISPUTED" };
+                let silent = state.participants.len().saturating_sub(total + 1);
+                let mut result = format!(
+                    "## Continuous Review Round {} — {}\n**Change:** {}\n**Result:** {} agree, {} disagree, {} alternatives, {} silent (= approve)\n",
+                    round_num, verdict, topic, agree_count + silent, disagree_list.len(), alternative_list.len(), silent);
+                if !disagree_list.is_empty() {
+                    result.push_str("\n**Disagreements:**\n");
+                    for (i, d) in disagree_list.iter().enumerate() { result.push_str(&format!("  {}. {}\n", i+1, d)); }
+                }
+                if !alternative_list.is_empty() {
+                    result.push_str("\n**Alternatives:**\n");
+                    for (i, a) in alternative_list.iter().enumerate() { result.push_str(&format!("  {}. {}\n", i+1, a)); }
+                }
+                result
+            }
+        } else {
+            // Delphi/Oxford/Red Team: full anonymized aggregate with randomized order
+            let seed = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let mut rng = seed;
+            for i in (1..bodies.len()).rev() {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let j = (rng as usize) % (i + 1);
+                bodies.swap(i, j);
+            }
+
+            let format_name = state.mode.as_deref().map(|m| {
+                let mut chars = m.chars();
+                match chars.next() {
+                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => "Discussion".to_string(),
+                }
+            }).unwrap_or_else(|| "Discussion".to_string());
+
+            if total == 0 {
+                format!("## {} Round {} Aggregate\nNo submissions received this round.", format_name, round_num)
+            } else {
+                let mut agg = format!(
+                    "## {} Round {} Aggregate — {} submissions\n**Topic:** {}\n\n---\n\n",
+                    format_name, round_num, total, topic
+                );
+                for (i, body) in bodies.iter().enumerate() {
+                    agg.push_str(&format!("### Participant {}\n{}\n\n---\n\n", i + 1, body));
+                }
+                agg.push_str(&format!(
+                    "*{} submissions collected. Order randomized. Identities anonymized.*", total
+                ));
+                agg
+            }
+        };
+
+        // Write aggregate as moderation message to board.jsonl
+        // (board.lock is already held by with_board_lock — write directly)
+        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let aggregate_msg = serde_json::json!({
+            "id": msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now,
+            "subject": format!("Round {} Aggregate", round_num),
+            "body": aggregate,
+            "metadata": {
+                "discussion_action": "aggregate",
+                "round": round_num
+            }
+        });
+        let aggregate_line = serde_json::to_string(&aggregate_msg)
+            .map_err(|e| format!("Failed to serialize aggregate: {}", e))?;
+
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&board_path)
+                .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+            writeln!(file, "{}", aggregate_line)
+                .map_err(|e| format!("Failed to write aggregate: {}", e))?;
+        }
+
+        // Update discussion state and write atomically (lock already held)
+        if let Some(round) = state.rounds.last_mut() {
+            round.closed_at = Some(now.clone());
+            round.aggregate_message_id = Some(msg_id);
+        }
+        state.phase = Some("reviewing".to_string());
+
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
+        Ok(format!("Round {} closed. {} submissions aggregated.", round_num, total))
+    })
+}
+
+#[tauri::command]
+fn open_next_round(dir: String) -> Result<u32, String> {
+    // Wrap in board lock to prevent race with MCP sidecar
+    collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+
+        let next_round = state.current_round + 1;
+        if next_round > state.settings.max_rounds {
+            return Err(format!("Max rounds ({}) reached.", state.settings.max_rounds));
+        }
+
+        let now = iso_now();
+        state.current_round = next_round;
+        state.phase = Some("submitting".to_string());
+        state.rounds.push(collab::DiscussionRound {
+            number: next_round,
+            opened_at: now.clone(),
+            closed_at: None,
+            submissions: Vec::new(),
+            aggregate_message_id: None,
+            trigger_message_id: None,
+            trigger_from: None,
+            author: None,
+            trigger_subject: None,
+            auto_triggered: None,
+            topic: None,
+        });
+
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
+
+        // Post round-open announcement to board.jsonl (lock already held)
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let announcement = serde_json::json!({
+            "id": msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now,
+            "subject": format!("Round {} opened", next_round),
+            "body": format!("Round {} is now open for submissions. Review the previous aggregate and submit your revised position.", next_round),
+            "metadata": {
+                "discussion_action": "open_round",
+                "round": next_round
+            }
+        });
+        if let Ok(line) = serde_json::to_string(&announcement) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+
+        Ok(next_round)
+    })
+}
+
+#[tauri::command]
+fn end_discussion(dir: String) -> Result<(), String> {
+    // Wrap in board lock to prevent race with MCP sidecar
+    collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+
+        let now = iso_now();
+        let topic = state.topic.clone();
+        let round_num = state.current_round;
+
+        state.active = false;
+        state.phase = Some("complete".to_string());
+
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
+
+        // Post end announcement to board.jsonl (lock already held)
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let announcement = serde_json::json!({
+            "id": msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now,
+            "subject": format!("Discussion ended: {}", topic),
+            "body": format!("The discussion on \"{}\" has concluded after {} round(s).", topic, round_num),
+            "metadata": {
+                "discussion_action": "end",
+                "final_round": round_num
+            }
+        });
+        if let Ok(line) = serde_json::to_string(&announcement) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
+    let state = collab::read_discussion(&dir);
+    let mut val = serde_json::to_value(&state)
+        .map_err(|e| format!("Failed to serialize discussion state: {}", e))?;
+
+    // Enrich submissions from board.jsonl (source of truth) since MCP tracking can miss writes
+    if state.active {
+        let board_path = collab::active_board_path(&dir);
+        if let Ok(board_content) = std::fs::read_to_string(&board_path) {
+            let submissions: Vec<serde_json::Value> = board_content.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|msg| msg.get("type").and_then(|t| t.as_str()) == Some("submission"))
+                .collect();
+
+            if let Some(rounds) = val.get_mut("rounds").and_then(|r| r.as_array_mut()) {
+                for round in rounds.iter_mut() {
+                    let opened_at = round.get("opened_at").and_then(|t| t.as_str()).unwrap_or("");
+                    let closed_at = round.get("closed_at").and_then(|t| t.as_str()).unwrap_or("");
+
+                    // Find submissions that fall within this round's time window
+                    let round_subs: Vec<serde_json::Value> = submissions.iter()
+                        .filter(|msg| {
+                            let ts = msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                            ts >= opened_at && (closed_at.is_empty() || ts <= closed_at)
+                        })
+                        .map(|msg| {
+                            serde_json::json!({
+                                "from": msg.get("from").and_then(|f| f.as_str()).unwrap_or("unknown"),
+                                "message_id": msg.get("id").and_then(|i| i.as_u64()).unwrap_or(0),
+                                "submitted_at": msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("")
+                            })
+                        })
+                        .collect();
+
+                    // Only override if board has more submissions than discussion.json tracked
+                    let existing_count = round.get("submissions")
+                        .and_then(|s| s.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    if round_subs.len() > existing_count {
+                        round["submissions"] = serde_json::json!(round_subs);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(val)
+}
+
+#[tauri::command]
+fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), String> {
+    // Wrap in board lock to prevent race with MCP sidecar
+    collab::with_board_lock(&dir, || {
+        let disc_path = collab::active_discussion_path(&dir);
+        let content = std::fs::read_to_string(&disc_path)
+            .map_err(|e| format!("Failed to read discussion.json: {}", e))?;
+        let mut disc: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse discussion.json: {}", e))?;
+
+        if let Some(settings) = disc.get_mut("settings") {
+            settings["auto_close_timeout_seconds"] = serde_json::json!(timeout_seconds);
+        } else {
+            disc["settings"] = serde_json::json!({
+                "auto_close_timeout_seconds": timeout_seconds
+            });
+        }
+
+        std::fs::write(&disc_path, serde_json::to_string_pretty(&disc)
+            .map_err(|e| format!("Failed to serialize: {}", e))?)
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
+
+        Ok(())
+    })
+}
+
+/// Generate ISO 8601 UTC timestamp
+fn iso_now() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+    let days = secs / 86400;
+    let mut y = 1970u64;
+    let mut remaining = days;
+    loop {
+        let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+        if remaining < diy { break; }
+        remaining -= diy;
+        y += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0u64;
+    for i in 0..12 {
+        if remaining < month_days[i] { break; }
+        remaining -= month_days[i];
+        m = i as u64 + 1;
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
+}
+
+#[tauri::command]
 fn send_team_message(dir: String, to: String, subject: String, body: String, msg_type: Option<String>, metadata: Option<serde_json::Value>) -> Result<u64, String> {
-    let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+    let board_path = collab::active_board_path(&dir);
 
     // Read existing board to determine next message ID
     let existing = std::fs::read_to_string(&board_path).unwrap_or_default();
@@ -2078,6 +2644,59 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
         .map_err(|e| format!("Failed to write message: {}", e))?;
 
     Ok(msg_id)
+}
+
+// ==================== Section Commands ====================
+
+#[tauri::command]
+fn create_section(dir: String, name: String) -> Result<collab::SectionInfo, String> {
+    collab::create_section(&dir, &name)
+}
+
+#[tauri::command]
+fn switch_section(dir: String, slug: String) -> Result<(), String> {
+    // Verify the section exists (either "default" or has a sections/{slug}/ directory)
+    if slug != "default" {
+        let sec_dir = std::path::Path::new(&dir).join(".vaak").join("sections").join(&slug);
+        if !sec_dir.exists() {
+            return Err(format!("Section '{}' does not exist", slug));
+        }
+    }
+    collab::set_active_section(&dir, &slug)
+}
+
+#[tauri::command]
+fn list_sections(dir: String) -> Result<Vec<collab::SectionInfo>, String> {
+    Ok(collab::list_sections(&dir))
+}
+
+#[tauri::command]
+fn get_active_section(dir: String) -> Result<String, String> {
+    Ok(collab::get_active_section(&dir))
+}
+
+// ==================== Roster Commands ====================
+
+#[tauri::command]
+fn roster_add_slot(project_dir: String, role: String) -> Result<collab::RosterSlot, String> {
+    collab::roster_add_slot(&project_dir, &role)
+}
+
+#[tauri::command]
+fn roster_remove_slot(
+    project_dir: String,
+    role: String,
+    instance: i32,
+    launcher_state: tauri::State<'_, launcher::LauncherState>,
+) -> Result<(), String> {
+    // Best-effort kill the spawned terminal process before removing the slot
+    launcher::kill_tracked_agent(&role, instance, &launcher_state);
+    collab::roster_remove_slot(&project_dir, &role, instance)
+}
+
+#[tauri::command]
+fn roster_get(project_dir: String) -> Result<Vec<collab::RosterSlotWithStatus>, String> {
+    collab::roster_get(&project_dir)
 }
 
 #[tauri::command]
@@ -2410,7 +3029,7 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
             let vaak_dir = std::path::Path::new(&dir).join(".vaak");
             let project_path = vaak_dir.join("project.json");
             let sessions_path = vaak_dir.join("sessions.json");
-            let board_path = vaak_dir.join("board.jsonl");
+            let board_path = collab::active_board_path(&dir);
             let claims_path = vaak_dir.join("claims.json");
 
             let current_mtimes = (
@@ -2453,6 +3072,7 @@ fn main() {
     let builder = tauri::Builder::default()
         .manage(AudioRecorderState(Mutex::new(AudioRecorder::new())))
         .manage(ScreenReaderConversationState(Mutex::new(ScreenReaderConversation::default())))
+        .manage(launcher::LauncherState::default())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -3033,16 +3653,47 @@ fn main() {
             read_role_briefing,
             send_team_message,
             set_workflow_type,
+            set_discussion_mode,
+            start_discussion,
+            close_discussion_round,
+            open_next_round,
+            end_discussion,
+            get_discussion_state,
+            set_continuous_timeout,
             delete_message,
             clear_all_messages,
             set_message_retention,
             get_project_claims,
             claim_files,
-            release_claim
+            release_claim,
+            create_section,
+            switch_section,
+            list_sections,
+            get_active_section,
+            // Roster commands
+            roster_add_slot,
+            roster_remove_slot,
+            roster_get,
+            // Team launcher commands
+            launcher::check_claude_installed,
+            launcher::launch_team_member,
+            launcher::launch_team,
+            launcher::kill_team_member,
+            launcher::kill_all_team_members,
+            launcher::get_spawned_agents,
         ]);
 
-    match builder.run(tauri::generate_context!()) {
-        Ok(_) => {}
+    match builder.build(tauri::generate_context!()) {
+        Ok(app) => {
+            app.run(|_app_handle, event| {
+                if let tauri::RunEvent::Exit = event {
+                    // Kill all spawned Claude agents on app exit
+                    if let Some(state) = _app_handle.try_state::<launcher::LauncherState>() {
+                        launcher::cleanup_all_spawned(&state);
+                    }
+                }
+            });
+        }
         Err(e) => {
             let error_msg = format!("Failed to run Tauri application: {}", e);
             log_error(&error_msg);
