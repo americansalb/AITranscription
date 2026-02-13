@@ -4047,38 +4047,20 @@ fn get_ancestor_pid(pid: u32) -> Option<u32> {
     }
 }
 
-/// Get the parent PID of a given process (macOS via sysctl)
+/// Get the parent PID of a given process (macOS — uses ps command)
 #[cfg(target_os = "macos")]
 fn get_ancestor_pid(pid: u32) -> Option<u32> {
-    // Use sysctl kern.proc.pid.{pid} to get kinfo_proc with parent PID
-    let mut mib: [libc::c_int; 4] = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_PID,
-        pid as libc::c_int,
-    ];
+    // Use `ps -o ppid= -p {pid}` to get the parent PID.
+    // This avoids FFI with kinfo_proc which isn't exposed by the libc crate.
+    let output = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
 
-    let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::kinfo_proc>();
-
-    let ret = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            4,
-            &mut info as *mut _ as *mut libc::c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-
-    if ret == 0 && size > 0 {
-        let ppid = info.kp_eproc.e_ppid;
-        if ppid > 1 {
-            Some(ppid as u32)
-        } else {
-            None
-        }
+    if output.status.success() {
+        let ppid_str = String::from_utf8_lossy(&output.stdout);
+        let ppid: u32 = ppid_str.trim().parse().ok()?;
+        if ppid > 1 { Some(ppid) } else { None }
     } else {
         None
     }
