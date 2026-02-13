@@ -8,5 +8,9 @@
     <string>Vaak needs accessibility access to simulate keyboard shortcuts for pasting text.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Vaak uses AppleScript to paste text into other applications.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Vaak needs screen recording access to capture screenshots for the AI screen reader feature.</string>
+    <key>NSAppNapIsDisabled</key>
+    <true/>
 </dict>
 </plist>

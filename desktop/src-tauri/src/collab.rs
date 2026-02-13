@@ -91,6 +91,17 @@ impl SessionRegistry {
 
 // ==================== Project Types (for desktop app UI) ====================
 
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompanionConfig {
+    pub role: String,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default = "default_true")]
+    pub default_enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleConfig {
     pub title: String,
@@ -98,6 +109,10 @@ pub struct RoleConfig {
     pub max_instances: u32,
     pub permissions: Vec<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companions: Vec<CompanionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +120,8 @@ pub struct RosterSlot {
     pub role: String,
     pub instance: u32,
     pub added_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -114,6 +131,8 @@ pub struct RosterSlotWithStatus {
     pub added_at: String,
     pub status: String, // "vacant", "standby", "working"
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,11 +169,14 @@ pub struct SessionBinding {
     pub role: String,
     pub instance: u32,
     pub session_id: String,
+    #[serde(default, alias = "joined_at")]
     pub claimed_at: String,
     pub last_heartbeat: String,
     pub status: String,
     #[serde(default)]
     pub activity: Option<String>,
+    #[serde(default)]
+    pub last_working_at: Option<String>,
     #[serde(default)]
     pub active_section: Option<String>,
 }
@@ -1016,7 +1038,8 @@ pub fn list_sections(dir: &str) -> Vec<SectionInfo> {
 // ==================== Roster Management ====================
 
 /// Add a roster slot for a role. Auto-assigns instance number. No max_instances limit.
-pub fn roster_add_slot(dir: &str, role: &str) -> Result<RosterSlot, String> {
+/// Optional metadata (e.g., `{"pool_id": "software-dev"}` for audience roles).
+pub fn roster_add_slot(dir: &str, role: &str, metadata: Option<serde_json::Value>) -> Result<RosterSlot, String> {
     let config_path = Path::new(dir).join(".vaak").join("project.json");
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
@@ -1085,13 +1108,18 @@ pub fn roster_add_slot(dir: &str, role: &str) -> Result<RosterSlot, String> {
         role: role.to_string(),
         instance,
         added_at: now.clone(),
+        metadata: metadata.clone(),
     };
 
-    roster.push(serde_json::json!({
+    let mut slot_json = serde_json::json!({
         "role": role,
         "instance": instance,
         "added_at": now
-    }));
+    });
+    if let Some(ref meta) = metadata {
+        slot_json["metadata"] = meta.clone();
+    }
+    roster.push(slot_json);
 
     // Update timestamp
     config["updated_at"] = serde_json::json!(iso_now());
@@ -1215,14 +1243,767 @@ pub fn roster_get(dir: &str) -> Result<Vec<RosterSlotWithStatus>, String> {
             None => ("vacant".to_string(), None),
         };
 
+        let metadata = slot.get("metadata").cloned();
         result.push(RosterSlotWithStatus {
             role: role.to_string(),
             instance,
             added_at,
             status,
             session_id,
+            metadata,
         });
     }
 
     Ok(result)
+}
+
+// ==================== Role CRUD ====================
+
+const BUILT_IN_ROLES: &[&str] = &["developer", "manager", "architect", "tester", "moderator"];
+
+/// Validate a role slug: lowercase alphanumeric + hyphens, non-empty.
+fn validate_slug(slug: &str) -> Result<(), String> {
+    if slug.is_empty() {
+        return Err("Role slug cannot be empty".to_string());
+    }
+    if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("Role slug must be lowercase alphanumeric with hyphens only".to_string());
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err("Role slug cannot start or end with a hyphen".to_string());
+    }
+    Ok(())
+}
+
+/// Create a new role in project.json and write its briefing file.
+pub fn create_role(
+    dir: &str,
+    slug: &str,
+    title: &str,
+    description: &str,
+    permissions: Vec<String>,
+    max_instances: u32,
+    briefing: &str,
+    tags: Vec<String>,
+    companions: Vec<CompanionConfig>,
+) -> Result<RoleConfig, String> {
+    validate_slug(slug)?;
+
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+    let lock_path = vaak_dir.join("board.lock");
+
+    // Acquire file lock for project.json modification
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions);
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
+    };
+
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions);
+
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    };
+
+    // Auto-save as global template (non-blocking: log error but don't fail role creation)
+    if result.is_ok() {
+        if let Err(e) = save_role_as_global_template(dir, slug) {
+            eprintln!("[collab] Auto-save global template for '{}' failed: {}", slug, e);
+        }
+    }
+
+    result
+}
+
+fn create_role_inner(
+    config_path: &Path,
+    vaak_dir: &Path,
+    slug: &str,
+    title: &str,
+    description: &str,
+    permissions: &[String],
+    max_instances: u32,
+    briefing: &str,
+    tags: &[String],
+    companions: &[CompanionConfig],
+) -> Result<RoleConfig, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Check slug uniqueness
+    if let Some(roles) = config.get("roles").and_then(|r| r.as_object()) {
+        if roles.contains_key(slug) {
+            return Err(format!("Role '{}' already exists", slug));
+        }
+    }
+
+    let now = iso_now();
+    let role_config = RoleConfig {
+        title: title.to_string(),
+        description: description.to_string(),
+        max_instances,
+        permissions: permissions.to_vec(),
+        created_at: now.clone(),
+        tags: tags.to_vec(),
+        companions: companions.to_vec(),
+    };
+
+    // Add role to config
+    let mut role_json = serde_json::json!({
+        "title": title,
+        "description": description,
+        "max_instances": max_instances,
+        "permissions": permissions,
+        "created_at": now,
+        "tags": tags,
+    });
+    if !companions.is_empty() {
+        role_json["companions"] = serde_json::to_value(companions)
+            .map_err(|e| format!("Failed to serialize companions: {}", e))?;
+    }
+
+    config.get_mut("roles")
+        .and_then(|r| r.as_object_mut())
+        .ok_or("No roles object in project.json")?
+        .insert(slug.to_string(), role_json);
+
+    config["updated_at"] = serde_json::Value::String(iso_now());
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    std::fs::write(config_path, updated)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Create briefing file
+    let roles_dir = vaak_dir.join("roles");
+    std::fs::create_dir_all(&roles_dir)
+        .map_err(|e| format!("Failed to create roles directory: {}", e))?;
+    let briefing_path = roles_dir.join(format!("{}.md", slug));
+    std::fs::write(&briefing_path, briefing)
+        .map_err(|e| format!("Failed to write briefing file: {}", e))?;
+
+    Ok(role_config)
+}
+
+/// Update an existing role's metadata and/or briefing.
+pub fn update_role(
+    dir: &str,
+    slug: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    permissions: Option<Vec<String>>,
+    max_instances: Option<u32>,
+    briefing: Option<&str>,
+    tags: Option<Vec<String>>,
+    companions: Option<Vec<CompanionConfig>>,
+) -> Result<RoleConfig, String> {
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+    let lock_path = vaak_dir.join("board.lock");
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref());
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref());
+
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    }
+}
+
+fn update_role_inner(
+    config_path: &Path,
+    vaak_dir: &Path,
+    slug: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    permissions: Option<&[String]>,
+    max_instances: Option<u32>,
+    briefing: Option<&str>,
+    tags: Option<&[String]>,
+    companions: Option<&[CompanionConfig]>,
+) -> Result<RoleConfig, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    {
+        let role = config.get_mut("roles")
+            .and_then(|r| r.as_object_mut())
+            .and_then(|roles| roles.get_mut(slug))
+            .ok_or(format!("Role '{}' not found", slug))?;
+
+        if let Some(t) = title {
+            role["title"] = serde_json::Value::String(t.to_string());
+        }
+        if let Some(d) = description {
+            role["description"] = serde_json::Value::String(d.to_string());
+        }
+        if let Some(p) = permissions {
+            role["permissions"] = serde_json::json!(p);
+        }
+        if let Some(m) = max_instances {
+            role["max_instances"] = serde_json::json!(m);
+        }
+        if let Some(t) = tags {
+            role["tags"] = serde_json::json!(t);
+        }
+        if let Some(c) = companions {
+            if c.is_empty() {
+                role.as_object_mut().map(|o| o.remove("companions"));
+            } else {
+                role["companions"] = serde_json::to_value(c)
+                    .map_err(|e| format!("Failed to serialize companions: {}", e))?;
+            }
+        }
+    }
+
+    config["updated_at"] = serde_json::Value::String(iso_now());
+
+    // Re-read the updated role for the return value
+    let updated_role: RoleConfig = config.get("roles")
+        .and_then(|r| r.get(slug))
+        .and_then(|r| serde_json::from_value(r.clone()).ok())
+        .ok_or(format!("Failed to read back updated role '{}'", slug))?;
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    std::fs::write(config_path, updated)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Update briefing file if provided
+    if let Some(b) = briefing {
+        let briefing_path = vaak_dir.join("roles").join(format!("{}.md", slug));
+        std::fs::write(&briefing_path, b)
+            .map_err(|e| format!("Failed to write briefing file: {}", e))?;
+    }
+
+    Ok(updated_role)
+}
+
+/// Delete a role from project.json, remove its briefing file and roster entries.
+/// Refuses to delete built-in roles or roles with active sessions.
+pub fn delete_role(dir: &str, slug: &str) -> Result<(), String> {
+    // Check built-in
+    if BUILT_IN_ROLES.contains(&slug) {
+        return Err(format!("Cannot delete built-in role '{}'", slug));
+    }
+
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+    let sessions_path = vaak_dir.join("sessions.json");
+    let lock_path = vaak_dir.join("board.lock");
+
+    // Check for active sessions before acquiring lock
+    let timeout_secs = {
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read project.json: {}", e))?;
+        let config: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+        config.get("settings")
+            .and_then(|s| s.get("heartbeat_timeout_seconds"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(120)
+    };
+
+    if let Ok(sessions_content) = std::fs::read_to_string(&sessions_path) {
+        if let Ok(sessions) = serde_json::from_str::<serde_json::Value>(&sessions_content) {
+            if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+                let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                let has_active = bindings.iter().any(|b| {
+                    let role_match = b.get("role").and_then(|r| r.as_str()) == Some(slug);
+                    let is_active = b.get("status").and_then(|s| s.as_str()) == Some("active");
+                    let hb = b.get("last_heartbeat").and_then(|h| h.as_str()).unwrap_or("");
+                    let is_fresh = parse_iso_epoch(hb)
+                        .map(|hb_secs| now_secs.saturating_sub(hb_secs) <= timeout_secs)
+                        .unwrap_or(false);
+                    role_match && is_active && is_fresh
+                });
+                if has_active {
+                    return Err(format!("Cannot delete role '{}': has active sessions. Remove agents first.", slug));
+                }
+            }
+        }
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = delete_role_inner(&config_path, &vaak_dir, slug);
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = delete_role_inner(&config_path, &vaak_dir, slug);
+
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    }
+}
+
+fn delete_role_inner(
+    config_path: &Path,
+    vaak_dir: &Path,
+    slug: &str,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Remove from roles catalog
+    let removed = config.get_mut("roles")
+        .and_then(|r| r.as_object_mut())
+        .map(|roles| roles.remove(slug).is_some())
+        .unwrap_or(false);
+
+    if !removed {
+        return Err(format!("Role '{}' not found in project.json", slug));
+    }
+
+    // Remove roster entries for this role
+    if let Some(roster) = config.get_mut("roster").and_then(|r| r.as_array_mut()) {
+        roster.retain(|s| {
+            s.get("role").and_then(|r| r.as_str()) != Some(slug)
+        });
+    }
+
+    config["updated_at"] = serde_json::Value::String(iso_now());
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    std::fs::write(config_path, updated)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Remove briefing file (best-effort)
+    let briefing_path = vaak_dir.join("roles").join(format!("{}.md", slug));
+    let _ = std::fs::remove_file(&briefing_path);
+
+    // Remove session bindings for this role (best-effort)
+    let sessions_path = vaak_dir.join("sessions.json");
+    if let Ok(sessions_content) = std::fs::read_to_string(&sessions_path) {
+        if let Ok(mut sessions) = serde_json::from_str::<serde_json::Value>(&sessions_content) {
+            if let Some(bindings) = sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+                bindings.retain(|b| {
+                    b.get("role").and_then(|r| r.as_str()) != Some(slug)
+                });
+                if let Ok(updated) = serde_json::to_string_pretty(&sessions) {
+                    let _ = std::fs::write(&sessions_path, updated);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ==================== Global Role Templates ====================
+
+/// Get the global role-templates directory (~/.vaak/role-templates/)
+fn global_templates_dir() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or("Cannot determine home directory")?;
+    Ok(PathBuf::from(home).join(".vaak").join("role-templates"))
+}
+
+/// Save a role from a project as a global template.
+/// Copies the role definition to ~/.vaak/role-templates/{slug}.json
+/// and the briefing to ~/.vaak/role-templates/{slug}.md
+pub fn save_role_as_global_template(dir: &str, slug: &str) -> Result<(), String> {
+    validate_slug(slug)?;
+
+    const BUILT_IN_ROLES: &[&str] = &["developer", "manager", "architect", "tester", "moderator"];
+    if BUILT_IN_ROLES.contains(&slug) {
+        return Err(format!("Cannot overwrite built-in role '{}' as a global template", slug));
+    }
+
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+
+    // Read role from project.json
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    let role_def = config
+        .get("roles")
+        .and_then(|r| r.get(slug))
+        .ok_or(format!("Role '{}' not found in project", slug))?
+        .clone();
+
+    // Create templates directory
+    let templates_dir = global_templates_dir()?;
+    std::fs::create_dir_all(&templates_dir)
+        .map_err(|e| format!("Failed to create templates directory: {}", e))?;
+
+    // Write role definition (strip created_at — it gets re-added on import)
+    let mut template = role_def.clone();
+    if let Some(obj) = template.as_object_mut() {
+        obj.remove("created_at");
+    }
+    let template_path = templates_dir.join(format!("{}.json", slug));
+    let json = serde_json::to_string_pretty(&template)
+        .map_err(|e| format!("Failed to serialize role template: {}", e))?;
+    std::fs::write(&template_path, json)
+        .map_err(|e| format!("Failed to write template file: {}", e))?;
+
+    // Copy briefing if it exists
+    let briefing_src = vaak_dir.join("roles").join(format!("{}.md", slug));
+    if briefing_src.exists() {
+        let briefing_dest = templates_dir.join(format!("{}.md", slug));
+        std::fs::copy(&briefing_src, &briefing_dest)
+            .map_err(|e| format!("Failed to copy briefing template: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// List all global role templates.
+/// Returns a JSON object: { slug: { title, description, tags, permissions, max_instances } }
+pub fn list_global_role_templates() -> Result<serde_json::Value, String> {
+    let templates_dir = global_templates_dir()?;
+    if !templates_dir.exists() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let mut result = serde_json::Map::new();
+    let entries = std::fs::read_dir(&templates_dir)
+        .map_err(|e| format!("Failed to read templates directory: {}", e))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if slug.is_empty() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(template) = serde_json::from_str::<serde_json::Value>(&content) {
+                result.insert(slug, template);
+            }
+        }
+    }
+
+    Ok(serde_json::Value::Object(result))
+}
+
+// ==================== Role Groups ====================
+
+/// A role entry within a role group
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleGroupEntry {
+    pub slug: String,
+    #[serde(default = "default_one")]
+    pub instances: u32,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_one() -> u32 { 1 }
+
+/// A role group (team preset)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleGroup {
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub description: String,
+    pub roles: Vec<RoleGroupEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
+}
+
+/// Save (upsert) a role group into project.json > role_groups[].
+/// Matches by slug: updates if exists, appends if new.
+pub fn save_role_group(dir: &str, group: RoleGroup) -> Result<RoleGroup, String> {
+    validate_slug(&group.slug)?;
+
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+    let lock_path = vaak_dir.join("board.lock");
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = save_role_group_inner(&config_path, &group);
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
+    };
+
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = save_role_group_inner(&config_path, &group);
+
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    };
+
+    let _ = lock_file;
+    result
+}
+
+fn save_role_group_inner(config_path: &Path, group: &RoleGroup) -> Result<RoleGroup, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Ensure role_groups array exists
+    if config.get("role_groups").is_none() {
+        config["role_groups"] = serde_json::json!([]);
+    }
+
+    let group_json = serde_json::to_value(group)
+        .map_err(|e| format!("Failed to serialize role group: {}", e))?;
+
+    let groups = config.get_mut("role_groups")
+        .and_then(|g| g.as_array_mut())
+        .ok_or("role_groups is not an array")?;
+
+    // Upsert: find by slug, replace if exists, append if new
+    let existing_idx = groups.iter().position(|g| {
+        g.get("slug").and_then(|s| s.as_str()) == Some(&group.slug)
+    });
+
+    if let Some(idx) = existing_idx {
+        groups[idx] = group_json;
+    } else {
+        groups.push(group_json);
+    }
+
+    config["updated_at"] = serde_json::Value::String(iso_now());
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    std::fs::write(config_path, updated)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    Ok(group.clone())
+}
+
+/// Delete a role group from project.json by slug.
+pub fn delete_role_group(dir: &str, slug: &str) -> Result<(), String> {
+    validate_slug(slug)?;
+
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let config_path = vaak_dir.join("project.json");
+    let lock_path = vaak_dir.join("board.lock");
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = delete_role_group_inner(&config_path, slug);
+
+        unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        result
+    };
+
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            return Err("Failed to acquire lock".to_string());
+        }
+
+        let result = delete_role_group_inner(&config_path, slug);
+
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    };
+
+    let _ = lock_file;
+    result
+}
+
+fn delete_role_group_inner(config_path: &Path, slug: &str) -> Result<(), String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if let Some(groups) = config.get_mut("role_groups").and_then(|g| g.as_array_mut()) {
+        let before = groups.len();
+        groups.retain(|g| g.get("slug").and_then(|s| s.as_str()) != Some(slug));
+        if groups.len() == before {
+            return Err(format!("Role group '{}' not found", slug));
+        }
+    } else {
+        return Err("No role_groups in project.json".to_string());
+    }
+
+    config["updated_at"] = serde_json::Value::String(iso_now());
+
+    let updated = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    std::fs::write(config_path, updated)
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    Ok(())
+}
+
+/// Remove a global role template.
+pub fn remove_global_role_template(slug: &str) -> Result<(), String> {
+    validate_slug(slug)?;
+
+    let templates_dir = global_templates_dir()?;
+    let json_path = templates_dir.join(format!("{}.json", slug));
+    let md_path = templates_dir.join(format!("{}.md", slug));
+
+    if !json_path.exists() && !md_path.exists() {
+        return Err(format!("No global template found for '{}'", slug));
+    }
+
+    if json_path.exists() {
+        std::fs::remove_file(&json_path)
+            .map_err(|e| format!("Failed to remove template: {}", e))?;
+    }
+    if md_path.exists() {
+        let _ = std::fs::remove_file(&md_path);
+    }
+
+    Ok(())
 }

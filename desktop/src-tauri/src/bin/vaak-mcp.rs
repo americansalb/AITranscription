@@ -31,6 +31,54 @@ struct ActiveProjectState {
     session_id: String,
 }
 
+/// Get the active project state, attempting auto-rejoin if the in-memory state was lost.
+/// Looks up the current session's binding in sessions.json and re-joins if found.
+fn get_or_rejoin_state() -> Result<ActiveProjectState, String> {
+    // Fast path: state is already in memory
+    {
+        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
+        if let Some(state) = guard.as_ref() {
+            return Ok(state.clone());
+        }
+    }
+
+    // Slow path: state lost, attempt auto-rejoin from sessions.json
+    eprintln!("[vaak-mcp] Session state lost — attempting auto-rejoin from sessions.json");
+
+    let project_dir = find_project_root()
+        .ok_or("Not in a project. Call project_join first.")?;
+    let session_id = read_cached_session_id().unwrap_or_else(get_session_id);
+
+    // Read sessions.json to find our binding
+    let sessions = read_sessions(&project_dir);
+    let bindings = sessions.get("bindings").and_then(|b| b.as_array())
+        .ok_or("Not in a project. Call project_join first.")?;
+
+    let binding = bindings.iter().find(|b| {
+        b.get("session_id").and_then(|s| s.as_str()) == Some(&session_id)
+        && b.get("status").and_then(|s| s.as_str()) == Some("active")
+    }).ok_or("Not in a project. Call project_join first.")?;
+
+    let role = binding.get("role").and_then(|r| r.as_str())
+        .ok_or("Not in a project. Call project_join first.")?;
+
+    eprintln!("[vaak-mcp] Found binding for session {} as role '{}' — re-joining", session_id, role);
+
+    // Re-join using the existing binding info
+    match handle_project_join(role, &project_dir, &session_id, None) {
+        Ok(_) => {
+            eprintln!("[vaak-mcp] Auto-rejoin successful");
+            // Now read the restored state
+            let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
+            guard.as_ref().ok_or("Auto-rejoin failed to restore state".to_string()).cloned()
+        }
+        Err(e) => {
+            eprintln!("[vaak-mcp] Auto-rejoin failed: {}", e);
+            Err(format!("Not in a project. Auto-rejoin failed: {}", e))
+        }
+    }
+}
+
 fn vaak_dir(project_dir: &str) -> PathBuf {
     Path::new(project_dir).join(".vaak")
 }
@@ -583,11 +631,29 @@ fn update_session_heartbeat_in_file() {
                     found = true;
                 }
             }
-            // If binding was removed (e.g. by kill_team_member revocation),
-            // do NOT re-create it. The agent should detect revocation and exit.
+            // If binding was removed, check if it was revoked vs. stale-swept
             if !found {
-                // Session was revoked — don't re-register
-                eprintln!("[vaak-mcp] Session binding not found — may have been revoked");
+                // Check if there's a revoked binding for us
+                let was_revoked = bindings.iter().any(|b| {
+                    b.get("session_id").and_then(|s| s.as_str()) == Some(&state.session_id)
+                    && b.get("status").and_then(|s| s.as_str()) == Some("revoked")
+                });
+                if was_revoked {
+                    eprintln!("[vaak-mcp] Session was revoked — not re-registering");
+                } else {
+                    // Binding was removed by another agent's stale sweep — re-register
+                    eprintln!("[vaak-mcp] Session binding lost (stale sweep?) — re-registering");
+                    bindings.push(serde_json::json!({
+                        "session_id": state.session_id,
+                        "role": state.role,
+                        "instance": state.instance,
+                        "status": "active",
+                        "activity": "working",
+                        "claimed_at": now,
+                        "last_heartbeat": now
+                    }));
+                    found = true;
+                }
             }
 
             // If roster exists, check if this session's slot was removed from roster
@@ -643,6 +709,10 @@ fn update_session_activity(activity: &str) {
             for binding in bindings.iter_mut() {
                 if binding.get("session_id").and_then(|s| s.as_str()) == Some(&state.session_id) {
                     binding["activity"] = serde_json::json!(activity);
+                    // When disconnecting, also mark status so team_status doesn't count ghosts
+                    if activity == "disconnected" {
+                        binding["status"] = serde_json::json!("disconnected");
+                    }
                     // Track when the session last entered "working" state so the UI
                     // can show a minimum display duration (avoids flicker from brief work)
                     if activity == "working" {
@@ -747,10 +817,7 @@ fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
 
 /// Handle project_claim: claim files for this session
 fn handle_project_claim(files: Vec<String>, description: &str) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let my_key = format!("{}:{}", state.role, state.instance);
 
@@ -828,10 +895,7 @@ fn handle_project_claim(files: Vec<String>, description: &str) -> Result<serde_j
 
 /// Handle project_release: release this session's file claim
 fn handle_project_release() -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let my_key = format!("{}:{}", state.role, state.instance);
 
@@ -853,10 +917,7 @@ fn handle_project_release() -> Result<serde_json::Value, String> {
 
 /// Handle project_claims: return all active claims (read-only)
 fn handle_project_claims() -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let claims = read_claims_filtered(&state.project_dir);
 
@@ -916,6 +977,7 @@ fn write_discussion_state(project_dir: &str, state: &serde_json::Value) -> Resul
 
 /// Generate anonymized aggregate from submissions in the current round.
 /// Collects submission messages from board.jsonl, strips identity, randomizes order.
+/// For Oxford with teams: groups submissions by team (FOR/AGAINST) instead of randomizing.
 fn generate_aggregate(project_dir: &str, discussion: &serde_json::Value) -> Result<String, String> {
     let rounds = discussion.get("rounds").and_then(|r| r.as_array())
         .ok_or("No rounds in discussion state")?;
@@ -928,14 +990,15 @@ fn generate_aggregate(project_dir: &str, discussion: &serde_json::Value) -> Resu
     // Read all board messages
     let all_messages = read_board(project_dir);
 
-    // Extract submission bodies — use tracked IDs if available, otherwise scan by type+timestamp
-    let mut bodies: Vec<String> = Vec::new();
+    // Extract submissions as (from, body) tuples
+    let mut entries: Vec<(String, String)> = Vec::new();
     if !tracked_ids.is_empty() {
         for msg in &all_messages {
             let id = msg.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
             if tracked_ids.contains(&id) {
+                let from = msg.get("from").and_then(|f| f.as_str()).unwrap_or("unknown");
                 let body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(empty)");
-                bodies.push(body.to_string());
+                entries.push((from.to_string(), body.to_string()));
             }
         }
     } else {
@@ -946,55 +1009,111 @@ fn generate_aggregate(project_dir: &str, discussion: &serde_json::Value) -> Resu
             let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
             let ts = msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
             if msg_type == "submission" && ts >= opened_at && (closed_at.is_empty() || ts <= closed_at) {
+                let from = msg.get("from").and_then(|f| f.as_str()).unwrap_or("unknown");
                 let body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(empty)");
-                bodies.push(body.to_string());
+                entries.push((from.to_string(), body.to_string()));
             }
         }
     }
 
-    if bodies.is_empty() {
+    if entries.is_empty() {
         return Ok("No submissions received this round.".to_string());
-    }
-
-    // Randomize order using Fisher-Yates shuffle with system time seed
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut rng_state = seed;
-    for i in (1..bodies.len()).rev() {
-        // Simple LCG for shuffling
-        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let j = (rng_state as usize) % (i + 1);
-        bodies.swap(i, j);
     }
 
     // Build aggregate text
     let round_num = current_round.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
     let topic = discussion.get("topic").and_then(|t| t.as_str()).unwrap_or("(no topic)");
-    let raw_mode = discussion.get("mode").and_then(|m| m.as_str()).unwrap_or("discussion");
+    let disc_mode = discussion.get("mode").and_then(|m| m.as_str()).unwrap_or("discussion");
     let format_name = {
-        let mut chars = raw_mode.chars();
+        let mut chars = disc_mode.chars();
         match chars.next() {
             Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
             None => "Discussion".to_string(),
         }
     };
-    let total = bodies.len();
+    let total = entries.len();
+
+    // Check if Oxford with teams set — group by team instead of randomizing
+    let teams = discussion.get("teams");
+    let has_teams = disc_mode == "oxford" && teams.map(|t| !t.is_null()).unwrap_or(false);
 
     let mut aggregate = format!(
         "## {} Round {} Aggregate — {} submissions\n**Topic:** {}\n\n---\n\n",
         format_name, round_num, total, topic
     );
 
-    for (i, body) in bodies.iter().enumerate() {
-        aggregate.push_str(&format!("### Participant {}\n{}\n\n---\n\n", i + 1, body));
-    }
+    if has_teams {
+        let teams_obj = teams.unwrap();
+        let team_for: Vec<String> = teams_obj.get("for")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let team_against: Vec<String> = teams_obj.get("against")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
 
-    aggregate.push_str(&format!(
-        "*{} submissions collected. Order randomized. Identities anonymized.*",
-        total
-    ));
+        // Group submissions by team
+        let mut for_subs: Vec<&str> = Vec::new();
+        let mut against_subs: Vec<&str> = Vec::new();
+        let mut unassigned_subs: Vec<&str> = Vec::new();
+
+        for (from, body) in &entries {
+            if team_for.contains(from) {
+                for_subs.push(body);
+            } else if team_against.contains(from) {
+                against_subs.push(body);
+            } else {
+                unassigned_subs.push(body);
+            }
+        }
+
+        if !for_subs.is_empty() {
+            aggregate.push_str("## TEAM FOR\n\n");
+            for (i, body) in for_subs.iter().enumerate() {
+                aggregate.push_str(&format!("### FOR — Submission {}\n{}\n\n---\n\n", i + 1, body));
+            }
+        }
+        if !against_subs.is_empty() {
+            aggregate.push_str("## TEAM AGAINST\n\n");
+            for (i, body) in against_subs.iter().enumerate() {
+                aggregate.push_str(&format!("### AGAINST — Submission {}\n{}\n\n---\n\n", i + 1, body));
+            }
+        }
+        if !unassigned_subs.is_empty() {
+            aggregate.push_str("## UNASSIGNED\n\n");
+            for (i, body) in unassigned_subs.iter().enumerate() {
+                aggregate.push_str(&format!("### Unassigned — Submission {}\n{}\n\n---\n\n", i + 1, body));
+            }
+        }
+
+        aggregate.push_str(&format!(
+            "*{} submissions collected. Grouped by team assignment. Identities anonymized within teams.*",
+            total
+        ));
+    } else {
+        // Standard: randomize order using Fisher-Yates shuffle
+        let mut bodies: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut rng_state = seed;
+        for i in (1..bodies.len()).rev() {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let j = (rng_state as usize) % (i + 1);
+            bodies.swap(i, j);
+        }
+
+        for (i, body) in bodies.iter().enumerate() {
+            aggregate.push_str(&format!("### Participant {}\n{}\n\n---\n\n", i + 1, body));
+        }
+
+        aggregate.push_str(&format!(
+            "*{} submissions collected. Order randomized. Identities anonymized.*",
+            total
+        ));
+    }
 
     Ok(aggregate)
 }
@@ -1281,11 +1400,283 @@ fn check_continuous_quorum(project_dir: &str) -> bool {
     pending.is_empty() && !submitted.is_empty()
 }
 
-fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
+// ==================== Audience Vote Tool ====================
+
+/// Vote history directory — stored per-project in .vaak/audience-history/
+fn audience_history_dir(project_dir: &str) -> PathBuf {
+    vaak_dir(project_dir).join("audience-history")
+}
+
+/// Call the backend audience vote API and post results to the collab board.
+fn handle_audience_vote(topic: &str, arguments: &str, phase: &str, pool: Option<&str>) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+
+    // Map phase names: MCP uses pre_vote/post_vote, backend uses pre/post
+    let backend_phase = match phase {
+        "pre_vote" | "pre" => "pre",
+        _ => "post",
     };
+
+    // Build request body for the backend API
+    let mut request_body = serde_json::json!({
+        "topic": topic,
+        "arguments": arguments,
+        "phase": backend_phase
+    });
+    if let Some(pool_id) = pool {
+        request_body["pool"] = serde_json::json!(pool_id);
+    }
+
+    // Call the backend API at http://127.0.0.1:19836/api/v1/audience/vote
+    eprintln!("[audience_vote] Calling backend: topic='{}', phase={}, pool={:?}",
+        &topic[..topic.len().min(80)], backend_phase, pool);
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(120)) // 27 parallel LLM calls can take time
+        .build();
+
+    let resp = agent.post("http://127.0.0.1:19836/api/v1/audience/vote")
+        .set("Content-Type", "application/json")
+        .send_string(&request_body.to_string())
+        .map_err(|e| format!("Backend API call failed: {}. Is the backend running on port 19836?", e))?;
+
+    let resp_str = resp.into_string()
+        .map_err(|e| format!("Failed to read backend response: {}", e))?;
+    let resp_body: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| format!("Failed to parse backend response: {}", e))?;
+
+    // Check for error in response
+    if let Some(err) = resp_body["error"].as_str() {
+        if resp_body["votes"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
+            return Err(format!("Audience vote error: {}", err));
+        }
+        // Partial results — continue with what we have
+        eprintln!("[audience_vote] Partial results (some providers failed): {}", err);
+    }
+
+    // Extract tally for the board message
+    let tally = resp_body.get("tally").cloned().unwrap_or(serde_json::json!({}));
+    let for_count = tally["FOR"].as_u64().unwrap_or(0);
+    let against_count = tally["AGAINST"].as_u64().unwrap_or(0);
+    let abstain_count = tally["ABSTAIN"].as_u64().unwrap_or(0);
+    let error_count = tally["ERROR"].as_u64().unwrap_or(0);
+    let total = resp_body["total_voters"].as_u64().unwrap_or(0);
+    let latency = resp_body["total_latency_ms"].as_u64().unwrap_or(0);
+    let pool_name = resp_body["pool_name"].as_str().unwrap_or("unknown");
+    let pool_id = resp_body["pool"].as_str().unwrap_or("general");
+
+    // Build per-provider breakdown
+    let mut provider_breakdown = String::new();
+    if let Some(by_prov) = resp_body["tally_by_provider"].as_object() {
+        for (prov, counts) in by_prov {
+            let pf = counts["FOR"].as_u64().unwrap_or(0);
+            let pa = counts["AGAINST"].as_u64().unwrap_or(0);
+            provider_breakdown.push_str(&format!("\n  - {}: FOR {}, AGAINST {}", prov, pf, pa));
+        }
+    }
+
+    // Collect notable rationales (up to 3, one per provider if possible)
+    let mut notable_rationales = String::new();
+    if let Some(votes) = resp_body["votes"].as_array() {
+        let mut seen_providers = std::collections::HashSet::new();
+        let mut count = 0;
+        for vote in votes {
+            if count >= 3 { break; }
+            let provider = vote["provider"].as_str().unwrap_or("");
+            let vote_val = vote["vote"].as_str().unwrap_or("");
+            if vote_val == "ERROR" { continue; }
+            if seen_providers.contains(provider) { continue; }
+            seen_providers.insert(provider.to_string());
+            let persona = vote["persona"].as_str().unwrap_or("Anonymous");
+            let rationale = vote["rationale"].as_str().unwrap_or("");
+            notable_rationales.push_str(&format!(
+                "\n> **{} ({}/{}):** {}", persona, vote_val, provider, rationale
+            ));
+            count += 1;
+        }
+    }
+
+    // Format the board message body
+    let phase_label = if backend_phase == "pre" { "Pre-Vote" } else { "Post-Vote" };
+    let error_note = if error_count > 0 {
+        format!(" ({} provider errors)", error_count)
+    } else {
+        String::new()
+    };
+
+    let board_body = format!(
+        "## Audience {} Results\n\
+         **Topic:** {}\n\
+         **Pool:** {} ({})\n\
+         **Total voters:** {}{}\n\n\
+         ### Tally\n\
+         - **FOR:** {}\n\
+         - **AGAINST:** {}\n\
+         - **ABSTAIN:** {}\n\n\
+         ### By Provider{}\n\n\
+         ### Notable Rationales{}\n\n\
+         *Completed in {}ms*",
+        phase_label, topic, pool_name, pool_id, total, error_note,
+        for_count, against_count, abstain_count,
+        provider_breakdown,
+        notable_rationales,
+        latency
+    );
+
+    // Post results to the collab board as a broadcast from "audience:0"
+    let board_result = with_file_lock(&state.project_dir, || {
+        let msg_id = next_message_id(&state.project_dir);
+        let message = serde_json::json!({
+            "id": msg_id,
+            "from": "audience:0",
+            "to": "all",
+            "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("Audience {} — {}", phase_label, &topic[..topic.len().min(60)]),
+            "body": board_body,
+            "metadata": {
+                "audience_vote": true,
+                "phase": backend_phase,
+                "pool": pool_id,
+                "tally": tally,
+                "total_voters": total,
+                "total_latency_ms": latency,
+                "votes": resp_body.get("votes").cloned().unwrap_or(serde_json::json!([]))
+            }
+        });
+        append_to_board(&state.project_dir, &message)?;
+        Ok(msg_id)
+    });
+
+    // Save to vote history for longitudinal tracking
+    let _ = save_vote_history(&state.project_dir, topic, backend_phase, pool_id, &resp_body);
+
+    // Notify desktop app
+    notify_desktop();
+
+    match board_result {
+        Ok(msg_id) => {
+            let invoker = format!("{}:{}", state.role, state.instance);
+            Ok(serde_json::json!({
+                "status": "posted",
+                "message_id": msg_id,
+                "invoked_by": invoker,
+                "phase": backend_phase,
+                "pool": pool_id,
+                "tally": {
+                    "FOR": for_count,
+                    "AGAINST": against_count,
+                    "ABSTAIN": abstain_count,
+                    "ERROR": error_count
+                },
+                "total_voters": total,
+                "note": "Full results posted to the collab board as a broadcast. All team members will see them."
+            }))
+        }
+        Err(e) => Err(format!("Vote collected but failed to post to board: {}", e))
+    }
+}
+
+/// Save vote results to the per-project history directory for longitudinal analysis.
+fn save_vote_history(project_dir: &str, topic: &str, phase: &str, pool: &str, results: &serde_json::Value) -> Result<(), String> {
+    let dir = audience_history_dir(project_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create history dir: {}", e))?;
+
+    let history_path = dir.join("votes.jsonl");
+    let entry = serde_json::json!({
+        "timestamp": utc_now_iso(),
+        "topic": topic,
+        "phase": phase,
+        "pool": pool,
+        "tally": results.get("tally"),
+        "tally_by_provider": results.get("tally_by_provider"),
+        "total_voters": results.get("total_voters"),
+        "total_latency_ms": results.get("total_latency_ms"),
+    });
+
+    let line = serde_json::to_string(&entry).map_err(|e| format!("Serialize error: {}", e))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&history_path)
+        .map_err(|e| format!("Failed to open votes.jsonl: {}", e))?;
+    writeln!(file, "{}", line).map_err(|e| format!("Write error: {}", e))?;
+    Ok(())
+}
+
+/// Retrieve historical audience vote data for a given topic.
+fn handle_audience_history(topic: &str, pool: Option<&str>) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+
+    let history_path = audience_history_dir(&state.project_dir).join("votes.jsonl");
+    let content = std::fs::read_to_string(&history_path)
+        .unwrap_or_default();
+
+    if content.trim().is_empty() {
+        return Ok(serde_json::json!({
+            "matches": [],
+            "message": "No audience vote history found for this project."
+        }));
+    }
+
+    let topic_lower = topic.to_lowercase();
+    let pool_owned = pool.map(|p| p.to_string());
+    let matches: Vec<serde_json::Value> = content.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|entry| {
+            let entry_topic = entry["topic"].as_str().unwrap_or("");
+            let topic_matches = entry_topic.to_lowercase().contains(&topic_lower);
+            let pool_matches = match &pool_owned {
+                Some(p) => entry["pool"].as_str() == Some(p.as_str()),
+                None => true,
+            };
+            topic_matches && pool_matches
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Ok(serde_json::json!({
+            "matches": [],
+            "message": format!("No vote history found matching topic '{}'", topic)
+        }));
+    }
+
+    // Compute opinion shift if we have both pre and post votes for same topic
+    let mut opinion_shift = serde_json::json!(null);
+    let pre_votes: Vec<&serde_json::Value> = matches.iter()
+        .filter(|m| m["phase"].as_str() == Some("pre"))
+        .collect();
+    let post_votes: Vec<&serde_json::Value> = matches.iter()
+        .filter(|m| m["phase"].as_str() == Some("post"))
+        .collect();
+
+    if let (Some(pre), Some(post)) = (pre_votes.last(), post_votes.last()) {
+        let pre_tally = pre.get("tally").cloned().unwrap_or(serde_json::json!({}));
+        let post_tally = post.get("tally").cloned().unwrap_or(serde_json::json!({}));
+        let pre_for = pre_tally["FOR"].as_i64().unwrap_or(0);
+        let pre_against = pre_tally["AGAINST"].as_i64().unwrap_or(0);
+        let post_for = post_tally["FOR"].as_i64().unwrap_or(0);
+        let post_against = post_tally["AGAINST"].as_i64().unwrap_or(0);
+
+        opinion_shift = serde_json::json!({
+            "pre_vote": { "FOR": pre_for, "AGAINST": pre_against },
+            "post_vote": { "FOR": post_for, "AGAINST": post_against },
+            "delta_for": post_for - pre_for,
+            "delta_against": post_against - pre_against,
+            "shifted": pre_for != post_for || pre_against != post_against
+        });
+    }
+
+    Ok(serde_json::json!({
+        "matches": matches,
+        "total_records": matches.len(),
+        "opinion_shift": opinion_shift
+    }))
+}
+
+fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
 
     let my_label = format!("{}:{}", state.role, state.instance);
 
@@ -1336,6 +1727,11 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             // Other modes (delphi/oxford/red_team) start with round 1 open.
             let (initial_round, initial_phase, initial_rounds) = if mode == "continuous" {
                 (0u64, "reviewing", serde_json::json!([]))
+            } else if mode == "delphi" {
+                // Delphi starts in "preparing" phase — broadcasts are immediately blocked
+                // to prevent context leaking before blind submissions begin.
+                // Moderator must call open_next_round to transition to "submitting" (round 1).
+                (0u64, "preparing", serde_json::json!([]))
             } else {
                 (1u64, "submitting", serde_json::json!([{
                     "number": 1,
@@ -1353,6 +1749,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "started_at": now,
                 "moderator": my_label,
                 "participants": participant_list,
+                "teams": null,
                 "current_round": initial_round,
                 "phase": initial_phase,
                 "paused_at": null,
@@ -1379,6 +1776,9 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 let msg_id = next_message_id(&state.project_dir);
                 let announcement_body = if mode == "continuous" {
                     format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
+                        topic, my_label, participant_list.join(", "))
+                } else if mode == "delphi" {
+                    format!("A Delphi discussion is being prepared.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Phase:** Preparing (broadcasts locked)\n\nAll broadcasts to \"all\" are now blocked to protect blind submission integrity. The moderator will coordinate privately via directed messages, then open Round 1 when ready. Do NOT share reference material publicly.",
                         topic, my_label, participant_list.join(", "))
                 } else {
                     format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
@@ -1407,6 +1807,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "status": "started",
                 "mode": mode,
                 "topic": topic,
+                "phase": initial_phase,
                 "round": initial_round,
                 "participants": participant_list,
                 "moderator": my_label
@@ -1480,11 +1881,12 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 return Err("No active discussion".to_string());
             }
             let phase = discussion.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-            if phase != "reviewing" {
-                return Err(format!("Cannot open next round: phase is '{}', expected 'reviewing'", phase));
+            // Accept "reviewing" (normal between-rounds) or "preparing" (Delphi pre-round-1)
+            if phase != "reviewing" && phase != "preparing" {
+                return Err(format!("Cannot open next round: phase is '{}', expected 'reviewing' or 'preparing'", phase));
             }
 
-            let current = discussion.get("current_round").and_then(|v| v.as_u64()).unwrap_or(1);
+            let current = discussion.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
             let max_rounds = discussion.get("settings")
                 .and_then(|s| s.get("max_rounds"))
                 .and_then(|m| m.as_u64())
@@ -1495,6 +1897,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             }
 
             let now = utc_now_iso();
+            let is_first_round = phase == "preparing";
 
             with_file_lock(&state.project_dir, || {
                 let mut updated = discussion.clone();
@@ -1514,6 +1917,11 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
 
                 // Post round open announcement
                 let msg_id = next_message_id(&state.project_dir);
+                let body_text = if is_first_round {
+                    format!("Round 1 is now open for blind submissions. Submit your position using type: \"submission\" addressed to the moderator. Do NOT share your position publicly — all broadcasts remain blocked.")
+                } else {
+                    format!("Round {} is now open for submissions. Review the previous aggregate and submit your revised position.", next_round)
+                };
                 let announcement = serde_json::json!({
                     "id": msg_id,
                     "from": my_label,
@@ -1521,7 +1929,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                     "type": "moderation",
                     "timestamp": now,
                     "subject": format!("Round {} opened", next_round),
-                    "body": format!("Round {} is now open for submissions. Review the previous aggregate and submit your revised position.", next_round),
+                    "body": body_text,
                     "metadata": {
                         "discussion_action": "open_round",
                         "round": next_round
@@ -1582,12 +1990,67 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             }))
         }
 
+        "set_teams" => {
+            let teams_val = teams.ok_or("teams parameter is required for set_teams")?;
+
+            // Validate discussion is active and Oxford
+            let disc = read_discussion_state(&state.project_dir);
+            if !disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("No active discussion. Start one first.".to_string());
+            }
+            let disc_mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+            if disc_mode != "oxford" {
+                return Err(format!("set_teams is only valid for Oxford debates (current mode: {})", disc_mode));
+            }
+
+            // Only the moderator can set teams
+            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("");
+            if my_label != moderator {
+                return Err(format!("Only the moderator ({}) can set teams", moderator));
+            }
+
+            // Validate teams structure: must have "for" and "against" arrays
+            let team_for = teams_val.get("for").and_then(|v| v.as_array())
+                .ok_or("teams must have a 'for' array")?;
+            let team_against = teams_val.get("against").and_then(|v| v.as_array())
+                .ok_or("teams must have an 'against' array")?;
+
+            // Validate all listed participants exist in the discussion
+            let disc_participants: Vec<String> = disc.get("participants")
+                .and_then(|p| p.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            for member in team_for.iter().chain(team_against.iter()) {
+                if let Some(m) = member.as_str() {
+                    if !disc_participants.contains(&m.to_string()) {
+                        eprintln!("[set_teams] WARNING: {} is not in participants list", m);
+                    }
+                }
+            }
+
+            // Write teams to discussion state
+            let mut updated = disc.clone();
+            updated["teams"] = teams_val.clone();
+            with_file_lock(&state.project_dir, || {
+                write_discussion_state(&state.project_dir, &updated)
+            })?;
+
+            eprintln!("[set_teams] Teams set: FOR={:?}, AGAINST={:?}", team_for, team_against);
+
+            Ok(serde_json::json!({
+                "status": "teams_set",
+                "for": team_for,
+                "against": team_against
+            }))
+        }
+
         "get_state" => {
             let discussion = read_discussion_state(&state.project_dir);
             Ok(discussion)
         }
 
-        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state", action))
+        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams", action))
     }
 }
 
@@ -1606,12 +2069,97 @@ fn find_project_root() -> Option<String> {
 
 // ==================== Handler Functions ====================
 
+/// Grandfather global role templates into a project on join.
+/// Reads ~/.vaak/role-templates/*.json and adds any missing roles to project.json.
+/// Copies matching *.md briefings to .vaak/roles/ if not already present.
+/// Idempotent — safe to run on every join.
+fn grandfather_role_templates(project_dir: &str, config: &mut serde_json::Value) -> Result<(), String> {
+    let templates_dir = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|h| PathBuf::from(h).join(".vaak").join("role-templates"))
+        .unwrap_or_default();
+    if !templates_dir.exists() {
+        return Ok(()); // No templates directory — nothing to do
+    }
+
+    let roles = match config.get_mut("roles").and_then(|r| r.as_object_mut()) {
+        Some(r) => r,
+        None => return Ok(()), // No roles object — can't add to it
+    };
+
+    let mut added_any = false;
+
+    // Scan template directory for .json role definitions
+    let entries = std::fs::read_dir(&templates_dir)
+        .map_err(|e| format!("Failed to read role-templates: {}", e))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if slug.is_empty() || roles.contains_key(&slug) {
+            continue; // Already exists in project — don't overwrite
+        }
+
+        // Read template definition
+        let template_content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let template: serde_json::Value = match serde_json::from_str(&template_content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Add created_at timestamp
+        let mut role_def = template.clone();
+        if let Some(obj) = role_def.as_object_mut() {
+            obj.insert("created_at".to_string(), serde_json::json!(utc_now_iso()));
+        }
+
+        eprintln!("[vaak-mcp] Grandfathering role template '{}' into project", slug);
+        roles.insert(slug.clone(), role_def);
+        added_any = true;
+
+        // Copy briefing .md if it exists and project doesn't have one
+        let briefing_template = templates_dir.join(format!("{}.md", slug));
+        if briefing_template.exists() {
+            let roles_dir = Path::new(project_dir).join(".vaak").join("roles");
+            let _ = std::fs::create_dir_all(&roles_dir);
+            let dest = roles_dir.join(format!("{}.md", slug));
+            if !dest.exists() {
+                if let Err(e) = std::fs::copy(&briefing_template, &dest) {
+                    eprintln!("[vaak-mcp] Failed to copy briefing for '{}': {}", slug, e);
+                }
+            }
+        }
+    }
+
+    if added_any {
+        // Save updated project.json
+        config["updated_at"] = serde_json::json!(utc_now_iso());
+        let config_path = project_json_path(project_dir);
+        let updated = serde_json::to_string_pretty(config)
+            .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+        std::fs::write(&config_path, updated)
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Handle project_join: claim a role in a project team
 fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section: Option<&str>) -> Result<serde_json::Value, String> {
     let normalized = project_dir.replace('\\', "/");
 
     // Verify project.json exists
-    let config = read_project_config(&normalized)?;
+    let mut config = read_project_config(&normalized)?;
+
+    // === GRANDFATHERING: auto-import missing global role templates ===
+    grandfather_role_templates(&normalized, &mut config)?;
+
     let roles = config.get("roles").and_then(|r| r.as_object())
         .ok_or("No roles defined in project.json")?;
 
@@ -1631,6 +2179,34 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         let bindings = sessions.get_mut("bindings")
             .and_then(|b| b.as_array_mut())
             .ok_or("Invalid sessions.json format")?;
+
+        // === GLOBAL STALE SWEEP: remove stale bindings for ALL roles on every join ===
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let before_count = bindings.len();
+            bindings.retain(|b| {
+                // Never sweep our own session — we may be actively rejoining
+                if b.get("session_id").and_then(|s| s.as_str()) == Some(session_id) {
+                    return true;
+                }
+                // Keep non-active bindings (already disconnected/revoked)
+                if b.get("status").and_then(|s| s.as_str()) != Some("active") {
+                    return true;
+                }
+                let hb = b.get("last_heartbeat").and_then(|h| h.as_str()).unwrap_or("");
+                match parse_iso_to_epoch_secs(hb) {
+                    Some(hb_secs) => now_secs.saturating_sub(hb_secs) <= timeout_secs,
+                    None => false, // No valid heartbeat = stale
+                }
+            });
+            let removed = before_count - bindings.len();
+            if removed > 0 {
+                eprintln!("[vaak-mcp] Stale sweep: removed {} ghost bindings on join", removed);
+            }
+        }
 
         // Check if this session already has a binding for this role
         let existing = bindings.iter().position(|b| {
@@ -1705,10 +2281,32 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
                             bindings.remove(stale_idx);
                             inst
                         },
-                        None => return Err(format!(
-                            "No vacant slot for role '{}'. All {} slots are filled.",
-                            role, role_slots.len()
-                        )),
+                        None => {
+                            // Auto-create a new roster slot instead of blocking
+                            let mut new_inst = 0u32;
+                            while role_slots.contains(&new_inst) {
+                                new_inst += 1;
+                            }
+                            // Append new slot to project.json roster
+                            let config_path = project_json_path(&normalized);
+                            let config_content = std::fs::read_to_string(&config_path)
+                                .map_err(|e| format!("Failed to read project.json: {}", e))?;
+                            let mut config_mut: serde_json::Value = serde_json::from_str(&config_content)
+                                .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+                            if let Some(roster_arr) = config_mut.get_mut("roster").and_then(|r| r.as_array_mut()) {
+                                roster_arr.push(serde_json::json!({
+                                    "role": role,
+                                    "instance": new_inst,
+                                    "added_at": utc_now_iso()
+                                }));
+                            }
+                            config_mut["updated_at"] = serde_json::json!(utc_now_iso());
+                            let updated = serde_json::to_string_pretty(&config_mut)
+                                .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+                            std::fs::write(&config_path, updated)
+                                .map_err(|e| format!("Failed to write project.json: {}", e))?;
+                            new_inst
+                        },
                     }
                 }
             }
@@ -1865,6 +2463,18 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         }
     }
 
+    // Look up roster slot metadata for this role:instance
+    let roster_metadata = config.get("roster")
+        .and_then(|r| r.as_array())
+        .and_then(|roster| {
+            roster.iter().find(|s| {
+                s.get("role").and_then(|r| r.as_str()) == Some(role)
+                    && s.get("instance").and_then(|i| i.as_u64()) == Some(instance as u64)
+            })
+        })
+        .and_then(|slot| slot.get("metadata").cloned())
+        .unwrap_or(serde_json::Value::Null);
+
     Ok(serde_json::json!({
         "status": "joined",
         "project_name": project_name,
@@ -1876,16 +2486,14 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         "recent_messages": recent,
         "active_section": active_section,
         "available_sections": available_sections,
-        "highest_message_id": max_recent_id
+        "highest_message_id": max_recent_id,
+        "roster_metadata": roster_metadata
     }))
 }
 
 /// Handle project_send: send a message to a role
 fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, metadata: Option<serde_json::Value>, _session_id: &str) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let config = read_project_config(&state.project_dir)?;
 
@@ -1916,6 +2524,11 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
+    // Read discussion state once for broadcast permission and Delphi enforcement
+    let disc = read_discussion_state(&state.project_dir);
+    let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    let disc_format = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+
     // Validate permission for broadcast
     if to == "all" {
         let roles = config.get("roles").and_then(|r| r.as_object());
@@ -1925,30 +2538,62 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             .and_then(|p| p.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
-        if !perms.contains(&"broadcast".to_string()) && !perms.contains(&"assign_tasks".to_string()) {
+
+        // Check if open communication mode is set (overrides role-level broadcast permission)
+        let comm_mode = config.get("settings")
+            .and_then(|s| s.get("discussion_mode"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("directed");
+
+        // Active discussions in public formats allow broadcasting (oxford, red_team, continuous)
+        let discussion_allows_broadcast = disc_active
+            && matches!(disc_format, "oxford" | "red_team" | "continuous");
+
+        let has_role_perm = perms.contains(&"broadcast".to_string())
+            || perms.contains(&"assign_tasks".to_string());
+        let open_mode = comm_mode == "open";
+
+        if !has_role_perm && !open_mode && !discussion_allows_broadcast {
             return Err("You don't have permission to broadcast. Use a specific role target.".to_string());
         }
     }
 
-    // Delphi protocol enforcement: reject non-submission broadcasts during active submitting phase
-    // Directed messages (to specific roles) are allowed — agents need to coordinate during implementation
+    // Delphi protocol enforcement: block ALL non-procedural broadcasts during active Delphi.
+    // Applies to the ENTIRE Delphi lifecycle (all phases, not just submitting).
+    // Oxford/red_team/continuous allow public broadcasts — only Delphi is restricted.
+    // Directed messages (to specific roles) are always allowed — agents need to coordinate.
+    //
+    // Allowed through:
+    //   - type:"submission" (participant blind submissions to moderator)
+    //   - type:"moderation" (system/moderator procedural announcements)
+    //   - Messages from human (always exempt)
+    //   - Directed messages (to != "all") — not affected by this check
+    //
+    // Blocked:
+    //   - type:"broadcast" from ANYONE including the moderator (prevents leaking reference material)
+    //   - type:"status", "answer", "directive", etc. to "all" from any non-human
     {
-        let disc = read_discussion_state(&state.project_dir);
-        let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-        let disc_mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-        let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
         let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
         let from = format!("{}:{}", state.role, state.instance);
 
-        if is_active && disc_mode == "delphi" && phase == "submitting"
+        if disc_active && disc_format == "delphi"
             && msg_type != "submission"
+            && msg_type != "moderation"
             && to == "all"
-            && from != moderator
             && state.role != "human"
         {
-            eprintln!("[delphi-reject] Blocked broadcast from {} during Delphi submitting phase (type: {}, to: all)", from, msg_type);
+            if from == moderator {
+                eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from, msg_type);
+                return Err(
+                    "Active Delphi discussion — moderator broadcasts to \"all\" are blocked. \
+                    Use type: \"moderation\" for procedural round announcements. \
+                    Directed messages to specific participants are still allowed.".to_string()
+                );
+            }
+            let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from, phase, msg_type);
             return Err(format!(
-                "Delphi round in progress — broadcasts blocked during blind submission phase. \
+                "Active Delphi discussion — broadcasts to \"all\" are blocked to preserve blind submission integrity. \
                 To submit your position, use type: \"submission\" addressed to the moderator ({}). \
                 Directed messages to specific roles are still allowed.",
                 moderator
@@ -1987,7 +2632,30 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             let disc = read_discussion_state(&state.project_dir);
             let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
             let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            let sub_disc_mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
             eprintln!("[submission-track] msg_id={}, from={}, active={}, phase={}", msg_id, from_label, is_active, phase);
+
+            // Oxford team assignment warning: log if submitter is not in any team
+            if is_active && sub_disc_mode == "oxford" {
+                let teams = disc.get("teams");
+                if let Some(t) = teams {
+                    if !t.is_null() {
+                        let in_for = t.get("for").and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().any(|v| v.as_str() == Some(&from_label)))
+                            .unwrap_or(false);
+                        let in_against = t.get("against").and_then(|v| v.as_array())
+                            .map(|arr| arr.iter().any(|v| v.as_str() == Some(&from_label)))
+                            .unwrap_or(false);
+                        if !in_for && !in_against {
+                            eprintln!("[submission-track] WARNING: {} submitted but is not assigned to any team (FOR or AGAINST)", from_label);
+                        } else {
+                            let team_name = if in_for { "FOR" } else { "AGAINST" };
+                            eprintln!("[submission-track] {} is on Team {}", from_label, team_name);
+                        }
+                    }
+                }
+            }
+
             if is_active && phase == "submitting" {
                 let mut updated = disc.clone();
                 let mut should_write = false;
@@ -1997,10 +2665,24 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 if let Some(rounds) = updated.get_mut("rounds").and_then(|r| r.as_array_mut()) {
                     if let Some(last_round) = rounds.last_mut() {
                         if let Some(subs) = last_round.get_mut("submissions").and_then(|s| s.as_array_mut()) {
-                            let already = subs.iter().any(|s| {
+                            // Find existing submission from this participant (if any)
+                            let existing_idx = subs.iter().position(|s| {
                                 s.get("from").and_then(|f| f.as_str()) == Some(&from_label)
                             });
-                            if !already {
+                            if let Some(idx) = existing_idx {
+                                // Correction: overwrite previous submission with the new one
+                                let prev_id = subs[idx].get("message_id").and_then(|id| id.as_u64()).unwrap_or(0);
+                                subs[idx] = serde_json::json!({
+                                    "from": from_label,
+                                    "message_id": msg_id,
+                                    "submitted_at": utc_now_iso(),
+                                    "replaces": prev_id
+                                });
+                                sub_count = subs.len();
+                                should_write = true;
+                                eprintln!("[submission-track] {} corrected submission (was msg {}, now msg {})", from_label, prev_id, msg_id);
+                            } else {
+                                // First submission from this participant
                                 subs.push(serde_json::json!({
                                     "from": from_label,
                                     "message_id": msg_id,
@@ -2008,8 +2690,6 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                                 }));
                                 sub_count = subs.len();
                                 should_write = true;
-                            } else {
-                                eprintln!("[submission-track] {} already submitted this round, skipping", from_label);
                             }
                         } else {
                             track_error = Some("submissions field missing or not an array in last round");
@@ -2164,10 +2844,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
 /// Handle project_check: read new messages
 fn handle_project_check(last_seen: u64) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     // If caller passes last_seen=0, use the stored last_seen_id from file
     // to prevent re-delivering messages already seen via project_join or hook
@@ -2234,10 +2911,7 @@ fn handle_project_check(last_seen: u64) -> Result<serde_json::Value, String> {
 /// Polls board.jsonl every 3 seconds. Sends heartbeat every 30 seconds.
 /// Returns immediately when new messages are found.
 fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let session_id = read_cached_session_id().unwrap_or_else(get_session_id);
     let ls_path = last_seen_path(&state.project_dir, &session_id);
@@ -2324,10 +2998,7 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
 
 /// Handle project_status: show team overview
 fn handle_project_status() -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     let config = read_project_config(&state.project_dir)?;
     let sessions = read_sessions(&state.project_dir);
@@ -2378,10 +3049,7 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
 
 /// Handle project_leave: release role binding
 fn handle_project_leave() -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     with_file_lock(&state.project_dir, || {
         let mut sessions = read_sessions(&state.project_dir);
@@ -2409,10 +3077,7 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
 
 /// Handle project_kick: forcibly revoke a team member's role
 fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     // Check permission: caller must have assign_tasks permission
     let config = read_project_config(&state.project_dir)?;
@@ -2461,12 +3126,53 @@ fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, S
     }))
 }
 
+/// Handle project_buzz: send a wake-up/poke message to a target role:instance.
+/// Writes a "buzz" type message to board.jsonl. Any role can buzz any other role.
+fn handle_project_buzz(target_role: &str, target_instance: u32) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+
+    let config = read_project_config(&state.project_dir)?;
+    let roles = config.get("roles").and_then(|r| r.as_object())
+        .ok_or("No roles in project config")?;
+
+    // Validate target role exists
+    if !roles.contains_key(target_role) {
+        return Err(format!("Target role '{}' not found. Available: {:?}", target_role, roles.keys().collect::<Vec<_>>()));
+    }
+
+    let target_label = format!("{}:{}", target_role, target_instance);
+    let from_label = format!("{}:{}", state.role, state.instance);
+
+    let result = with_file_lock(&state.project_dir, || {
+        let msg_id = next_message_id(&state.project_dir);
+        let message = serde_json::json!({
+            "id": msg_id,
+            "from": from_label,
+            "to": target_label,
+            "type": "buzz",
+            "timestamp": utc_now_iso(),
+            "subject": format!("Buzz from {}", from_label),
+            "body": format!("{} is requesting you wake up and rejoin if disconnected.", from_label),
+            "metadata": {}
+        });
+        append_to_board(&state.project_dir, &message)?;
+        Ok(msg_id)
+    })?;
+
+    eprintln!("[vaak-mcp] Buzz sent to {} (msg_id={})", target_label, result);
+    notify_desktop();
+
+    Ok(serde_json::json!({
+        "status": "buzzed",
+        "target": target_label,
+        "message_id": result,
+        "message": format!("Buzz sent to {}. Their next prompt will include a wake-up instruction.", target_label)
+    }))
+}
+
 /// Handle project_update_briefing: update a role's briefing markdown
 fn handle_project_update_briefing(role: &str, content: &str) -> Result<serde_json::Value, String> {
-    let state = {
-        let guard = ACTIVE_PROJECT.lock().map_err(|_| "Lock poisoned")?;
-        guard.as_ref().ok_or("Not in a project. Call project_join first.")?.clone()
-    };
+    let state = get_or_rejoin_state()?;
 
     // Check permission: caller must have assign_tasks permission
     let config = read_project_config(&state.project_dir)?;
@@ -2767,7 +3473,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         };
         let instructions = if disc_phase == "submitting" {
             if disc_i_submitted {
-                "You have already submitted for this round. DO NOT send any more messages. Wait for the moderator to close the round and publish the aggregate."
+                "You have submitted for this round. You may submit again to CORRECT your position — the latest submission replaces the previous one. Otherwise, wait for the moderator to close the round and publish the aggregate."
             } else {
                 "MANDATORY: You MUST submit your position NOW. Use project_send with to: set to the moderator's role (shown above), type: \"submission\". Any non-submission message you send will be AUTOMATICALLY CONVERTED to a submission addressed to the moderator. Do NOT send messages to \"all\" — this is a BLIND round. Other agents cannot see your submission."
             }
@@ -2914,6 +3620,38 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         }
     }
 
+    // === Priority interrupt check — display before regular messages ===
+    let interrupt_messages: Vec<&&serde_json::Value> = new_messages.iter()
+        .filter(|m| m.get("type").and_then(|t| t.as_str()) == Some("interrupt"))
+        .cloned()
+        .collect();
+    if !interrupt_messages.is_empty() {
+        for imsg in &interrupt_messages {
+            let from = imsg.get("from").and_then(|f| f.as_str()).unwrap_or("?");
+            let subject = imsg.get("subject").and_then(|s| s.as_str()).unwrap_or("");
+            let body = imsg.get("body").and_then(|b| b.as_str()).unwrap_or("");
+            output.push_str(&format!(
+                "\n\n⚠️ PRIORITY INTERRUPT from {}: {}\n{}\nYou MUST stop your current work and handle this interrupt immediately. Acknowledge it via project_send before continuing.",
+                from, subject, body
+            ));
+        }
+    }
+
+    // === Buzz detection — inject wake-up instruction for buzz messages ===
+    let buzz_messages: Vec<&&serde_json::Value> = new_messages.iter()
+        .filter(|m| m.get("type").and_then(|t| t.as_str()) == Some("buzz"))
+        .cloned()
+        .collect();
+    if !buzz_messages.is_empty() {
+        for bmsg in &buzz_messages {
+            let from = bmsg.get("from").and_then(|f| f.as_str()).unwrap_or("?");
+            output.push_str(&format!(
+                "\n\n⚡ BUZZ: You were poked by {}. If you are not in a project, call project_join immediately to rejoin as {}.",
+                from, my_role
+            ));
+        }
+    }
+
     if new_messages.is_empty() {
         output.push_str(" No new messages.");
     } else {
@@ -2954,6 +3692,20 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
                 && mtype == "submission" && !is_from_me && !is_from_human
             {
                 continue; // Hide other agents' submissions — blind review
+            }
+
+            // Delphi blind phase: hide ALL non-moderation broadcasts to prevent
+            // reference material from biasing blind submissions. This covers:
+            //   - Non-moderator broadcasts (role-creator sharing role lists, etc.)
+            //   - Moderator non-moderation broadcasts (accidental type:"broadcast" instead of "moderation")
+            // Only type:"moderation" broadcasts pass through (procedural round announcements).
+            // Covers all Delphi phases (preparing + submitting + reviewing) so seed broadcasts
+            // posted before or during the discussion are invisible to participants.
+            if disc_active && disc_mode == "delphi"
+                && is_broadcast && !is_from_me && !is_from_human
+                && mtype != "moderation"
+            {
+                continue; // Hide ALL non-moderation broadcasts during Delphi
             }
 
             let routing_tag = if is_from_human {
@@ -3249,14 +4001,13 @@ fn read_cached_session_id() -> Option<String> {
         }
     }
 
-    #[cfg(windows)]
-    {
-        if let Some(grandparent) = get_ancestor_pid(ppid) {
-            let cache_file = cache_dir.join(format!("{}.txt", grandparent));
-            if let Ok(id) = std::fs::read_to_string(&cache_file) {
-                if !id.is_empty() {
-                    return Some(id);
-                }
+    // Check grandparent's cache file too — handles indirect hook invocation
+    // (e.g., shell → subshell → vaak-mcp --hook)
+    if let Some(grandparent) = get_ancestor_pid(ppid) {
+        let cache_file = cache_dir.join(format!("{}.txt", grandparent));
+        if let Ok(id) = std::fs::read_to_string(&cache_file) {
+            if !id.is_empty() {
+                return Some(id);
             }
         }
     }
@@ -3294,6 +4045,60 @@ fn get_ancestor_pid(pid: u32) -> Option<u32> {
         CloseHandle(snapshot);
         None
     }
+}
+
+/// Get the parent PID of a given process (macOS via sysctl)
+#[cfg(target_os = "macos")]
+fn get_ancestor_pid(pid: u32) -> Option<u32> {
+    // Use sysctl kern.proc.pid.{pid} to get kinfo_proc with parent PID
+    let mut mib: [libc::c_int; 4] = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+
+    let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of::<libc::kinfo_proc>();
+
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            &mut info as *mut _ as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+
+    if ret == 0 && size > 0 {
+        let ppid = info.kp_eproc.e_ppid;
+        if ppid > 1 {
+            Some(ppid as u32)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Get the parent PID of a given process (Linux via /proc)
+#[cfg(all(unix, not(target_os = "macos"), not(windows)))]
+fn get_ancestor_pid(pid: u32) -> Option<u32> {
+    // Read /proc/{pid}/status and parse PPid field
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    for line in status.lines() {
+        if line.starts_with("PPid:") {
+            let ppid_str = line.split_whitespace().nth(1)?;
+            let ppid: u32 = ppid_str.parse().ok()?;
+            if ppid > 1 {
+                return Some(ppid);
+            }
+        }
+    }
+    None
 }
 
 /// Send text to Vaak's local speak endpoint
@@ -3425,7 +4230,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "timeout": { "type": "integer", "description": "Max seconds to wait before returning (default 300 = 5 minutes)" }
+                            "timeout": { "type": "integer", "description": "Max seconds to wait before returning (default 55 = under 1 minute, stays within MCP response timeout)" }
                         },
                         "required": []
                     }
@@ -3485,6 +4290,18 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "project_buzz",
+                    "description": "Send a wake-up signal to a team member. Writes a buzz message to the board that triggers a rejoin instruction in their next prompt. Use this when a team member appears disconnected or unresponsive. Any role can buzz any other role.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "role": { "type": "string", "description": "Role slug of the member to buzz (e.g., 'developer')" },
+                            "instance": { "type": "integer", "description": "Instance number of the member to buzz (e.g., 0, 1, 2). Defaults to 0." }
+                        },
+                        "required": ["role"]
+                    }
+                },
+                {
                     "name": "screen_read",
                     "description": "Capture a screenshot of the screen. Returns the file path to the screenshot image. Use the Read tool to view the image and then describe what you see to the user via the speak tool.",
                     "inputSchema": {
@@ -3540,13 +4357,13 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "discussion_control",
-                    "description": "Control structured discussions (Delphi, Oxford, Continuous Review). Actions: start_discussion, close_round, open_next_round, end_discussion, get_state. Delphi/Oxford: manual rounds with anonymized aggregates. Continuous: auto-rounds triggered by developer status messages, silence=consent, lightweight tallies.",
+                    "description": "Control structured discussions (Delphi, Oxford, Continuous Review). Actions: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams. Delphi/Oxford: manual rounds with anonymized aggregates. Continuous: auto-rounds triggered by developer status messages, silence=consent, lightweight tallies.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "description": "Action to perform: start_discussion, close_round, open_next_round, end_discussion, get_state"
+                                "description": "Action to perform: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams"
                             },
                             "mode": {
                                 "type": "string",
@@ -3560,9 +4377,39 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                                 "type": "array",
                                 "items": { "type": "string" },
                                 "description": "Participant role:instance IDs (for start_discussion). If omitted, all active sessions are included."
+                            },
+                            "teams": {
+                                "type": "object",
+                                "description": "Team assignments for Oxford format (for set_teams action). Keys: 'for' and 'against', values: arrays of participant IDs (e.g. {\"for\": [\"dev:0\"], \"against\": [\"dev:1\"]})"
                             }
                         },
                         "required": ["action"]
+                    }
+                },
+                {
+                    "name": "audience_vote",
+                    "description": "Collect votes from an AI audience pool (27 personas across 3 LLM providers). Results are posted to the collab board as a broadcast so all team members see them simultaneously. Any role can invoke this tool.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string", "description": "The debate proposition or question to vote on" },
+                            "arguments": { "type": "string", "description": "Optional: concatenated debate arguments to present to the audience (empty for pre-vote)" },
+                            "phase": { "type": "string", "description": "'pre_vote' (before arguments) or 'post_vote' (after arguments). Defaults to 'post_vote'." },
+                            "pool": { "type": "string", "description": "Audience pool ID: 'general', 'software-dev', 'ai-ml', 'law', or custom. Defaults to 'general'." }
+                        },
+                        "required": ["topic"]
+                    }
+                },
+                {
+                    "name": "audience_history",
+                    "description": "Retrieve historical audience vote data for a given topic. Shows vote tallies, opinion shifts between pre-vote and post-vote, and per-provider breakdowns.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "topic": { "type": "string", "description": "Topic to search for in vote history (partial match supported)" },
+                            "pool": { "type": "string", "description": "Optional: filter by pool ID" }
+                        },
+                        "required": ["topic"]
                     }
                 }]
             })
@@ -3755,7 +4602,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 let timeout_secs = arguments
                     .and_then(|a| a.get("timeout"))
                     .and_then(|v| v.as_u64())
-                    .unwrap_or(300);
+                    .unwrap_or(55).min(55);
 
                 match handle_project_wait(timeout_secs) {
                     Ok(resp) => {
@@ -3886,6 +4733,30 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{
                                 "type": "text",
                                 "text": format!("Project kick failed: {}", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "project_buzz" {
+                let arguments = params.get("arguments")?;
+                let role = arguments.get("role")?.as_str()?;
+                let instance = arguments.get("instance").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+                match handle_project_buzz(role, instance) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp.to_string()
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Project buzz failed: {}", e)
                             }],
                             "isError": true
                         })
@@ -4031,8 +4902,9 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 let participants = args.get("participants")
                     .and_then(|p| p.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
+                let teams = args.get("teams").cloned();
 
-                match handle_discussion_control(action, mode, topic, participants) {
+                match handle_discussion_control(action, mode, topic, participants, teams) {
                     Ok(resp) => {
                         serde_json::json!({
                             "content": [{
@@ -4046,6 +4918,56 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{
                                 "type": "text",
                                 "text": format!("Discussion control failed: {}", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "audience_vote" {
+                let arguments = params.get("arguments")?;
+                let topic = arguments.get("topic")?.as_str()?;
+                let args_text = arguments.get("arguments").and_then(|v| v.as_str()).unwrap_or("");
+                let phase = arguments.get("phase").and_then(|v| v.as_str()).unwrap_or("post_vote");
+                let pool = arguments.get("pool").and_then(|v| v.as_str());
+
+                match handle_audience_vote(topic, args_text, phase, pool) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp.to_string()
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Audience vote failed: {}", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "audience_history" {
+                let arguments = params.get("arguments")?;
+                let topic = arguments.get("topic")?.as_str()?;
+                let pool = arguments.get("pool").and_then(|v| v.as_str());
+
+                match handle_audience_history(topic, pool) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp.to_string()
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Audience history failed: {}", e)
                             }],
                             "isError": true
                         })
@@ -4119,9 +5041,14 @@ fn run_hook() {
 
     let mut output = String::new();
 
-    // Voice instructions only when enabled
-    if enabled {
-        let speak_msg = "IMPORTANT: You MUST call the mcp__vaak__speak tool to speak responses aloud to the user. When on a team project, use project_send for ALL team communication FIRST, then call speak with a SHORT summary for your local terminal user. The board is for the team. Speak is for the human at your terminal. Never use speak as a substitute for project_send.";
+    // Check for active project team in CWD's .vaak/
+    let team_reminder = check_project_from_cwd(&session_id);
+    let on_team = team_reminder.is_some();
+
+    // Voice/speak instructions depend on both voice enabled AND team status
+    if enabled && !on_team {
+        // Solo mode (no team project) + voice on → use speak for all responses
+        let speak_msg = "IMPORTANT: You MUST call the mcp__vaak__speak tool to speak responses aloud to the user.";
 
         let detail_msg = match detail {
             1 => "Keep explanations extremely brief - one sentence summaries only. Use simple, layperson terms.",
@@ -4140,18 +5067,21 @@ fn run_hook() {
         };
     }
 
-    // Check for active project team in CWD's .vaak/ (always, even when voice is off)
-    if let Some(team_reminder) = check_project_from_cwd(&session_id) {
+    // Team project context (always injected when on a team, even when voice is off)
+    if let Some(reminder) = team_reminder {
         if !output.is_empty() {
             output.push(' ');
         }
-        output.push_str(&team_reminder);
+        output.push_str(&reminder);
+
+        // Team mode → NEVER call speak (regardless of voice setting). Use project_send only.
+        output.push_str("\nDo NOT call the mcp__vaak__speak tool. On a team project, use project_send for ALL communication. The collab board is your only output channel.");
 
         // When auto-collab is enabled, inject autonomous team behavior instructions
         if auto_collab {
             output.push_str("\n\nAUTONOMOUS TEAM MODE:\n");
             output.push_str("1. Handle ALL unread messages BEFORE the user's request. For each directive: implement it fully. For questions: send an answer.\n");
-            output.push_str("2. Do NOT ask the user for permission — act on team messages proactively, then speak what you did.\n");
+            output.push_str("2. Do NOT ask the user for permission — act on team messages proactively, then report what you did via project_send.\n");
             output.push_str("3. After handling messages AND the user's request, call mcp__vaak__project_wait to enter standby. This blocks until new messages arrive — zero cost while waiting.\n");
             output.push_str("4. When project_wait returns with messages, handle them, then call project_wait again. Loop indefinitely — never stop unless the user interrupts with Ctrl+C.\n");
         }
@@ -4372,6 +5302,41 @@ fn capture_screenshot(region: &str) -> Result<String, String> {
         }
     };
 
+    // Detect blank/black screenshots — on macOS this means Screen Recording permission is denied.
+    // CoreGraphics returns a valid but entirely black image when permission is missing.
+    #[cfg(target_os = "macos")]
+    {
+        let rgba = image.as_raw();
+        let total_pixels = rgba.len() / 4;
+        if total_pixels > 0 {
+            let sample_stride = (total_pixels / 100).max(1);
+            let mut all_black = true;
+            let mut i = 0;
+            while i < total_pixels {
+                let offset = i * 4;
+                if offset + 2 < rgba.len() {
+                    let r = rgba[offset];
+                    let g = rgba[offset + 1];
+                    let b = rgba[offset + 2];
+                    if r > 5 || g > 5 || b > 5 {
+                        all_black = false;
+                        break;
+                    }
+                }
+                i += sample_stride;
+            }
+            if all_black {
+                return Err(
+                    "Screen capture returned a blank image. This usually means Screen Recording \
+                     permission has not been granted. On macOS, go to System Settings > Privacy & \
+                     Security > Screen Recording and enable access for Vaak. You may need to \
+                     restart the app after granting permission."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
     let dir = get_screenshot_dir()?;
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4384,7 +5349,7 @@ fn capture_screenshot(region: &str) -> Result<String, String> {
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        files.sort_by_key(|e| std::cmp::Reverse(e.path()));
+        files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
         for old_file in files.into_iter().skip(10) {
             let _ = std::fs::remove_file(old_file.path());
         }
@@ -4451,8 +5416,55 @@ fn list_visible_windows() -> Result<String, String> {
     }
 }
 
-/// List visible windows (Unix stub)
-#[cfg(not(windows))]
+/// List visible windows (macOS — uses AppleScript via System Events)
+#[cfg(target_os = "macos")]
+fn list_visible_windows() -> Result<String, String> {
+    // AppleScript to get window names, positions, and sizes from all visible apps
+    let script = r#"
+        set output to ""
+        tell application "System Events"
+            set visibleProcesses to every process whose visible is true
+            repeat with proc in visibleProcesses
+                set procName to name of proc
+                try
+                    set wins to every window of proc
+                    repeat with win in wins
+                        set winName to name of win
+                        set winPos to position of win
+                        set winSize to size of win
+                        set output to output & "\"" & procName & " - " & winName & "\" - Position: (" & (item 1 of winPos) & ", " & (item 2 of winPos) & "), Size: " & (item 1 of winSize) & "x" & (item 2 of winSize) & linefeed
+                    end repeat
+                end try
+            end repeat
+        end tell
+        return output
+    "#;
+
+    match std::process::Command::new("osascript").args(["-e", script]).output() {
+        Ok(output) => {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if text.is_empty() {
+                    Ok("No visible windows found.".to_string())
+                } else {
+                    let line_count = text.lines().count();
+                    Ok(format!("Visible windows ({}):\n{}", line_count, text))
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("not allowed") || stderr.contains("assistive") {
+                    Err("Window listing requires Automation permission. Grant access in System Settings > Privacy > Automation.".to_string())
+                } else {
+                    Err(format!("AppleScript failed: {}", stderr.trim()))
+                }
+            }
+        }
+        Err(e) => Err(format!("Failed to run osascript: {}", e)),
+    }
+}
+
+/// List visible windows (Linux — uses wmctrl)
+#[cfg(target_os = "linux")]
 fn list_visible_windows() -> Result<String, String> {
     match std::process::Command::new("wmctrl").arg("-l").output() {
         Ok(output) => {
@@ -4462,7 +5474,7 @@ fn list_visible_windows() -> Result<String, String> {
                 Err("wmctrl failed. Install wmctrl for window listing on Linux.".to_string())
             }
         }
-        Err(_) => Err("Window listing not available on this platform. Install wmctrl on Linux.".to_string()),
+        Err(_) => Err("Window listing not available. Install wmctrl: sudo apt install wmctrl".to_string()),
     }
 }
 

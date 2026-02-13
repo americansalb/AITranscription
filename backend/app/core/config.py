@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # API Keys
     groq_api_key: str = ""
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str = "TlLCuK5N2ARR6OHBwD53"  # Default: AALB
 

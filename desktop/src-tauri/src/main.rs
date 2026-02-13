@@ -360,6 +360,27 @@ fn get_project_path() -> Option<String> {
 
 // ==================== End Voice Settings ====================
 
+/// Check if macOS Accessibility permission is granted.
+/// Enigo silently fails without this — key simulation returns Ok but nothing happens.
+#[cfg(target_os = "macos")]
+fn check_accessibility_permission() -> Result<(), String> {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    let trusted = unsafe { AXIsProcessTrusted() };
+    if trusted == 0 {
+        return Err(
+            "Accessibility permission not granted. Vaak needs Accessibility access to simulate \
+             keyboard shortcuts. Go to System Settings > Privacy & Security > Accessibility \
+             and enable Vaak. You may need to restart the app after granting permission."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Simulate a paste keyboard shortcut (Ctrl+V on Windows/Linux, Cmd+V on macOS)
 ///
 /// Note: Focus switching timing is handled by the JavaScript caller.
@@ -367,6 +388,11 @@ fn get_project_path() -> Option<String> {
 #[tauri::command]
 fn simulate_paste() -> Result<(), String> {
     log_error("simulate_paste: called");
+
+    // On macOS, check Accessibility permission before attempting key simulation.
+    // Without it, enigo silently succeeds but no keys are actually pressed.
+    #[cfg(target_os = "macos")]
+    check_accessibility_permission()?;
 
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
         log_error(&format!("simulate_paste: Failed to create Enigo: {}", e));
@@ -475,6 +501,10 @@ fn simulate_paste() -> Result<(), String> {
 /// This is an alternative to paste for applications that don't support clipboard
 #[tauri::command]
 fn type_text(text: String) -> Result<(), String> {
+    // On macOS, check Accessibility permission before attempting key simulation.
+    #[cfg(target_os = "macos")]
+    check_accessibility_permission()?;
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
         log_error(&format!("Failed to create Enigo for typing: {}", e));
         e.to_string()
@@ -1402,6 +1432,10 @@ fn get_screen_dimensions() -> (u32, u32) {
 /// Execute a computer use action from Anthropic's tool_use response
 /// scale_x, scale_y: multiply Claude's coordinates by these to get real screen coords
 fn execute_computer_action(input: &serde_json::Value, scale_x: f64, scale_y: f64) -> Result<(), String> {
+    // On macOS, check Accessibility permission before attempting input simulation.
+    #[cfg(target_os = "macos")]
+    check_accessibility_permission()?;
+
     let mut enigo = Enigo::new(&Settings::default()).map_err(|e| format!("{}", e))?;
 
     let action = input.get("action").and_then(|a| a.as_str()).unwrap_or("");
@@ -1495,12 +1529,43 @@ fn execute_computer_action(input: &serde_json::Value, scale_x: f64, scale_y: f64
                     "shift" => Some(Key::Shift),
                     "meta" | "super" | "win" | "command" | "cmd" => Some(Key::Meta),
                     "capslock" | "caps_lock" => Some(Key::CapsLock),
-                    "insert" => Some(Key::Other(0x2D)), // VK_INSERT
-                    "printscreen" | "print_screen" => Some(Key::Other(0x2C)),
-                    "numlock" | "num_lock" => Some(Key::Other(0x90)),
-                    "scrolllock" | "scroll_lock" => Some(Key::Other(0x91)),
-                    "pause" | "break" => Some(Key::Other(0x13)),
-                    "contextmenu" | "apps" => Some(Key::Other(0x5D)),
+                    "insert" => {
+                        #[cfg(target_os = "macos")]
+                        { Some(Key::Other(0x72)) } // kVK_Help (Insert equivalent on Mac)
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x2D)) } // VK_INSERT
+                    },
+                    "numlock" | "num_lock" => {
+                        #[cfg(target_os = "macos")]
+                        { Some(Key::Other(0x47)) } // kVK_ANSI_KeypadClear (NumLock equivalent)
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x90)) } // VK_NUMLOCK
+                    },
+                    // These keys don't exist on macOS keyboards
+                    "printscreen" | "print_screen" => {
+                        #[cfg(target_os = "macos")]
+                        { None }
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x2C)) } // VK_SNAPSHOT
+                    },
+                    "scrolllock" | "scroll_lock" => {
+                        #[cfg(target_os = "macos")]
+                        { None }
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x91)) } // VK_SCROLL
+                    },
+                    "pause" | "break" => {
+                        #[cfg(target_os = "macos")]
+                        { None }
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x13)) } // VK_PAUSE
+                    },
+                    "contextmenu" | "apps" => {
+                        #[cfg(target_os = "macos")]
+                        { None }
+                        #[cfg(not(target_os = "macos"))]
+                        { Some(Key::Other(0x5D)) } // VK_APPS
+                    },
                     other if other.len() == 1 => Some(Key::Unicode(other.chars().next().unwrap())),
                     _ => None,
                 }
@@ -2678,8 +2743,8 @@ fn get_active_section(dir: String) -> Result<String, String> {
 // ==================== Roster Commands ====================
 
 #[tauri::command]
-fn roster_add_slot(project_dir: String, role: String) -> Result<collab::RosterSlot, String> {
-    collab::roster_add_slot(&project_dir, &role)
+fn roster_add_slot(project_dir: String, role: String, metadata: Option<serde_json::Value>) -> Result<collab::RosterSlot, String> {
+    collab::roster_add_slot(&project_dir, &role, metadata)
 }
 
 #[tauri::command]
@@ -2699,6 +2764,69 @@ fn roster_get(project_dir: String) -> Result<Vec<collab::RosterSlotWithStatus>, 
     collab::roster_get(&project_dir)
 }
 
+// ==================== Role CRUD Commands ====================
+
+#[tauri::command]
+fn create_role(
+    project_dir: String,
+    slug: String,
+    title: String,
+    description: String,
+    permissions: Vec<String>,
+    max_instances: u32,
+    briefing: String,
+    tags: Vec<String>,
+    companions: Option<Vec<collab::CompanionConfig>>,
+) -> Result<collab::RoleConfig, String> {
+    // Auto-save to global templates happens inside collab::create_role
+    collab::create_role(&project_dir, &slug, &title, &description, permissions, max_instances, &briefing, tags, companions.unwrap_or_default())
+}
+
+#[tauri::command]
+fn update_role(
+    project_dir: String,
+    slug: String,
+    title: Option<String>,
+    description: Option<String>,
+    permissions: Option<Vec<String>>,
+    max_instances: Option<u32>,
+    briefing: Option<String>,
+    tags: Option<Vec<String>>,
+    companions: Option<Vec<collab::CompanionConfig>>,
+) -> Result<collab::RoleConfig, String> {
+    let result = collab::update_role(
+        &project_dir,
+        &slug,
+        title.as_deref(),
+        description.as_deref(),
+        permissions,
+        max_instances,
+        briefing.as_deref(),
+        tags,
+        companions,
+    )?;
+    // Auto-update global template on edit (non-blocking)
+    if let Err(e) = collab::save_role_as_global_template(&project_dir, &slug) {
+        eprintln!("[main] Auto-update global template for '{}' failed: {}", slug, e);
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn delete_role(project_dir: String, slug: String) -> Result<(), String> {
+    collab::delete_role(&project_dir, &slug)
+}
+
+#[tauri::command]
+fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<collab::RoleGroup, String> {
+    collab::save_role_group(&project_dir, group)
+}
+
+#[tauri::command]
+fn delete_role_group(project_dir: String, slug: String) -> Result<(), String> {
+    collab::delete_role_group(&project_dir, &slug)
+}
+
 #[tauri::command]
 fn read_role_briefing(dir: String, role_slug: String) -> Result<String, String> {
     let path = std::path::Path::new(&dir)
@@ -2707,6 +2835,23 @@ fn read_role_briefing(dir: String, role_slug: String) -> Result<String, String> 
         .join(format!("{}.md", role_slug));
     std::fs::read_to_string(&path)
         .map_err(|e| format!("No briefing found for '{}': {}", role_slug, e))
+}
+
+// ==================== Global Role Template Commands ====================
+
+#[tauri::command]
+fn save_role_as_global_template(project_dir: String, slug: String) -> Result<(), String> {
+    collab::save_role_as_global_template(&project_dir, &slug)
+}
+
+#[tauri::command]
+fn list_global_role_templates() -> Result<serde_json::Value, String> {
+    collab::list_global_role_templates()
+}
+
+#[tauri::command]
+fn remove_global_role_template(slug: String) -> Result<(), String> {
+    collab::remove_global_role_template(&slug)
 }
 
 #[tauri::command]
@@ -3674,6 +3819,17 @@ fn main() {
             roster_add_slot,
             roster_remove_slot,
             roster_get,
+            // Role CRUD commands
+            create_role,
+            update_role,
+            delete_role,
+            // Role group commands
+            save_role_group,
+            delete_role_group,
+            // Global role template commands
+            save_role_as_global_template,
+            list_global_role_templates,
+            remove_global_role_template,
             // Team launcher commands
             launcher::check_claude_installed,
             launcher::launch_team_member,
@@ -3681,17 +3837,18 @@ fn main() {
             launcher::kill_team_member,
             launcher::kill_all_team_members,
             launcher::get_spawned_agents,
+            launcher::get_role_companions,
+            launcher::repopulate_spawned,
+            launcher::focus_agent_window,
+            launcher::buzz_agent_terminal,
         ]);
 
     match builder.build(tauri::generate_context!()) {
         Ok(app) => {
-            app.run(|_app_handle, event| {
-                if let tauri::RunEvent::Exit = event {
-                    // Kill all spawned Claude agents on app exit
-                    if let Some(state) = _app_handle.try_state::<launcher::LauncherState>() {
-                        launcher::cleanup_all_spawned(&state);
-                    }
-                }
+            app.run(|_app_handle, _event| {
+                // Intentionally empty — do NOT kill spawned Claude agents on app exit.
+                // Terminal sessions must survive app restarts so agents keep their context.
+                // Use kill_all_team_members for explicit cleanup.
             });
         }
         Err(e) => {

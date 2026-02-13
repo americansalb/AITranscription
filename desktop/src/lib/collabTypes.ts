@@ -1,9 +1,17 @@
+export interface CompanionConfig {
+  role: string;
+  optional: boolean;
+  default_enabled: boolean;
+}
+
 export interface RoleConfig {
   title: string;
   description: string;
   max_instances: number;
   permissions: string[];
   created_at: string;
+  tags?: string[];
+  companions?: CompanionConfig[];
 }
 
 export interface ProjectConfig {
@@ -14,6 +22,7 @@ export interface ProjectConfig {
   updated_at: string;
   roles: Record<string, RoleConfig>;
   roster?: RosterSlot[];
+  role_groups?: RoleGroup[];
   settings: {
     heartbeat_timeout_seconds: number;
     message_retention_days: number;
@@ -192,7 +201,25 @@ export interface RosterResponse {
   catalog: Record<string, RoleConfig>;  // Available role definitions
 }
 
-/** Preset team templates for quick setup */
+/** A role entry within a group/preset */
+export interface RoleGroupEntry {
+  slug: string;
+  instances: number;
+}
+
+/** A reusable group of roles (preset or custom) */
+export interface RoleGroup {
+  slug: string;
+  name: string;
+  icon: string;
+  description: string;
+  builtin: boolean;
+  roles: RoleGroupEntry[];
+  parent?: string | null;  // parent group slug — null/undefined = top-level
+  order?: number;          // sort position within parent
+}
+
+/** @deprecated Use RoleGroup instead */
 export interface TeamTemplate {
   id: string;
   name: string;

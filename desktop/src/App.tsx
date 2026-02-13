@@ -674,7 +674,9 @@ function App() {
       checkHealth()
         .then((health) => {
           setBackendReady(health.groq_configured && health.anthropic_configured);
-          if (!health.groq_configured) {
+          if (health.groq_configured && health.anthropic_configured) {
+            setError(null);
+          } else if (!health.groq_configured) {
             setError({
               message: "Backend: Groq API key not configured",
               action: {
