@@ -1196,34 +1196,25 @@ fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     use base64::Engine;
     use screenshots::Screen;
 
-    // 0. On macOS, check Screen Recording permission before attempting capture
-    #[cfg(target_os = "macos")]
-    {
-        #[link(name = "CoreGraphics", kind = "framework")]
-        extern "C" {
-            fn CGPreflightScreenCaptureAccess() -> bool;
-            fn CGRequestScreenCaptureAccess() -> bool;
-        }
-
-        let has_permission = unsafe { CGPreflightScreenCaptureAccess() };
-        if !has_permission {
-            // Prompt the user to grant permission
-            let _ = unsafe { CGRequestScreenCaptureAccess() };
-            return Err(
-                "Screen Recording permission not granted. Go to System Settings > Privacy & Security > \
-                 Screen Recording and enable Vaak. You may need to restart the app after granting permission."
-                    .to_string(),
-            );
-        }
-    }
-
     // 1. Capture screenshot (primary screen)
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
         return Err("No screens found".to_string());
     }
     let screen = &screens[0];
-    let image = screen.capture().map_err(|e| format!("Failed to capture screen: {}", e))?;
+    let image = screen.capture().map_err(|e| {
+        // On macOS, a capture failure likely means Screen Recording permission is missing
+        #[cfg(target_os = "macos")]
+        {
+            return format!(
+                "Screen capture failed. You may need to grant Screen Recording permission: \
+                 System Settings, Privacy and Security, Screen Recording, enable Vaak, then restart the app. \
+                 Error: {}", e
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        format!("Failed to capture screen: {}", e)
+    })?;
 
     // 2. Resize if too large (keeps vision API happy and reduces payload)
     let (w, h) = image.dimensions();
@@ -1402,28 +1393,23 @@ fn capture_screenshot_base64_with_size(max_width: u32) -> Result<(String, u32, u
     use base64::Engine;
     use screenshots::Screen;
 
-    // On macOS, check Screen Recording permission before attempting capture
-    #[cfg(target_os = "macos")]
-    {
-        #[link(name = "CoreGraphics", kind = "framework")]
-        extern "C" {
-            fn CGPreflightScreenCaptureAccess() -> bool;
-        }
-        if !unsafe { CGPreflightScreenCaptureAccess() } {
-            return Err(
-                "Screen Recording permission not granted. Go to System Settings > Privacy & Security > \
-                 Screen Recording and enable Vaak."
-                    .to_string(),
-            );
-        }
-    }
-
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
         return Err("No screens found".to_string());
     }
     let screen = &screens[0];
-    let image = screen.capture().map_err(|e| format!("Failed to capture screen: {}", e))?;
+    let image = screen.capture().map_err(|e| {
+        #[cfg(target_os = "macos")]
+        {
+            return format!(
+                "Screen capture failed. You may need to grant Screen Recording permission: \
+                 System Settings, Privacy and Security, Screen Recording, enable Vaak, then restart the app. \
+                 Error: {}", e
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        format!("Failed to capture screen: {}", e)
+    })?;
 
     let (w, h) = image.dimensions();
     let final_image: screenshots::image::DynamicImage = if w > max_width {
