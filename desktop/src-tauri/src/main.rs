@@ -1195,6 +1195,28 @@ fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, Stri
 fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     use base64::Engine;
     use screenshots::Screen;
+
+    // 0. On macOS, check Screen Recording permission before attempting capture
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGPreflightScreenCaptureAccess() -> bool;
+            fn CGRequestScreenCaptureAccess() -> bool;
+        }
+
+        let has_permission = unsafe { CGPreflightScreenCaptureAccess() };
+        if !has_permission {
+            // Prompt the user to grant permission
+            let _ = unsafe { CGRequestScreenCaptureAccess() };
+            return Err(
+                "Screen Recording permission not granted. Go to System Settings > Privacy & Security > \
+                 Screen Recording and enable Vaak. You may need to restart the app after granting permission."
+                    .to_string(),
+            );
+        }
+    }
+
     // 1. Capture screenshot (primary screen)
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
@@ -1379,6 +1401,22 @@ impl Default for SRSettings {
 fn capture_screenshot_base64_with_size(max_width: u32) -> Result<(String, u32, u32), String> {
     use base64::Engine;
     use screenshots::Screen;
+
+    // On macOS, check Screen Recording permission before attempting capture
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGPreflightScreenCaptureAccess() -> bool;
+        }
+        if !unsafe { CGPreflightScreenCaptureAccess() } {
+            return Err(
+                "Screen Recording permission not granted. Go to System Settings > Privacy & Security > \
+                 Screen Recording and enable Vaak."
+                    .to_string(),
+            );
+        }
+    }
 
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
