@@ -1368,17 +1368,25 @@ fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     use base64::Engine;
     use screenshots::Screen;
 
-    // On macOS, check Screen Recording permission before attempting capture
-    #[cfg(target_os = "macos")]
-    check_screen_recording_permission()?;
-
     // 1. Capture screenshot (primary screen)
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
         return Err("No screens found".to_string());
     }
     let screen = &screens[0];
-    let image = screen.capture().map_err(|e| format!("Failed to capture screen: {}", e))?;
+    let image = screen.capture().map_err(|e| {
+        // On macOS, a capture failure likely means Screen Recording permission is missing
+        #[cfg(target_os = "macos")]
+        {
+            return format!(
+                "Screen capture failed. You may need to grant Screen Recording permission: \
+                 System Settings, Privacy and Security, Screen Recording, enable Vaak, then restart the app. \
+                 Error: {}", e
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        format!("Failed to capture screen: {}", e)
+    })?;
 
     // 2. Resize if too large (keeps vision API happy and reduces payload)
     let (w, h) = image.dimensions();
@@ -1566,7 +1574,18 @@ fn capture_screenshot_base64_with_size(max_width: u32) -> Result<(String, u32, u
         return Err("No screens found".to_string());
     }
     let screen = &screens[0];
-    let image = screen.capture().map_err(|e| format!("Failed to capture screen: {}", e))?;
+    let image = screen.capture().map_err(|e| {
+        #[cfg(target_os = "macos")]
+        {
+            return format!(
+                "Screen capture failed. You may need to grant Screen Recording permission: \
+                 System Settings, Privacy and Security, Screen Recording, enable Vaak, then restart the app. \
+                 Error: {}", e
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        format!("Failed to capture screen: {}", e)
+    })?;
 
     let (w, h) = image.dimensions();
     let final_image: screenshots::image::DynamicImage = if w > max_width {

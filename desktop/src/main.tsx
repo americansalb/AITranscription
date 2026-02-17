@@ -8,6 +8,17 @@ import { ToastProvider } from "./components/Toast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
 
+// Block browser-style shortcuts that conflict with app functionality.
+// Cmd+R / Ctrl+R refreshes the webview, re-initializing all listeners and
+// replaying cached speak events — which looks like a false screen reader trigger.
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+    if (e.key === "r" || e.key === "R") {
+      e.preventDefault();
+    }
+  }
+});
+
 // Check window type from hash
 const hash = window.location.hash;
 const isOverlay = hash === "#/overlay";

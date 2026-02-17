@@ -339,6 +339,11 @@ export async function initSpeakListener(): Promise<() => void> {
   const unlistenSRError = await listen<string>("screen-reader-error", (event) => {
     console.log("[Speak] Screen reader error:", event.payload);
     earcons.screenReaderError();
+    // Speak the error message so screen reader users know what went wrong
+    if (event.payload && typeof event.payload === "string") {
+      const ts = Date.now();
+      queueStore.addItem(event.payload, `screen-reader-error-${ts}`);
+    }
   });
 
   // Listen for screen reader stop-speaking events (Alt+R or Alt+A pressed = stop current audio)
@@ -360,6 +365,11 @@ export async function initSpeakListener(): Promise<() => void> {
   const unlistenSRAskError = await listen<string>("screen-reader-ask-error", (event) => {
     console.log("[Speak] Screen reader ask error:", event.payload);
     earcons.screenReaderAskError();
+    // Speak the error message so screen reader users know what went wrong
+    if (event.payload && typeof event.payload === "string") {
+      const ts = Date.now();
+      queueStore.addItem(event.payload, `screen-reader-error-${ts}`);
+    }
   });
 
   // Store unlisten in window to persist across hot reloads

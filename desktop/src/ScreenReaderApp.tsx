@@ -130,7 +130,7 @@ export function ScreenReaderApp() {
             <div className="sr-row">
               <div>
                 <div className="sr-row-label">Enable Screen Reader</div>
-                <div className="sr-row-desc">{getAltKeyName()}+R captures screen, {getAltKeyName()}+A for follow-up questions</div>
+                <div className="sr-row-desc">{formatHotkeyForDisplay("Alt+R")} captures screen, {formatHotkeyForDisplay("Alt+A")} for follow-up questions</div>
               </div>
               <button className={`sr-toggle ${enabled ? "active" : ""}`} onClick={handleToggle} />
             </div>
@@ -316,7 +316,7 @@ export function ScreenReaderApp() {
               </div>
               <div className="sr-status-item">
                 <div className="sr-status-label">Ask</div>
-                <div className="sr-status-value">{getAltKeyName()}+A</div>
+                <div className="sr-status-value">{formatHotkeyForDisplay("Alt+A")}</div>
               </div>
               <div className="sr-status-item">
                 <div className="sr-status-label">Last Read</div>
