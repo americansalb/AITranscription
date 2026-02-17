@@ -5,6 +5,7 @@ import { useGlobalHotkey } from "./hooks/useGlobalHotkey";
 import { transcribeAndPolish, transcribe, polish, checkHealth, ApiError, isLoggedIn, submitFeedback, getApiBaseUrl, getAuthToken, getUserStats } from "./lib/api";
 import { injectText, setTrayRecordingState, updateOverlayState } from "./lib/clipboard";
 import { isMacOS, formatHotkeyForDisplay as formatHotkeyDisplay } from "./lib/platform";
+import { trimHistory, enforceStorageCap } from "./lib/storageManager";
 import { Settings, getStoredHotkey } from "./components/Settings";
 import { AudioIndicator } from "./components/AudioIndicator";
 import { StatsPanel } from "./components/StatsPanel";
@@ -346,9 +347,10 @@ function App() {
   // Save history to localStorage when it changes
   useEffect(() => {
     try {
-      // Keep only last 100 entries
-      const trimmed = transcriptHistory.slice(0, 100);
+      // Keep only last 50 entries with capped text sizes (enforces 5MB global limit)
+      const trimmed = trimHistory(transcriptHistory, 50);
       localStorage.setItem(STORAGE_KEYS.HISTORY, JSON.stringify(trimmed));
+      enforceStorageCap();
     } catch (e) {
       console.warn("Failed to save history:", e);
     }

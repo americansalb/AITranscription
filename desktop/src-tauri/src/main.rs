@@ -53,6 +53,37 @@ use tauri::{
 };
 use tiny_http::{Response, Server};
 
+/// Validate and canonicalize a project directory path.
+/// Rejects path traversal attempts (e.g., `..`) and verifies the directory exists
+/// and contains a `.vaak/` subdirectory (confirming it's a valid Vaak project).
+fn validate_project_dir(dir: &str) -> Result<String, String> {
+    let path = std::path::Path::new(dir);
+
+    // Reject paths containing ".." components
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err("Invalid project directory: path traversal not allowed".to_string());
+        }
+    }
+
+    // Canonicalize to resolve symlinks and relative paths
+    let canonical = path.canonicalize()
+        .map_err(|e| format!("Invalid project directory '{}': {}", dir, e))?;
+
+    // Must be a directory
+    if !canonical.is_dir() {
+        return Err(format!("Not a directory: {}", canonical.display()));
+    }
+
+    // Must contain .vaak/ subdirectory (valid project)
+    let vaak_dir = canonical.join(".vaak");
+    if !vaak_dir.is_dir() {
+        return Err(format!("Not a Vaak project (no .vaak/ directory): {}", canonical.display()));
+    }
+
+    Ok(canonical.to_string_lossy().to_string())
+}
+
 /// Helper to create an Image from PNG bytes
 fn load_png_image(png_bytes: &[u8]) -> Result<Image<'static>, String> {
     // Decode PNG to RGBA
@@ -257,7 +288,7 @@ fn sync_collab_settings_to_project() {
     }
 
     if let Ok(pretty) = serde_json::to_string_pretty(&config) {
-        let _ = std::fs::write(&config_path, pretty);
+        let _ = collab::atomic_write(&config_path, pretty.as_bytes());
     }
 }
 
@@ -377,78 +408,133 @@ fn get_project_path() -> Option<String> {
 #[cfg(target_os = "macos")]
 static ACCESSIBILITY_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Cache for granted accessibility permission (once true, stays true for process lifetime)
+#[cfg(target_os = "macos")]
+static ACCESSIBILITY_GRANTED: AtomicBool = AtomicBool::new(false);
+
+/// Cache for granted screen recording permission (once true, stays true for process lifetime)
+#[cfg(target_os = "macos")]
+static SCREEN_RECORDING_GRANTED: AtomicBool = AtomicBool::new(false);
+
 /// Check if macOS Accessibility permission is granted.
 /// Enigo silently fails without this — key simulation returns Ok but nothing happens.
 /// On first failure, attempts to trigger the macOS permission prompt via AXIsProcessTrustedWithOptions.
+/// Caches positive result to avoid repeated FFI calls after permission is granted.
 #[cfg(target_os = "macos")]
 fn check_accessibility_permission() -> Result<(), String> {
+    // Fast path: already granted, skip FFI call
+    if ACCESSIBILITY_GRANTED.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrusted() -> u8;
     }
 
     let trusted = unsafe { AXIsProcessTrusted() };
-    if trusted == 0 {
-        // On first failure, try to trigger the system permission prompt
-        if !ACCESSIBILITY_WARNED.swap(true, Ordering::Relaxed) {
-            eprintln!("[accessibility] Permission not granted — triggering macOS prompt");
-            // AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=true
-            // triggers the macOS system dialog asking the user to grant permission
-            #[link(name = "ApplicationServices", kind = "framework")]
-            extern "C" {
-                fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> u8;
-            }
-            #[link(name = "CoreFoundation", kind = "framework")]
-            extern "C" {
-                fn CFDictionaryCreate(
-                    allocator: *const std::ffi::c_void,
-                    keys: *const *const std::ffi::c_void,
-                    values: *const *const std::ffi::c_void,
-                    num: isize,
-                    key_callbacks: *const std::ffi::c_void,
-                    value_callbacks: *const std::ffi::c_void,
-                ) -> *const std::ffi::c_void;
-                fn CFRelease(cf: *const std::ffi::c_void);
-                static kCFBooleanTrue: *const std::ffi::c_void;
-                static kCFTypeDictionaryKeyCallBacks: u8;
-                static kCFTypeDictionaryValueCallBacks: u8;
-            }
-            // The key string "AXTrustedCheckOptionPrompt"
-            let key_str = b"AXTrustedCheckOptionPrompt\0";
-            #[link(name = "CoreFoundation", kind = "framework")]
-            extern "C" {
-                fn CFStringCreateWithCString(
-                    alloc: *const std::ffi::c_void,
-                    c_str: *const u8,
-                    encoding: u32,
-                ) -> *const std::ffi::c_void;
-            }
-            unsafe {
-                let key = CFStringCreateWithCString(std::ptr::null(), key_str.as_ptr(), 0x08000100); // kCFStringEncodingUTF8
-                let keys = [key];
-                let values = [kCFBooleanTrue];
-                let options = CFDictionaryCreate(
-                    std::ptr::null(),
-                    keys.as_ptr(),
-                    values.as_ptr(),
-                    1,
-                    &kCFTypeDictionaryKeyCallBacks as *const _ as *const std::ffi::c_void,
-                    &kCFTypeDictionaryValueCallBacks as *const _ as *const std::ffi::c_void,
-                );
-                let _ = AXIsProcessTrustedWithOptions(options);
-                CFRelease(options);
-                CFRelease(key);
-            }
-        }
-
-        return Err(
-            "Accessibility permission not granted. Vaak needs Accessibility access to simulate \
-             keyboard shortcuts. Go to System Settings > Privacy & Security > Accessibility \
-             and enable Vaak. You may need to restart the app after granting permission."
-                .to_string(),
-        );
+    if trusted != 0 {
+        ACCESSIBILITY_GRANTED.store(true, Ordering::Relaxed);
+        return Ok(());
     }
-    Ok(())
+
+    // Not yet granted — on first failure, trigger the system permission prompt
+    if !ACCESSIBILITY_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!("[accessibility] Permission not granted — triggering macOS prompt");
+        // AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=true
+        // triggers the macOS system dialog asking the user to grant permission
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> u8;
+        }
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            fn CFDictionaryCreate(
+                allocator: *const std::ffi::c_void,
+                keys: *const *const std::ffi::c_void,
+                values: *const *const std::ffi::c_void,
+                num: isize,
+                key_callbacks: *const std::ffi::c_void,
+                value_callbacks: *const std::ffi::c_void,
+            ) -> *const std::ffi::c_void;
+            fn CFRelease(cf: *const std::ffi::c_void);
+            static kCFBooleanTrue: *const std::ffi::c_void;
+            static kCFTypeDictionaryKeyCallBacks: u8;
+            static kCFTypeDictionaryValueCallBacks: u8;
+        }
+        let key_str = b"AXTrustedCheckOptionPrompt\0";
+        #[link(name = "CoreFoundation", kind = "framework")]
+        extern "C" {
+            fn CFStringCreateWithCString(
+                alloc: *const std::ffi::c_void,
+                c_str: *const u8,
+                encoding: u32,
+            ) -> *const std::ffi::c_void;
+        }
+        unsafe {
+            let key = CFStringCreateWithCString(std::ptr::null(), key_str.as_ptr(), 0x08000100); // kCFStringEncodingUTF8
+            let keys = [key];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                &kCFTypeDictionaryKeyCallBacks as *const _ as *const std::ffi::c_void,
+                &kCFTypeDictionaryValueCallBacks as *const _ as *const std::ffi::c_void,
+            );
+            let _ = AXIsProcessTrustedWithOptions(options);
+            CFRelease(options);
+            CFRelease(key);
+        }
+    }
+
+    Err(
+        "Accessibility permission not granted. Vaak needs Accessibility access to simulate \
+         keyboard shortcuts. Go to System Settings > Privacy & Security > Accessibility \
+         and enable Vaak. You may need to restart the app after granting permission."
+            .to_string(),
+    )
+}
+
+/// Check if macOS Screen Recording permission is granted.
+/// On macOS 10.15+, screen capture returns blank images without this permission.
+/// Caches positive result to avoid repeated FFI calls.
+#[cfg(target_os = "macos")]
+fn check_screen_recording_permission() -> Result<(), String> {
+    // Fast path: already granted
+    if SCREEN_RECORDING_GRANTED.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> u8;
+    }
+
+    let granted = unsafe { CGPreflightScreenCaptureAccess() };
+    if granted != 0 {
+        SCREEN_RECORDING_GRANTED.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+
+    // Not granted — request access (shows system dialog on first call)
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGRequestScreenCaptureAccess() -> u8;
+    }
+    let requested = unsafe { CGRequestScreenCaptureAccess() };
+    if requested != 0 {
+        SCREEN_RECORDING_GRANTED.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+
+    Err(
+        "Screen Recording permission not granted. Vaak needs Screen Recording access to capture \
+         screenshots. Go to System Settings > Privacy & Security > Screen Recording \
+         and enable Vaak. You may need to restart the app after granting permission."
+            .to_string(),
+    )
 }
 
 /// Simulate a paste keyboard shortcut (Ctrl+V on Windows/Linux, Cmd+V on macOS)
@@ -1281,6 +1367,11 @@ fn check_recording(state: tauri::State<AudioRecorderState>) -> Result<bool, Stri
 fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     use base64::Engine;
     use screenshots::Screen;
+
+    // On macOS, check Screen Recording permission before attempting capture
+    #[cfg(target_os = "macos")]
+    check_screen_recording_permission()?;
+
     // 1. Capture screenshot (primary screen)
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
@@ -1465,6 +1556,10 @@ impl Default for SRSettings {
 fn capture_screenshot_base64_with_size(max_width: u32) -> Result<(String, u32, u32), String> {
     use base64::Engine;
     use screenshots::Screen;
+
+    // On macOS, check Screen Recording permission before attempting capture
+    #[cfg(target_os = "macos")]
+    check_screen_recording_permission()?;
 
     let screens = Screen::all().map_err(|e| format!("Failed to enumerate screens: {}", e))?;
     if screens.is_empty() {
@@ -1873,6 +1968,9 @@ fn get_project_last_mtimes() -> &'static Mutex<(Option<std::time::SystemTime>, O
 /// Tauri command: start watching a project directory for .vaak/ file changes
 #[tauri::command]
 fn watch_project_dir(dir: String) -> Result<serde_json::Value, String> {
+    // Validate path to prevent traversal attacks
+    let dir = validate_project_dir(&dir)?;
+
     // Determine the best directory to watch:
     // If the specified dir has an inactive/empty .vaak/ but a subdirectory has an active one, prefer the subdirectory.
     let effective_dir = find_best_vaak_dir(&dir);
@@ -1981,6 +2079,21 @@ fn find_best_vaak_dir(dir: &str) -> String {
 
 #[tauri::command]
 fn initialize_project(dir: String, config: String) -> Result<(), String> {
+    // Relaxed validation: no ".." components, must be an existing directory
+    // (can't require .vaak/ since we're creating it)
+    let path = std::path::Path::new(&dir);
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err("Invalid directory: path traversal not allowed".to_string());
+        }
+    }
+    let canonical = path.canonicalize()
+        .map_err(|e| format!("Invalid directory '{}': {}", dir, e))?;
+    if !canonical.is_dir() {
+        return Err(format!("Not a directory: {}", canonical.display()));
+    }
+    let dir = canonical.to_string_lossy().to_string();
+
     let vaak_dir = std::path::Path::new(&dir).join(".vaak");
     let roles_dir = vaak_dir.join("roles");
     let last_seen_dir = vaak_dir.join("last-seen");
@@ -2028,6 +2141,7 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     let board_path = collab::active_board_path(&dir);
     let content = std::fs::read_to_string(&board_path)
         .map_err(|e| format!("Failed to read board.jsonl: {}", e))?;
@@ -2050,7 +2164,7 @@ fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
         filtered.join("\n") + "\n"
     };
 
-    std::fs::write(&board_path, output)
+    collab::atomic_write(&board_path, output.as_bytes())
         .map_err(|e| format!("Failed to write board.jsonl: {}", e))?;
     notify_collab_change();
     Ok(())
@@ -2058,8 +2172,9 @@ fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
 
 #[tauri::command]
 fn clear_all_messages(dir: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     let board_path = collab::active_board_path(&dir);
-    std::fs::write(&board_path, "")
+    collab::atomic_write(&board_path, b"")
         .map_err(|e| format!("Failed to truncate board.jsonl: {}", e))?;
     notify_collab_change();
     Ok(())
@@ -2067,6 +2182,7 @@ fn clear_all_messages(dir: String) -> Result<(), String> {
 
 #[tauri::command]
 fn set_message_retention(dir: String, days: u64) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
@@ -2109,7 +2225,7 @@ fn set_message_retention(dir: String, days: u64) -> Result<(), String> {
 
     let pretty = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&config_path, pretty)
+    collab::atomic_write(&config_path, pretty.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
     notify_collab_change();
     Ok(())
@@ -2117,6 +2233,7 @@ fn set_message_retention(dir: String, days: u64) -> Result<(), String> {
 
 #[tauri::command]
 fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     // Validate workflow type
     if let Some(ref wt) = workflow_type {
         if wt != "full" && wt != "quick" && wt != "bugfix" {
@@ -2171,7 +2288,7 @@ fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), S
 
     let pretty = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&config_path, pretty)
+    collab::atomic_write(&config_path, pretty.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     notify_collab_change();
@@ -2180,6 +2297,7 @@ fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), S
 
 #[tauri::command]
 fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     if let Some(ref dm) = discussion_mode {
         if dm != "open" && dm != "directed" {
             return Err(format!("Invalid communication mode '{}'. Must be 'open' or 'directed'. (Discussion formats like 'delphi'/'oxford' are set when starting a discussion, not here.)", dm));
@@ -2230,7 +2348,7 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
 
     let pretty = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&config_path, pretty)
+    collab::atomic_write(&config_path, pretty.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     notify_collab_change();
@@ -2363,6 +2481,7 @@ fn start_discussion(
 
 #[tauri::command]
 fn close_discussion_round(dir: String) -> Result<String, String> {
+    let dir = validate_project_dir(&dir)?;
     // Wrap the entire read-modify-write in a single lock acquisition
     // to prevent the dual-writer race with MCP sidecar submissions.
     // Without this, MCP-written submissions could be wiped when we
@@ -2555,6 +2674,7 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
 
 #[tauri::command]
 fn open_next_round(dir: String) -> Result<u32, String> {
+    let dir = validate_project_dir(&dir)?;
     // Wrap in board lock to prevent race with MCP sidecar
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
@@ -2620,6 +2740,7 @@ fn open_next_round(dir: String) -> Result<u32, String> {
 
 #[tauri::command]
 fn end_discussion(dir: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     // Wrap in board lock to prevent race with MCP sidecar
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
@@ -2670,6 +2791,7 @@ fn end_discussion(dir: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
     let state = collab::read_discussion(&dir);
     let mut val = serde_json::to_value(&state)
         .map_err(|e| format!("Failed to serialize discussion state: {}", e))?;
@@ -2721,6 +2843,7 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     // Wrap in board lock to prevent race with MCP sidecar
     let result = collab::with_board_lock(&dir, || {
         let disc_path = collab::active_discussion_path(&dir);
@@ -2737,8 +2860,9 @@ fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), Strin
             });
         }
 
-        std::fs::write(&disc_path, serde_json::to_string_pretty(&disc)
-            .map_err(|e| format!("Failed to serialize: {}", e))?)
+        let disc_content = serde_json::to_string_pretty(&disc)
+            .map_err(|e| format!("Failed to serialize: {}", e))?;
+        collab::atomic_write(&disc_path, disc_content.as_bytes())
             .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
 
         Ok(())
@@ -2778,6 +2902,7 @@ fn iso_now() -> String {
 
 #[tauri::command]
 fn send_team_message(dir: String, to: String, subject: String, body: String, msg_type: Option<String>, metadata: Option<serde_json::Value>) -> Result<u64, String> {
+    let dir = validate_project_dir(&dir)?;
     let board_path = collab::active_board_path(&dir);
 
     // Read existing board to determine next message ID
@@ -2852,6 +2977,7 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
 
 #[tauri::command]
 fn create_section(dir: String, name: String) -> Result<collab::SectionInfo, String> {
+    let dir = validate_project_dir(&dir)?;
     let result = collab::create_section(&dir, &name);
     if result.is_ok() { notify_collab_change(); }
     result
@@ -2859,6 +2985,7 @@ fn create_section(dir: String, name: String) -> Result<collab::SectionInfo, Stri
 
 #[tauri::command]
 fn switch_section(dir: String, slug: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     // Verify the section exists (either "default" or has a sections/{slug}/ directory)
     if slug != "default" {
         let sec_dir = std::path::Path::new(&dir).join(".vaak").join("sections").join(&slug);
@@ -2873,11 +3000,13 @@ fn switch_section(dir: String, slug: String) -> Result<(), String> {
 
 #[tauri::command]
 fn list_sections(dir: String) -> Result<Vec<collab::SectionInfo>, String> {
+    let dir = validate_project_dir(&dir)?;
     Ok(collab::list_sections(&dir))
 }
 
 #[tauri::command]
 fn get_active_section(dir: String) -> Result<String, String> {
+    let dir = validate_project_dir(&dir)?;
     Ok(collab::get_active_section(&dir))
 }
 
@@ -2885,6 +3014,7 @@ fn get_active_section(dir: String) -> Result<String, String> {
 
 #[tauri::command]
 fn roster_add_slot(project_dir: String, role: String, metadata: Option<serde_json::Value>) -> Result<collab::RosterSlot, String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::roster_add_slot(&project_dir, &role, metadata);
     if result.is_ok() { notify_collab_change(); }
     result
@@ -2906,6 +3036,7 @@ fn roster_remove_slot(
 
 #[tauri::command]
 fn roster_get(project_dir: String) -> Result<Vec<collab::RosterSlotWithStatus>, String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     collab::roster_get(&project_dir)
 }
 
@@ -2962,6 +3093,7 @@ fn update_role(
 
 #[tauri::command]
 fn delete_role(project_dir: String, slug: String) -> Result<(), String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::delete_role(&project_dir, &slug);
     if result.is_ok() { notify_collab_change(); }
     result
@@ -2969,6 +3101,7 @@ fn delete_role(project_dir: String, slug: String) -> Result<(), String> {
 
 #[tauri::command]
 fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<collab::RoleGroup, String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::save_role_group(&project_dir, group);
     if result.is_ok() { notify_collab_change(); }
     result
@@ -2976,6 +3109,7 @@ fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<coll
 
 #[tauri::command]
 fn delete_role_group(project_dir: String, slug: String) -> Result<(), String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::delete_role_group(&project_dir, &slug);
     if result.is_ok() { notify_collab_change(); }
     result
@@ -2983,6 +3117,11 @@ fn delete_role_group(project_dir: String, slug: String) -> Result<(), String> {
 
 #[tauri::command]
 fn read_role_briefing(dir: String, role_slug: String) -> Result<String, String> {
+    let dir = validate_project_dir(&dir)?;
+    // Sanitize role_slug: reject path separators and traversal
+    if role_slug.contains('/') || role_slug.contains('\\') || role_slug.contains("..") {
+        return Err("Invalid role slug: path traversal not allowed".to_string());
+    }
     let path = std::path::Path::new(&dir)
         .join(".vaak")
         .join("roles")
@@ -2995,6 +3134,7 @@ fn read_role_briefing(dir: String, role_slug: String) -> Result<String, String> 
 
 #[tauri::command]
 fn save_role_as_global_template(project_dir: String, slug: String) -> Result<(), String> {
+    let project_dir = validate_project_dir(&project_dir)?;
     collab::save_role_as_global_template(&project_dir, &slug)
 }
 
@@ -3010,6 +3150,7 @@ fn remove_global_role_template(slug: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_project_claims(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
     let vaak_dir = std::path::Path::new(&dir).join(".vaak");
     let claims_path = vaak_dir.join("claims.json");
     let content = match std::fs::read_to_string(&claims_path) {
@@ -3064,6 +3205,7 @@ fn get_project_claims(dir: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn claim_files(dir: String, role_instance: String, files: Vec<String>, description: String, session_id: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
     let claims_path = std::path::Path::new(&dir).join(".vaak").join("claims.json");
     let lock_path = std::path::Path::new(&dir).join(".vaak").join("board.lock");
 
@@ -3126,7 +3268,7 @@ fn claim_files(dir: String, role_instance: String, files: Vec<String>, descripti
 
             let output = serde_json::to_string_pretty(&claims)
                 .map_err(|e| format!("Serialize error: {}", e))?;
-            std::fs::write(&claims_path, output)
+            collab::atomic_write(&claims_path, output.as_bytes())
                 .map_err(|e| format!("Write error: {}", e))?;
 
             Ok(serde_json::json!({ "conflicts": conflicts }))
@@ -3179,7 +3321,7 @@ fn claim_files(dir: String, role_instance: String, files: Vec<String>, descripti
 
             let output = serde_json::to_string_pretty(&claims)
                 .map_err(|e| format!("Serialize error: {}", e))?;
-            std::fs::write(&claims_path, output)
+            collab::atomic_write(&claims_path, output.as_bytes())
                 .map_err(|e| format!("Write error: {}", e))?;
 
             Ok(serde_json::json!({ "conflicts": conflicts }))
@@ -3193,6 +3335,7 @@ fn claim_files(dir: String, role_instance: String, files: Vec<String>, descripti
 
 #[tauri::command]
 fn release_claim(dir: String, role_instance: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
     let claims_path = std::path::Path::new(&dir).join(".vaak").join("claims.json");
     let lock_path = std::path::Path::new(&dir).join(".vaak").join("board.lock");
 
@@ -3224,7 +3367,7 @@ fn release_claim(dir: String, role_instance: String) -> Result<(), String> {
             claims.remove(&role_instance);
             let output = serde_json::to_string_pretty(&claims)
                 .map_err(|e| format!("Serialize error: {}", e))?;
-            std::fs::write(&claims_path, output)
+            collab::atomic_write(&claims_path, output.as_bytes())
                 .map_err(|e| format!("Write error: {}", e))?;
             Ok(())
         })();
@@ -3249,7 +3392,7 @@ fn release_claim(dir: String, role_instance: String) -> Result<(), String> {
             claims.remove(&role_instance);
             let output = serde_json::to_string_pretty(&claims)
                 .map_err(|e| format!("Serialize error: {}", e))?;
-            std::fs::write(&claims_path, output)
+            collab::atomic_write(&claims_path, output.as_bytes())
                 .map_err(|e| format!("Write error: {}", e))?;
             Ok(())
         })();

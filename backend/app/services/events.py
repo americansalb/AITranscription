@@ -3,9 +3,12 @@ Server-Sent Events manager for real-time voice notifications.
 """
 import asyncio
 import json
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import AsyncGenerator
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,11 +67,18 @@ class EventManager:
         if not self._clients:
             return
 
+        failed_queues = []
         for queue in self._clients:
             try:
                 await queue.put(event)
             except Exception:
-                # Client queue might be full or closed
+                logger.warning("Failed to broadcast event to SSE client (queue full or closed)")
+                failed_queues.append(queue)
+        # Remove failed queues to prevent further broadcast attempts to dead clients
+        for q in failed_queues:
+            try:
+                self._clients.remove(q)
+            except ValueError:
                 pass
 
     def _format_sse(self, event: VoiceEvent) -> str:

@@ -185,7 +185,7 @@ class ScreenReaderService:
 
     async def computer_use(self, messages: list, display_width: int = 1920, display_height: int = 1080, model: str | None = None, uia_tree: str | None = None) -> dict:
         """Single-turn computer use call. Returns raw Anthropic response for Rust to parse."""
-        vision_model = model or "claude-sonnet-4-20250514"
+        vision_model = model or settings.vision_model
 
         system_prompt = (
             "You control a computer for a blind user. Act on the screenshot provided — NEVER request another screenshot. "

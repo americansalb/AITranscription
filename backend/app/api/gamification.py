@@ -1,6 +1,7 @@
 """Gamification API endpoints for XP, levels, achievements, and leaderboards."""
 
 import logging
+from enum import Enum
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,6 +21,13 @@ from app.services.gamification import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/gamification", tags=["gamification"])
+
+
+class LeaderboardMetric(str, Enum):
+    """Valid leaderboard ranking metrics."""
+    lifetime_xp = "lifetime_xp"
+    achievements = "achievements"
+    words = "words"
 
 
 # =============================================================================
@@ -265,25 +273,19 @@ async def mark_achievements_notified(
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)
 async def get_leaderboard(
-    metric: str = Query(default="lifetime_xp", description="Metric to rank by: lifetime_xp, achievements, words"),
+    metric: LeaderboardMetric = Query(default=LeaderboardMetric.lifetime_xp, description="Metric to rank by"),
     limit: int = Query(default=100, ge=1, le=500),
     include_user_rank: bool = Query(default=True, description="Include current user's rank"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Get the leaderboard with optional user rank."""
-    if metric not in ["lifetime_xp", "achievements", "words"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid metric. Must be one of: lifetime_xp, achievements, words",
-        )
-
     service = LeaderboardService(db)
-    leaderboard = await service.get_leaderboard(metric=metric, limit=limit)
+    leaderboard = await service.get_leaderboard(metric=metric.value, limit=limit)
 
     user_rank = None
     if include_user_rank:
-        user_rank = await service.get_user_rank(current_user.id, metric=metric)
+        user_rank = await service.get_user_rank(current_user.id, metric=metric.value)
 
     return {
         "leaderboard": leaderboard,

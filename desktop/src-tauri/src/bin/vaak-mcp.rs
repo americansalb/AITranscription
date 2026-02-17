@@ -17,6 +17,19 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Atomic file write: write to .tmp, fsync, rename. Prevents partial writes on macOS.
+fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, content)
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Ok(f) = std::fs::File::open(&tmp_path) {
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+    Ok(())
+}
+
 /// Backend API base URL. Override via VAAK_BACKEND_URL env var; defaults to localhost:19836.
 fn get_backend_url() -> String {
     std::env::var("VAAK_BACKEND_URL")
@@ -221,7 +234,7 @@ fn ensure_sections_layout(project_dir: &str) -> Result<(), String> {
 
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(&config_path, content)
+    atomic_write(&config_path, content.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     eprintln!("[sections] Migration complete");
@@ -267,7 +280,7 @@ fn handle_create_section(project_dir: &str, name: &str) -> Result<serde_json::Va
 
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(&config_path, content)
+    atomic_write(&config_path, content.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     eprintln!("[sections] Created section '{}' (slug: {})", name, slug);
@@ -314,7 +327,7 @@ fn handle_switch_section(project_dir: &str, slug: &str) -> Result<serde_json::Va
     // the human clicks a section tab. This prevents one agent's switch from moving all others.
     let sessions_content = serde_json::to_string_pretty(&sessions)
         .map_err(|e| format!("Failed to serialize sessions.json: {}", e))?;
-    std::fs::write(&sessions_path, sessions_content)
+    atomic_write(&sessions_path, sessions_content.as_bytes())
         .map_err(|e| format!("Failed to write sessions.json: {}", e))?;
 
     eprintln!("[sections] Switched to section '{}'", slug);
@@ -493,20 +506,39 @@ where
         .open(&lock_path)
         .map_err(|e| format!("Failed to open lock file: {}", e))?;
 
+    const LOCK_TIMEOUT_MS: u64 = 10_000; // 10 seconds max wait
+    const LOCK_RETRY_MS: u64 = 50;       // retry interval
+
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let handle = lock_file.as_raw_handle();
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
 
+        // Try non-blocking first
         let locked = unsafe {
-            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
         };
+
         if locked == 0 {
-            return Err("Failed to acquire file lock".to_string());
+            // Lock held by another process — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                let retry = unsafe {
+                    LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                };
+                if retry != 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "board.lock held for >{}s — possible stale lock. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
 
         let result = f();
@@ -521,10 +553,23 @@ where
     {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            return Err("Failed to acquire file lock".to_string());
+
+        // Try non-blocking first
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            // Lock held — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "board.lock held for >{}s — possible stale lock. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
+
         let result = f();
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -555,20 +600,39 @@ where
         .open(&lock_path)
         .map_err(|e| format!("Failed to open discussion lock file: {}", e))?;
 
+    const LOCK_TIMEOUT_MS: u64 = 10_000; // 10 seconds max wait
+    const LOCK_RETRY_MS: u64 = 50;       // retry interval
+
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let handle = lock_file.as_raw_handle();
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
 
+        // Try non-blocking first
         let locked = unsafe {
-            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
         };
+
         if locked == 0 {
-            return Err("Failed to acquire discussion lock".to_string());
+            // Lock held by another process — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                let retry = unsafe {
+                    LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                };
+                if retry != 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "discussion.lock held for >{}s — possible stale lock. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
 
         let result = f();
@@ -583,10 +647,23 @@ where
     {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
-        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-        if ret != 0 {
-            return Err("Failed to acquire discussion lock".to_string());
+
+        // Try non-blocking first
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            // Lock held — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "discussion.lock held for >{}s — possible stale lock. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
+
         let result = f();
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -684,7 +761,7 @@ fn write_sessions(project_dir: &str, sessions: &serde_json::Value) -> Result<(),
     let path = sessions_json_path(project_dir);
     let content = serde_json::to_string_pretty(sessions)
         .map_err(|e| format!("Failed to serialize sessions: {}", e))?;
-    std::fs::write(&path, content)
+    atomic_write(&path, content.as_bytes())
         .map_err(|e| format!("Failed to write sessions.json: {}", e))?;
     Ok(())
 }
@@ -833,7 +910,7 @@ fn write_claims(project_dir: &str, claims: &serde_json::Value) -> Result<(), Str
     let path = claims_json_path(project_dir);
     let content = serde_json::to_string_pretty(claims)
         .map_err(|e| format!("Failed to serialize claims: {}", e))?;
-    std::fs::write(&path, content)
+    atomic_write(&path, content.as_bytes())
         .map_err(|e| format!("Failed to write claims.json: {}", e))?;
     Ok(())
 }
@@ -1046,13 +1123,28 @@ fn read_discussion_state(project_dir: &str) -> serde_json::Value {
         }))
 }
 
-fn write_discussion_state(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
+/// Write discussion state WITHOUT acquiring the lock.
+/// Use this when the caller already holds with_discussion_lock.
+fn write_discussion_state_unlocked(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
     let path = discussion_json_path(project_dir);
     let content = serde_json::to_string_pretty(state)
         .map_err(|e| format!("Failed to serialize discussion state: {}", e))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
-    Ok(())
+    atomic_write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write discussion.json: {}", e))
+}
+
+/// Write discussion state WITH file locking.
+/// Acquires with_discussion_lock to prevent concurrent write corruption.
+/// Do NOT call from within with_discussion_lock (use write_discussion_state_unlocked instead).
+fn write_discussion_state(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize discussion state: {}", e))?;
+    let pd = project_dir.to_string();
+    with_discussion_lock(project_dir, move || {
+        let path = discussion_json_path(&pd);
+        atomic_write(&path, content.as_bytes())
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))
+    })
 }
 
 /// Generate anonymized aggregate from submissions in the current round.
@@ -1221,6 +1313,7 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
     let all_messages = read_board(project_dir);
 
     let mut agree_count = 0u32;
+    let mut neutral_count = 0u32;
     let mut disagree_reasons: Vec<String> = Vec::new();
     let mut alternatives: Vec<String> = Vec::new();
 
@@ -1249,6 +1342,11 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
         } else if body.starts_with("alternative") || body.starts_with("suggest") || body.starts_with("instead") {
             let proposal = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(no proposal)").to_string();
             alternatives.push(proposal);
+        } else if body.starts_with("neutral") || body.starts_with("no opinion") || body.starts_with("abstain")
+            || body.starts_with("n/a") || body.starts_with("no comment") || body.starts_with("pass")
+            || body.starts_with("defer") || body.starts_with("no preference")
+        {
+            neutral_count += 1;
         } else {
             // H3 fix: Unclassified responses count as agree (silence = consent model)
             agree_count += 1;
@@ -1270,6 +1368,9 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
     );
 
     result.push_str(&format!("- {} agree\n", agree_count));
+    if neutral_count > 0 {
+        result.push_str(&format!("- {} neutral\n", neutral_count));
+    }
     if !disagree_reasons.is_empty() {
         result.push_str(&format!("- {} disagree:\n", disagree_reasons.len()));
         for (i, reason) in disagree_reasons.iter().enumerate() {
@@ -1352,7 +1453,7 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
             }));
         }
 
-        let _ = write_discussion_state(&pd, &updated);
+        let _ = write_discussion_state_unlocked(&pd, &updated);
 
         // Post review window notification
         let timeout = updated.get("settings")
@@ -1368,7 +1469,7 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
             "type": "moderation",
             "timestamp": now,
             "subject": format!("Review #{}: {}", next_round, if topic.len() > 80 { &topic[..80] } else { &topic }),
-            "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
+            "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / neutral / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
             "metadata": {
                 "discussion_action": "auto_round",
                 "round": next_round,
@@ -1456,7 +1557,7 @@ fn auto_close_timed_out_round_inner(project_dir: &str) -> bool {
     }
     // In continuous mode, phase goes back to "reviewing" (ready for next auto-trigger)
     updated["phase"] = serde_json::json!("reviewing");
-    let _ = write_discussion_state(project_dir, &updated);
+    let _ = write_discussion_state_unlocked(project_dir, &updated);
 
     true
 }
@@ -1882,7 +1983,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 // Post announcement to board
                 let msg_id = next_message_id(&state.project_dir);
                 let announcement_body = if mode == "continuous" {
-                    format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
+                    format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / neutral / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
                         topic, my_label, participant_list.join(", "))
                 } else if mode == "delphi" {
                     format!("A Delphi discussion is being prepared.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Phase:** Preparing (broadcasts locked)\n\nAll broadcasts to \"all\" are now blocked to protect blind submission integrity. The moderator will coordinate privately via directed messages, then open Round 1 when ready. Do NOT share reference material publicly.",
@@ -2153,7 +2254,20 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         }
 
         "get_state" => {
-            let discussion = read_discussion_state(&state.project_dir);
+            let mut discussion = read_discussion_state(&state.project_dir);
+            // Strip author-identifying fields from rounds to prevent metadata leak.
+            // trigger_from: direct author identity
+            // trigger_message_id: indirect leak — client can look up the board message to find its `from` field
+            // trigger_subject: probabilistic leak — specific subjects are attributable in small teams
+            if let Some(rounds) = discussion.get_mut("rounds").and_then(|r| r.as_array_mut()) {
+                for round in rounds.iter_mut() {
+                    if let Some(obj) = round.as_object_mut() {
+                        obj.remove("trigger_from");
+                        obj.remove("trigger_message_id");
+                        obj.remove("trigger_subject");
+                    }
+                }
+            }
             Ok(discussion)
         }
 
@@ -2250,7 +2364,7 @@ fn grandfather_role_templates(project_dir: &str, config: &mut serde_json::Value)
         let config_path = project_json_path(project_dir);
         let updated = serde_json::to_string_pretty(config)
             .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-        std::fs::write(&config_path, updated)
+        atomic_write(&config_path, updated.as_bytes())
             .map_err(|e| format!("Failed to write project.json: {}", e))?;
     }
 
@@ -3621,7 +3735,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
 
         let review_status = if fresh_phase == "submitting" {
             let submit_status = if disc_i_submitted { "you have responded" } else { "you have NOT responded" };
-            format!("REVIEW WINDOW OPEN — Round #{}: {}\nStatus: {}/{} responded ({}). Window: {}s. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence = consent.",
+            format!("REVIEW WINDOW OPEN — Round #{}: {}\nStatus: {}/{} responded ({}). Window: {}s. Respond with: agree / neutral / disagree: [reason] / alternative: [proposal]. Silence = consent.",
                 fresh_round, round_topic, disc_submitted_count, disc_participants, submit_status, timeout)
         } else {
             format!("CONTINUOUS REVIEW active. Round #{} closed. Next review window opens when a developer posts a status update.", fresh_round)

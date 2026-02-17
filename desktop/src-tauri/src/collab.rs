@@ -6,6 +6,23 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Atomic file write: write to .tmp file, fsync, then rename over target.
+/// Protects against partial writes and advisory lock races on macOS.
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension("tmp");
+    // Write content to temp file
+    std::fs::write(&tmp_path, content)
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    // fsync the temp file to ensure data is on disk
+    if let Ok(f) = std::fs::File::open(&tmp_path) {
+        let _ = f.sync_all();
+    }
+    // Atomic rename (on Unix, rename is atomic; on Windows, it's close enough)
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+    Ok(())
+}
+
 /// Info about an active Claude Code session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -379,7 +396,7 @@ fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: 
     // Write back cleaned version if any were removed
     if any_removed {
         if let Ok(s) = serde_json::to_string_pretty(&clean_map) {
-            let _ = std::fs::write(&claims_path, s);
+            let _ = atomic_write(&claims_path, s.as_bytes());
         }
     }
 
@@ -580,7 +597,7 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
         Err(_) => return false,
     };
 
-    // Acquire file lock
+    // Acquire file lock with timeout (matches with_board_lock pattern)
     let lock_file = match std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -590,20 +607,40 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
         Err(_) => return false,
     };
 
+    const LOCK_TIMEOUT_MS: u64 = 10_000; // 10 seconds max wait
+    const LOCK_RETRY_MS: u64 = 50;       // retry interval
+
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let handle = lock_file.as_raw_handle();
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let locked = unsafe {
-            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
-        };
-        if locked == 0 { return false; }
 
-        let result = std::fs::write(&path, &json).is_ok();
+        // Try non-blocking first
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+
+        if locked == 0 {
+            // Lock held by another process — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                let retry = unsafe {
+                    LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                };
+                if retry != 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    eprintln!("[write_discussion] Lock timeout after {}s on {}", LOCK_TIMEOUT_MS / 1000, lock_path.display());
+                    return false;
+                }
+            }
+        }
+
+        let result = atomic_write(&path, json.as_bytes()).is_ok();
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
         result
@@ -613,9 +650,22 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
     {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 { return false; }
 
-        let result = std::fs::write(&path, &json).is_ok();
+        // Try non-blocking first
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            // Lock held — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    eprintln!("[write_discussion] Lock timeout after {}s on {}", LOCK_TIMEOUT_MS / 1000, lock_path.display());
+                    return false;
+                }
+            }
+        }
+
+        let result = atomic_write(&path, json.as_bytes()).is_ok();
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -731,7 +781,7 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    std::fs::write(&path, json).is_ok()
+    atomic_write(&path, json.as_bytes()).is_ok()
 }
 
 /// Compact board.jsonl by removing messages older than `max_age_days`.
@@ -883,7 +933,7 @@ pub fn cleanup_gone_sessions(dir: &str) -> bool {
         if locked == 0 { return false; }
 
         let result = match serde_json::to_string_pretty(&sessions) {
-            Ok(s) => std::fs::write(&sessions_path, s).is_ok(),
+            Ok(s) => atomic_write(&sessions_path, s.as_bytes()).is_ok(),
             Err(_) => false,
         };
 
@@ -898,7 +948,7 @@ pub fn cleanup_gone_sessions(dir: &str) -> bool {
         if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 { return false; }
 
         let result = match serde_json::to_string_pretty(&sessions) {
-            Ok(s) => std::fs::write(&sessions_path, s).is_ok(),
+            Ok(s) => atomic_write(&sessions_path, s.as_bytes()).is_ok(),
             Err(_) => false,
         };
 
@@ -984,7 +1034,7 @@ pub fn set_active_section(dir: &str, section: &str) -> Result<(), String> {
 
     let json = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(&config_path, json)
+    atomic_write(&config_path, json.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
     Ok(())
 }
@@ -1242,7 +1292,7 @@ pub fn roster_add_slot(dir: &str, role: &str, metadata: Option<serde_json::Value
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(&config_path, updated)
+    atomic_write(&config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     Ok(slot)
@@ -1275,7 +1325,7 @@ pub fn roster_remove_slot(dir: &str, role: &str, instance: i32) -> Result<(), St
     config["updated_at"] = serde_json::json!(iso_now());
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(&config_path, updated)
+    atomic_write(&config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     // 2. Revoke any bound session in sessions.json
@@ -1288,7 +1338,7 @@ pub fn roster_remove_slot(dir: &str, role: &str, instance: i32) -> Result<(), St
                         && b.get("instance").and_then(|i| i.as_i64()) == Some(instance as i64))
                 });
                 if let Ok(updated) = serde_json::to_string_pretty(&sessions) {
-                    let _ = std::fs::write(&sessions_path, updated);
+                    let _ = atomic_write(&sessions_path, updated.as_bytes());
                 }
             }
         }
@@ -1519,7 +1569,7 @@ fn create_role_inner(
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(config_path, updated)
+    atomic_write(config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     // Create briefing file
@@ -1649,7 +1699,7 @@ fn update_role_inner(
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(config_path, updated)
+    atomic_write(config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     // Update briefing file if provided
@@ -1780,7 +1830,7 @@ fn delete_role_inner(
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(config_path, updated)
+    atomic_write(config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     // Remove briefing file (best-effort)
@@ -1796,7 +1846,7 @@ fn delete_role_inner(
                     b.get("role").and_then(|r| r.as_str()) != Some(slug)
                 });
                 if let Ok(updated) = serde_json::to_string_pretty(&sessions) {
-                    let _ = std::fs::write(&sessions_path, updated);
+                    let _ = atomic_write(&sessions_path, updated.as_bytes());
                 }
             }
         }
@@ -2016,7 +2066,7 @@ fn save_role_group_inner(config_path: &Path, group: &RoleGroup) -> Result<RoleGr
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(config_path, updated)
+    atomic_write(config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     Ok(group.clone())
@@ -2095,7 +2145,7 @@ fn delete_role_group_inner(config_path: &Path, slug: &str) -> Result<(), String>
 
     let updated = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
-    std::fs::write(config_path, updated)
+    atomic_write(config_path, updated.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     Ok(())

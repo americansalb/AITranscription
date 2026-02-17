@@ -4,6 +4,7 @@ import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
+import { trimVoiceAssignments } from "../lib/storageManager";
 import "../styles/collab.css";
 
 const ROLE_COLORS: Record<string, string> = {
@@ -516,7 +517,9 @@ function addSavedProject(path: string, name?: string): void {
     const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
     const autoName = name || parts[parts.length - 1] || "My Project";
     projects.unshift({ name: autoName, path, addedAt: new Date().toISOString() });
-    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(projects));
+    // Cap saved projects to 20
+    const capped = projects.slice(0, 20);
+    localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(capped));
   } catch { /* ignore */ }
 }
 
@@ -538,7 +541,12 @@ export function CollabTab() {
   const [selectedRole, setSelectedRole] = useState<RoleStatus | null>(null);
   const [msgTo, setMsgTo] = useState("all");
   const [msgBody, setMsgBodyRaw] = useState(() => localStorage.getItem("vaak_compose_draft") || "");
-  const setMsgBody = (v: string) => { setMsgBodyRaw(v); localStorage.setItem("vaak_compose_draft", v); };
+  const MAX_DRAFT_LENGTH = 50000; // 50KB cap to prevent unbounded localStorage growth
+  const setMsgBody = (v: string) => {
+    const capped = v.length > MAX_DRAFT_LENGTH ? v.slice(0, MAX_DRAFT_LENGTH) : v;
+    setMsgBodyRaw(capped);
+    localStorage.setItem("vaak_compose_draft", capped);
+  };
   const [sending, setSending] = useState(false);
   const [workflowDropdownOpen, setWorkflowDropdownOpen] = useState(false);
   const [discussionModeOpen, setDiscussionModeOpen] = useState(false);
@@ -576,6 +584,7 @@ export function CollabTab() {
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [newSectionName, setNewSectionName] = useState("");
   const [creatingSectionMode, setCreatingSectionMode] = useState(false);
+  const [sectionLoading, setSectionLoading] = useState(false);
   const [savedProjects, setSavedProjects] = useState(() => loadSavedProjects());
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
   const [projectSections, setProjectSections] = useState<Record<string, Section[]>>({});
@@ -1033,7 +1042,7 @@ When multiple instances of this role are active:
 
   function setCollabVoiceAssignment(roleSlug: string, voiceId: string) {
     setCollabVoices(prev => {
-      const next = { ...prev, [roleSlug]: voiceId };
+      const next = trimVoiceAssignments({ ...prev, [roleSlug]: voiceId });
       localStorage.setItem("vaak_collab_voice_assignments", JSON.stringify(next));
       return next;
     });
@@ -1185,7 +1194,8 @@ When multiple instances of this role are active:
   }, [projectDir]);
 
   const handleCreateSection = async () => {
-    if (!newSectionName.trim() || !projectDir) return;
+    if (!newSectionName.trim() || !projectDir || sectionLoading) return;
+    setSectionLoading(true);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const created = await invoke<Section>("create_section", {
@@ -1205,11 +1215,14 @@ When multiple instances of this role are active:
       if (result) setProject(result);
     } catch (e) {
       console.error("[CollabTab] Failed to create section:", e);
+    } finally {
+      setSectionLoading(false);
     }
   };
 
   const handleSwitchSection = async (slug: string) => {
-    if (!projectDir || slug === activeSection) return;
+    if (!projectDir || slug === activeSection || sectionLoading) return;
+    setSectionLoading(true);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("switch_section", { dir: projectDir, slug });
@@ -1219,6 +1232,8 @@ When multiple instances of this role are active:
       if (result) setProject(result);
     } catch (e) {
       console.error("[CollabTab] Failed to switch section:", e);
+    } finally {
+      setSectionLoading(false);
     }
   };
 
@@ -2336,8 +2351,9 @@ When multiple instances of this role are active:
           {sections.map(s => (
             <button
               key={s.slug}
-              className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}`}
+              className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}${sectionLoading ? " section-tab-loading" : ""}`}
               onClick={() => handleSwitchSection(s.slug)}
+              disabled={sectionLoading}
             >
               <span className="section-tab-hash">#</span>
               <span className="section-tab-name">{s.name}</span>
@@ -2360,7 +2376,7 @@ When multiple instances of this role are active:
                 }}
                 autoFocus
               />
-              <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim()}>+</button>
+              <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "+"}</button>
               <button className="section-tab-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
             </div>
           ) : (

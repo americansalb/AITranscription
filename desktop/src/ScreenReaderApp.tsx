@@ -12,7 +12,7 @@ import {
   saveSRVoiceId,
 } from "./lib/voiceStream";
 import { keyEventToHotkey } from "./components/Settings";
-import { formatHotkeyForDisplay, isWindows } from "./lib/platform";
+import { formatHotkeyForDisplay, isWindows, isMacOS, getModifierKeyName, getAltKeyName } from "./lib/platform";
 import "./styles/screen-reader.css";
 
 const SR_DETAIL_LABELS = ["Brief", "Concise", "Balanced", "Thorough", "Exhaustive"];
@@ -130,7 +130,7 @@ export function ScreenReaderApp() {
             <div className="sr-row">
               <div>
                 <div className="sr-row-label">Enable Screen Reader</div>
-                <div className="sr-row-desc">Alt+R captures screen, Alt+A for follow-up questions</div>
+                <div className="sr-row-desc">{getAltKeyName()}+R captures screen, {getAltKeyName()}+A for follow-up questions</div>
               </div>
               <button className={`sr-toggle ${enabled ? "active" : ""}`} onClick={handleToggle} />
             </div>
@@ -209,6 +209,20 @@ export function ScreenReaderApp() {
                 style={!isWindows() ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
               />
             </div>
+            {isMacOS() && (
+              <div className="sr-macos-guidance">
+                <div className="sr-row-label">macOS Accessibility</div>
+                <div className="sr-row-desc">
+                  UI Automation and Focus Tracking require Windows APIs. On macOS, Vaak captures your screen to describe what's visible. For the best experience:
+                </div>
+                <ul className="sr-macos-tips">
+                  <li>Enable VoiceOver ({getModifierKeyName()}+F5) for native macOS screen reading alongside Vaak</li>
+                  <li>Grant Accessibility permission: System Settings &gt; Privacy &amp; Security &gt; Accessibility &gt; Vaak</li>
+                  <li>Grant Screen Recording permission: System Settings &gt; Privacy &amp; Security &gt; Screen Recording &gt; Vaak</li>
+                  <li>Use the <code>say</code> command in Terminal for quick text-to-speech testing</li>
+                </ul>
+              </div>
+            )}
           </div>
 
           {/* Vision Settings */}
@@ -302,7 +316,7 @@ export function ScreenReaderApp() {
               </div>
               <div className="sr-status-item">
                 <div className="sr-status-label">Ask</div>
-                <div className="sr-status-value">Alt+A</div>
+                <div className="sr-status-value">{getAltKeyName()}+A</div>
               </div>
               <div className="sr-status-item">
                 <div className="sr-status-label">Last Read</div>

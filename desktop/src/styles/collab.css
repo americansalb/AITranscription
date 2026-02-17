@@ -3229,6 +3229,10 @@
 .section-tab-active:hover {
   color: var(--collab-accent);
 }
+.section-tab-loading {
+  opacity: 0.5;
+  pointer-events: none;
+}
 
 .section-tab-hash {
   font-weight: 700;

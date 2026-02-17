@@ -185,6 +185,11 @@ class CorrectionRetriever:
         limit: int = 5,
     ) -> list[dict]:
         """Find corrections similar to the given text."""
+        # Cap limit to prevent unbounded queries
+        limit = min(limit, 50)
+        # Truncate excessively long text before embedding (embedding models have token limits)
+        if len(text) > 2000:
+            text = text[:2000]
         query_embedding = compute_embedding(text)
 
         # Use pgvector's cosine distance operator (<=>)

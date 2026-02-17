@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import type { QueueItem, QueueState, QueueItemStatus } from "./queueTypes";
 import * as db from "./queueDatabase";
 import { getStoredVoiceEnabled } from "./voiceStream";
+import { trimVoiceAssignments } from "./storageManager";
 
 // Check if this is the main window (has audio playback) or a secondary window
 const hash = window.location.hash;
@@ -1038,7 +1039,8 @@ export function saveVoiceAssignment(sessionId: string, voiceId: string): void {
   try {
     const assignments = getVoiceAssignments();
     assignments[sessionId] = voiceId;
-    localStorage.setItem(VOICE_ASSIGNMENTS_KEY, JSON.stringify(assignments));
+    const trimmed = trimVoiceAssignments(assignments);
+    localStorage.setItem(VOICE_ASSIGNMENTS_KEY, JSON.stringify(trimmed));
   } catch {}
 }
 

@@ -28,6 +28,7 @@ export interface Session {
 
 // Storage keys
 const SESSIONS_KEY = "vaak_speak_sessions";
+const MAX_SESSIONS = 20; // Cap total session count to prevent unbounded localStorage growth
 
 // Predefined colors for visual distinction (8 colors for 8 Claude instances)
 export const SESSION_COLORS = [
@@ -71,13 +72,18 @@ export function loadSessions(): Session[] {
  */
 export function saveSessions(sessions: Session[]): void {
   try {
-    // Keep only last 500 messages per session to avoid storage bloat
-    const trimmed = sessions.map(session => ({
+    // Cap session count: keep most recent by lastActivity, then trim messages per session
+    const sorted = [...sessions].sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
+    const capped = sorted.slice(0, MAX_SESSIONS);
+    const trimmed = capped.map(session => ({
       ...session,
       messages: session.messages.slice(0, 500)
     }));
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(trimmed));
-    console.log(`[SessionManager] Saved ${sessions.length} sessions to localStorage`);
+    if (sessions.length > MAX_SESSIONS) {
+      console.log(`[SessionManager] Pruned ${sessions.length - MAX_SESSIONS} old sessions (cap: ${MAX_SESSIONS})`);
+    }
+    console.log(`[SessionManager] Saved ${trimmed.length} sessions to localStorage`);
   } catch (e) {
     console.error("[SessionManager] Failed to save sessions:", e);
   }
