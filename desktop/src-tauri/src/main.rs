@@ -2838,6 +2838,20 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
         }
     }
 
+    // Strip author-identifying fields from rounds to prevent metadata leak (matches vaak-mcp.rs).
+    // trigger_from: direct author identity
+    // trigger_message_id: indirect leak — client can look up the board message to find its `from` field
+    // trigger_subject: probabilistic leak — specific subjects are attributable in small teams
+    if let Some(rounds) = val.get_mut("rounds").and_then(|r| r.as_array_mut()) {
+        for round in rounds.iter_mut() {
+            if let Some(obj) = round.as_object_mut() {
+                obj.remove("trigger_from");
+                obj.remove("trigger_message_id");
+                obj.remove("trigger_subject");
+            }
+        }
+    }
+
     Ok(val)
 }
 
