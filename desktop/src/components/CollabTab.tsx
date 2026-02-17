@@ -16,6 +16,31 @@ const ROLE_COLORS: Record<string, string> = {
   user: "#e1e8ed",
 };
 
+// Palette for dynamically-created roles — deterministic via FNV-1a slug hash
+const HASH_PALETTE = [
+  "#e91e63", // pink
+  "#00bcd4", // cyan
+  "#ff7043", // deep orange
+  "#8bc34a", // lime green
+  "#7e57c2", // deep purple
+  "#26a69a", // teal
+  "#ec407a", // rose
+  "#42a5f5", // sky blue
+  "#ffa726", // amber
+  "#66bb6a", // medium green
+  "#ef5350", // coral
+  "#ab47bc", // orchid
+];
+
+function hashSlug(slug: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < slug.length; i++) {
+    hash ^= slug.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) & 0xffffffff;
+  }
+  return hash >>> 0;
+}
+
 // Pipeline order for role cards: Manager → Architect → Developer → Tester
 const ROLE_ORDER: Record<string, number> = {
   manager: 0,
@@ -29,7 +54,7 @@ function getRoleColor(slug: string): string {
   for (const [prefix, color] of Object.entries(ROLE_COLORS)) {
     if (slug.startsWith(prefix)) return color;
   }
-  return "#657786";
+  return HASH_PALETTE[hashSlug(slug) % HASH_PALETTE.length];
 }
 
 const WORKFLOW_TYPES: Record<string, { label: string; color: string; desc: string }> = {
