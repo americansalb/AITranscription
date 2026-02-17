@@ -756,8 +756,11 @@ class TestAchievementDefinitions:
         speed_records = [a for a in all_achs
                           if a["metric_type"] == "fastest_wpm"]
         assert len(speed_records) == 20, f"Expected 20 speed record tiers, got {len(speed_records)}"
-        # First tier should start at 100 WPM
-        assert speed_records[0]["threshold"] == 100
+        # First tier should start at 50 WPM
+        assert speed_records[0]["threshold"] == 50
+        # No tier should exceed the 300 WPM cap
+        assert all(a["threshold"] <= 300 for a in speed_records), \
+            f"Speed tiers exceed 300 WPM cap: {[a['threshold'] for a in speed_records if a['threshold'] > 300]}"
         # Thresholds should be ascending
         for i in range(1, len(speed_records)):
             assert speed_records[i]["threshold"] > speed_records[i-1]["threshold"]

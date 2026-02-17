@@ -312,8 +312,9 @@ def generate_all_achievements() -> list[dict[str, Any]]:
         description_template="Achieve a transcription with {value}+ WPM",
         category=AchievementCategory.SPEED,
         metric_type="fastest_wpm",
-        thresholds=[100, 120, 140, 160, 180, 200, 220, 240, 260, 280,
-                   300, 325, 350, 375, 400, 450, 500, 600, 750, 1000],
+        # NOTE: WPM is capped at 300 (routes.py:262). All tiers must be <= 300.
+        thresholds=[50, 75, 100, 115, 130, 145, 160, 175, 190, 200,
+                   210, 220, 230, 240, 250, 260, 270, 280, 290, 300],
         icon="bolt",
     ))
 
@@ -324,8 +325,9 @@ def generate_all_achievements() -> list[dict[str, Any]]:
         description_template="Maintain an average WPM of {value}+",
         category=AchievementCategory.SPEED,
         metric_type="average_wpm",
+        # NOTE: WPM is capped at 300 (routes.py:262). All tiers must be <= 300.
         thresholds=[50, 60, 70, 80, 90, 100, 110, 120, 130, 140,
-                   150, 160, 175, 190, 210, 230, 250, 280, 320, 400],
+                   150, 165, 180, 200, 220, 240, 260, 275, 290, 300],
         icon="gauge",
     ))
 

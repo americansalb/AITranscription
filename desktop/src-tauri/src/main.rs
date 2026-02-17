@@ -2591,12 +2591,9 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
                 result
             }
         } else {
-            // Delphi/Oxford/Red Team: full anonymized aggregate with randomized order
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let mut rng = seed;
+            // Delphi/Oxford/Red Team: full anonymized aggregate with randomized order.
+            // Uses UUID v4 (backed by OS entropy) for unpredictable shuffle seed.
+            let mut rng = uuid::Uuid::new_v4().as_u128();
             for i in (1..bodies.len()).rev() {
                 rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 let j = (rng as usize) % (i + 1);

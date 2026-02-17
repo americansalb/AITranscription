@@ -1264,13 +1264,10 @@ fn generate_aggregate(project_dir: &str, discussion: &serde_json::Value) -> Resu
             total
         ));
     } else {
-        // Standard: randomize order using Fisher-Yates shuffle
+        // Standard: randomize order using Fisher-Yates shuffle with cryptographic seed.
+        // Uses UUID v4 (backed by getrandom/OS entropy) instead of predictable nanosecond timestamp.
         let mut bodies: Vec<&str> = entries.iter().map(|(_, b)| b.as_str()).collect();
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let mut rng_state = seed;
+        let mut rng_state = uuid::Uuid::new_v4().as_u128();
         for i in (1..bodies.len()).rev() {
             rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             let j = (rng_state as usize) % (i + 1);
@@ -1348,14 +1345,22 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
         {
             neutral_count += 1;
         } else {
-            // H3 fix: Unclassified responses count as agree (silence = consent model)
-            agree_count += 1;
+            // Unclassified responses count as neutral — not agree.
+            // Long/ambiguous messages shouldn't inflate the agree count.
+            // Silence (no response at all) = consent; a response that can't be
+            // classified is a distinct signal that should not be conflated with agreement.
+            neutral_count += 1;
         }
     }
 
     let total = submissions.len();
     let consensus = if disagree_reasons.is_empty() && alternatives.is_empty() {
-        "APPROVED"
+        if agree_count > 0 || total == 0 {
+            "APPROVED"
+        } else {
+            // All responses were neutral/unclassified — not a clear approval
+            "NOTED"
+        }
     } else if disagree_reasons.len() > agree_count as usize {
         "CONTESTED"
     } else {
