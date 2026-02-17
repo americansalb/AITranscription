@@ -43,7 +43,8 @@ def calculate_xp(category: str, tier: int, rarity: AchievementRarity) -> int:
         AchievementRarity.LEGENDARY: 5
     }
     tier_mult = 1 + (tier - 1) * 0.5 + (tier / 10) ** 2
-    return round(base.get(category, 10) * tier_mult * rarity_mult[rarity] / 5) * 5
+    # H1 fix: Guarantee minimum 5 XP — low-tier achievements should never round to 0
+    return max(5, round(base.get(category, 10) * tier_mult * rarity_mult[rarity] / 5) * 5)
 
 
 def generate_tiered_achievements(

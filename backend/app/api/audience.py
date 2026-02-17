@@ -92,9 +92,10 @@ async def audience_vote(req: AudienceVoteRequest):
             pool=req.pool,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Audience vote ValueError: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid vote request")
     if "error" in result and not result.get("votes"):
-        raise HTTPException(status_code=400, detail=result["error"])
+        raise HTTPException(status_code=400, detail="Vote collection failed")
     logger.info(
         f"Audience vote complete: {result['tally']} in {result['total_latency_ms']}ms"
     )
@@ -117,7 +118,8 @@ async def get_pool(pool_id: str):
     try:
         pool = load_pool(pool_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Pool load error for '%s': %s", pool_id, e)
+        raise HTTPException(status_code=400, detail="Invalid pool request")
     if not pool:
         raise HTTPException(status_code=404, detail=f"Pool '{pool_id}' not found")
     return {
@@ -184,7 +186,8 @@ async def remove_pool(pool_id: str):
     try:
         deleted = delete_pool(pool_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Pool delete error for '%s': %s", pool_id, e)
+        raise HTTPException(status_code=400, detail="Invalid pool request")
     if not deleted:
         # Check if it exists but is builtin
         pool = load_pool(pool_id)
@@ -205,7 +208,8 @@ async def list_personas(pool: Optional[str] = Query(None, description="Filter by
     try:
         audience_pool = load_pool(pool_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Persona list error for pool '%s': %s", pool_id, e)
+        raise HTTPException(status_code=400, detail="Invalid pool request")
     if not audience_pool:
         raise HTTPException(status_code=404, detail=f"Pool '{pool_id}' not found")
     return [

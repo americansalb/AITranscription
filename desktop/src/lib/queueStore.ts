@@ -103,7 +103,9 @@ function getApiUrl(): string {
 // Notify all listeners of state change
 function notify(): void {
   log(`Notifying ${listeners.size} listeners of state change`);
-  listeners.forEach((listener) => listener());
+  // Clone Set before iterating to prevent concurrent modification issues (QUEUE-7)
+  const snapshot = [...listeners];
+  snapshot.forEach((listener) => listener());
 }
 
 // Broadcast state to other windows via Tauri events
@@ -213,7 +215,7 @@ export async function addItem(text: string, sessionId: string, existingItem?: Qu
       item.sessionColor = "#6366f1"; // Indigo to distinguish from Claude sessions
     } else {
       const cached = sessionCache[item.sessionId];
-      if (cached) {
+      if (cached && (Date.now() - cached.cachedAt < SESSION_CACHE_TTL_MS)) {
         item.sessionName = cached.name;
         item.sessionColor = cached.color;
       }
@@ -344,11 +346,18 @@ export async function playItem(uuid: string): Promise<void> {
   }
 
   try {
-    // Update status to playing
+    // Update status to playing in DB first — if this fails, don't update UI (QUEUE-2)
     log(`Updating item ${uuid} status to "playing" in database`);
-    await db.updateQueueItemStatus(uuid, "playing");
+    try {
+      await db.updateQueueItemStatus(uuid, "playing");
+    } catch (dbError) {
+      logError(`DB update to "playing" failed for ${uuid}, aborting playback:`, dbError);
+      isStartingPlayback = false;
+      // Don't update local state — DB and UI stay consistent (both still "pending")
+      throw new Error(`Database update failed: ${dbError}`);
+    }
 
-    // Update local state - set isPlaying BEFORE async TTS call
+    // DB succeeded — now safe to update local state
     const updatedItems = state.items.map((i) =>
       i.uuid === uuid ? { ...i, status: "playing" as QueueItemStatus } : i
     );
@@ -361,9 +370,15 @@ export async function playItem(uuid: string): Promise<void> {
     });
     log(`State updated: isPlaying=true, currentItem=${uuid}`);
 
+    // QUEUE-11: Validate text length before sending to TTS (max 5000 chars)
+    const MAX_TTS_TEXT_LENGTH = 5000;
+    const ttsText = item.text.length > MAX_TTS_TEXT_LENGTH
+      ? item.text.substring(0, MAX_TTS_TEXT_LENGTH) + "... (truncated)"
+      : item.text;
+
     // Call TTS API
     const formData = new FormData();
-    formData.append("text", item.text);
+    formData.append("text", ttsText);
     formData.append("session_id", item.sessionId);
 
     // Pass voice_id if assigned (check cache, then localStorage fallback, then default)
@@ -427,16 +442,33 @@ export async function playItem(uuid: string): Promise<void> {
     currentAudio.volume = state.volume;
     currentAudio.muted = false; // Explicitly ensure not muted
     audioStartTime = Date.now();
-    audioDurationMs = 0; // Reset duration
+    // QUEUE-5: Estimate duration from text length until real metadata loads
+    // Avoids progress showing 100% (currentTime / 0) before onloadedmetadata fires
+    // Estimate: chars / 5 = words, words / 150 WPM = minutes, * 60000 = ms
+    audioDurationMs = Math.max(1000, (item.text.length / 5 / 150) * 60000);
     audioCurrentTimeMs = 0; // Reset current time
 
     // Debug audio element properties
     log(`Audio element created - volume: ${currentAudio.volume}, muted: ${currentAudio.muted}, paused: ${currentAudio.paused}`);
 
-    // Add canplay handler to verify audio is ready
+    // Release mutex when audio is actually ready to play (QUEUE-1)
+    // This prevents race conditions where playNext() is called before audio is loaded
     currentAudio.oncanplay = () => {
       log(`Audio canplay event fired for ${uuid} - readyState: ${currentAudio?.readyState}, duration: ${currentAudio?.duration}`);
+      if (isStartingPlayback) {
+        isStartingPlayback = false;
+        log("Mutex released - audio confirmed ready (canplay)");
+      }
     };
+
+    // Safety timeout: release mutex if neither oncanplay nor onerror fires within 10s
+    // Prevents permanent queue freeze from unexpected browser behavior
+    setTimeout(() => {
+      if (isStartingPlayback) {
+        isStartingPlayback = false;
+        log("Mutex released - safety timeout (10s) reached without canplay or onerror");
+      }
+    }, 10000);
 
     // Capture duration when metadata loads
     currentAudio.onloadedmetadata = () => {
@@ -456,7 +488,8 @@ export async function playItem(uuid: string): Promise<void> {
     };
 
     currentAudio.onended = async () => {
-      const duration = Date.now() - audioStartTime;
+      // Use audio duration from element for accuracy instead of wall clock
+      const duration = currentAudio ? currentAudio.duration * 1000 : Date.now() - audioStartTime;
       log(`Audio ended for ${uuid}, duration: ${duration}ms`);
       await onItemComplete(uuid, duration);
       URL.revokeObjectURL(audioUrl);
@@ -469,6 +502,12 @@ export async function playItem(uuid: string): Promise<void> {
     };
 
     currentAudio.onerror = async () => {
+      // Release mutex IMMEDIATELY on error — if oncanplay never fires, queue would freeze (QUEUE-1 deadlock fix)
+      if (isStartingPlayback) {
+        isStartingPlayback = false;
+        log("Mutex released - audio error occurred before canplay");
+      }
+
       // Get detailed error information from the audio element
       const audioError = currentAudio?.error;
       let errorMessage = "Audio playback failed";
@@ -502,8 +541,12 @@ export async function playItem(uuid: string): Promise<void> {
     try {
       await currentAudio.play();
       log(`Audio playback started successfully for ${uuid}`);
-      isStartingPlayback = false;
-      log("Mutex released - playback confirmed started");
+      // Mutex released by oncanplay callback (QUEUE-1) — but release here too as safety net
+      // in case canplay already fired before play() resolved
+      if (isStartingPlayback) {
+        isStartingPlayback = false;
+        log("Mutex released - playback confirmed started (safety net)");
+      }
       log(`Post-play state: volume=${currentAudio.volume}, muted=${currentAudio.muted}, paused=${currentAudio.paused}, currentTime=${currentAudio.currentTime}`);
 
       // Check if pause was requested during TTS fetch
@@ -531,6 +574,21 @@ export async function playItem(uuid: string): Promise<void> {
 
 // Track which items have been finalized to prevent double-processing
 const finalizedItems = new Set<string>();
+// Periodic cleanup to prevent memory leak (QUEUE-5) — clear items older than 500 entries
+const MAX_FINALIZED_SIZE = 500;
+function cleanupFinalizedItems(): void {
+  if (finalizedItems.size > MAX_FINALIZED_SIZE) {
+    // Delete oldest half (Sets iterate in insertion order)
+    const toDelete = Math.floor(finalizedItems.size / 2);
+    let count = 0;
+    for (const uuid of finalizedItems) {
+      if (count >= toDelete) break;
+      finalizedItems.delete(uuid);
+      count++;
+    }
+    log(`Cleaned up finalizedItems: removed ${count}, remaining ${finalizedItems.size}`);
+  }
+}
 
 // Mark item as completed
 async function onItemComplete(uuid: string, durationMs: number): Promise<void> {
@@ -540,6 +598,7 @@ async function onItemComplete(uuid: string, durationMs: number): Promise<void> {
     return;
   }
   finalizedItems.add(uuid);
+  cleanupFinalizedItems(); // QUEUE-5: prevent unbounded growth
 
   log(`*** COMPLETING ITEM *** uuid=${uuid}, duration=${durationMs}ms`);
   try {
@@ -576,6 +635,7 @@ async function onItemFailed(uuid: string, errorMessage: string): Promise<void> {
     return;
   }
   finalizedItems.add(uuid);
+  cleanupFinalizedItems(); // QUEUE-5: prevent unbounded growth
 
   log(`Marking item ${uuid} as failed: ${errorMessage}`);
   try {
@@ -610,10 +670,11 @@ export function pause(): void {
   }
   if (currentAudio && state.isPlaying) {
     currentAudio.pause();
-    const position = (Date.now() - audioStartTime);
+    // Use audio element's actual currentTime instead of wall clock (QUEUE-3)
+    const position = currentAudio.currentTime * 1000;
     setState({ isPaused: true, isPlaying: false, currentPosition: position });
     pauseRequested = false;
-    log(`Paused at position ${position}ms`);
+    log(`Paused at position ${position}ms (from audio.currentTime)`);
   } else if (state.isPlaying && !currentAudio) {
     // Audio is "playing" state but TTS fetch hasn't completed yet — defer pause
     log("pause() - audio not ready yet, setting pauseRequested flag");
@@ -634,10 +695,10 @@ export function resume(): void {
   }
   pauseRequested = false; // Clear any pending pause request
   if (currentAudio && state.isPaused) {
+    // Resume from where audio.currentTime already is — no need to recalculate (QUEUE-4)
     currentAudio.play();
-    audioStartTime = Date.now() - state.currentPosition;
     setState({ isPaused: false, isPlaying: true });
-    log("Resumed playback");
+    log(`Resumed playback from ${currentAudio.currentTime * 1000}ms`);
   } else {
     log("resume() - no paused audio");
   }
@@ -1008,12 +1069,15 @@ interface SessionCacheEntry {
   name: string;
   color: string;
   voiceId?: string;
+  cachedAt: number; // QUEUE-10: TTL tracking
 }
 
 const sessionCache: Record<string, SessionCacheEntry> = {};
+const SESSION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes (QUEUE-10)
 
 // Enrich queue items with session name/color from cache
 function enrichWithSessionInfo(items: QueueItem[]): QueueItem[] {
+  const now = Date.now();
   return items.map(item => {
     if (item.sessionId.startsWith("screen-reader")) {
       const sessionName = item.sessionId.startsWith("screen-reader-ask")
@@ -1024,7 +1088,8 @@ function enrichWithSessionInfo(items: QueueItem[]): QueueItem[] {
       return { ...item, sessionName, sessionColor: "#6366f1" };
     }
     const cached = sessionCache[item.sessionId];
-    if (cached && (!item.sessionName || !item.sessionColor)) {
+    // QUEUE-10: Skip stale cache entries
+    if (cached && (now - cached.cachedAt < SESSION_CACHE_TTL_MS) && (!item.sessionName || !item.sessionColor)) {
       return { ...item, sessionName: cached.name, sessionColor: cached.color };
     }
     return item;
@@ -1032,8 +1097,9 @@ function enrichWithSessionInfo(items: QueueItem[]): QueueItem[] {
 }
 
 export function updateSessionCache(sessions: { id: string; name: string; color: string; voiceId?: string }[]): void {
+  const now = Date.now();
   for (const s of sessions) {
-    sessionCache[s.id] = { name: s.name, color: s.color, voiceId: s.voiceId };
+    sessionCache[s.id] = { name: s.name, color: s.color, voiceId: s.voiceId, cachedAt: now };
   }
   // Re-enrich current items with updated session info
   if (state.items.length > 0) {

@@ -5,6 +5,7 @@ import { TranscriptApp } from "./TranscriptApp";
 import { ScreenReaderApp } from "./ScreenReaderApp";
 import { QueueApp } from "./QueueApp";
 import { ToastProvider } from "./components/Toast";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles.css";
 
 // Check window type from hash
@@ -20,15 +21,21 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     {isOverlay ? (
       <OverlayApp />
     ) : isTranscript ? (
-      <TranscriptApp />
+      <ErrorBoundary fallbackLabel="The Claude integration panel encountered an error.">
+        <TranscriptApp />
+      </ErrorBoundary>
     ) : isScreenReader ? (
-      <ScreenReaderApp />
+      <ErrorBoundary fallbackLabel="The screen reader settings encountered an error.">
+        <ScreenReaderApp />
+      </ErrorBoundary>
     ) : isQueue ? (
       <QueueApp />
     ) : (
-      <ToastProvider>
-        <App />
-      </ToastProvider>
+      <ErrorBoundary fallbackLabel="The main application encountered an error.">
+        <ToastProvider>
+          <App />
+        </ToastProvider>
+      </ErrorBoundary>
     )}
   </>
 );

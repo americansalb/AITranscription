@@ -226,6 +226,17 @@ export function saveVoiceEnabled(enabled: boolean): void {
   } catch {
     // Ignore storage errors
   }
+
+  // QUEUE-6: When voice is disabled, clear pending queue items and stop playback
+  if (!enabled) {
+    import('./queueStore').then(({ clearPending, stopPlayback }) => {
+      stopPlayback();
+      clearPending();
+      console.log('[VoiceStream] Voice disabled — stopped playback and cleared pending queue');
+    }).catch(() => {
+      // Ignore import errors (e.g., during startup)
+    });
+  }
 }
 
 // Blind mode storage (replaces old VoiceMode)

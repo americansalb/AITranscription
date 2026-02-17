@@ -5,6 +5,7 @@ Run with: python -m scripts.seed_admin
 Use --force to reset an existing admin user's password
 """
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -16,13 +17,25 @@ from app.models.user import User, SubscriptionTier
 from app.services.auth import hash_password, get_user_by_email
 
 
-# Dev accounts - all get password "winner" and unlimited usage
+# Dev accounts - all get unlimited usage; password from env var
 DEV_ACCOUNTS = [
     {"email": "kenil.thakkar@gmail.com", "name": "Kenil Thakkar"},
     {"email": "kevin@aalb.org", "name": "Kevin"},
     {"email": "happy102785@gmail.com", "name": "Happy"},
 ]
-PASSWORD = "winner"
+PASSWORD = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
+if not PASSWORD:
+    print("ERROR: ADMIN_BOOTSTRAP_PASSWORD environment variable is not set.")
+    print("Set it before running: export ADMIN_BOOTSTRAP_PASSWORD='your-secure-password'")
+    sys.exit(1)
+
+# Validate password strength
+from app.core.password import validate_password_strength
+try:
+    validate_password_strength(PASSWORD)
+except ValueError as e:
+    print(f"ERROR: Bootstrap password too weak: {e}")
+    sys.exit(1)
 
 
 async def seed_admin(force: bool = False):
@@ -63,7 +76,7 @@ async def seed_admin(force: bool = False):
 
         await db.commit()
 
-    print("\nDev accounts (password: winner):")
+    print("\nDev accounts seeded:")
     for account in DEV_ACCOUNTS:
         print(f"  - {account['email']}")
 

@@ -77,7 +77,7 @@ async def post_role_design(req: RoleDesignRequest):
         return result
     except RuntimeError as e:
         logger.error("Role design error: %s", e)
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail="Role design service unavailable")
     except Exception as e:
         logger.exception("Unexpected error in role design")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal error")

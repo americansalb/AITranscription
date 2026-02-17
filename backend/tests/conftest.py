@@ -93,7 +93,7 @@ def make_user(**overrides):
         "email": "test@example.com",
         "full_name": "Test User",
         "hashed_password": "$2b$12$fakehash",
-        "tier": "free",
+        "tier": "standard",
         "is_active": True,
         "is_admin": False,
         "accessibility_verified": False,

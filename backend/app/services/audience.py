@@ -384,10 +384,10 @@ async def _get_single_vote(
             "provider": persona.provider,
             "model": "error",
             "vote": "ERROR",
-            "rationale": str(e),
+            "rationale": "Vote collection failed for this persona",
             "latency_ms": int(elapsed * 1000),
             "usage": {},
-            "error": str(e),
+            "error": "Vote failed",
         }
 
 

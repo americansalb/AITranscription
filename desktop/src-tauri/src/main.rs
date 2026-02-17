@@ -14,13 +14,26 @@ use audio::{AudioData, AudioDevice, AudioRecorder};
 use enigo::{Enigo, Keyboard, Mouse, Settings, Coordinate};
 use parking_lot::Mutex;
 use std::io::Read;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
 /// Monotonically increasing ID for each Alt+A request. When a new request starts,
 /// it bumps this counter. Running loops check if their ID still matches; if not, they abort.
 static COMPUTER_USE_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Shutdown flag for the HTTP server thread. Set to true on app exit.
+static HTTP_SERVER_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Backend API base URL. Override via VAAK_BACKEND_URL env var; defaults to localhost:19836.
+static BACKEND_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_backend_url() -> &'static str {
+    BACKEND_URL.get_or_init(|| {
+        std::env::var("VAAK_BACKEND_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:19836".to_string())
+    })
+}
 
 /// Speaker lock: only one session can speak at a time.
 /// Stores (session_id, last_speak_timestamp_millis). Other sessions are silently
@@ -360,8 +373,13 @@ fn get_project_path() -> Option<String> {
 
 // ==================== End Voice Settings ====================
 
+/// Track whether we've already shown the accessibility permission dialog
+#[cfg(target_os = "macos")]
+static ACCESSIBILITY_WARNED: AtomicBool = AtomicBool::new(false);
+
 /// Check if macOS Accessibility permission is granted.
 /// Enigo silently fails without this — key simulation returns Ok but nothing happens.
+/// On first failure, attempts to trigger the macOS permission prompt via AXIsProcessTrustedWithOptions.
 #[cfg(target_os = "macos")]
 fn check_accessibility_permission() -> Result<(), String> {
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -371,6 +389,58 @@ fn check_accessibility_permission() -> Result<(), String> {
 
     let trusted = unsafe { AXIsProcessTrusted() };
     if trusted == 0 {
+        // On first failure, try to trigger the system permission prompt
+        if !ACCESSIBILITY_WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!("[accessibility] Permission not granted — triggering macOS prompt");
+            // AXIsProcessTrustedWithOptions with kAXTrustedCheckOptionPrompt=true
+            // triggers the macOS system dialog asking the user to grant permission
+            #[link(name = "ApplicationServices", kind = "framework")]
+            extern "C" {
+                fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> u8;
+            }
+            #[link(name = "CoreFoundation", kind = "framework")]
+            extern "C" {
+                fn CFDictionaryCreate(
+                    allocator: *const std::ffi::c_void,
+                    keys: *const *const std::ffi::c_void,
+                    values: *const *const std::ffi::c_void,
+                    num: isize,
+                    key_callbacks: *const std::ffi::c_void,
+                    value_callbacks: *const std::ffi::c_void,
+                ) -> *const std::ffi::c_void;
+                fn CFRelease(cf: *const std::ffi::c_void);
+                static kCFBooleanTrue: *const std::ffi::c_void;
+                static kCFTypeDictionaryKeyCallBacks: u8;
+                static kCFTypeDictionaryValueCallBacks: u8;
+            }
+            // The key string "AXTrustedCheckOptionPrompt"
+            let key_str = b"AXTrustedCheckOptionPrompt\0";
+            #[link(name = "CoreFoundation", kind = "framework")]
+            extern "C" {
+                fn CFStringCreateWithCString(
+                    alloc: *const std::ffi::c_void,
+                    c_str: *const u8,
+                    encoding: u32,
+                ) -> *const std::ffi::c_void;
+            }
+            unsafe {
+                let key = CFStringCreateWithCString(std::ptr::null(), key_str.as_ptr(), 0x08000100); // kCFStringEncodingUTF8
+                let keys = [key];
+                let values = [kCFBooleanTrue];
+                let options = CFDictionaryCreate(
+                    std::ptr::null(),
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                    1,
+                    &kCFTypeDictionaryKeyCallBacks as *const _ as *const std::ffi::c_void,
+                    &kCFTypeDictionaryValueCallBacks as *const _ as *const std::ffi::c_void,
+                );
+                let _ = AXIsProcessTrustedWithOptions(options);
+                CFRelease(options);
+                CFRelease(key);
+            }
+        }
+
         return Err(
             "Accessibility permission not granted. Vaak needs Accessibility access to simulate \
              keyboard shortcuts. Go to System Settings > Privacy & Security > Accessibility \
@@ -892,7 +962,23 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
             }
         };
 
-        for mut request in server.incoming_requests() {
+        loop {
+            // Check shutdown flag
+            if HTTP_SERVER_SHUTDOWN.load(Ordering::Relaxed) {
+                eprintln!("[speak-server] Shutdown signal received, exiting");
+                break;
+            }
+
+            // Use recv_timeout so we can check the shutdown flag periodically
+            let mut request = match server.recv_timeout(Duration::from_secs(1)) {
+                Ok(Some(req)) => req,
+                Ok(None) => continue, // timeout, loop to check shutdown flag
+                Err(e) => {
+                    eprintln!("[speak-server] recv error: {}", e);
+                    continue;
+                }
+            };
+
             let url = request.url().to_string();
             let method = request.method().as_str().to_string();
 
@@ -1257,7 +1343,7 @@ fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
         body["uia_tree"] = serde_json::Value::String(tree_text.clone());
     }
 
-    let response = client.post("http://127.0.0.1:19836/api/v1/describe-screen")
+    let response = client.post(&format!("{}/api/v1/describe-screen", get_backend_url()))
         .set("Content-Type", "application/json")
         .send_string(&body.to_string())
         .map_err(|e| format!("Backend request failed: {}", e))?;
@@ -1793,6 +1879,16 @@ fn watch_project_dir(dir: String) -> Result<serde_json::Value, String> {
 
     let vaak_dir = std::path::Path::new(&effective_dir).join(".vaak");
 
+    // Compact board.jsonl on load: remove messages older than 7 days, keep at least 200
+    match collab::compact_board(&effective_dir, 7, 200) {
+        Ok((kept, removed)) => {
+            if removed > 0 {
+                eprintln!("[collab] Board compacted: kept {} messages, removed {} old messages", kept, removed);
+            }
+        }
+        Err(e) => eprintln!("[collab] Board compaction failed (non-fatal): {}", e),
+    }
+
     // Read and parse full project state
     let parsed = collab::parse_project_dir(&effective_dir);
 
@@ -1956,6 +2052,7 @@ fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
 
     std::fs::write(&board_path, output)
         .map_err(|e| format!("Failed to write board.jsonl: {}", e))?;
+    notify_collab_change();
     Ok(())
 }
 
@@ -1964,6 +2061,7 @@ fn clear_all_messages(dir: String) -> Result<(), String> {
     let board_path = collab::active_board_path(&dir);
     std::fs::write(&board_path, "")
         .map_err(|e| format!("Failed to truncate board.jsonl: {}", e))?;
+    notify_collab_change();
     Ok(())
 }
 
@@ -2013,6 +2111,7 @@ fn set_message_retention(dir: String, days: u64) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
     std::fs::write(&config_path, pretty)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    notify_collab_change();
     Ok(())
 }
 
@@ -2075,6 +2174,7 @@ fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), S
     std::fs::write(&config_path, pretty)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    notify_collab_change();
     Ok(())
 }
 
@@ -2133,7 +2233,21 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     std::fs::write(&config_path, pretty)
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
+    notify_collab_change();
     Ok(())
+}
+
+/// Fire-and-forget notification to the local HTTP server (port 7865) so that
+/// the MCP sidecar and frontend windows learn about board/discussion changes
+/// made by Tauri commands. Without this, MCP waits up to 55s to discover changes.
+fn notify_collab_change() {
+    std::thread::spawn(|| {
+        let _ = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .post("http://127.0.0.1:7865/collab/notify")
+            .send_string("");
+    });
 }
 
 // ==================== Discussion Control Commands ====================
@@ -2243,6 +2357,7 @@ fn start_discussion(
         }
     }
 
+    notify_collab_change();
     Ok(())
 }
 
@@ -2252,7 +2367,7 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
     // to prevent the dual-writer race with MCP sidecar submissions.
     // Without this, MCP-written submissions could be wiped when we
     // read discussion.json, modify it, and write it back.
-    collab::with_board_lock(&dir, || {
+    let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
             return Err("No active discussion.".to_string());
@@ -2318,14 +2433,27 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
                 let mut alternative_list: Vec<String> = Vec::new();
                 for body in &bodies {
                     let lower = body.trim().to_lowercase();
-                    if lower.starts_with("agree") || lower == "lgtm" || lower == "approved" || lower == "+1" {
+                    if lower.starts_with("agree") || lower == "lgtm" || lower == "approved" || lower == "+1"
+                        || lower.starts_with("looks good") || lower.starts_with("makes sense")
+                        || lower.starts_with("i'm fine with") || lower.starts_with("im fine with")
+                        || lower.starts_with("no objection") || lower.starts_with("sounds good")
+                        || lower.starts_with("i agree") || lower.starts_with("fine with")
+                        || lower.starts_with("works for me") || lower.starts_with("ship it")
+                        || lower.starts_with("no concerns") || lower.starts_with("all good")
+                        || lower.starts_with("thumbs up") || lower.starts_with("go ahead")
+                        || lower.starts_with("no issues") || lower.starts_with("acknowledged")
+                    {
                         agree_count += 1;
-                    } else if lower.starts_with("disagree") || lower.starts_with("object") || lower.starts_with("-1") {
+                    } else if lower.starts_with("disagree") || lower.starts_with("object") || lower.starts_with("-1")
+                        || lower.starts_with("block") || lower.starts_with("reject") || lower.starts_with("nack")
+                    {
                         disagree_list.push(body.clone());
                     } else if lower.starts_with("alternative") || lower.starts_with("suggest") || lower.starts_with("instead") {
                         alternative_list.push(body.clone());
                     } else {
-                        disagree_list.push(body.clone());
+                        // H3 fix: Unclassified responses default to agree (silence = consent model)
+                        // rather than disagree, which was incorrectly biasing toward rejection
+                        agree_count += 1;
                     }
                 }
                 let verdict = if disagree_list.is_empty() && alternative_list.is_empty() { "APPROVED" } else { "DISPUTED" };
@@ -2420,13 +2548,15 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
             return Err("Failed to write discussion.json".to_string());
         }
         Ok(format!("Round {} closed. {} submissions aggregated.", round_num, total))
-    })
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
 fn open_next_round(dir: String) -> Result<u32, String> {
     // Wrap in board lock to prevent race with MCP sidecar
-    collab::with_board_lock(&dir, || {
+    let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
             return Err("No active discussion.".to_string());
@@ -2483,13 +2613,15 @@ fn open_next_round(dir: String) -> Result<u32, String> {
         }
 
         Ok(next_round)
-    })
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
 fn end_discussion(dir: String) -> Result<(), String> {
     // Wrap in board lock to prevent race with MCP sidecar
-    collab::with_board_lock(&dir, || {
+    let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
             return Err("No active discussion.".to_string());
@@ -2531,7 +2663,9 @@ fn end_discussion(dir: String) -> Result<(), String> {
         }
 
         Ok(())
-    })
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2588,7 +2722,7 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), String> {
     // Wrap in board lock to prevent race with MCP sidecar
-    collab::with_board_lock(&dir, || {
+    let result = collab::with_board_lock(&dir, || {
         let disc_path = collab::active_discussion_path(&dir);
         let content = std::fs::read_to_string(&disc_path)
             .map_err(|e| format!("Failed to read discussion.json: {}", e))?;
@@ -2608,7 +2742,9 @@ fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), Strin
             .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
 
         Ok(())
-    })
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 /// Generate ISO 8601 UTC timestamp
@@ -2708,6 +2844,7 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
     writeln!(file, "{}", message.to_string())
         .map_err(|e| format!("Failed to write message: {}", e))?;
 
+    notify_collab_change();
     Ok(msg_id)
 }
 
@@ -2715,7 +2852,9 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
 
 #[tauri::command]
 fn create_section(dir: String, name: String) -> Result<collab::SectionInfo, String> {
-    collab::create_section(&dir, &name)
+    let result = collab::create_section(&dir, &name);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2727,7 +2866,9 @@ fn switch_section(dir: String, slug: String) -> Result<(), String> {
             return Err(format!("Section '{}' does not exist", slug));
         }
     }
-    collab::set_active_section(&dir, &slug)
+    let result = collab::set_active_section(&dir, &slug);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2744,7 +2885,9 @@ fn get_active_section(dir: String) -> Result<String, String> {
 
 #[tauri::command]
 fn roster_add_slot(project_dir: String, role: String, metadata: Option<serde_json::Value>) -> Result<collab::RosterSlot, String> {
-    collab::roster_add_slot(&project_dir, &role, metadata)
+    let result = collab::roster_add_slot(&project_dir, &role, metadata);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2756,7 +2899,9 @@ fn roster_remove_slot(
 ) -> Result<(), String> {
     // Best-effort kill the spawned terminal process before removing the slot
     launcher::kill_tracked_agent(&role, instance, &launcher_state);
-    collab::roster_remove_slot(&project_dir, &role, instance)
+    let result = collab::roster_remove_slot(&project_dir, &role, instance);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2779,7 +2924,9 @@ fn create_role(
     companions: Option<Vec<collab::CompanionConfig>>,
 ) -> Result<collab::RoleConfig, String> {
     // Auto-save to global templates happens inside collab::create_role
-    collab::create_role(&project_dir, &slug, &title, &description, permissions, max_instances, &briefing, tags, companions.unwrap_or_default())
+    let result = collab::create_role(&project_dir, &slug, &title, &description, permissions, max_instances, &briefing, tags, companions.unwrap_or_default());
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2809,22 +2956,29 @@ fn update_role(
     if let Err(e) = collab::save_role_as_global_template(&project_dir, &slug) {
         eprintln!("[main] Auto-update global template for '{}' failed: {}", slug, e);
     }
+    notify_collab_change();
     Ok(result)
 }
 
 #[tauri::command]
 fn delete_role(project_dir: String, slug: String) -> Result<(), String> {
-    collab::delete_role(&project_dir, &slug)
+    let result = collab::delete_role(&project_dir, &slug);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
 fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<collab::RoleGroup, String> {
-    collab::save_role_group(&project_dir, group)
+    let result = collab::save_role_group(&project_dir, group);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
 fn delete_role_group(project_dir: String, slug: String) -> Result<(), String> {
-    collab::delete_role_group(&project_dir, &slug)
+    let result = collab::delete_role_group(&project_dir, &slug);
+    if result.is_ok() { notify_collab_change(); }
+    result
 }
 
 #[tauri::command]
@@ -2979,6 +3133,7 @@ fn claim_files(dir: String, role_instance: String, files: Vec<String>, descripti
         })();
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        if result.is_ok() { notify_collab_change(); }
         result
     }
 
@@ -3031,6 +3186,7 @@ fn claim_files(dir: String, role_instance: String, files: Vec<String>, descripti
         })();
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
+        if result.is_ok() { notify_collab_change(); }
         result
     }
 }
@@ -3074,6 +3230,7 @@ fn release_claim(dir: String, role_instance: String) -> Result<(), String> {
         })();
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
+        if result.is_ok() { notify_collab_change(); }
         result
     }
 
@@ -3098,6 +3255,7 @@ fn release_claim(dir: String, role_instance: String) -> Result<(), String> {
         })();
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
+        if result.is_ok() { notify_collab_change(); }
         result
     }
 }
@@ -3144,6 +3302,12 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
         let mut cleanup_counter: u32 = 0;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
+
+            // Check shutdown flag (same pattern as HTTP server)
+            if HTTP_SERVER_SHUTDOWN.load(Ordering::Relaxed) {
+                eprintln!("[watcher] Shutdown flag set, exiting file watcher thread");
+                break;
+            }
 
             let dir = {
                 let guard = get_project_watched_dir().lock();
@@ -3398,7 +3562,7 @@ fn main() {
                                     "audio_base64": audio_data.audio_base64,
                                 });
 
-                                let transcribe_resp = match client.post("http://127.0.0.1:19836/api/v1/transcribe-base64")
+                                let transcribe_resp = match client.post(&format!("{}/api/v1/transcribe-base64", get_backend_url()))
                                     .set("Content-Type", "application/json")
                                     .send_string(&transcribe_body.to_string())
                                 {
@@ -3517,7 +3681,7 @@ fn main() {
                                         cu_body["uia_tree"] = serde_json::Value::String(tree_text.clone());
                                     }
 
-                                    let cu_resp = match client.post("http://127.0.0.1:19836/api/v1/computer-use")
+                                    let cu_resp = match client.post(&format!("{}/api/v1/computer-use", get_backend_url()))
                                         .set("Content-Type", "application/json")
                                         .send_string(&cu_body.to_string())
                                     {
@@ -3845,8 +4009,13 @@ fn main() {
 
     match builder.build(tauri::generate_context!()) {
         Ok(app) => {
-            app.run(|_app_handle, _event| {
-                // Intentionally empty — do NOT kill spawned Claude agents on app exit.
+            app.run(|_app_handle, event| {
+                // Signal HTTP server to shut down when the app exits
+                if let tauri::RunEvent::Exit = event {
+                    HTTP_SERVER_SHUTDOWN.store(true, Ordering::Relaxed);
+                    eprintln!("[main] App exiting — HTTP server shutdown signaled");
+                }
+                // NOTE: Do NOT kill spawned Claude agents on app exit.
                 // Terminal sessions must survive app restarts so agents keep their context.
                 // Use kill_all_team_members for explicit cleanup.
             });

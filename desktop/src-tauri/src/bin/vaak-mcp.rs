@@ -17,6 +17,12 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Backend API base URL. Override via VAAK_BACKEND_URL env var; defaults to localhost:19836.
+fn get_backend_url() -> String {
+    std::env::var("VAAK_BACKEND_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:19836".to_string())
+}
+
 // ==================== Project-based Collaboration Protocol ====================
 
 /// Active project state for this MCP sidecar process.
@@ -416,22 +422,34 @@ fn utc_now_iso() -> String {
     format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
 }
 
-/// Parse an ISO 8601 timestamp (YYYY-MM-DDTHH:MM:SSZ) to seconds since epoch.
-/// Returns None if the format can't be parsed.
+/// Parse an ISO 8601 timestamp to seconds since epoch.
+/// Handles: "2026-02-05T04:11:10Z", "2026-02-05T04:11:10.123Z",
+///          "2026-02-05T04:11:10+00:00", "2026-02-05T04:11:10.123+00:00"
 fn parse_iso_to_epoch_secs(iso: &str) -> Option<u64> {
-    // Expected format: "2026-02-05T04:11:10Z"
-    let iso = iso.trim_end_matches('Z');
-    let (date_part, time_part) = iso.split_once('T')?;
+    // Strip timezone suffix: Z, +00:00, -05:00, etc.
+    let iso_clean = iso.trim_end_matches('Z');
+    // Handle +HH:MM or -HH:MM offset — just strip it (treat as UTC for simplicity)
+    let iso_clean = if let Some(plus_pos) = iso_clean.rfind('+') {
+        if plus_pos > 10 { &iso_clean[..plus_pos] } else { iso_clean }
+    } else if let Some(minus_pos) = iso_clean.rfind('-') {
+        // Only strip if the minus is in the time part (after T), not the date part
+        if minus_pos > 10 { &iso_clean[..minus_pos] } else { iso_clean }
+    } else {
+        iso_clean
+    };
+
+    let (date_part, time_part) = iso_clean.split_once('T')?;
     let date_parts: Vec<&str> = date_part.split('-').collect();
     let time_parts: Vec<&str> = time_part.split(':').collect();
-    if date_parts.len() != 3 || time_parts.len() != 3 { return None; }
+    if date_parts.len() != 3 || time_parts.len() < 3 { return None; }
 
     let year: u64 = date_parts[0].parse().ok()?;
     let month: u64 = date_parts[1].parse().ok()?;
     let day: u64 = date_parts[2].parse().ok()?;
     let hour: u64 = time_parts[0].parse().ok()?;
     let min: u64 = time_parts[1].parse().ok()?;
-    let sec: u64 = time_parts[2].parse().ok()?;
+    // Handle fractional seconds (e.g., "10.123") — parse as float and truncate
+    let sec: u64 = time_parts[2].split('.').next()?.parse().ok()?;
 
     // Count days from 1970 to the given date
     let mut total_days: u64 = 0;
@@ -506,6 +524,68 @@ where
         let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
         if ret != 0 {
             return Err("Failed to acquire file lock".to_string());
+        }
+        let result = f();
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        result
+    }
+}
+
+/// Execute a closure while holding an exclusive file lock on discussion.lock.
+/// Prevents race conditions when multiple agents read-modify-write discussion.json.
+fn with_discussion_lock<F, R>(project_dir: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String>,
+{
+    let dir = vaak_dir(project_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .vaak dir: {}", e))?;
+
+    // Discussion lock is section-aware, same as board lock
+    let section = get_active_section(project_dir);
+    let lock_path = if section == "default" {
+        dir.join("discussion.lock")
+    } else {
+        let section_dir = dir.join("sections").join(&section);
+        std::fs::create_dir_all(&section_dir).map_err(|e| format!("Failed to create section dir: {}", e))?;
+        section_dir.join("discussion.lock")
+    };
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open discussion lock file: {}", e))?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            return Err("Failed to acquire discussion lock".to_string());
+        }
+
+        let result = f();
+
+        unsafe {
+            UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped);
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err("Failed to acquire discussion lock".to_string());
         }
         let result = f();
         unsafe { libc::flock(fd, libc::LOCK_UN); }
@@ -1150,17 +1230,28 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
 
         let body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("").trim().to_lowercase();
 
-        if body.starts_with("agree") || body == "lgtm" || body == "approved" || body == "+1" {
+        if body.starts_with("agree") || body == "lgtm" || body == "approved" || body == "+1"
+            || body.starts_with("looks good") || body.starts_with("makes sense")
+            || body.starts_with("i'm fine with") || body.starts_with("im fine with")
+            || body.starts_with("no objection") || body.starts_with("sounds good")
+            || body.starts_with("i agree") || body.starts_with("fine with")
+            || body.starts_with("works for me") || body.starts_with("ship it")
+            || body.starts_with("no concerns") || body.starts_with("all good")
+            || body.starts_with("thumbs up") || body.starts_with("go ahead")
+            || body.starts_with("no issues") || body.starts_with("acknowledged")
+        {
             agree_count += 1;
-        } else if body.starts_with("disagree") || body.starts_with("object") || body.starts_with("-1") {
+        } else if body.starts_with("disagree") || body.starts_with("object") || body.starts_with("-1")
+            || body.starts_with("block") || body.starts_with("reject") || body.starts_with("nack")
+        {
             let reason = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(no reason)").to_string();
             disagree_reasons.push(reason);
         } else if body.starts_with("alternative") || body.starts_with("suggest") || body.starts_with("instead") {
             let proposal = msg.get("body").and_then(|b| b.as_str()).unwrap_or("(no proposal)").to_string();
             alternatives.push(proposal);
         } else {
-            // Treat unclassified as a comment — count as "reviewed"
-            disagree_reasons.push(msg.get("body").and_then(|b| b.as_str()).unwrap_or("(comment)").to_string());
+            // H3 fix: Unclassified responses count as agree (silence = consent model)
+            agree_count += 1;
         }
     }
 
@@ -1198,95 +1289,103 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
 /// Auto-create a micro-round in continuous mode when a developer posts a status message.
 /// Returns the new round number, or None if no round was created.
 fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, status_msg_body: &str, author: &str, msg_id: u64) -> Option<u32> {
-    let disc = read_discussion_state(project_dir);
-    let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-    let mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    // Wrap in discussion lock to prevent race condition when two status messages arrive simultaneously
+    let subject = status_msg_subject.to_string();
+    let body = status_msg_body.to_string();
+    let author_owned = author.to_string();
+    let pd = project_dir.to_string();
 
-    if !is_active || mode != "continuous" {
-        return None;
-    }
+    let result = with_discussion_lock(project_dir, move || {
+        let disc = read_discussion_state(&pd);
+        let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Don't create rounds for the moderator's own moderation messages
-    let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("");
-    if author == moderator {
-        return None;
-    }
-
-    // Close any open round that's timed out before creating a new one
-    let _ = auto_close_timed_out_round(project_dir);
-
-    let now = utc_now_iso();
-    let mut updated = disc.clone();
-
-    // Check if there's already an open round — don't create a new one
-    let current_phase = updated.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-    if current_phase == "submitting" {
-        // There's already an open round collecting responses — don't create another
-        return None;
-    }
-
-    let current_round = updated.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let next_round = current_round + 1;
-
-    // Build round topic from the status message
-    let topic = if !status_msg_subject.is_empty() {
-        status_msg_subject.to_string()
-    } else if status_msg_body.len() > 200 {
-        format!("{}...", &status_msg_body[..200])
-    } else {
-        status_msg_body.to_string()
-    };
-
-    updated["current_round"] = serde_json::json!(next_round);
-    updated["phase"] = serde_json::json!("submitting");
-
-    if let Some(rounds) = updated.get_mut("rounds").and_then(|r| r.as_array_mut()) {
-        rounds.push(serde_json::json!({
-            "number": next_round,
-            "opened_at": now,
-            "closed_at": null,
-            "submissions": [],
-            "aggregate_message_id": null,
-            "auto_triggered": true,
-            "topic": topic,
-            "trigger_from": author,
-            "trigger_subject": topic,
-            "trigger_message_id": msg_id
-        }));
-    }
-
-    let _ = write_discussion_state(project_dir, &updated);
-
-    // Post review window notification
-    let timeout = updated.get("settings")
-        .and_then(|s| s.get("auto_close_timeout_seconds"))
-        .and_then(|t| t.as_u64())
-        .unwrap_or(60);
-
-    let board_msg_id = next_message_id(project_dir);
-    let notification = serde_json::json!({
-        "id": board_msg_id,
-        "from": "system",
-        "to": "all",
-        "type": "moderation",
-        "timestamp": now,
-        "subject": format!("Review #{}: {}", next_round, if topic.len() > 80 { &topic[..80] } else { &topic }),
-        "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author, topic, timeout),
-        "metadata": {
-            "discussion_action": "auto_round",
-            "round": next_round,
-            "author": author,
-            "timeout_seconds": timeout
+        if !is_active || mode != "continuous" {
+            return Ok(None);
         }
-    });
-    let _ = append_to_board(project_dir, &notification);
 
-    Some(next_round)
+        // Don't create rounds for the moderator's own moderation messages
+        let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("");
+        if author_owned == moderator {
+            return Ok(None);
+        }
+
+        // Close any open round that's timed out before creating a new one
+        let _ = auto_close_timed_out_round_inner(&pd);
+
+        let now = utc_now_iso();
+        let mut updated = disc.clone();
+
+        // Check if there's already an open round — don't create a new one
+        let current_phase = updated.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        if current_phase == "submitting" {
+            return Ok(None);
+        }
+
+        let current_round = updated.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let next_round = current_round + 1;
+
+        // Build round topic from the status message
+        let topic = if !subject.is_empty() {
+            subject.clone()
+        } else if body.len() > 200 {
+            format!("{}...", &body[..200])
+        } else {
+            body.clone()
+        };
+
+        updated["current_round"] = serde_json::json!(next_round);
+        updated["phase"] = serde_json::json!("submitting");
+
+        if let Some(rounds) = updated.get_mut("rounds").and_then(|r| r.as_array_mut()) {
+            rounds.push(serde_json::json!({
+                "number": next_round,
+                "opened_at": now,
+                "closed_at": null,
+                "submissions": [],
+                "aggregate_message_id": null,
+                "auto_triggered": true,
+                "topic": topic,
+                "trigger_from": author_owned,
+                "trigger_subject": topic,
+                "trigger_message_id": msg_id
+            }));
+        }
+
+        let _ = write_discussion_state(&pd, &updated);
+
+        // Post review window notification
+        let timeout = updated.get("settings")
+            .and_then(|s| s.get("auto_close_timeout_seconds"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(60);
+
+        let board_msg_id = next_message_id(&pd);
+        let notification = serde_json::json!({
+            "id": board_msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now,
+            "subject": format!("Review #{}: {}", next_round, if topic.len() > 80 { &topic[..80] } else { &topic }),
+            "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
+            "metadata": {
+                "discussion_action": "auto_round",
+                "round": next_round,
+                "author": author_owned,
+                "timeout_seconds": timeout
+            }
+        });
+        let _ = append_to_board(&pd, &notification);
+
+        Ok(Some(next_round))
+    });
+
+    result.ok().flatten()
 }
 
-/// Check if the current round in a continuous discussion has timed out.
-/// If so, auto-close it and generate a mini-aggregate.
-fn auto_close_timed_out_round(project_dir: &str) -> bool {
+/// Inner implementation of auto-close (called within discussion lock).
+fn auto_close_timed_out_round_inner(project_dir: &str) -> bool {
     let disc = read_discussion_state(project_dir);
     let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
     let mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
@@ -1362,6 +1461,14 @@ fn auto_close_timed_out_round(project_dir: &str) -> bool {
     true
 }
 
+/// Check if the current round has timed out. Acquires discussion lock.
+fn auto_close_timed_out_round(project_dir: &str) -> bool {
+    let pd = project_dir.to_string();
+    with_discussion_lock(project_dir, move || {
+        Ok(auto_close_timed_out_round_inner(&pd))
+    }).unwrap_or(false)
+}
+
 /// Check if quorum is reached for the current continuous review round.
 /// Quorum = all non-author participants have submitted.
 fn check_continuous_quorum(project_dir: &str) -> bool {
@@ -1427,7 +1534,7 @@ fn handle_audience_vote(topic: &str, arguments: &str, phase: &str, pool: Option<
         request_body["pool"] = serde_json::json!(pool_id);
     }
 
-    // Call the backend API at http://127.0.0.1:19836/api/v1/audience/vote
+    // Call the backend API for audience voting
     eprintln!("[audience_vote] Calling backend: topic='{}', phase={}, pool={:?}",
         &topic[..topic.len().min(80)], backend_phase, pool);
 
@@ -1435,10 +1542,10 @@ fn handle_audience_vote(topic: &str, arguments: &str, phase: &str, pool: Option<
         .timeout(std::time::Duration::from_secs(120)) // 27 parallel LLM calls can take time
         .build();
 
-    let resp = agent.post("http://127.0.0.1:19836/api/v1/audience/vote")
+    let resp = agent.post(&format!("{}/api/v1/audience/vote", get_backend_url()))
         .set("Content-Type", "application/json")
         .send_string(&request_body.to_string())
-        .map_err(|e| format!("Backend API call failed: {}. Is the backend running on port 19836?", e))?;
+        .map_err(|e| format!("Backend API call failed: {}. Is the backend running at {}?", e, get_backend_url()))?;
 
     let resp_str = resp.into_string()
         .map_err(|e| format!("Failed to read backend response: {}", e))?;

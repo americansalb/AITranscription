@@ -4,7 +4,7 @@ Server-Sent Events manager for real-time voice notifications.
 import asyncio
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 
@@ -39,7 +39,7 @@ class EventManager:
             yield self._format_sse(
                 VoiceEvent(
                     type="connected",
-                    timestamp=datetime.utcnow().isoformat(),
+                    timestamp=datetime.now(timezone.utc).isoformat(),
                 )
             )
 

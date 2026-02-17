@@ -1,9 +1,11 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import router
+from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.dictionary import router as dictionary_router
 from app.api.learning import router as learning_router
@@ -13,6 +15,18 @@ from app.api.roles import router as roles_router
 from app.core.config import settings
 from app.core.database import engine
 from app.models.base import Base
+
+# CORS: restrict to Tauri app origins by default; override via CORS_ORIGINS env var
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:19836",
+    "tauri://localhost",
+    "https://tauri.localhost",
+]
+_cors_env = os.environ.get("CORS_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else _DEFAULT_CORS_ORIGINS
 
 
 @asynccontextmanager
@@ -40,21 +54,23 @@ app = FastAPI(
     title=settings.app_name,
     description="AI-powered transcription API with Groq Whisper and Claude Haiku",
     version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    debug=False,  # Never expose tracebacks in responses, even if DEBUG=true in .env
+    docs_url="/docs" if settings.debug else None,   # Only expose docs in debug mode
+    redoc_url="/redoc" if settings.debug else None,
 )
 
-# CORS configuration - allow desktop app origins
+# CORS configuration - restricted to Tauri app origins (override via CORS_ORIGINS env var)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 # Include API routes
 app.include_router(router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(dictionary_router, prefix="/api/v1")
 app.include_router(learning_router, prefix="/api/v1")

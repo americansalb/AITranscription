@@ -1,8 +1,13 @@
 import json
+import logging
+import re
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_optional_user
@@ -104,9 +109,11 @@ async def transcribe_audio(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Transcription ValueError: %s", e)
+        raise HTTPException(status_code=500, detail="Transcription failed due to invalid input")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+        logger.error("Transcription failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Transcription failed")
 
 
 @router.post(
@@ -145,9 +152,11 @@ async def polish_text(
         )
 
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Polish ValueError: %s", e)
+        raise HTTPException(status_code=500, detail="Polish failed due to invalid input")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
+        logger.error("Polish failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Polish failed")
 
 
 @router.post("/polish-stream")
@@ -186,7 +195,8 @@ async def polish_text_stream(
                 yield f"data: {json.dumps(event)}\n\n"
 
         except Exception as e:
-            error_event = {"type": "error", "data": {"message": str(e)}}
+            logger.error("SSE stream error: %s: %s", type(e).__name__, e)
+            error_event = {"type": "error", "data": {"message": "Processing failed"}}
             yield f"data: {json.dumps(error_event)}\n\n"
 
     return StreamingResponse(
@@ -243,13 +253,13 @@ async def transcribe_and_polish(
 
         # Save transcript to database if user is authenticated
         if user and db:
-            # Calculate metrics
-            word_count = len(result["text"].split())
+            # Calculate metrics — use regex for accurate word boundaries (H8 fix)
+            word_count = len(re.findall(r'\b\w+\b', result["text"]))
             character_count = len(result["text"])
             duration = transcribe_response.duration or 0
-            # Cap WPM at 300 to prevent inflated values from short recordings
+            # Cap WPM at 300 to prevent inflated values from short recordings (C7 fix)
             raw_wpm = (word_count / (duration / 60)) if duration > 0 else 0
-            words_per_minute = min(raw_wpm, 250.0) if duration >= 5 else 0
+            words_per_minute = min(raw_wpm, 300.0) if duration >= 5 else 0
 
             # Create transcript record
             transcript = Transcript(
@@ -267,11 +277,19 @@ async def transcribe_and_polish(
             )
             db.add(transcript)
 
-            # Update user statistics
-            user.total_transcriptions += 1
-            user.total_words += word_count
-            user.total_audio_seconds += int(duration)
-            user.total_polish_tokens += result["usage"]["input_tokens"] + result["usage"]["output_tokens"]
+            # Update user statistics atomically to prevent race conditions (H5 fix)
+            # H7 fix: Use float for audio_seconds to avoid truncation
+            from app.models.user import User as UserModel
+            await db.execute(
+                update(UserModel)
+                .where(UserModel.id == user.id)
+                .values(
+                    total_transcriptions=UserModel.total_transcriptions + 1,
+                    total_words=UserModel.total_words + word_count,
+                    total_audio_seconds=UserModel.total_audio_seconds + round(duration),
+                    total_polish_tokens=UserModel.total_polish_tokens + result["usage"]["input_tokens"] + result["usage"]["output_tokens"],
+                )
+            )
 
             await db.flush()
 
@@ -306,7 +324,8 @@ async def transcribe_and_polish(
             saved=bool(user),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Polish failed: {str(e)}")
+        logger.error("Polish (transcribe+polish) failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Polish failed")
 
 
 @router.post(
@@ -364,9 +383,7 @@ async def text_to_speech(
                 db.add(transcript)
                 await db.commit()
             except Exception as save_error:
-                print(f"[TTS] Failed to save transcript: {save_error}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Failed to save transcript: %s: %s", type(save_error).__name__, save_error)
                 await db.rollback()
                 # Continue anyway - don't fail the TTS request just because we couldn't save
 
@@ -380,13 +397,11 @@ async def text_to_speech(
         )
 
     except ValueError as e:
-        print(f"[TTS] ValueError: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("TTS ValueError: %s", e)
+        raise HTTPException(status_code=500, detail="TTS failed due to invalid input")
     except Exception as e:
-        print(f"[TTS] Exception: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
+        logger.error("TTS failed: %s: %s", type(e).__name__, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="TTS failed")
 
 
 @router.post(
@@ -444,7 +459,8 @@ async def describe_screen(request: DescribeScreenRequest):
         )
         return DescribeScreenResponse(**result)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Screen description failed: {str(e)}")
+        logger.error("Screen description failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Screen description failed")
 
 
 @router.post(
@@ -482,7 +498,8 @@ async def transcribe_audio_base64(request: TranscribeBase64Request):
             language=result.get("language"),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+        logger.error("SR transcription failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Transcription failed")
 
 
 @router.post(
@@ -517,7 +534,8 @@ async def screen_reader_chat(request: ScreenReaderChatRequest):
         )
         return ScreenReaderChatResponse(**result)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Screen reader chat failed: {str(e)}")
+        logger.error("Screen reader chat failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Screen reader chat failed")
 
 
 @router.post(
@@ -555,9 +573,8 @@ async def computer_use(request: ComputerUseRequest):
         logger.warning(f"[ComputerUse] success: stop_reason={result.get('stop_reason')}, blocks={len(result.get('content', []))}")
         return ComputerUseResponse(**result)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Computer use failed: {str(e)}")
+        logger.error("Computer use failed: %s: %s", type(e).__name__, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Computer use failed")
 
 
 @router.get("/voices")

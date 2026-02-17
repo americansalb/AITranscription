@@ -1,11 +1,14 @@
 """Admin API routes for user management and statistics."""
 
-from datetime import datetime, timedelta
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator as pydantic_field_validator
+
+from app.core.password import validate_password_strength as _validate_password
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,11 +63,16 @@ class CreateUserRequest(BaseModel):
     """Request to create a new user."""
 
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8, max_length=72)
     full_name: str | None = None
     tier: SubscriptionTier = SubscriptionTier.STANDARD
     is_active: bool = True
     daily_transcription_limit: int = 0  # 0 = unlimited
+
+    @pydantic_field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        return _validate_password(v)
 
 
 class UpdateUserRequest(BaseModel):
@@ -76,7 +84,14 @@ class UpdateUserRequest(BaseModel):
     is_active: bool | None = None
     is_admin: bool | None = None
     daily_transcription_limit: int | None = None
-    password: str | None = Field(None, min_length=6)
+    password: str | None = Field(None, min_length=8, max_length=72)
+
+    @pydantic_field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        return _validate_password(v)
 
 
 class UserStatsResponse(BaseModel):
@@ -417,7 +432,7 @@ async def get_global_stats(
     admin: User = Depends(require_admin),
 ):
     """Get global statistics (admin only)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
 
@@ -644,11 +659,27 @@ async def seed_admin_accounts(
             detail="Invalid secret key",
         )
 
-    # Admin accounts to create
+    # Admin accounts to create — password from environment variable
+    admin_password = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
+    if not admin_password:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ADMIN_BOOTSTRAP_PASSWORD environment variable not set",
+        )
+
+    # Validate password meets strength requirements
+    try:
+        _validate_password(admin_password)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Bootstrap password too weak: {e}",
+        )
+
     admin_accounts = [
-        {"email": "iris@aalb.org", "password": "AALB"},
-        {"email": "kenil.thakkar@gmail.com", "password": "AALB"},
-        {"email": "happy102785@gmail.com", "password": "AALB"},
+        {"email": "iris@aalb.org", "password": admin_password},
+        {"email": "kenil.thakkar@gmail.com", "password": admin_password},
+        {"email": "happy102785@gmail.com", "password": admin_password},
     ]
 
     created = []
@@ -1292,6 +1323,14 @@ ADMIN_DASHBOARD_HTML = '''
         let authToken = localStorage.getItem('admin_token');
         let currentUser = null;
 
+        // XSS protection: escape user-provided strings before innerHTML injection
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
         // Check if already logged in
         if (authToken) {
             checkAuth();
@@ -1425,7 +1464,7 @@ ADMIN_DASHBOARD_HTML = '''
                         <div class="tier-breakdown">
                             ${Object.entries(stats.users_by_tier).map(([tier, count]) => `
                                 <div class="tier-item">
-                                    <span class="badge badge-${tier}">${tier}</span>
+                                    <span class="badge badge-${escapeHtml(tier)}">${escapeHtml(tier)}</span>
                                     <span>${count}</span>
                                 </div>
                             `).join('')}
@@ -1488,11 +1527,11 @@ ADMIN_DASHBOARD_HTML = '''
                         ${users.map(user => `
                             <tr>
                                 <td>
-                                    ${user.email}
+                                    ${escapeHtml(user.email)}
                                     ${user.is_admin ? '<span class="badge badge-admin">Admin</span>' : ''}
                                 </td>
-                                <td>${user.full_name || '-'}</td>
-                                <td><span class="badge badge-${user.tier}">${user.tier}</span></td>
+                                <td>${escapeHtml(user.full_name) || '-'}</td>
+                                <td><span class="badge badge-${escapeHtml(user.tier)}">${escapeHtml(user.tier)}</span></td>
                                 <td><span class="badge badge-${user.is_active ? 'active' : 'inactive'}">${user.is_active ? 'Active' : 'Inactive'}</span></td>
                                 <td>${user.total_transcriptions.toLocaleString()}</td>
                                 <td>${user.total_words.toLocaleString()}</td>
@@ -1533,15 +1572,15 @@ ADMIN_DASHBOARD_HTML = '''
 
                 document.getElementById('userDetailContent').innerHTML = `
                     <div class="user-detail-panel">
-                        <h3 style="margin-bottom: 16px;">${user.email}</h3>
+                        <h3 style="margin-bottom: 16px;">${escapeHtml(user.email)}</h3>
                         <div class="detail-grid">
                             <div class="detail-item">
                                 <label>Full Name</label>
-                                <div class="value">${user.full_name || '-'}</div>
+                                <div class="value">${escapeHtml(user.full_name) || '-'}</div>
                             </div>
                             <div class="detail-item">
                                 <label>Tier</label>
-                                <div class="value"><span class="badge badge-${user.tier}">${user.tier}</span></div>
+                                <div class="value"><span class="badge badge-${escapeHtml(user.tier)}">${escapeHtml(user.tier)}</span></div>
                             </div>
                             <div class="detail-item">
                                 <label>Status</label>
@@ -1615,7 +1654,7 @@ ADMIN_DASHBOARD_HTML = '''
                                     ${transcripts.map(t => `
                                         <tr>
                                             <td>${new Date(t.created_at).toLocaleString()}</td>
-                                            <td>${t.polished_text.slice(0, 60)}${t.polished_text.length > 60 ? '...' : ''}</td>
+                                            <td>${escapeHtml(t.polished_text.slice(0, 60))}${t.polished_text.length > 60 ? '...' : ''}</td>
                                             <td>${t.word_count}</td>
                                             <td>${t.audio_duration_seconds.toFixed(1)}s</td>
                                         </tr>
@@ -1627,7 +1666,7 @@ ADMIN_DASHBOARD_HTML = '''
                 `;
             } catch (err) {
                 document.getElementById('userDetailContent').innerHTML = `
-                    <div class="error-message">Failed to load user details: ${err.message}</div>
+                    <div class="error-message">Failed to load user details: ${escapeHtml(err.message)}</div>
                 `;
             }
         }

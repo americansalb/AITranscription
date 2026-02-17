@@ -7,6 +7,7 @@ _THIS_DIR = Path(__file__).resolve().parent  # app/core/
 _ENV_FILE = _THIS_DIR.parent.parent / ".env"  # backend/.env
 
 
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://localhost:5432/vaak"
 
     # Auth
-    secret_key: str = "dev-secret-key-change-in-production"
+    secret_key: str = ""  # Must be set via SECRET_KEY env var — no insecure default
     access_token_expire_minutes: int = 60 * 24 * 7  # 1 week
 
     # App settings
@@ -48,3 +49,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Validate secret key at import time — app won't start without a proper secret
+if not settings.secret_key or settings.secret_key == "dev-secret-key-change-in-production":
+    raise RuntimeError(
+        "FATAL: SECRET_KEY environment variable is not set or is still the "
+        "insecure default. Set a strong, random SECRET_KEY in your .env file "
+        "or environment before starting the application."
+    )

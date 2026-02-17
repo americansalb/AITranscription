@@ -586,6 +586,8 @@ export function CollabTab() {
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMsgCount, setNewMsgCount] = useState(0);
   const prevMsgCountRef = useRef(0);
+  const MSG_PAGE_SIZE = 50;
+  const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
@@ -884,7 +886,8 @@ export function CollabTab() {
           }])
         ),
       } : { roles: {} };
-      const res = await fetch("http://localhost:19836/api/v1/roles/design", {
+      const apiUrl = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:19836";
+      const res = await fetch(`${apiUrl}/api/v1/roles/design`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: newMessages, project_context: projectContext }),
@@ -2756,12 +2759,26 @@ When multiple instances of this role are active:
                         key={cardKey}
                         className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${card.title}, status: ${card.status}. Click to view details.`}
                         onClick={() => {
                           if (card.slug === "audience") {
                             setAudiencePanelOpen(true);
                             if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
                           } else {
                             matchingRole && setSelectedRole(matchingRole);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            if (card.slug === "audience") {
+                              setAudiencePanelOpen(true);
+                              if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
+                            } else {
+                              matchingRole && setSelectedRole(matchingRole);
+                            }
                           }
                         }}
                       >
@@ -2983,10 +3000,10 @@ When multiple instances of this role are active:
         {/* Message Timeline */}
         <div className="message-timeline" ref={messageTimelineRef}>
           {hasNoMessages ? (
-            <div className="message-timeline-empty">
+            <div className="message-timeline-empty" role="status">
               {hasNoSessions
-                ? "No team members connected yet"
-                : "Team connected — waiting for first message..."}
+                ? "No team members connected yet. Launch agents from the roster above to get started."
+                : "Team connected — no messages yet. Your team's communication will appear here."}
             </div>
           ) : (
             (() => {
@@ -3002,7 +3019,23 @@ When multiple instances of this role are active:
                   .map((m) => m.id)
               );
 
-              return project!.messages.map((msg: BoardMessage) => {
+              const allMessages = project!.messages;
+              const totalCount = allMessages.length;
+              const hasHiddenMessages = totalCount > visibleMsgLimit;
+              const visibleMessages = hasHiddenMessages
+                ? allMessages.slice(totalCount - visibleMsgLimit)
+                : allMessages;
+
+              return (<>
+              {hasHiddenMessages && (
+                <button
+                  className="load-earlier-btn"
+                  onClick={() => setVisibleMsgLimit(prev => prev + MSG_PAGE_SIZE)}
+                >
+                  Load {Math.min(MSG_PAGE_SIZE, totalCount - visibleMsgLimit)} earlier messages ({totalCount - visibleMsgLimit} hidden)
+                </button>
+              )}
+              {visibleMessages.map((msg: BoardMessage) => {
               // Vote proposal → render as VoteCard
               if (voteProposalIds.has(msg.id)) {
                 const tally = voteTallies.find((t) => t.proposalId === msg.id);
@@ -3168,7 +3201,7 @@ When multiple instances of this role are active:
                   )}
                 </div>
               );
-            });
+            })}</>);
             })()
           )}
           <div ref={messagesEndRef} />
@@ -3223,7 +3256,7 @@ When multiple instances of this role are active:
             onClick={sendMessage}
             disabled={!msgBody.trim() || sending}
           >
-            Send
+            {sending ? "Sending\u2026" : "Send"}
           </button>
         </div>
 
@@ -4191,8 +4224,17 @@ When multiple instances of this role are active:
                       onClick={() => startWatching(proj.path)}
                       disabled={loading}
                     >
-                      <span className="saved-project-name">{proj.name}</span>
-                      <span className="saved-project-path">{proj.path}</span>
+                      {loading ? (
+                        <>
+                          <span className="saved-project-name">Connecting&hellip;</span>
+                          <span className="saved-project-path">{proj.path}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="saved-project-name">{proj.name}</span>
+                          <span className="saved-project-path">{proj.path}</span>
+                        </>
+                      )}
                     </button>
                     <button
                       className="saved-project-remove"

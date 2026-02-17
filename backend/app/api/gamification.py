@@ -166,7 +166,6 @@ async def check_achievements(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Check for and unlock any newly earned achievements."""
-    import sys, traceback
     try:
         service = AchievementService(db)
         newly_unlocked = await service.check_achievements(current_user.id)
@@ -193,10 +192,8 @@ async def check_achievements(
             "level_changes": level_changes,
         }
     except Exception as e:
-        sys.stderr.write(f"[GAMIFICATION CHECK ERROR] {type(e).__name__}: {e}\n")
-        sys.stderr.write(traceback.format_exc())
-        sys.stderr.flush()
-        raise
+        logging.getLogger(__name__).exception("Gamification check failed: %s", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Gamification check failed")
 
 
 @router.get("/achievements", response_model=AchievementListResponse)

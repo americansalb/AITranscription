@@ -369,8 +369,8 @@ class PolishService:
                 }
 
         except Exception as e:
-            logger.error(f"Streaming polish failed: {e}")
-            yield {"type": "error", "data": {"message": str(e)}}
+            logger.error(f"Streaming polish failed: {type(e).__name__}: {e}")
+            yield {"type": "error", "data": {"message": "Polishing failed"}}
 
 
 # Singleton instance

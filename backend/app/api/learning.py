@@ -105,7 +105,9 @@ async def submit_feedback(
             message="Correction stored successfully",
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to store feedback: {e}")
+        import logging
+        logging.getLogger(__name__).error("Failed to store feedback: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Failed to store feedback")
 
 
 @router.get("/stats", response_model=LearningStatsResponse)
@@ -318,7 +320,9 @@ async def train_correction_model(
             epochs_trained=result["epochs_trained"],
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Training failed: {e}")
+        import logging
+        logging.getLogger(__name__).error("Training failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Training failed")
 
 
 @router.post("/train-whisper", response_model=TrainModelResponse)
@@ -362,9 +366,13 @@ async def train_whisper_model(
             epochs_trained=result["epochs_trained"],
         )
     except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        import logging
+        logging.getLogger(__name__).error("Whisper training RuntimeError: %s", e)
+        raise HTTPException(status_code=400, detail="Training configuration error")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Training failed: {e}")
+        import logging
+        logging.getLogger(__name__).error("Whisper training failed: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=500, detail="Training failed")
 
 
 @router.get("/rules", response_model=RulesListResponse)
@@ -416,7 +424,9 @@ async def create_correction_rule(
             hit_count=rule.hit_count,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        import logging
+        logging.getLogger(__name__).error("Invalid correction rule: %s", e)
+        raise HTTPException(status_code=400, detail="Invalid rule pattern")
 
 
 @router.delete("/rules/{rule_id}")

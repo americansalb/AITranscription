@@ -1,10 +1,15 @@
 import logging
+import re
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator as pydantic_field_validator
+
+from app.core.password import validate_password_strength as _validate_password
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,13 +31,45 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 security = HTTPBearer()
 
 
+# In-memory rate limiter for auth endpoints (brute force protection)
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(key: str, max_attempts: int, window_seconds: int = 60) -> None:
+    """Check if a key has exceeded the rate limit within the time window.
+
+    Args:
+        key: Identifier (e.g., IP address or endpoint:IP)
+        max_attempts: Maximum allowed attempts in the window
+        window_seconds: Time window in seconds (default 60)
+
+    Raises:
+        HTTPException 429 if rate limit exceeded
+    """
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    # Prune expired entries
+    _rate_limit_store[key] = [t for t in _rate_limit_store[key] if t > cutoff]
+    if len(_rate_limit_store[key]) >= max_attempts:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many attempts. Try again in {window_seconds} seconds.",
+        )
+    _rate_limit_store[key].append(now)
+
+
 # Request/Response schemas
 class SignupRequest(BaseModel):
     """Request body for user signup."""
 
     email: EmailStr
-    password: str = Field(min_length=6, max_length=72, description="Password must be 6-72 characters")
+    password: str = Field(min_length=8, max_length=72, description="Password must be 8-72 characters with uppercase, lowercase, and digit")
     full_name: str | None = None
+
+    @pydantic_field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        return _validate_password(v)
 
 
 class LoginRequest(BaseModel):
@@ -112,8 +149,10 @@ async def get_optional_user(
 
 # Routes
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
+async def signup(request: SignupRequest, raw_request: Request, db: AsyncSession = Depends(get_db)):
     """Create a new user account."""
+    client_ip = raw_request.client.host if raw_request.client else "unknown"
+    _check_rate_limit(f"signup:{client_ip}", max_attempts=3, window_seconds=60)
     try:
         logger.info(f"Signup attempt for email: {request.email}")
 
@@ -147,13 +186,15 @@ async def signup(request: SignupRequest, db: AsyncSession = Depends(get_db)):
         logger.error(f"Signup error: {type(e).__name__}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Signup failed: {str(e)}",
+            detail="Signup failed",
         )
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(request: LoginRequest, raw_request: Request, db: AsyncSession = Depends(get_db)):
     """Authenticate and receive an access token."""
+    client_ip = raw_request.client.host if raw_request.client else "unknown"
+    _check_rate_limit(f"login:{client_ip}", max_attempts=5, window_seconds=60)
     logger.info(f"Login attempt for email: {request.email}")
 
     try:
@@ -189,7 +230,7 @@ async def login(request: LoginRequest, db: AsyncSession = Depends(get_db)):
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Login error: {type(e).__name__}",
+            detail="Login failed",
         )
 
 
@@ -522,10 +563,8 @@ async def get_my_stats(
             typing_wpm=current_user.typing_wpm,
         )
     except Exception as e:
-        sys.stderr.write(f"[STATS ERROR] {type(e).__name__}: {e}\n")
-        sys.stderr.write(traceback.format_exc())
-        sys.stderr.flush()
-        raise
+        logger.exception("Stats retrieval failed: %s", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
 
 
 class UpdateTypingWpmRequest(BaseModel):

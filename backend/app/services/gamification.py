@@ -1,7 +1,7 @@
 """Gamification service - XP, levels, achievements, and progression logic."""
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, func, and_, or_, exists
@@ -213,7 +213,7 @@ class GamificationService:
 
         # Update XP
         gamification.lifetime_xp += final_amount
-        gamification.last_xp_earned_at = datetime.utcnow()
+        gamification.last_xp_earned_at = datetime.now(timezone.utc)
 
         # Calculate new level from lifetime XP within current prestige tier
         # Convert string to enum for threshold lookup
@@ -502,7 +502,7 @@ class AchievementService:
         perfect_months = 0
         comeback_count = 0
 
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
 
         # Calculate current streak (from today backwards)
         if dates:
@@ -528,20 +528,21 @@ class AchievementService:
 
         longest_streak = max(longest_streak, streak)
 
-        # Perfect weeks/months calculation (simplified)
-        # A perfect week: 7 consecutive days
+        # Perfect weeks/months calculation
+        # A perfect week: 7 consecutive days, perfect month: 30 consecutive days
+        # C1 FIX: Use single counter without premature reset — count all milestones
         consecutive = 1
         for i in range(1, len(dates)):
             if (dates[i] - dates[i-1]).days == 1:
                 consecutive += 1
-                if consecutive >= 7:
-                    perfect_weeks += 1
-                    consecutive = 0
-                if consecutive >= 30:
-                    perfect_months += 1
-                    consecutive = 0
             else:
+                # Streak broken — count completed weeks/months from this streak
+                perfect_weeks += consecutive // 7
+                perfect_months += consecutive // 30
                 consecutive = 1
+        # Count the final streak
+        perfect_weeks += consecutive // 7
+        perfect_months += consecutive // 30
 
         return {
             "current_streak": current_streak,
@@ -794,7 +795,7 @@ class AchievementService:
             # Account age
             created_at = user_row[2]
             if created_at:
-                age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+                age_days = (datetime.now(timezone.utc) - created_at.replace(tzinfo=None)).days
                 account_age_months = age_days // 30
 
         # Daily records — use subquery to avoid nested aggregates
@@ -932,7 +933,7 @@ class AchievementService:
             # Check if threshold is met
             if current_value >= definition.threshold:
                 user_achievement.is_unlocked = True
-                user_achievement.unlocked_at = datetime.utcnow()
+                user_achievement.unlocked_at = datetime.now(timezone.utc)
 
                 # Award XP
                 await self.gamification_service.award_achievement_xp(

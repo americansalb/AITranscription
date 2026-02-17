@@ -234,13 +234,23 @@ pub fn parse_iso_epoch_pub(iso: &str) -> Option<u64> {
 
 /// Parse ISO 8601 timestamp to epoch seconds (for heartbeat age comparison)
 fn parse_iso_epoch(iso: &str) -> Option<u64> {
-    let iso = iso.trim_end_matches('Z');
-    let (date_part, time_part) = iso.split_once('T')?;
+    let iso_clean = iso.trim_end_matches('Z');
+    // Handle +HH:MM or -HH:MM timezone offset by stripping it
+    let iso_clean = if let Some(plus_pos) = iso_clean.rfind('+') {
+        if plus_pos > 10 { &iso_clean[..plus_pos] } else { iso_clean }
+    } else if let Some(minus_pos) = iso_clean.rfind('-') {
+        if minus_pos > 10 { &iso_clean[..minus_pos] } else { iso_clean }
+    } else {
+        iso_clean
+    };
+    let (date_part, time_part) = iso_clean.split_once('T')?;
     let dp: Vec<&str> = date_part.split('-').collect();
     let tp: Vec<&str> = time_part.split(':').collect();
-    if dp.len() != 3 || tp.len() != 3 { return None; }
+    if dp.len() != 3 || tp.len() < 3 { return None; }
     let (year, month, day): (u64, u64, u64) = (dp[0].parse().ok()?, dp[1].parse().ok()?, dp[2].parse().ok()?);
-    let (hour, min, sec): (u64, u64, u64) = (tp[0].parse().ok()?, tp[1].parse().ok()?, tp[2].parse().ok()?);
+    // Handle fractional seconds like "45.123"
+    let sec: u64 = tp[2].split('.').next()?.parse().ok()?;
+    let (hour, min): (u64, u64) = (tp[0].parse().ok()?, tp[1].parse().ok()?);
     let mut total_days: u64 = 0;
     for y in 1970..year {
         let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
@@ -639,19 +649,43 @@ where
         .open(&lock_path)
         .map_err(|e| format!("Failed to open lock file: {}", e))?;
 
+    // Stale lock protection: try non-blocking first, then retry with timeout.
+    // OS-level file locks (LockFileEx/flock) auto-release on process death,
+    // but a hung process can hold the lock indefinitely. The timeout prevents
+    // infinite blocking in that case.
+    const LOCK_TIMEOUT_MS: u64 = 10_000; // 10 seconds max wait
+    const LOCK_RETRY_MS: u64 = 50;       // retry interval
+
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let handle = lock_file.as_raw_handle();
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+
+        // Try non-blocking first
         let locked = unsafe {
-            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK, 0, u32::MAX, u32::MAX, &mut overlapped)
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
         };
+
         if locked == 0 {
-            return Err("Failed to acquire board.lock".to_string());
+            // Lock held by another process — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                let retry = unsafe {
+                    LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                };
+                if retry != 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "board.lock held for >{}s — possible stale lock from hung process. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
 
         let result = f();
@@ -666,9 +700,23 @@ where
     {
         use std::os::unix::io::AsRawFd;
         let fd = lock_file.as_raw_fd();
-        if unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
-            return Err("Failed to acquire board.lock".to_string());
+
+        // Try non-blocking first
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            // Lock held — retry with timeout
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "board.lock held for >{}s — possible stale lock from hung process. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
         }
+
         let result = f();
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -684,6 +732,74 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> bool {
         Err(_) => return false,
     };
     std::fs::write(&path, json).is_ok()
+}
+
+/// Compact board.jsonl by removing messages older than `max_age_days`.
+/// Keeps the last `min_keep` messages regardless of age to preserve context.
+/// Returns (kept, removed) counts. Uses board lock for safety.
+pub fn compact_board(dir: &str, max_age_days: u64, min_keep: usize) -> Result<(usize, usize), String> {
+    with_board_lock(dir, || {
+        let board_path = active_board_path(dir);
+        let content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        let total = lines.len();
+
+        if total <= min_keep {
+            return Ok((total, 0));
+        }
+
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = now_epoch.saturating_sub(max_age_days * 86400);
+
+        // Parse each line and check timestamp
+        let mut keep: Vec<&str> = Vec::with_capacity(total);
+        let mut removed = 0usize;
+
+        for line in &lines {
+            let should_keep = if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                let ts_str = msg.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                match parse_iso_epoch(ts_str) {
+                    Some(epoch) => epoch >= cutoff,
+                    None => true, // Keep unparseable messages
+                }
+            } else {
+                true // Keep unparseable lines
+            };
+
+            if should_keep {
+                keep.push(line);
+            } else {
+                removed += 1;
+            }
+        }
+
+        // Always keep at least min_keep messages (take from the end = most recent)
+        if keep.len() < min_keep && total >= min_keep {
+            keep = lines[total - min_keep..].to_vec();
+            removed = total - min_keep;
+        }
+
+        if removed == 0 {
+            return Ok((total, 0));
+        }
+
+        // Write compacted board via atomic rename
+        let tmp_path = board_path.with_extension("jsonl.tmp");
+        let mut output = String::with_capacity(keep.iter().map(|l| l.len() + 1).sum());
+        for line in &keep {
+            output.push_str(line);
+            output.push('\n');
+        }
+        std::fs::write(&tmp_path, &output)
+            .map_err(|e| format!("Failed to write temp board: {}", e))?;
+        std::fs::rename(&tmp_path, &board_path)
+            .map_err(|e| format!("Failed to rename temp board: {}", e))?;
+
+        Ok((keep.len(), removed))
+    })
 }
 
 /// Remove session bindings whose heartbeat age exceeds timeout * 2.5 (gone threshold).

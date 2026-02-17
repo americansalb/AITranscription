@@ -735,22 +735,46 @@ export function TranscriptApp() {
   return (
     <div className="transcript-app">
       {/* Main Tab Navigation */}
-      <div className="main-tab-nav">
+      <div className="main-tab-nav" role="tablist" aria-label="Main navigation">
         <button
           className={`main-tab ${activeTab === "preferences" ? "active" : ""}`}
           onClick={() => setActiveTab("preferences")}
+          role="tab"
+          aria-selected={activeTab === "preferences"}
+          aria-controls="panel-preferences"
+          tabIndex={activeTab === "preferences" ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("sessions"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("collab"); }
+          }}
         >
           Preferences
         </button>
         <button
           className={`main-tab ${activeTab === "sessions" ? "active" : ""}`}
           onClick={() => setActiveTab("sessions")}
+          role="tab"
+          aria-selected={activeTab === "sessions"}
+          aria-controls="panel-sessions"
+          tabIndex={activeTab === "sessions" ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("collab"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("preferences"); }
+          }}
         >
           Sessions
         </button>
         <button
           className={`main-tab ${activeTab === "collab" ? "active" : ""}`}
           onClick={() => setActiveTab("collab")}
+          role="tab"
+          aria-selected={activeTab === "collab"}
+          aria-controls="panel-collab"
+          tabIndex={activeTab === "collab" ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("preferences"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("sessions"); }
+          }}
         >
           Collab
         </button>
@@ -758,7 +782,7 @@ export function TranscriptApp() {
 
       {/* Preferences Tab */}
       {activeTab === "preferences" && (
-        <div className="preferences-tab-content">
+        <div className="preferences-tab-content" id="panel-preferences" role="tabpanel" aria-labelledby="tab-preferences">
           <div className="preferences-header">
             <h2>Claude Integration Settings</h2>
             <p className="preferences-subtitle">Configure how Claude Code speaks to you</p>
@@ -963,13 +987,13 @@ export function TranscriptApp() {
       )}
 
       {/* Collab Tab — always mounted so event listeners stay active */}
-      <div style={{ display: activeTab === "collab" ? "flex" : "none", flex: 1, minHeight: 0 }}>
+      <div id="panel-collab" role="tabpanel" aria-labelledby="tab-collab" style={{ display: activeTab === "collab" ? "flex" : "none", flex: 1, minHeight: 0 }}>
         <CollabTab />
       </div>
 
       {/* Sessions Tab */}
       {activeTab === "sessions" && (
-        <div className="sessions-content">
+        <div className="sessions-content" id="panel-sessions" role="tabpanel" aria-labelledby="tab-sessions">
           {/* Sidebar - Session List */}
           <div className="transcript-sidebar">
             <div className="transcript-header">
