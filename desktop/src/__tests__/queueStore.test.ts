@@ -313,7 +313,7 @@ describe("updateSessionCache and item enrichment", () => {
   });
 
   it("updateSessionCache enriches existing items with session info", async () => {
-    const { updateSessionCache, getState, setVolume } = await import("../lib/queueStore");
+    const { updateSessionCache, getState } = await import("../lib/queueStore");
 
     // We can't easily add items without the full Tauri stack, but we can test
     // the cache functions independently

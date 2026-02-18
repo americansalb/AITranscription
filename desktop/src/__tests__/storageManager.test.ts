@@ -165,7 +165,7 @@ describe("trimHistory", () => {
   });
 
   it("leaves rawText undefined when input has undefined rawText", () => {
-    const entries = [{ timestamp: Date.now() }];
+    const entries: { rawText?: string; timestamp: number }[] = [{ timestamp: Date.now() }];
     const result = trimHistory(entries);
     expect(result[0].rawText).toBeUndefined();
   });

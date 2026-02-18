@@ -10,7 +10,7 @@
  *   - Paste shortcut per platform
  *   - Edge case: missing navigator
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // We need to re-import after mocking navigator, so use dynamic imports
 // and reset modules between tests.

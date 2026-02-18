@@ -17,7 +17,6 @@ import {
   generateInsights,
   getTopInsight,
   getStoryInsights,
-  Insight,
 } from "../lib/insightGenerator";
 import type {
   UserStats,

@@ -15,7 +15,6 @@ import {
   generateBriefing,
   type BriefingInput,
   type PeerRole,
-  type RoleTemplate,
 } from "../utils/briefingGenerator";
 
 

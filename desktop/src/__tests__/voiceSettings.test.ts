@@ -11,7 +11,7 @@
  *   - Default values for each setting
  *   - Error handling (localStorage unavailable)
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   getStoredVoiceEnabled,
   saveVoiceEnabled,

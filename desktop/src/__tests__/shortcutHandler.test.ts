@@ -11,7 +11,7 @@
  *   - initShortcutHandler: registers and returns cleanup function
  *   - Unhandled keys return false
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // Mock queueStore before importing shortcutHandler
 vi.mock("../lib/queueStore", () => ({
@@ -50,8 +50,6 @@ import {
   adjustVolume,
   speakStatus,
   stopAndClear,
-  replayCurrent,
-  replayLastCompleted,
   initShortcutHandler,
 } from "../lib/shortcutHandler";
 import * as queueStore from "../lib/queueStore";

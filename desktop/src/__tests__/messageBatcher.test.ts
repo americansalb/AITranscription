@@ -39,7 +39,7 @@ describe("messageBatcher", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     callback = vi.fn();
-    setBatchCallback(callback);
+    setBatchCallback(callback as (text: string, sessionId: string, batchCount: number) => void);
     clearBatch();
     mockClassify.mockReturnValue("normal");
     mockPriorityEnabled.mockReturnValue(false);

@@ -12,7 +12,7 @@ import {
   saveSRVoiceId,
 } from "./lib/voiceStream";
 import { keyEventToHotkey } from "./components/Settings";
-import { formatHotkeyForDisplay, isWindows, isMacOS, getModifierKeyName, getAltKeyName } from "./lib/platform";
+import { formatHotkeyForDisplay, isWindows, isMacOS, getModifierKeyName } from "./lib/platform";
 import "./styles/screen-reader.css";
 
 const SR_DETAIL_LABELS = ["Brief", "Concise", "Balanced", "Thorough", "Exhaustive"];
