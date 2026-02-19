@@ -177,7 +177,16 @@ function computeInstanceStatus(
   if (age > goneThreshold) return "vacant";
 
   // Use activity field if available (set by vaak-mcp.rs)
-  if (session.activity === "working") return "working";
+  if (session.activity === "working") {
+    // Max working duration: if last_working_at is older than 3 minutes,
+    // the agent is likely stuck (context expired, crashed mid-tool-call).
+    const lwAt = session.last_working_at;
+    if (lwAt) {
+      const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
+      if (workAge > 180) return "stale";
+    }
+    return "working";
+  }
   if (session.activity === "standby") {
     // Minimum display duration: if the session was working within the last 30 seconds,
     // show "working" instead of "standby" so the human can actually see the transition
