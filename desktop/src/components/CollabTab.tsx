@@ -613,6 +613,7 @@ export function CollabTab() {
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
+  const [importRolesStatus, setImportRolesStatus] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupIcon, setNewGroupIcon] = useState("\uD83D\uDCE6");
   const [newGroupDesc, setNewGroupDesc] = useState("");
@@ -1593,6 +1594,44 @@ When multiple instances of this role are active:
     }
   };
 
+  const handleImportRoles = async () => {
+    if (!projectDir || !window.__TAURI__) return;
+    const savedProjects = loadSavedProjects();
+    const otherProjects = savedProjects.filter(p => normalizePath(p.path) !== normalizePath(projectDir));
+    if (otherProjects.length === 0) {
+      setImportRolesStatus("No other projects to import from");
+      setTimeout(() => setImportRolesStatus(null), 3000);
+      return;
+    }
+    try {
+      setImportRolesStatus("Importing...");
+      const { invoke } = await import("@tauri-apps/api/core");
+      // Try each saved project until one succeeds
+      let imported = 0;
+      for (const source of otherProjects) {
+        try {
+          const count = await invoke<number>("copy_project_roles", {
+            sourceDir: source.path,
+            destDir: projectDir,
+          });
+          imported += count;
+        } catch {
+          // Source project may not exist or have no roles — try next
+        }
+      }
+      if (imported > 0) {
+        setImportRolesStatus(`Imported ${imported} role${imported !== 1 ? "s" : ""}`);
+      } else {
+        setImportRolesStatus("No new roles to import");
+      }
+      setTimeout(() => setImportRolesStatus(null), 4000);
+    } catch (e) {
+      console.error("[CollabTab] Failed to import roles:", e);
+      setImportRolesStatus("Import failed");
+      setTimeout(() => setImportRolesStatus(null), 3000);
+    }
+  };
+
   const handleViewAgent = async (slug: string, instance: number) => {
     if (!projectDir) return;
     try {
@@ -2068,19 +2107,6 @@ When multiple instances of this role are active:
           } else {
             throw watchErr;
           }
-        }
-
-        // For any connected project, sync roles from the most-used saved project
-        // (skip-if-exists: only adds missing roles, never overwrites)
-        const allSaved = loadSavedProjects();
-        const otherSaved = allSaved.filter(p => normalizePath(p.path) !== normalizePath(dir));
-        if (otherSaved.length > 0) {
-          try {
-            await invoke("copy_project_roles", {
-              sourceDir: otherSaved[0].path,
-              destDir: dir,
-            });
-          } catch { /* non-fatal */ }
         }
 
         // Update projectDir if the backend found a better subdirectory
@@ -2733,45 +2759,46 @@ When multiple instances of this role are active:
                 );
               };
 
-              const activeGroupName = activeGroup === "all" ? "All" : (selectedGroupData?.name || activeGroup);
-              const activeGroupIcon = activeGroup === "all" ? "\u2B50" : (selectedGroupData?.icon || "");
-
               return (
                 <>
-                  {/* Compact header bar — always visible, one line */}
+                  {/* Compact trigger button — opens role management modal */}
                   <button
-                    className="add-team-header"
-                    onClick={() => setTeamSectionOpen(prev => !prev)}
-                    aria-expanded={teamSectionOpen}
-                    aria-label={`Groups & Roles: ${activeGroupName}, ${allRoleSlugs.length} roles. Click to ${teamSectionOpen ? "collapse" : "expand"}`}
+                    className="manage-roles-trigger"
+                    onClick={() => setTeamSectionOpen(true)}
+                    aria-label={`Manage Roles & Groups. ${allRoleSlugs.length} roles in ${topLevel.length} groups. Click to open.`}
                   >
-                    <span className={`add-team-header-arrow${teamSectionOpen ? " add-team-header-arrow-open" : ""}`} />
-                    <span className="add-team-header-label">Groups & Roles</span>
-                    <span className="add-team-header-current">{activeGroupIcon} {activeGroupName}</span>
-                    <span className="add-team-header-count">{allRoleSlugs.length}</span>
-                    {/* View toggle — always accessible */}
-                    <span className="add-team-header-views" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        className={`roster-view-btn${rosterViewMode === "grid" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => updateRosterViewMode("grid")}
-                        title="Grid view"
-                      >&#9638;</button>
-                      <button
-                        className={`roster-view-btn${rosterViewMode === "list" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => updateRosterViewMode("list")}
-                        title="List view"
-                      >&#9776;</button>
-                      <button
-                        className={`roster-view-btn${rosterViewMode === "chip" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => updateRosterViewMode("chip")}
-                        title="Compact chip view"
-                      >&#11044;</button>
-                    </span>
+                    <span className="manage-roles-trigger-icon">{"\u2699\uFE0F"}</span>
+                    <span className="manage-roles-trigger-label">Manage Roles & Groups</span>
+                    <span className="manage-roles-trigger-count">{allRoleSlugs.length} roles</span>
                   </button>
 
-                  {/* Expandable content — only visible when open */}
+                  {/* Full-screen modal for role management */}
                   {teamSectionOpen && (
-                    <div className="add-team-expandable">
+                    <div className="roles-modal-overlay" onClick={() => setTeamSectionOpen(false)}>
+                      <div className="roles-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="roles-modal-header">
+                          <h2 className="roles-modal-title">Roles & Groups</h2>
+                          <span className="roles-modal-subtitle">{allRoleSlugs.length} roles in {topLevel.length} groups</span>
+                          <span className="roles-modal-views">
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "grid" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("grid")}
+                              title="Grid view"
+                            >&#9638;</button>
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "list" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("list")}
+                              title="List view"
+                            >&#9776;</button>
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "chip" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("chip")}
+                              title="Compact chip view"
+                            >&#11044;</button>
+                          </span>
+                          <button className="roles-modal-close" onClick={() => setTeamSectionOpen(false)} aria-label="Close">&times;</button>
+                        </div>
+                        <div className="roles-modal-body">
                       {/* Search bar */}
                       <input
                         className="group-search-input"
@@ -2810,6 +2837,18 @@ When multiple instances of this role are active:
                           <span className="group-tree-leaf" />
                           <span className="group-tree-icon" style={{ color: "#1da1f2" }}>+</span>
                           <span className="group-tree-name">New Group</span>
+                        </button>
+                        <button
+                          className="group-tree-node group-tree-node-import"
+                          style={{ paddingLeft: "8px" }}
+                          onClick={() => handleImportRoles()}
+                          title="Import roles from another saved project"
+                          aria-label="Import roles from another project"
+                          disabled={importRolesStatus === "Importing..."}
+                        >
+                          <span className="group-tree-leaf" />
+                          <span className="group-tree-icon" style={{ color: "#f5a623" }}>{"\u{1F4E5}"}</span>
+                          <span className="group-tree-name">{importRolesStatus || "Import Roles"}</span>
                         </button>
                       </div>
 
@@ -2866,8 +2905,98 @@ When multiple instances of this role are active:
                           <span className="add-team-btn-label">+ New Role</span>
                         </button>
                       </div>
+
+                      {/* Active Roster inside modal — mirrors the main roster */}
+                      {(() => {
+                        const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
+                        const modalCards = buildRosterCards(
+                          project.config.roster,
+                          project.config.roles,
+                          project.role_statuses,
+                          project.sessions,
+                          timeoutSecs
+                        );
+                        const companionSlugs = new Set<string>();
+                        for (const [, roleDef] of Object.entries(project.config.roles)) {
+                          const rd = roleDef as RoleConfig;
+                          if (rd.companions) {
+                            for (const comp of rd.companions) {
+                              companionSlugs.add((comp as any).role);
+                            }
+                          }
+                        }
+                        const modalFiltered = modalCards.filter(card => {
+                          if (!companionSlugs.has(card.slug)) return true;
+                          const parentActive = Object.entries(project.config.roles).some(([parentSlug, parentDef]) => {
+                            const pd = parentDef as RoleConfig;
+                            if (!pd.companions?.some((c: any) => c.role === card.slug)) return false;
+                            return project.sessions?.some(s => s.role === parentSlug && s.status === "active");
+                          });
+                          return parentActive;
+                        });
+                        if (modalFiltered.length === 0) return null;
+                        return (
+                          <>
+                            <div className="roles-modal-roster-label">Active Roster</div>
+                            <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                              {modalFiltered.map((card) => {
+                                const cardKey = `${card.slug}:${card.instance}`;
+                                const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
+                                const handleCardClick = () => {
+                                  if (card.slug === "audience") {
+                                    setAudiencePanelOpen(true);
+                                  } else {
+                                    matchingRole && setSelectedRole(matchingRole);
+                                  }
+                                };
+                                if (rosterViewMode === "chip") {
+                                  return (
+                                    <button
+                                      key={cardKey}
+                                      className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                                      style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
+                                      onClick={handleCardClick}
+                                      title={`${card.title} — ${card.status}`}
+                                    >
+                                      <span className={getStatusDotClass(card.status)} />
+                                      <span className="role-chip-name">{card.title}</span>
+                                      <span className={`role-chip-status role-card-status-${card.status}`}>{card.status}</span>
+                                    </button>
+                                  );
+                                }
+                                return (
+                                  <div
+                                    key={cardKey}
+                                    className={`project-role-card role-card-status-${card.status}`}
+                                    style={{ borderColor: card.roleColor + "30" }}
+                                    onClick={handleCardClick}
+                                  >
+                                    <div className="role-card-header">
+                                      <span className={getStatusDotClass(card.status)} />
+                                      <span className="role-card-title" style={{ color: card.roleColor }}>{card.title}</span>
+                                      {card.instance > 0 && <span className="role-card-instance">#{card.instance}</span>}
+                                    </div>
+                                    <div className="role-card-status">{card.status}</div>
+                                    {card.status === "vacant" && claudeInstalled !== false && (
+                                      <button
+                                        className="role-card-launch-btn"
+                                        onClick={(e) => { e.stopPropagation(); handleLaunchMember(card.slug, card.instance); }}
+                                        disabled={launchCooldown}
+                                        title={`Launch Claude agent as ${card.title}`}
+                                      >Launch</button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        );
+                      })()}
+
                     </div>
-                  )}
+                  </div>
+                </div>
+              )}
                 </>
               );
             })()}
