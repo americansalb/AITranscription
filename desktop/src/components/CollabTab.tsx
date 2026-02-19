@@ -2070,6 +2070,19 @@ When multiple instances of this role are active:
           }
         }
 
+        // For any connected project, sync roles from the most-used saved project
+        // (skip-if-exists: only adds missing roles, never overwrites)
+        const allSaved = loadSavedProjects();
+        const otherSaved = allSaved.filter(p => normalizePath(p.path) !== normalizePath(dir));
+        if (otherSaved.length > 0) {
+          try {
+            await invoke("copy_project_roles", {
+              sourceDir: otherSaved[0].path,
+              destDir: dir,
+            });
+          } catch { /* non-fatal */ }
+        }
+
         // Update projectDir if the backend found a better subdirectory
         const finalDir = (result?.effective_dir && result.effective_dir !== dir) ? result.effective_dir : dir;
         if (finalDir !== dir) {
