@@ -130,6 +130,9 @@ pub struct RoleConfig {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<CompanionConfig>,
+    /// true for roles the user created via UI; false for system/imported roles
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1544,6 +1547,7 @@ fn create_role_inner(
         created_at: now.clone(),
         tags: tags.to_vec(),
         companions: companions.to_vec(),
+        custom: true,
     };
 
     // Add role to config
@@ -1554,6 +1558,7 @@ fn create_role_inner(
         "permissions": permissions,
         "created_at": now,
         "tags": tags,
+        "custom": true,
     });
     if !companions.is_empty() {
         role_json["companions"] = serde_json::to_value(companions)

@@ -310,8 +310,6 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
-  max-height: 320px;
-  overflow-y: auto;
   padding-right: 4px;
 }
 
@@ -362,6 +360,42 @@
 .role-card-title {
   font-weight: 600;
   font-size: 14px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* × remove button on card header — always visible, muted until hover */
+.role-card-remove-x {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: none;
+  color: var(--collab-text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.45;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  padding: 0;
+  margin-left: auto;
+}
+
+.role-card-remove-x:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--collab-text-primary);
+}
+
+.role-card:hover .role-card-remove-x {
+  opacity: 0.7;
 }
 
 .role-card-meta {
@@ -405,6 +439,11 @@
 .role-card-status-standby {
   color: var(--collab-warning);
   background: rgba(245, 197, 24, 0.1);
+}
+
+.role-card-status-stale {
+  color: #e8935a;
+  background: rgba(232, 147, 90, 0.15);
 }
 
 .role-card-status-gone {
@@ -616,6 +655,148 @@
   padding-top: 4px;
 }
 
+/* Manage Roles trigger button — compact, always visible */
+.manage-roles-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  font-size: 13px;
+  color: var(--collab-text-primary);
+  text-align: left;
+}
+
+.manage-roles-trigger:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.manage-roles-trigger-icon {
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.manage-roles-trigger-label {
+  font-weight: 600;
+  flex: 1;
+}
+
+.manage-roles-trigger-count {
+  font-size: 11px;
+  color: var(--collab-text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* Roles management modal overlay */
+.roles-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.roles-modal {
+  background: var(--collab-bg-primary, #15202b);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  width: 90vw;
+  max-width: 900px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.2s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.roles-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.roles-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--collab-text-primary);
+  margin: 0;
+}
+
+.roles-modal-subtitle {
+  font-size: 12px;
+  color: var(--collab-text-muted);
+  flex: 1;
+}
+
+.roles-modal-views {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.roles-modal-close {
+  background: none;
+  border: none;
+  color: var(--collab-text-muted);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.roles-modal-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--collab-text-primary);
+}
+
+.roles-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.roles-modal-roster-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--collab-text-muted);
+  margin-top: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 /* (Tabs removed — groups are now inline chip filters) */
 
 /* Group presets — compact layout */
@@ -717,6 +898,21 @@
 
 .group-tree-node-create:hover {
   opacity: 1;
+}
+
+.group-tree-node-import {
+  opacity: 0.5;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 1px;
+}
+
+.group-tree-node-import:hover {
+  opacity: 1;
+}
+
+.group-tree-node-import:disabled {
+  opacity: 0.3;
+  cursor: wait;
 }
 
 /* Toggle arrow for expandable nodes */
@@ -4168,30 +4364,170 @@
   color: var(--collab-warning);
 }
 
-/* Disconnect — subtle danger hint in default state */
+/* Disconnect — amber/warning color */
 .role-action-disconnect {
-  color: #c4677a;
-  border-color: rgba(224, 36, 94, 0.15);
+  color: #d4a048;
+  border-color: rgba(212, 160, 72, 0.2);
 }
 
 .role-action-disconnect:hover {
-  background: rgba(224, 36, 94, 0.2);
-  color: var(--collab-error);
+  background: rgba(212, 160, 72, 0.15);
+  color: #e8b44c;
+  border-color: rgba(212, 160, 72, 0.3);
 }
 
-/* Remove & Delete — red tint in default state */
-.role-action-remove,
+/* Remove from roster — neutral/muted, not destructive */
+.role-action-remove {
+  color: var(--collab-text-muted);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.role-action-remove:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--collab-text-secondary);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Delete role — red, destructive */
 .role-action-delete {
   color: #c4677a;
   border-color: rgba(224, 36, 94, 0.15);
   background: rgba(224, 36, 94, 0.06);
 }
 
-.role-action-remove:hover,
 .role-action-delete:hover {
   background: rgba(224, 36, 94, 0.2);
   color: var(--collab-error);
   border-color: rgba(224, 36, 94, 0.3);
+}
+
+/* Overflow menu — "..." button + dropdown */
+.role-action-overflow-wrap {
+  position: relative;
+}
+
+.role-action-overflow-btn {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  padding: 2px 8px;
+  min-width: 32px;
+  color: var(--collab-text-muted);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.role-action-overflow-btn:hover,
+.role-action-overflow-btn.active {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--collab-text-primary);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.role-action-overflow-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+}
+
+.role-action-overflow-menu {
+  /* position set inline via JS (fixed + calculated coords) to escape overflow clipping */
+  z-index: 10000;
+  min-width: 180px;
+  background: var(--collab-bg-secondary, #1a2734);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 4px 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: fadeIn 0.1s ease;
+}
+
+.role-overflow-item {
+  display: block;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: none;
+  color: var(--collab-text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+
+.role-overflow-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--collab-text-primary);
+}
+
+.role-overflow-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.role-overflow-separator {
+  display: block;
+  height: 1px;
+  margin: 4px 10px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Edit Role — accent blue */
+.role-overflow-edit {
+  color: #6b8aed;
+}
+
+.role-overflow-edit:hover {
+  background: rgba(107, 138, 237, 0.12);
+  color: #8ba4f5;
+}
+
+/* Buzz — bright yellow/gold (attention) */
+.role-overflow-buzz {
+  color: #e0c050;
+}
+
+.role-overflow-buzz:hover {
+  background: rgba(224, 192, 80, 0.12);
+  color: #f0d060;
+}
+
+/* Interrupt — orange/warning */
+.role-overflow-interrupt {
+  color: #e8935a;
+}
+
+.role-overflow-interrupt:hover {
+  background: rgba(232, 147, 90, 0.12);
+  color: #f0a570;
+}
+
+/* Disconnect — amber */
+.role-overflow-disconnect {
+  color: #d4a048;
+}
+
+.role-overflow-disconnect:hover {
+  background: rgba(212, 160, 72, 0.12);
+  color: #e8b44c;
+}
+
+.role-overflow-remove {
+  color: var(--collab-text-muted);
+}
+
+.role-overflow-remove:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--collab-text-secondary);
+}
+
+.role-overflow-delete {
+  color: #c4677a;
+}
+
+.role-overflow-delete:hover {
+  background: rgba(224, 36, 94, 0.12);
+  color: var(--collab-error);
 }
 
 /* Global template badge — read-only indicator, not a button */

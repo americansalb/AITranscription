@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
@@ -155,7 +156,7 @@ interface InstanceCard {
   slug: string;
   title: string;
   instance: number;
-  status: "working" | "standby" | "vacant";
+  status: "working" | "standby" | "stale" | "vacant";
   roleColor: string;
 }
 
@@ -185,6 +186,9 @@ function computeInstanceStatus(
       const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
       if (workAge < 30) return "working";
     }
+    // Staleness: agents call project_wait(timeout=55s). If heartbeat is older than 75s
+    // while still in standby, the agent likely stopped polling (crash, context overflow).
+    if (age > 75) return "stale";
     return "standby";
   }
 
@@ -593,6 +597,8 @@ export function CollabTab() {
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
+  const [openCardMenu, setOpenCardMenu] = useState<string | null>(null); // "slug:instance" key
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
   const [claimsCollapsed, setClaimsCollapsed] = useState(true);
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
@@ -649,7 +655,6 @@ export function CollabTab() {
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
-  const BUILT_IN_ROLES = ["developer", "manager", "architect", "tester", "moderator"];
   const [_globalTemplates, _setGlobalTemplates] = useState<Set<string>>(new Set());
 
   const PERM_TOOLTIPS: Record<string, string> = {
@@ -901,7 +906,8 @@ export function CollabTab() {
   };
 
   const handleDeleteRole = async (slug: string) => {
-    if (BUILT_IN_ROLES.includes(slug)) return;
+    // Only allow deleting user-created custom roles
+    if (project?.config?.roles?.[slug]?.custom !== true) return;
     const roleTitle = project?.config?.roles?.[slug]?.title || slug;
     setConfirmTypedInput("");
     setConfirmAction({
@@ -1424,30 +1430,6 @@ When multiple instances of this role are active:
   };
 
 
-  const handleKillMember = async (role: string, instance: number) => {
-    const roleConfig = project?.config?.roles?.[role];
-    const companions = roleConfig?.companions?.map((c: { role: string }) => c.role) || [];
-    const companionNote = companions.length > 0
-      ? ` This will also disconnect companion roles: ${companions.join(", ")}.`
-      : "";
-    setConfirmAction({
-      title: "Remove team member",
-      message: `Remove ${role}:${instance} from the team? This will close their terminal window.${companionNote}`,
-      confirmLabel: "Remove",
-      onConfirm: async () => {
-        try {
-          if (window.__TAURI__) {
-            const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("kill_team_member", { role, instance });
-          }
-        } catch (e) {
-          console.error("[CollabTab] Failed to kill team member:", e);
-        }
-        setConfirmAction(null);
-      },
-    });
-  };
-
   const handleSendInterrupt = async () => {
     if (!interruptTarget || !projectDir) return;
     const to = `${interruptTarget.slug}:${interruptTarget.instance}`;
@@ -1690,14 +1672,25 @@ When multiple instances of this role are active:
   };
 
   const handleRemoveRosterSlot = async (role: string, instance: number) => {
+    const roleTitle = project?.config?.roles?.[role]?.title || role;
     setConfirmAction({
-      title: "Remove role from roster",
-      message: `Remove ${role}:${instance} from the project roster? This will also disconnect any active agent in this slot.`,
+      title: "Remove from roster",
+      message: `Remove ${roleTitle} :${instance} from the roster? This hides the card and disconnects any active agent.`,
       confirmLabel: "Remove",
       onConfirm: async () => {
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
+            // If no explicit roster exists, create one from all defined roles first
+            const hasExplicitRoster = project?.config?.roster && project.config.roster.length > 0;
+            if (!hasExplicitRoster && project) {
+              const allSlugs = Object.keys(project.config.roles);
+              for (const slug of allSlugs) {
+                try {
+                  await invoke("roster_add_slot", { projectDir, role: slug, metadata: null });
+                } catch { /* slot may already exist from migration */ }
+              }
+            }
             await invoke("roster_remove_slot", { projectDir, role, instance });
             // Refresh project state so the removed slot disappears from the UI
             const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
@@ -2975,6 +2968,12 @@ When multiple instances of this role are active:
                                       <span className={getStatusDotClass(card.status)} />
                                       <span className="role-card-title" style={{ color: card.roleColor }}>{card.title}</span>
                                       {card.instance > 0 && <span className="role-card-instance">#{card.instance}</span>}
+                                      <button
+                                        className="role-card-remove-x"
+                                        onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
+                                        title="Remove from roster"
+                                        aria-label={`Remove ${card.title} from roster`}
+                                      >&times;</button>
                                     </div>
                                     <div className="role-card-status">{card.status}</div>
                                     {card.status === "vacant" && claudeInstalled !== false && (
@@ -3034,7 +3033,6 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
-          const hasRoster = project.config.roster && project.config.roster.length > 0;
           const vacantCount = filteredCards.filter(c => c.status === "vacant").length;
           return (
             <>
@@ -3092,6 +3090,12 @@ When multiple instances of this role are active:
                           <span className="role-card-title" style={{ color: card.roleColor }}>
                             {card.title}
                           </span>
+                          <button
+                            className="role-card-remove-x"
+                            onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
+                            title="Remove from roster"
+                            aria-label={`Remove ${card.title} from roster`}
+                          >&times;</button>
                         </div>
                         <div className="role-card-meta">
                           <span className="role-card-slug">{card.slug}</span>
@@ -3107,81 +3111,95 @@ When multiple instances of this role are active:
                           if (!parentRole) return null;
                           return <span className="role-companion-badge">paired with {(parentRole[1] as any).title || parentRole[0]}</span>;
                         })()}
-                        {/* Action row — always visible, grouped by severity */}
-                        <div className="role-card-actions" role="group" aria-label={`Actions for ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`} onClick={(e) => e.stopPropagation()}>
-                          {/* Safe actions: View, Edit */}
+                        {/* Action row — primary action + overflow menu */}
+                        <div className="role-card-actions" role="group" aria-label={`Actions for ${card.title}`} onClick={(e) => e.stopPropagation()}>
+                          {/* Primary action: View for active, nothing extra for vacant */}
                           {card.status !== "vacant" && (
                             <button
                               className="role-action-btn role-action-view"
                               onClick={() => handleViewAgent(card.slug, card.instance >= 0 ? card.instance : 0)}
-                              title={`View ${card.title} — bring terminal to front`}
-                              aria-label={`View ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""} terminal`}
+                              title={`View ${card.title} terminal`}
                             >&#128065; View</button>
                           )}
-                          {card.instance === 0 && (
-                            <button
-                              className="role-action-btn"
-                              onClick={() => openEditRoleForm(card.slug)}
-                              title={`Edit ${card.title} role settings`}
-                              aria-label={`Edit ${card.title} role settings`}
-                            >&#9998; Edit</button>
-                          )}
-                          {/* Global badge removed — all roles are global, badge was redundant and broke layout consistency */}
-                          {/* Gentle nudge: Buzz — wake up stale agents */}
-                          {card.status !== "vacant" && (() => {
-                            const bk = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
-                            const isBuzzed = buzzedKey === bk;
+                          {/* Overflow menu trigger */}
+                          {(() => {
+                            const cardKey = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                            const isOpen = openCardMenu === cardKey;
                             return (
-                              <button
-                                className={`role-action-btn role-action-buzz${isBuzzed ? " role-action-buzz-sent" : ""}`}
-                                onClick={() => handleBuzz(card.slug, card.instance >= 0 ? card.instance : 0)}
-                                disabled={isBuzzed}
-                                title={isBuzzed ? "Buzz sent!" : `Buzz ${card.title} — wake up a stale agent`}
-                                aria-label={isBuzzed ? `Buzz sent to ${card.title}` : `Buzz ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`}
-                              >{isBuzzed ? "\u2713 Sent" : "\uD83D\uDD14 Buzz"}</button>
+                              <div className="role-action-overflow-wrap">
+                                <button
+                                  className={`role-action-btn role-action-overflow-btn${isOpen ? " active" : ""}`}
+                                  onClick={(e) => {
+                                    if (isOpen) { setOpenCardMenu(null); setMenuPos(null); }
+                                    else {
+                                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                      const menuW = 200; // approx menu width
+                                      // If menu would overflow left edge, anchor to left of button; otherwise right-align
+                                      const wouldClipLeft = r.right - menuW < 8;
+                                      setMenuPos({
+                                        top: r.bottom + 4,
+                                        right: wouldClipLeft ? -1 : window.innerWidth - r.right,
+                                        left: wouldClipLeft ? Math.max(8, r.left) : -1,
+                                      });
+                                      setOpenCardMenu(cardKey);
+                                    }
+                                  }}
+                                  title="More actions"
+                                  aria-expanded={isOpen}
+                                  aria-haspopup="menu"
+                                >&#8943;</button>
+                                {isOpen && menuPos && createPortal(
+                                  <>
+                                  <div className="role-action-overflow-backdrop" onClick={() => { setOpenCardMenu(null); setMenuPos(null); }} />
+                                  <div className="role-action-overflow-menu" role="menu" style={{ position: 'fixed', top: menuPos.top, ...(menuPos.left >= 0 ? { left: menuPos.left, right: 'auto' } : { right: menuPos.right, left: 'auto' }) }} onClick={() => { setOpenCardMenu(null); setMenuPos(null); }}>
+                                    {card.instance === 0 && (
+                                      <button className="role-overflow-item role-overflow-edit" role="menuitem" onClick={() => openEditRoleForm(card.slug)}>&#9998; Edit Role</button>
+                                    )}
+                                    {card.status !== "vacant" && (() => {
+                                      const bk = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                                      const isBuzzed = buzzedKey === bk;
+                                      return (
+                                        <button className="role-overflow-item role-overflow-buzz" role="menuitem" onClick={() => handleBuzz(card.slug, card.instance >= 0 ? card.instance : 0)} disabled={isBuzzed}>
+                                          {isBuzzed ? "\u2713 Buzzed" : "\uD83D\uDD14 Buzz"}
+                                        </button>
+                                      );
+                                    })()}
+                                    {card.status !== "vacant" && (
+                                      <button className="role-overflow-item role-overflow-interrupt" role="menuitem" onClick={() => setInterruptTarget({ slug: card.slug, instance: card.instance >= 0 ? card.instance : 0, title: card.title })}>&#9889; Interrupt</button>
+                                    )}
+                                    {card.status !== "vacant" && (
+                                      <button className="role-overflow-item role-overflow-disconnect" role="menuitem" onClick={() => {
+                                        const inst = card.instance >= 0 ? card.instance : 0;
+                                        setConfirmAction({
+                                          title: "Disconnect agent",
+                                          message: `Disconnect ${card.title}:${inst}? This ends their session but keeps the slot on the roster.`,
+                                          confirmLabel: "Disconnect",
+                                          onConfirm: async () => {
+                                            try {
+                                              if (window.__TAURI__) {
+                                                const { invoke } = await import("@tauri-apps/api/core");
+                                                await invoke("kill_team_member", { role: card.slug, instance: inst });
+                                              }
+                                            } catch (e) {
+                                              console.error("[CollabTab] Failed to disconnect:", e);
+                                            }
+                                            setConfirmAction(null);
+                                          },
+                                        });
+                                      }}>&#10005; Disconnect</button>
+                                    )}
+                                    <span className="role-overflow-separator" />
+                                    <button className="role-overflow-item role-overflow-remove" role="menuitem" onClick={() => handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0)}>&#8722; Remove from Roster</button>
+                                    {card.instance === 0 && card.status === "vacant" && project?.config?.roles?.[card.slug]?.custom === true && (
+                                      <button className="role-overflow-item role-overflow-delete" role="menuitem" onClick={() => handleDeleteRole(card.slug)}>&#128465; Delete Role</button>
+                                    )}
+                                  </div>
+                                  </>,
+                                  document.body
+                                )}
+                              </div>
                             );
                           })()}
-                          {/* Warning actions: Interrupt */}
-                          {card.status !== "vacant" && (
-                            <button
-                              className="role-action-btn role-action-interrupt"
-                              onClick={() => setInterruptTarget({ slug: card.slug, instance: card.instance >= 0 ? card.instance : 0, title: card.title })}
-                              title={`Interrupt ${card.title} — stop their current work`}
-                              aria-label={`Send interrupt to ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`}
-                            >&#9889; Interrupt</button>
-                          )}
-                          {/* Separator between safe and destructive actions */}
-                          {(card.status !== "vacant" || (hasRoster && card.status === "vacant")) && (
-                            <span className="role-actions-separator" aria-hidden="true" />
-                          )}
-                          {/* Destructive actions: Disconnect, Remove, Delete */}
-                          {card.status !== "vacant" && (
-                            <button
-                              className="role-action-btn role-action-disconnect"
-                              onClick={() => {
-                                const inst = card.instance >= 0 ? card.instance : 0;
-                                handleKillMember(card.slug, inst);
-                              }}
-                              title={`Disconnect ${card.title} agent — ends their session`}
-                              aria-label={`Disconnect ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""} agent`}
-                            >&times; Disconnect</button>
-                          )}
-                          {hasRoster && card.status === "vacant" && (
-                            <button
-                              className="role-action-btn role-action-remove"
-                              onClick={() => handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0)}
-                              title={`Remove ${card.title} slot from roster`}
-                              aria-label={`Remove ${card.title} roster slot`}
-                            >&#128465; Remove</button>
-                          )}
-                          {card.instance === 0 && card.status === "vacant" && !BUILT_IN_ROLES.includes(card.slug) && (
-                            <button
-                              className="role-action-btn role-action-delete"
-                              onClick={() => handleDeleteRole(card.slug)}
-                              title={`Permanently delete ${card.title} role`}
-                              aria-label={`Permanently delete ${card.title} role from project`}
-                            >&#128465; Delete</button>
-                          )}
                         </div>
                         {voiceList.length > 0 && (
                           <select
