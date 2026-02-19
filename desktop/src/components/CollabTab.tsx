@@ -536,9 +536,14 @@ function loadSavedProjects(): SavedProject[] {
   } catch { return []; }
 }
 
+function normalizePath(p: string): string {
+  return p.replace(/^\\\\\?\\/, "").replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
 function addSavedProject(path: string, name?: string): void {
   try {
-    const projects = loadSavedProjects().filter(p => p.path !== path);
+    const norm = normalizePath(path);
+    const projects = loadSavedProjects().filter(p => normalizePath(p.path) !== norm);
     const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
     const autoName = name || parts[parts.length - 1] || "My Project";
     projects.unshift({ name: autoName, path, addedAt: new Date().toISOString() });
@@ -550,7 +555,8 @@ function addSavedProject(path: string, name?: string): void {
 
 function removeSavedProject(path: string): void {
   try {
-    const projects = loadSavedProjects().filter(p => p.path !== path);
+    const norm = normalizePath(path);
+    const projects = loadSavedProjects().filter(p => normalizePath(p.path) !== norm);
     localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(projects));
   } catch { /* ignore */ }
 }
@@ -4330,8 +4336,6 @@ When multiple instances of this role are active:
                   const { open } = await import("@tauri-apps/plugin-dialog");
                   const selected = await open({ directory: true, multiple: false });
                   if (selected) {
-                    addSavedProject(selected as string);
-                    setSavedProjects(loadSavedProjects());
                     startWatching(selected as string);
                   }
                 }

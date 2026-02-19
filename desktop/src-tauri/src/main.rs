@@ -81,7 +81,9 @@ fn validate_project_dir(dir: &str) -> Result<String, String> {
         return Err(format!("Not a Vaak project (no .vaak/ directory): {}", canonical.display()));
     }
 
-    Ok(canonical.to_string_lossy().to_string())
+    // Strip Windows extended-length path prefix (\\?\) that canonicalize() adds
+    let s = canonical.to_string_lossy().to_string();
+    Ok(s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string())
 }
 
 /// Helper to create an Image from PNG bytes
