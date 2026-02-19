@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # Rate limits
     max_audio_duration_seconds: int = 300  # 5 minutes max per request
 
+    # API call timeouts (seconds) — provisional values, calibrate with production data
+    groq_timeout_base: int = 30        # Base timeout for Groq transcription
+    groq_timeout_per_min_audio: int = 30  # Additional seconds per minute of audio
+    anthropic_timeout_base: int = 30   # Base timeout for Anthropic polish
+    anthropic_timeout_per_1k_chars: int = 15  # Additional seconds per 1000 chars
+    timeout_ceiling: int = 300         # Maximum timeout for any single API call (5 min)
+
     # ML Features (experimental)
     enable_ml_corrections: bool = False  # Feature flag for embedding-based learning
 

@@ -283,6 +283,7 @@ export async function transcribeAndPolish(
     context?: string;
     formality?: "casual" | "neutral" | "formal";
     model?: WhisperModel;
+    signal?: AbortSignal;
   } = {}
 ): Promise<TranscribeAndPolishResponse> {
   // Use correct filename based on actual audio format
@@ -304,18 +305,26 @@ export async function transcribeAndPolish(
     formData.append("model", options.model);
   }
 
-  // Dynamic timeout based on file size
-  // Estimate: ~16KB per second of audio at typical compression
-  // Add generous buffer for network latency and server processing
-  // Minimum 60 seconds, maximum 10 minutes
+  // Proportional timeout based on audio file size
+  // ~16KB per second of audio at typical compression
+  // Minimum 60 seconds, maximum 5 minutes (down from 10 min)
   const estimatedDurationSeconds = Math.max(audioBlob.size / 16000, 1);
   const timeoutMs = Math.min(
     Math.max((estimatedDurationSeconds + 60) * 1000, 60000),  // min 60 seconds
-    600000  // max 10 minutes
+    300000  // max 5 minutes
   );
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  // If caller provides an external signal (e.g. user cancel button), forward abort
+  if (options.signal) {
+    if (options.signal.aborted) {
+      clearTimeout(timeoutId);
+      throw new ApiError("Transcription cancelled", 0);
+    }
+    options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
 
   try {
     const response = await fetch(`${API_BASE_URL}/api/v1/transcribe-and-polish`, {
@@ -341,6 +350,10 @@ export async function transcribeAndPolish(
   } catch (error) {
     clearTimeout(timeoutId);
     if (error instanceof Error && error.name === "AbortError") {
+      // Distinguish user cancel from timeout
+      if (options.signal?.aborted) {
+        throw new ApiError("Transcription cancelled", 0);
+      }
       const timeoutSecs = Math.round(timeoutMs / 1000);
       throw new ApiError(`Transcription request timed out after ${timeoutSecs} seconds`, 408);
     }
@@ -353,7 +366,8 @@ export async function transcribeAndPolish(
  */
 export async function transcribe(
   audioBlob: Blob,
-  language?: string
+  language?: string,
+  signal?: AbortSignal
 ): Promise<TranscribeResponse> {
   // Use correct filename based on actual audio format
   const filename = getAudioFilename(audioBlob);
@@ -365,13 +379,45 @@ export async function transcribe(
     formData.append("language", language);
   }
 
-  const response = await fetch(`${API_BASE_URL}/api/v1/transcribe`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-    body: formData,
-  });
+  // Proportional timeout: min 60s, max 5 min (matches transcribe+polish ceiling)
+  const estimatedDurationSeconds = Math.max(audioBlob.size / 16000, 1);
+  const timeoutMs = Math.min(
+    Math.max((estimatedDurationSeconds + 30) * 1000, 60000),
+    300000  // max 5 minutes
+  );
 
-  return handleResponse<TranscribeResponse>(response);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  if (signal) {
+    if (signal.aborted) {
+      clearTimeout(timeoutId);
+      throw new ApiError("Transcription cancelled", 0);
+    }
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/v1/transcribe`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return handleResponse<TranscribeResponse>(response);
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      if (signal?.aborted) {
+        throw new ApiError("Transcription cancelled", 0);
+      }
+      const timeoutSecs = Math.round(timeoutMs / 1000);
+      throw new ApiError(`Transcription request timed out after ${timeoutSecs} seconds`, 408);
+    }
+    throw error;
+  }
 }
 
 /**

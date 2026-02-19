@@ -326,6 +326,41 @@ function App() {
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("recording");
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Elapsed time tracker for processing — shows "Transcribing... (12s)" to prevent "is it stuck?" perception
+  const [processingElapsed, setProcessingElapsed] = useState(0);
+  const processingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // AbortController for cancelling in-flight transcription requests
+  const processingAbortRef = useRef<AbortController | null>(null);
+
+  // Abort in-flight requests on unmount to prevent orphaned connections
+  useEffect(() => {
+    return () => {
+      processingAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (status === "processing") {
+      setProcessingElapsed(0);
+      const startTime = Date.now();
+      processingTimerRef.current = setInterval(() => {
+        setProcessingElapsed(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+    } else {
+      if (processingTimerRef.current) {
+        clearInterval(processingTimerRef.current);
+        processingTimerRef.current = null;
+      }
+      setProcessingElapsed(0);
+    }
+    return () => {
+      if (processingTimerRef.current) {
+        clearInterval(processingTimerRef.current);
+      }
+    };
+  }, [status]);
+
   // Week 3: New state for comparison, regenerate, history, confidence
   const [showComparison, setShowComparison] = useState(false);
   const [showExport, setShowExport] = useState(false);
@@ -531,8 +566,20 @@ function App() {
     }
   }, [recorder, backendReady, showToast, soundEnabled]);
 
+  // Cancel in-flight transcription processing
+  const cancelProcessing = useCallback(() => {
+    if (processingAbortRef.current) {
+      processingAbortRef.current.abort();
+      processingAbortRef.current = null;
+    }
+  }, []);
+
   // Shared transcription processing logic — used by both hotkey and click handlers
   const processRecording = useCallback(async (audioBlob: Blob, ctx: string, fmt: "casual" | "neutral" | "formal") => {
+    // Create a new AbortController for this processing run
+    const abortController = new AbortController();
+    processingAbortRef.current = abortController;
+
     setProcessingStep("transcribing");
 
     let rawText: string;
@@ -543,13 +590,14 @@ function App() {
       const response = await transcribeAndPolish(audioBlob, {
         context: ctx === "general" ? undefined : ctx,
         formality: fmt,
+        signal: abortController.signal,
       });
       setProcessingStep("polishing");
       rawText = response.raw_text;
       polishedText = response.polished_text;
       transcriptSaved = response.saved;
     } else {
-      const response = await transcribe(audioBlob);
+      const response = await transcribe(audioBlob, undefined, abortController.signal);
       rawText = response.raw_text;
       polishedText = response.raw_text;
       transcriptSaved = false;
@@ -596,6 +644,13 @@ function App() {
 
   // Shared error handling for transcription failures
   const handleTranscriptionError = useCallback((err: unknown) => {
+    // User-initiated cancellation — don't show error, already handled by cancel button
+    if (err instanceof ApiError && err.message === "Transcription cancelled") {
+      setProcessingStep("recording");
+      setStatus("idle");
+      return;
+    }
+
     const message =
       err instanceof ApiError
         ? err.detail || err.message
@@ -1112,10 +1167,27 @@ function App() {
                       <span>{index + 1}</span>
                     )}
                   </div>
-                  <span className="progress-step-label">{step.label}</span>
+                  <span className="progress-step-label">
+                    {step.label}
+                    {isCurrent && processingElapsed > 0 && ` (${processingElapsed}s)`}
+                  </span>
                 </div>
               );
             })}
+            <button
+              className="cancel-processing-btn"
+              onClick={() => {
+                cancelProcessing();
+                setProcessingStep("recording");
+                setStatus("idle");
+                isProcessingRef.current = false;
+                showToast("Transcription cancelled", "warning");
+              }}
+              title="Cancel transcription"
+              aria-label="Cancel transcription"
+            >
+              Cancel
+            </button>
           </div>
         ) : (
           <div className="status">
