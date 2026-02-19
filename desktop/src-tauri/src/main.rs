@@ -2160,6 +2160,112 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Copy roles (briefings + project.json entries + role_groups) from one project to another.
+#[tauri::command]
+fn copy_project_roles(source_dir: String, dest_dir: String) -> Result<u32, String> {
+    // Source must be a valid vaak project; dest needs only .vaak/ to exist
+    let source = validate_project_dir(&source_dir)?;
+    let dest_path = std::path::Path::new(&dest_dir);
+    let dest_vaak = dest_path.join(".vaak");
+    if !dest_vaak.is_dir() {
+        return Err(format!("Destination has no .vaak/ directory: {}", dest_dir));
+    }
+    // Strip \\?\ from dest too
+    let dest_canonical = dest_path.canonicalize()
+        .map_err(|e| format!("Invalid dest directory: {}", e))?;
+    let dest = {
+        let s = dest_canonical.to_string_lossy().to_string();
+        s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+    };
+
+    let source_vaak = std::path::Path::new(&source).join(".vaak");
+    let dest_vaak = std::path::Path::new(&dest).join(".vaak");
+    let mut copied: u32 = 0;
+
+    // 1. Copy role briefing .md files from source/roles/ to dest/roles/
+    let source_roles_dir = source_vaak.join("roles");
+    let dest_roles_dir = dest_vaak.join("roles");
+    let _ = std::fs::create_dir_all(&dest_roles_dir);
+    if source_roles_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&source_roles_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".md") {
+                    let dest_file = dest_roles_dir.join(&name);
+                    if !dest_file.exists() {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if std::fs::write(&dest_file, &content).is_ok() {
+                                copied += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Merge roles and role_groups from source project.json into dest project.json
+    let source_config_path = source_vaak.join("project.json");
+    let dest_config_path = dest_vaak.join("project.json");
+    if source_config_path.exists() && dest_config_path.exists() {
+        let source_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&source_config_path)
+                .map_err(|e| format!("Failed to read source project.json: {}", e))?
+        ).map_err(|e| format!("Failed to parse source project.json: {}", e))?;
+
+        let mut dest_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&dest_config_path)
+                .map_err(|e| format!("Failed to read dest project.json: {}", e))?
+        ).map_err(|e| format!("Failed to parse dest project.json: {}", e))?;
+
+        // Merge roles: copy entries from source that don't exist in dest
+        if let Some(source_roles) = source_json.get("roles").and_then(|r| r.as_object()) {
+            let dest_roles = dest_json.get_mut("roles")
+                .and_then(|r| r.as_object_mut());
+            if let Some(dest_roles) = dest_roles {
+                for (slug, config) in source_roles {
+                    if !dest_roles.contains_key(slug) {
+                        dest_roles.insert(slug.clone(), config.clone());
+                        copied += 1;
+                    }
+                }
+            }
+        }
+
+        // Merge role_groups: copy groups from source that don't exist in dest (by slug)
+        if let Some(source_groups) = source_json.get("role_groups").and_then(|g| g.as_array()) {
+            let dest_groups = dest_json.get_mut("role_groups")
+                .and_then(|g| g.as_array_mut());
+            if let Some(dest_groups) = dest_groups {
+                let existing_slugs: std::collections::HashSet<String> = dest_groups.iter()
+                    .filter_map(|g| g.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+                for group in source_groups {
+                    if let Some(slug) = group.get("slug").and_then(|s| s.as_str()) {
+                        if !existing_slugs.contains(slug) {
+                            dest_groups.push(group.clone());
+                            copied += 1;
+                        }
+                    }
+                }
+            } else {
+                // dest has no role_groups array — create it
+                dest_json["role_groups"] = serde_json::Value::Array(source_groups.clone());
+                copied += source_groups.len() as u32;
+            }
+        }
+
+        // Write back dest project.json
+        let pretty = serde_json::to_string_pretty(&dest_json)
+            .map_err(|e| format!("Failed to format dest project.json: {}", e))?;
+        std::fs::write(&dest_config_path, pretty)
+            .map_err(|e| format!("Failed to write dest project.json: {}", e))?;
+    }
+
+    Ok(copied)
+}
+
 #[tauri::command]
 fn delete_message(dir: String, message_id: u64) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
@@ -4134,6 +4240,7 @@ fn main() {
             watch_project_dir,
             stop_watching_project,
             initialize_project,
+            copy_project_roles,
             read_role_briefing,
             send_team_message,
             set_workflow_type,

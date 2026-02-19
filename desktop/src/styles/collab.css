@@ -701,6 +701,14 @@
   font-style: italic;
 }
 
+.group-tree-node-dim {
+  opacity: 0.45;
+}
+
+.group-tree-node-dim:hover {
+  opacity: 0.75;
+}
+
 .group-tree-node-create {
   opacity: 0.5;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -773,6 +781,41 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* Group tree inline action buttons (edit/delete) */
+.group-tree-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.group-tree-node:hover .group-tree-actions {
+  opacity: 1;
+}
+
+.group-tree-action-btn {
+  background: none;
+  border: none;
+  padding: 0 3px;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--collab-text-muted);
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+  line-height: 1;
+}
+
+.group-tree-action-btn:hover {
+  color: var(--collab-text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.group-tree-action-delete:hover {
+  color: var(--collab-error);
+  background: rgba(224, 36, 94, 0.12);
 }
 
 /* ==================== Breadcrumbs ==================== */
@@ -907,6 +950,82 @@
 
 .project-roles-list .role-voice-select {
   display: none;
+}
+
+/* ==================== Chip View Mode ==================== */
+
+.project-roles-chips {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 6px !important;
+  grid-template-columns: unset !important;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  padding: 4px 10px 4px 7px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+  font-size: 12px;
+  font-family: inherit;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.role-chip:hover {
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.05);
+}
+
+.role-chip:focus-visible {
+  outline: 2px solid var(--collab-accent);
+  outline-offset: 1px;
+}
+
+.role-chip .project-status-dot {
+  flex-shrink: 0;
+}
+
+.role-chip-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.role-chip-status {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.role-chip-working {
+  background: rgba(23, 191, 99, 0.1);
+  border-color: rgba(23, 191, 99, 0.35) !important;
+  box-shadow: 0 0 10px rgba(23, 191, 99, 0.15);
+}
+
+.role-chip-vacant {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.role-chip-vacant:hover {
+  opacity: 0.8;
 }
 
 /* Legacy chip grid (kept for backward compat, no longer rendered by default) */

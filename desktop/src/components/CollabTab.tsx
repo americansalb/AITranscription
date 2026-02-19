@@ -598,10 +598,21 @@ export function CollabTab() {
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
   const [groupSearch, setGroupSearch] = useState("");
-  const [rosterViewMode, setRosterViewMode] = useState<"grid" | "list">("grid");
+  const [rosterViewMode, setRosterViewMode] = useState<"grid" | "list" | "chip">(() => {
+    try {
+      const saved = localStorage.getItem("vaak_roster_view_mode");
+      if (saved === "grid" || saved === "list" || saved === "chip") return saved;
+    } catch { /* ignore */ }
+    return "grid";
+  });
+  const updateRosterViewMode = (mode: "grid" | "list" | "chip") => {
+    setRosterViewMode(mode);
+    try { localStorage.setItem("vaak_roster_view_mode", mode); } catch { /* ignore */ }
+  };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupIcon, setNewGroupIcon] = useState("\uD83D\uDCE6");
   const [newGroupDesc, setNewGroupDesc] = useState("");
@@ -1513,6 +1524,7 @@ When multiple instances of this role are active:
 
   /** Open the create-group modal, optionally pre-filling from current roster */
   const openCreateGroupModal = (fromRoster?: boolean, parentSlug?: string) => {
+    setEditingGroupSlug(null);
     setNewGroupName("");
     setNewGroupIcon("\uD83D\uDCE6");
     setNewGroupDesc("");
@@ -1528,10 +1540,25 @@ When multiple instances of this role are active:
     setCreateGroupOpen(true);
   };
 
-  /** Save a custom group to project.json via Tauri */
+  /** Open the group modal pre-filled for editing an existing group */
+  const openEditGroupModal = (group: RoleGroup) => {
+    setEditingGroupSlug(group.slug);
+    setNewGroupName(group.name);
+    setNewGroupIcon(group.icon || "\uD83D\uDCE6");
+    setNewGroupDesc(group.description || "");
+    setNewGroupParent(group.parent || null);
+    const roles: Record<string, number> = {};
+    for (const r of group.roles) {
+      roles[r.slug] = r.instances;
+    }
+    setNewGroupRoles(roles);
+    setCreateGroupOpen(true);
+  };
+
+  /** Save a custom group (create new or update existing) to project.json via Tauri */
   const handleSaveCustomGroup = async () => {
     if (!projectDir || !newGroupName.trim() || !window.__TAURI__) return;
-    const slug = newGroupName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const slug = editingGroupSlug || newGroupName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const group: RoleGroup = {
       slug,
       name: newGroupName.trim(),
@@ -1552,6 +1579,17 @@ When multiple instances of this role are active:
       // Fallback: if Tauri command doesn't exist yet, store locally
       console.error("[CollabTab] Failed to save group:", e);
       setCreateGroupOpen(false);
+    }
+  };
+
+  /** Delete a custom group from project.json via Tauri */
+  const handleDeleteGroup = async (slug: string) => {
+    if (!projectDir || !window.__TAURI__) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("delete_role_group", { projectDir, slug });
+    } catch (e) {
+      console.error("[CollabTab] Failed to delete group:", e);
     }
   };
 
@@ -2009,6 +2047,22 @@ When multiple instances of this role are active:
               dir,
               config: JSON.stringify(config),
             });
+            // Copy roles from an existing project if available
+            const savedProjects = loadSavedProjects();
+            const otherProjects = savedProjects.filter(p => normalizePath(p.path) !== normalizePath(dir));
+            if (otherProjects.length > 0) {
+              try {
+                // Auto-copy from the most recently added project
+                const sourceProject = otherProjects[0];
+                await invoke("copy_project_roles", {
+                  sourceDir: sourceProject.path,
+                  destDir: dir,
+                });
+              } catch (copyErr) {
+                // Non-fatal — project still initializes with defaults
+                console.warn("[CollabTab] Could not copy roles from existing project:", copyErr);
+              }
+            }
             // Re-read after creation
             result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
           } else {
@@ -2570,6 +2624,16 @@ When multiple instances of this role are active:
                 return count;
               };
 
+              // Count active (non-vacant) roles in a group including children
+              const deepActiveCount = (g: RoleGroup): number => {
+                const activeSessions = project.sessions || [];
+                let count = g.roles.filter(r =>
+                  activeSessions.some(s => s.role === r.slug && s.status === "active")
+                ).length;
+                for (const child of childrenOf(g.slug)) count += deepActiveCount(child);
+                return count;
+              };
+
               // Breadcrumb path from root to active group
               const breadcrumbs: { slug: string; name: string }[] = [];
               if (activeGroup !== "all") {
@@ -2597,16 +2661,18 @@ When multiple instances of this role are active:
                 const isExpanded = treeExpanded.has(group.slug);
                 const isActive = activeGroup === group.slug;
                 const count = deepRoleCount(group);
+                const activeCount = deepActiveCount(group);
+                const hasActiveRoles = activeCount > 0;
 
                 return (
                   <div key={group.slug} className="group-tree-branch">
                     <button
-                      className={`group-tree-node${isActive ? " group-tree-node-active" : ""}${!group.builtin ? " group-tree-node-custom" : ""}`}
+                      className={`group-tree-node${isActive ? " group-tree-node-active" : ""}${!group.builtin ? " group-tree-node-custom" : ""}${!hasActiveRoles ? " group-tree-node-dim" : ""}`}
                       style={{ paddingLeft: `${8 + depth * 16}px` }}
                       onClick={() => setExpandedGroup(group.slug)}
                       title={group.description}
                       aria-expanded={hasChildren ? isExpanded : undefined}
-                      aria-label={`${group.name}, ${count} roles${isActive ? ", selected" : ""}`}
+                      aria-label={`${group.name}, ${activeCount} active of ${count} roles${isActive ? ", selected" : ""}`}
                     >
                       {hasChildren && (
                         <span
@@ -2619,7 +2685,31 @@ When multiple instances of this role are active:
                       {!hasChildren && <span className="group-tree-leaf" />}
                       <span className="group-tree-icon">{group.icon}</span>
                       <span className="group-tree-name">{group.name}</span>
-                      <span className="group-tree-count">{count}</span>
+                      <span className="group-tree-count">{hasActiveRoles ? `${activeCount}/${count}` : count}</span>
+                      {!group.builtin && (
+                        <span className="group-tree-actions" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            className="group-tree-action-btn"
+                            onClick={(e) => { e.stopPropagation(); openEditGroupModal(group); }}
+                            title={`Edit ${group.name} group`}
+                            aria-label={`Edit ${group.name} group`}
+                          >&#9998;</button>
+                          <button
+                            className="group-tree-action-btn group-tree-action-delete"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmAction({
+                                title: `Delete "${group.name}" group?`,
+                                message: `This will remove the group definition. Running sessions are not affected.`,
+                                onConfirm: () => handleDeleteGroup(group.slug),
+                                confirmLabel: "Delete Group",
+                              });
+                            }}
+                            title={`Delete ${group.name} group`}
+                            aria-label={`Delete ${group.name} group`}
+                          >&times;</button>
+                        </span>
+                      )}
                     </button>
                     {hasChildren && isExpanded && (
                       <div className="group-tree-children">
@@ -2650,14 +2740,19 @@ When multiple instances of this role are active:
                     <span className="add-team-header-views" onClick={(e) => e.stopPropagation()}>
                       <button
                         className={`roster-view-btn${rosterViewMode === "grid" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => setRosterViewMode("grid")}
+                        onClick={() => updateRosterViewMode("grid")}
                         title="Grid view"
                       >&#9638;</button>
                       <button
                         className={`roster-view-btn${rosterViewMode === "list" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => setRosterViewMode("list")}
+                        onClick={() => updateRosterViewMode("list")}
                         title="List view"
                       >&#9776;</button>
+                      <button
+                        className={`roster-view-btn${rosterViewMode === "chip" ? " roster-view-btn-active" : ""}`}
+                        onClick={() => updateRosterViewMode("chip")}
+                        title="Compact chip view"
+                      >&#11044;</button>
                     </span>
                   </button>
 
@@ -2802,10 +2897,43 @@ When multiple instances of this role are active:
           return (
             <>
               {filteredCards.length > 0 && (
-                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}`}>
+                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
                   {filteredCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
+                    const handleCardClick = () => {
+                      if (card.slug === "audience") {
+                        setAudiencePanelOpen(true);
+                        if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
+                      } else {
+                        matchingRole && setSelectedRole(matchingRole);
+                      }
+                    };
+                    const handleCardKeyDown = (e: React.KeyboardEvent) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleCardClick();
+                      }
+                    };
+
+                    // Compact chip view
+                    if (rosterViewMode === "chip") {
+                      return (
+                        <button
+                          key={cardKey}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                          style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
+                          onClick={handleCardClick}
+                          title={`${card.title} — ${card.status}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
+                          aria-label={`${card.title}, status: ${card.status}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                        >
+                          <span className={getStatusDotClass(card.status)} />
+                          <span className="role-chip-name">{card.title}</span>
+                          <span className={`role-chip-status role-card-status-${card.status}`}>{card.status}</span>
+                        </button>
+                      );
+                    }
+
                     return (
                       <div
                         key={cardKey}
@@ -2814,25 +2942,8 @@ When multiple instances of this role are active:
                         role="button"
                         tabIndex={0}
                         aria-label={`${card.title}, status: ${card.status}. Click to view details.`}
-                        onClick={() => {
-                          if (card.slug === "audience") {
-                            setAudiencePanelOpen(true);
-                            if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
-                          } else {
-                            matchingRole && setSelectedRole(matchingRole);
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            if (card.slug === "audience") {
-                              setAudiencePanelOpen(true);
-                              if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
-                            } else {
-                              matchingRole && setSelectedRole(matchingRole);
-                            }
-                          }
-                        }}
+                        onClick={handleCardClick}
+                        onKeyDown={handleCardKeyDown}
                       >
                         <div className="role-card-header">
                           <span className={getStatusDotClass(card.status)} />
@@ -4156,7 +4267,7 @@ When multiple instances of this role are active:
         {createGroupOpen && (
           <div className="confirm-dialog" onClick={() => setCreateGroupOpen(false)}>
             <div className="confirm-dialog-box" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
-              <div className="confirm-dialog-title">Create Role Group</div>
+              <div className="confirm-dialog-title">{editingGroupSlug ? "Edit Role Group" : "Create Role Group"}</div>
               <div className="create-group-form">
                 <div className="create-group-row">
                   <input
@@ -4214,7 +4325,7 @@ When multiple instances of this role are active:
                     className="group-card-deploy-btn"
                     onClick={handleSaveCustomGroup}
                     disabled={!newGroupName.trim() || !Object.values(newGroupRoles).some(v => v > 0)}
-                  >Save Group</button>
+                  >{editingGroupSlug ? "Update Group" : "Save Group"}</button>
                 </div>
               </div>
             </div>
