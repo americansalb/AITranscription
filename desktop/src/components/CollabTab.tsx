@@ -1991,18 +1991,23 @@ When multiple instances of this role are active:
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
 
-        // Try to read existing project
-        let result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
-
-        // No .vaak/ found — auto-create it
-        if (!result) {
-          const config = buildDefaultConfig(dir);
-          await invoke("initialize_project", {
-            dir,
-            config: JSON.stringify(config),
-          });
-          // Re-read after creation
+        // Try to read existing project; auto-create .vaak/ if missing
+        let result: (ParsedProject & { effective_dir?: string }) | null;
+        try {
           result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
+        } catch (watchErr) {
+          // watch_project_dir throws when .vaak/ doesn't exist — auto-create it
+          if (String(watchErr).includes("Not a Vaak project") || String(watchErr).includes("no .vaak")) {
+            const config = buildDefaultConfig(dir);
+            await invoke("initialize_project", {
+              dir,
+              config: JSON.stringify(config),
+            });
+            // Re-read after creation
+            result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
+          } else {
+            throw watchErr;
+          }
         }
 
         // Update projectDir if the backend found a better subdirectory
