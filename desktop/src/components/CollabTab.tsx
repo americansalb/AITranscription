@@ -172,8 +172,8 @@ function computeInstanceStatus(
   if (session.activity === "disconnected") return "vacant";
 
   // Heartbeat comes every 30s, but agents in project_wait block up to 55s
-  // between heartbeats. Use 180s threshold to avoid false "vacant" during waits.
-  const goneThreshold = Math.min(timeoutSecs, 180);
+  // between heartbeats. 120s threshold with intermediate "stale" state at 75s.
+  const goneThreshold = Math.min(timeoutSecs, 120);
   if (age > goneThreshold) return "vacant";
 
   // Use activity field if available (set by vaak-mcp.rs)
