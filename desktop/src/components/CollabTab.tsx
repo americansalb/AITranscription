@@ -606,6 +606,8 @@ export function CollabTab() {
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
+  // Auto-buzz watchdog: tracks which agents have been auto-buzzed in the current staleness episode
+  const autoBuzzedRef = useRef<Map<string, number>>(new Map()); // key → timestamp of buzz
   const [openCardMenu, setOpenCardMenu] = useState<string | null>(null); // "slug:instance" key
   const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
   const [claimsCollapsed, setClaimsCollapsed] = useState(true);
@@ -2041,6 +2043,57 @@ When multiple instances of this role are active:
       unlistenFileChanged?.();
     };
   }, [watching, projectDir]);
+
+  // Auto-buzz watchdog: when a session goes stale, buzz it once automatically.
+  // Clears tracking when agent recovers or goes vacant.
+  useEffect(() => {
+    if (!project || !projectDir || !window.__TAURI__) return;
+    const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
+    const nowSecs = Date.now() / 1000;
+    const sessions = project.sessions || [];
+    const buzzed = autoBuzzedRef.current;
+    const activeKeys = new Set<string>();
+
+    for (const s of sessions) {
+      if (s.instance == null || s.instance < 0) continue;
+      const key = `${s.role}:${s.instance}`;
+      const status = computeInstanceStatus(s, timeoutSecs, nowSecs);
+      activeKeys.add(key);
+
+      if (status === "stale") {
+        const lastBuzz = buzzed.get(key);
+        if (!lastBuzz) {
+          // First time stale — auto-buzz once
+          buzzed.set(key, Date.now());
+          (async () => {
+            try {
+              const { invoke } = await import("@tauri-apps/api/core");
+              try {
+                await invoke("buzz_agent_terminal", { role: s.role, instance: s.instance });
+              } catch {
+                await invoke("send_team_message", {
+                  dir: projectDir, to: key,
+                  subject: "Auto-buzz: stale detected",
+                  body: "You appear stale. Rejoin and resume standby.",
+                  msgType: "buzz",
+                });
+              }
+              console.log(`[AutoBuzz] Buzzed stale agent ${key}`);
+            } catch (e) {
+              console.error(`[AutoBuzz] Failed to buzz ${key}:`, e);
+            }
+          })();
+        }
+      } else if (status === "working" || status === "standby") {
+        // Agent recovered — clear tracking so it can be buzzed again next time
+        buzzed.delete(key);
+      }
+    }
+    // Clean up entries for agents that are no longer in sessions
+    for (const k of buzzed.keys()) {
+      if (!activeKeys.has(k)) buzzed.delete(k);
+    }
+  }, [project, projectDir]);
 
   const fetchProjectSections = async (path: string) => {
     try {
