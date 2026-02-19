@@ -752,12 +752,15 @@ pub fn buzz_agent_terminal(
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, GetForegroundWindow};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
         // Find and focus the agent's terminal window
         let hwnd = find_window_by_pid(pid)
             .ok_or(format!("No visible window found for {}:{} (PID {})", role, instance, pid))?;
+
+        // Save the current foreground window so we can restore it after buzzing
+        let prev_hwnd = unsafe { GetForegroundWindow() };
 
         unsafe {
             SetForegroundWindow(hwnd);
@@ -834,7 +837,17 @@ pub fn buzz_agent_terminal(
         };
 
         if sent == 0 {
+            // Restore focus even on failure
+            if !prev_hwnd.is_null() {
+                unsafe { SetForegroundWindow(prev_hwnd); }
+            }
             return Err(format!("SendInput failed for {}:{} (PID {})", role, instance, pid));
+        }
+
+        // Brief pause to let keystrokes land, then restore the user's window
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if !prev_hwnd.is_null() {
+            unsafe { SetForegroundWindow(prev_hwnd); }
         }
 
         Ok(format!("Buzzed {}:{} — sent {} keystrokes to PID {}", role, instance, sent, pid))
