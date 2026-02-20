@@ -4287,6 +4287,7 @@ fn main() {
             launcher::repopulate_spawned,
             launcher::focus_agent_window,
             launcher::buzz_agent_terminal,
+            launcher::check_macos_permissions,
         ]);
 
     match builder.build(tauri::generate_context!()) {

@@ -668,6 +668,7 @@ export function CollabTab() {
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
+  const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; platform: string } | null>(null);
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
@@ -1380,6 +1381,20 @@ When multiple instances of this role are active:
       } catch { setClaudeInstalled(false); }
     })();
   }, []);
+
+  // Check macOS permissions on first connect (only runs on macOS)
+  useEffect(() => {
+    if (!window.__TAURI__ || !watching) return;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const perms = await invoke<{ automation: boolean; accessibility: boolean; platform: string }>("check_macos_permissions");
+        if (perms.platform === "macos") {
+          setMacPermissions(perms);
+        }
+      } catch { /* non-critical */ }
+    })();
+  }, [watching]);
 
   // Team launcher handlers
   const handleLaunchMember = async (role: string, instance: number) => {
@@ -3380,6 +3395,25 @@ When multiple instances of this role are active:
             <div className="project-hint-body">
               Any Claude Code session running in this folder will automatically detect the project
               and join a role. Just start chatting — Claude will see the team and join on its own.
+            </div>
+          </div>
+        )}
+
+        {/* macOS permission warning banner */}
+        {macPermissions && (!macPermissions.automation || !macPermissions.accessibility) && (
+          <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
+            <div className="project-hint-title" style={{ color: "#e8935a" }}>macOS Permissions Required</div>
+            <div className="project-hint-body">
+              {!macPermissions.automation && !macPermissions.accessibility
+                ? "Vaak needs Automation and Accessibility permissions to launch and buzz team agents."
+                : !macPermissions.automation
+                  ? "Vaak needs Automation permission to launch and manage Terminal windows for agents."
+                  : "Vaak needs Accessibility permission to buzz agents and read screen content."
+              }
+              {" "}Go to <strong>System Settings → Privacy & Security</strong>:
+              {!macPermissions.automation && <><br/>• <strong>Automation</strong> → enable Terminal for Vaak</>}
+              {!macPermissions.accessibility && <><br/>• <strong>Accessibility</strong> → enable Vaak</>}
+              <br/>Then restart the app.
             </div>
           </div>
         )}

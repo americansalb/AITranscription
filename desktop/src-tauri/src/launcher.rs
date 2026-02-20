@@ -1202,3 +1202,63 @@ fn is_pid_alive(pid: u32) -> bool {
             .unwrap_or(false)
     }
 }
+
+/// Check macOS TCC permissions needed for the app to function.
+/// Returns a JSON-serializable struct with boolean fields for each permission.
+/// On non-macOS platforms, all permissions return true (not applicable).
+#[derive(serde::Serialize)]
+pub struct MacPermissions {
+    pub automation: bool,
+    pub accessibility: bool,
+    pub platform: String,
+}
+
+#[tauri::command]
+pub fn check_macos_permissions() -> MacPermissions {
+    #[cfg(target_os = "macos")]
+    {
+        // Test Automation permission: can we talk to Terminal.app?
+        let automation = Command::new("osascript")
+            .args(["-e", r#"tell application "Terminal" to get name"#])
+            .output()
+            .map(|o| {
+                if o.status.success() {
+                    true
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    // -1743 = "not allowed assistive access" / Automation denied
+                    !(stderr.contains("not allowed") || stderr.contains("-1743"))
+                }
+            })
+            .unwrap_or(false);
+
+        // Test Accessibility permission: can we use System Events?
+        let accessibility = Command::new("osascript")
+            .args(["-e", r#"tell application "System Events" to get name of first process whose frontmost is true"#])
+            .output()
+            .map(|o| {
+                if o.status.success() {
+                    true
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    !(stderr.contains("not allowed") || stderr.contains("-1743"))
+                }
+            })
+            .unwrap_or(false);
+
+        MacPermissions {
+            automation,
+            accessibility,
+            platform: "macos".to_string(),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        MacPermissions {
+            automation: true,
+            accessibility: true,
+            platform: if cfg!(target_os = "windows") { "windows" } else { "linux" }.to_string(),
+        }
+    }
+}
