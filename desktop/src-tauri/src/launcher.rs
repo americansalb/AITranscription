@@ -146,12 +146,17 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         };
 
         // Write temp .ps1 script (same as working launch-team.ps1 approach)
+        // Use single quotes to prevent PowerShell subexpression expansion ($(...), `).
+        // Escape single quotes by doubling them: ' → ''
         let temp_dir = std::env::temp_dir();
         let script_name = format!("vaak-launch-{}-{}.ps1", role, std::process::id());
         let script_path = temp_dir.join(&script_name);
+        let safe_dir = project_dir.replace('\'', "''");
+        let safe_claude = claude_path.replace('\'', "''");
+        let safe_prompt = join_prompt.replace('\'', "''");
         let ps_script = format!(
-            "Set-Location \"{}\"\n& \"{}\" --dangerously-skip-permissions \"{}\"",
-            project_dir, claude_path, join_prompt
+            "Set-Location '{}'\n& '{}' --dangerously-skip-permissions '{}'",
+            safe_dir, safe_claude, safe_prompt
         );
         std::fs::write(&script_path, &ps_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
@@ -171,14 +176,21 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             .args(&ps_args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| format!("Failed to spawn via WMI: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&script_path);
+                format!("Failed to spawn via WMI: {}", e)
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
         if !output.status.success() || stdout.is_empty() {
+            let _ = std::fs::remove_file(&script_path);
             return Err(format!("WMI spawn failed for {}: stdout='{}' stderr='{}'", role, stdout, stderr_str));
         }
+
+        // Clean up temp script (contains prompt text)
+        let _ = std::fs::remove_file(&script_path);
 
         eprintln!("[launcher] Spawned {} via WMI (independent of Job Object)", role);
 
@@ -296,28 +308,19 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             "cd '{}' && claude --dangerously-skip-permissions '{}'",
             safe_dir, safe_prompt
         );
+        // Pass bash_cmd as a direct -c argument to bash, NOT through a shell string.
+        // Using separate args avoids double-quote re-interpretation of $, `, \.
         Command::new("x-terminal-emulator")
-            .args([
-                "-e",
-                &format!("bash -c \"{}\"", bash_cmd),
-            ])
+            .args(["-e", "bash", "-c", &bash_cmd])
             .spawn()
             .or_else(|_| {
                 Command::new("gnome-terminal")
-                    .args([
-                        "--",
-                        "bash",
-                        "-c",
-                        &bash_cmd,
-                    ])
+                    .args(["--", "bash", "-c", &bash_cmd])
                     .spawn()
             })
             .or_else(|_| {
                 Command::new("xterm")
-                    .args([
-                        "-e",
-                        &bash_cmd,
-                    ])
+                    .args(["-e", "bash", "-c", &bash_cmd])
                     .spawn()
             })
             .map_err(|e| format!("Failed to spawn terminal: {}", e))?
