@@ -289,13 +289,17 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
 
     #[cfg(target_os = "linux")]
     let child = {
+        // Escape single quotes to prevent shell injection in project_dir and prompt
+        let safe_dir = project_dir.replace('\'', "'\\''");
+        let safe_prompt = join_prompt.replace('\'', "'\\''");
+        let bash_cmd = format!(
+            "cd '{}' && claude --dangerously-skip-permissions '{}'",
+            safe_dir, safe_prompt
+        );
         Command::new("x-terminal-emulator")
             .args([
                 "-e",
-                &format!(
-                    "bash -c \"cd '{}' && claude --dangerously-skip-permissions '{}'\"",
-                    project_dir, join_prompt
-                ),
+                &format!("bash -c \"{}\"", bash_cmd),
             ])
             .spawn()
             .or_else(|_| {
@@ -304,10 +308,7 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
                         "--",
                         "bash",
                         "-c",
-                        &format!(
-                            "cd '{}' && claude --dangerously-skip-permissions '{}'",
-                            project_dir, join_prompt
-                        ),
+                        &bash_cmd,
                     ])
                     .spawn()
             })
@@ -315,10 +316,7 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
                 Command::new("xterm")
                     .args([
                         "-e",
-                        &format!(
-                            "cd '{}' && claude --dangerously-skip-permissions '{}'",
-                            project_dir, join_prompt
-                        ),
+                        &bash_cmd,
                     ])
                     .spawn()
             })
