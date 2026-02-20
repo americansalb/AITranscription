@@ -182,12 +182,12 @@ function computeInstanceStatus(
     // sustained work (e.g., 66 consecutive file reads). So agents doing long analysis
     // will have old last_working_at despite being alive. Use heartbeat freshness to
     // pick a lenient vs strict threshold:
-    //   - Fresh heartbeat (< 75s): sidecar confirmed alive → 600s (10 min) tolerance
+    //   - Fresh heartbeat (< 75s): sidecar confirmed alive → 300s (5 min) tolerance
     //   - Stale heartbeat (75-120s): sidecar may be unresponsive → 180s (3 min)
     const lwAt = session.last_working_at;
     if (lwAt) {
       const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
-      const maxWorkDuration = age < 75 ? 600 : 180;
+      const maxWorkDuration = age < 75 ? 300 : 180;
       if (workAge > maxWorkDuration) return "stale";
     }
     return "working";
