@@ -4472,6 +4472,17 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* WCAG 2.1 Level AA (2.4.7): visible focus indicator for keyboard navigation */
+.manage-roles-trigger:focus-visible,
+.role-card-remove-x:focus-visible,
+.role-overflow-item:focus-visible,
+.role-action-overflow-btn:focus-visible,
+.confirm-dialog-cancel:focus-visible,
+.confirm-dialog-delete:focus-visible {
+  outline: 2px solid var(--collab-accent);
+  outline-offset: 1px;
+}
+
 /* Edit Role — accent blue */
 .role-overflow-edit {
   color: #6b8aed;

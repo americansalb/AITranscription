@@ -2113,7 +2113,9 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
     if !canonical.is_dir() {
         return Err(format!("Not a directory: {}", canonical.display()));
     }
-    let dir = canonical.to_string_lossy().to_string();
+    // Strip Windows extended-length prefix (\\?\) to match validate_project_dir
+    let raw = canonical.to_string_lossy().to_string();
+    let dir = raw.strip_prefix("\\\\?\\").unwrap_or(&raw).to_string();
 
     let vaak_dir = std::path::Path::new(&dir).join(".vaak");
     let roles_dir = vaak_dir.join("roles");
