@@ -56,7 +56,7 @@ class DescribeScreenRequest(BaseModel):
     detail: int = Field(default=3, ge=1, le=5, description="Detail level 1-5")
     model: str | None = Field(default=None, description="Vision model override")
     focus: str | None = Field(default=None, description="Focus mode: general, errors, code, text")
-    uia_tree: str | None = Field(default=None, description="Windows UI Automation tree text (from Rust)")
+    uia_tree: str | None = Field(default=None, description="UI accessibility tree text (from Rust sidecar)")
 
 
 class DescribeScreenResponse(BaseModel):
@@ -90,7 +90,7 @@ class ScreenReaderChatRequest(BaseModel):
     detail: int = Field(default=3, ge=1, le=5, description="Detail level 1-5")
     model: str | None = Field(default=None, description="Vision model override")
     focus: str | None = Field(default=None, description="Focus mode: general, errors, code, text")
-    uia_tree: str | None = Field(default=None, description="Windows UI Automation tree text")
+    uia_tree: str | None = Field(default=None, description="UI accessibility tree text")
 
 
 class ScreenReaderChatResponse(BaseModel):
@@ -115,7 +115,7 @@ class ComputerUseRequest(BaseModel):
     display_width: int = Field(default=1920, description="Display width in pixels")
     display_height: int = Field(default=1080, description="Display height in pixels")
     model: str | None = Field(default=None, description="Model override")
-    uia_tree: str | None = Field(default=None, description="Windows UI Automation tree text")
+    uia_tree: str | None = Field(default=None, description="UI accessibility tree text")
 
 
 class ComputerUseResponse(BaseModel):

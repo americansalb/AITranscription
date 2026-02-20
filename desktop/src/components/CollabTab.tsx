@@ -178,12 +178,17 @@ function computeInstanceStatus(
 
   // Use activity field if available (set by vaak-mcp.rs)
   if (session.activity === "working") {
-    // Max working duration: if last_working_at is older than 3 minutes,
-    // the agent is likely stuck (context expired, crashed mid-tool-call).
+    // last_working_at is only set on TRANSITION to working, not refreshed during
+    // sustained work (e.g., 66 consecutive file reads). So agents doing long analysis
+    // will have old last_working_at despite being alive. Use heartbeat freshness to
+    // pick a lenient vs strict threshold:
+    //   - Fresh heartbeat (< 75s): sidecar confirmed alive → 600s (10 min) tolerance
+    //   - Stale heartbeat (75-120s): sidecar may be unresponsive → 180s (3 min)
     const lwAt = session.last_working_at;
     if (lwAt) {
       const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
-      if (workAge > 180) return "stale";
+      const maxWorkDuration = age < 75 ? 600 : 180;
+      if (workAge > maxWorkDuration) return "stale";
     }
     return "working";
   }

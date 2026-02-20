@@ -59,7 +59,7 @@ class ScreenReaderService:
 
         if uia_tree:
             base += (
-                "\n\nYou have access to the Windows UI Automation tree below. "
+                "\n\nYou have access to the UI accessibility tree below. "
                 "This gives you EXACT element names, types, values, coordinates, and keyboard shortcuts. "
                 "Use this structured data to identify elements precisely instead of guessing from pixels. "
                 "When referring to interactive elements, mention their exact name and type from the tree. "
@@ -198,7 +198,7 @@ class ScreenReaderService:
             "6. If something didn't work after 2 attempts, stop and say what went wrong.\n"
             "7. PREFER keyboard navigation (Tab, Enter, arrow keys, shortcuts) over mouse clicks. Keyboard is more reliable.\n"
             "8. If the UI Automation tree is provided, use element coordinates from it for precise clicks. Use keyboard shortcuts when available.\n"
-            "9. To open an application: press the Windows key (key 'meta'), wait briefly, then type the app name and press Enter. This is the most reliable method.\n"
+            "9. To open an application: press the system search key (key 'meta'), wait briefly, then type the app name and press Enter. This is the most reliable method.\n"
             "10. IMPORTANT: Never send an empty key string. If you have nothing to press, use a different action."
         )
 
