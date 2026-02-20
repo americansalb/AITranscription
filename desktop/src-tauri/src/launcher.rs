@@ -672,8 +672,8 @@ end tell"#,
             let stderr = String::from_utf8_lossy(&result.stderr);
             if stderr.contains("not allowed") || stderr.contains("-1743") {
                 return Err(
-                    "Automation permission required. Go to System Settings > Privacy & Security > \
-                     Automation and enable Terminal for Vaak."
+                    "Automation permission required. Go to System Settings > \
+                     Privacy & Security > Automation and enable Terminal for Vaak."
                         .to_string(),
                 );
             }
@@ -869,6 +869,17 @@ pub fn buzz_agent_terminal(
             ));
         }
 
+        // Save the frontmost app so we can restore focus after buzzing
+        let save_front = std::process::Command::new("osascript")
+            .args(["-e", r#"tell application "System Events" to get name of first process whose frontmost is true"#])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            });
+
         // Focus the Terminal window/tab, then type "back" + Enter via System Events keystroke
         let script = format!(
             r#"tell application "Terminal"
@@ -900,9 +911,12 @@ end tell"#,
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
             if stderr.contains("not allowed") || stderr.contains("-1743") {
+                // System Events keystroke requires Accessibility permission;
+                // Terminal window iteration requires Automation permission.
                 return Err(
-                    "Automation permission required for Terminal. Go to System Settings > \
-                     Privacy & Security > Automation and enable Terminal for Vaak."
+                    "Buzz requires two macOS permissions: \
+                     (1) System Settings > Privacy & Security > Automation — enable Terminal for Vaak. \
+                     (2) System Settings > Privacy & Security > Accessibility — enable Vaak."
                         .to_string(),
                 );
             }
@@ -910,6 +924,16 @@ end tell"#,
                 "Failed to buzz {}:{}: {}",
                 role, instance, stderr.trim()
             ));
+        }
+
+        // Restore the user's previously-focused app (avoid focus stealing)
+        if let Some(front_app) = save_front {
+            if front_app != "Terminal" {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &format!(r#"tell application "{}" to activate"#, front_app)])
+                    .output();
+            }
         }
 
         Ok(format!(
