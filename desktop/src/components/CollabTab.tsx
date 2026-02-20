@@ -1382,22 +1382,25 @@ When multiple instances of this role are active:
     })();
   }, []);
 
-  // Check macOS permissions on first connect (only runs on macOS)
-  useEffect(() => {
-    if (!window.__TAURI__ || !watching) return;
-    (async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const perms = await invoke<{ automation: boolean; accessibility: boolean; platform: string }>("check_macos_permissions");
-        if (perms.platform === "macos") {
-          setMacPermissions(perms);
-        }
-      } catch { /* non-critical */ }
-    })();
-  }, [watching]);
+  // Check macOS permissions on first launch attempt (deferred from connect
+  // to avoid triggering TCC dialog before user has tried to use Terminal)
+  const macPermsCheckedRef = useRef(false);
+  const checkMacPermissions = async () => {
+    if (macPermsCheckedRef.current || !window.__TAURI__) return;
+    macPermsCheckedRef.current = true;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const perms = await invoke<{ automation: boolean; accessibility: boolean; platform: string }>("check_macos_permissions");
+      if (perms.platform === "macos") {
+        setMacPermissions(perms);
+      }
+    } catch { /* non-critical */ }
+  };
 
   // Team launcher handlers
   const handleLaunchMember = async (role: string, instance: number) => {
+    // Check macOS permissions on first launch attempt
+    await checkMacPermissions();
     // Check for companion roles before launching
     const roleConfig = project?.config?.roles?.[role];
     const companions = (roleConfig as any)?.companions;
