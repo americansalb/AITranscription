@@ -2088,18 +2088,22 @@ When multiple instances of this role are active:
         if (!lastBuzz) {
           // First time stale — auto-buzz once via board message (non-disruptive,
           // doesn't steal focus like buzz_agent_terminal which calls SetForegroundWindow)
-          buzzed.set(key, Date.now());
+          // Mark as pending (negative timestamp) so we don't re-fire during the async call
+          buzzed.set(key, -1);
+          const capturedDir = projectDir;
           (async () => {
             try {
               const { invoke } = await import("@tauri-apps/api/core");
               await invoke("send_team_message", {
-                dir: projectDir, to: key,
+                dir: capturedDir, to: key,
                 subject: "Auto-buzz: stale detected",
                 body: "You appear stale. Rejoin and resume standby.",
                 msgType: "buzz",
               });
+              buzzed.set(key, Date.now()); // Mark success — won't retry
               console.log(`[AutoBuzz] Sent board buzz to ${key}`);
             } catch (e) {
+              buzzed.delete(key); // Clear on failure — will retry next cycle
               console.error(`[AutoBuzz] Failed to buzz ${key}:`, e);
             }
           })();
