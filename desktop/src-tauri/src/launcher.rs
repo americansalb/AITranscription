@@ -197,21 +197,33 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         let script_name = format!("vaak-launch-{}-{}-{}.sh", role, inst, std::process::id());
         let script_path = temp_dir.join(&script_name);
 
-        // Use single quotes around prompt to prevent shell metacharacter expansion.
-        // Escape any single quotes in the prompt with the standard shell idiom: ' → '\''
+        // Escape single quotes in prompt and project_dir for safe shell interpolation.
+        // Uses the standard shell idiom: ' → '\'' (end quote, escaped quote, reopen quote).
+        // Both values are placed inside single quotes in the script to prevent
+        // metacharacter expansion ($, `, \, etc.) — fixing command injection risk.
         let safe_prompt = join_prompt.replace('\'', "'\\''");
+        let safe_dir = project_dir.replace('\'', "'\\''");
+        let safe_pid = pid_file.to_string_lossy().replace('\'', "'\\''");
         let sh_script = format!(
-            "#!/bin/sh\necho $$ > \"{pid_file}\"\ncd \"{project_dir}\"\nexec claude --dangerously-skip-permissions '{prompt}'\n",
-            pid_file = pid_file.to_string_lossy(),
-            project_dir = project_dir,
+            "#!/bin/sh\n\
+             # Verify claude is on PATH before proceeding\n\
+             if ! command -v claude >/dev/null 2>&1; then\n\
+               echo 'ERROR: claude not found on PATH' >&2\n\
+               exit 1\n\
+             fi\n\
+             echo $$ > '{pid_file}'\n\
+             cd '{project_dir}'\n\
+             exec claude --dangerously-skip-permissions '{prompt}'\n",
+            pid_file = safe_pid,
+            project_dir = safe_dir,
             prompt = safe_prompt,
         );
         std::fs::write(&script_path, &sh_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
-        // Make executable
+        // Make executable (owner-only: rwx for owner, no access for others)
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
 
         // Launch in Terminal.app via `open -a Terminal`
         // Use .output() to capture exit code and detect permission failures
@@ -221,6 +233,7 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             .map_err(|e| format!("Failed to run 'open -a Terminal': {}", e))?;
 
         if !open_result.status.success() {
+            let _ = std::fs::remove_file(&script_path);
             let stderr = String::from_utf8_lossy(&open_result.stderr);
             // Best-effort detection of macOS permission denial from Launch Services.
             // `open -a Terminal` uses Launch Services (not osascript), so error strings
@@ -240,15 +253,16 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
 
         eprintln!("[launcher] Spawned {} via Terminal.app, waiting for PID file...", role);
 
-        // Poll for the PID file (250ms intervals, 10s timeout)
+        // Poll for the PID file (250ms intervals, 20s timeout — generous for cold Terminal.app launch)
         let mut pid: Option<u32> = None;
-        for _ in 0..40 {
+        for _ in 0..80 {
             std::thread::sleep(std::time::Duration::from_millis(250));
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(p) = content.trim().parse::<u32>() {
                     pid = Some(p);
-                    // Clean up PID file
+                    // Clean up PID file and launch script (contains prompt text)
                     let _ = std::fs::remove_file(&pid_file);
+                    let _ = std::fs::remove_file(&script_path);
                     break;
                 }
             }
@@ -260,12 +274,14 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
                 p
             }
             None => {
-                // Clean up stale PID file if it exists
+                // Clean up stale PID file and launch script
                 let _ = std::fs::remove_file(&pid_file);
+                let _ = std::fs::remove_file(&script_path);
                 return Err(format!(
                     "Timed out waiting for agent PID for {}. \
                      If Terminal.app did not open, check System Settings > \
-                     Privacy & Security > Automation permissions for Vaak.", role
+                     Privacy & Security > Automation permissions for Vaak. \
+                     If claude is not installed, install it with: npm install -g @anthropic-ai/claude-code", role
                 ));
             }
         }
