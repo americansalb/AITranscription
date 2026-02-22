@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod a11y;
 mod audio;
 mod collab;
 mod database;
@@ -8,7 +9,7 @@ mod focus_tracker;
 mod keyboard_hook;
 mod launcher;
 mod queue;
-mod uia_capture;
+
 
 use audio::{AudioData, AudioDevice, AudioRecorder};
 use enigo::{Enigo, Keyboard, Mouse, Settings, Coordinate};
@@ -1415,15 +1416,15 @@ fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     let sr_settings = load_sr_settings_from_disk();
     let voice_settings = load_voice_settings();
 
-    // 3b. Capture UIA tree (best-effort, don't fail if unavailable)
-    let uia_tree_json = match uia_capture::capture_uia_tree() {
+    // 3b. Capture accessibility tree (best-effort, don't fail if unavailable)
+    let uia_tree_json = match a11y::capture_tree() {
         Ok(tree) => {
-            let text = uia_capture::format_tree_for_prompt(&tree);
-            log_error(&format!("UIA tree captured: {} elements", tree.element_count));
+            let text = a11y::format_tree_for_prompt(&tree);
+            log_error(&format!("A11y tree captured: {} elements", tree.element_count));
             Some(text)
         }
         Err(e) => {
-            log_error(&format!("UIA capture failed (non-fatal): {}", e));
+            log_error(&format!("A11y capture failed (non-fatal): {}", e));
             None
         }
     };
@@ -1496,10 +1497,10 @@ fn describe_screen(app: tauri::AppHandle) -> Result<String, String> {
     describe_screen_core(&app)
 }
 
-/// Capture the UIA tree from the foreground window and return as JSON
+/// Capture the accessibility tree from the foreground window and return as JSON
 #[tauri::command]
 fn capture_uia_tree_cmd() -> Result<serde_json::Value, String> {
-    let tree = uia_capture::capture_uia_tree()?;
+    let tree = a11y::capture_tree()?;
     serde_json::to_value(&tree).map_err(|e| format!("Serialize failed: {}", e))
 }
 
@@ -1948,27 +1949,60 @@ fn update_native_hotkey(hotkey: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Update tray icon to show recording state
+/// Update tray icon, title, and tooltip to show recording/processing state.
+/// `state` is one of: "idle", "recording", "processing", "success", "error"
+/// On macOS, also sets tray title text (visible next to icon in menu bar)
+/// and bounces the dock icon on recording start and processing complete.
 #[tauri::command]
-fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
+fn set_recording_state(app: tauri::AppHandle, recording: bool, state: Option<String>) -> Result<(), String> {
+    let state_str = state.as_deref().unwrap_or(if recording { "recording" } else { "idle" });
+
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let icon_bytes: &[u8] = if recording {
+        // Icon: recording uses red icon, everything else uses idle
+        let icon_bytes: &[u8] = if state_str == "recording" {
             include_bytes!("../icons/tray-recording.png")
+        } else if state_str == "processing" {
+            include_bytes!("../icons/tray-recording.png") // keep red during processing
         } else {
             include_bytes!("../icons/tray-idle.png")
         };
-
         if let Ok(icon) = load_png_image(icon_bytes) {
             let _ = tray.set_icon(Some(icon));
         }
 
-        let tooltip = if recording {
-            "Vaak - Recording..."
-        } else {
-            "Vaak - Ready"
+        // Tooltip: detailed state description
+        let tooltip = match state_str {
+            "recording" => "Vaak - Recording...",
+            "processing" => "Vaak - Processing transcription...",
+            "success" => "Vaak - Transcription complete",
+            "error" => "Vaak - Transcription failed",
+            _ => "Vaak - Ready",
         };
         let _ = tray.set_tooltip(Some(tooltip));
+
+        // macOS: set tray title text (appears next to the tray icon in menu bar)
+        #[cfg(target_os = "macos")]
+        {
+            let title: Option<&str> = match state_str {
+                "recording" => Some("REC"),
+                "processing" => Some("..."),
+                _ => None, // clear title for idle/success/error
+            };
+            let _ = tray.set_title(title);
+        }
     }
+
+    // macOS: dock bounce on recording start and processing complete
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::UserAttentionType;
+        if state_str == "recording" || state_str == "success" {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -3905,9 +3939,9 @@ fn main() {
                                     }
                                 };
 
-                                // Capture UIA tree for initial message
-                                let initial_uia = match uia_capture::capture_uia_tree() {
-                                    Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                // Capture accessibility tree for initial message
+                                let initial_uia = match a11y::capture_tree() {
+                                    Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                     Err(_) => None,
                                 };
                                 let user_text = if let Some(ref tree_text) = initial_uia {
@@ -3950,9 +3984,9 @@ fn main() {
 
                                     log_error(&format!("Alt+A: Computer use iteration {}", iteration));
 
-                                    // Capture fresh UIA tree for the system prompt
-                                    let cu_uia_tree = match uia_capture::capture_uia_tree() {
-                                        Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                    // Capture fresh accessibility tree for the system prompt
+                                    let cu_uia_tree = match a11y::capture_tree() {
+                                        Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                         Err(_) => None,
                                     };
                                     let mut cu_body = serde_json::json!({
@@ -4110,9 +4144,9 @@ fn main() {
 
                                             match screenshot_result {
                                                 Ok((new_screenshot, _, _)) => {
-                                                    // Capture fresh UIA tree after action
-                                                    let uia_text = match uia_capture::capture_uia_tree() {
-                                                        Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                                    // Capture fresh accessibility tree after action
+                                                    let uia_text = match a11y::capture_tree() {
+                                                        Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                                         Err(_) => None,
                                                     };
                                                     let mut content_blocks = vec![
@@ -4290,6 +4324,7 @@ fn main() {
             launcher::focus_agent_window,
             launcher::buzz_agent_terminal,
             launcher::check_macos_permissions,
+            launcher::open_macos_settings,
         ]);
 
     match builder.build(tauri::generate_context!()) {

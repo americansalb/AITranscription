@@ -22,6 +22,7 @@ import { initSpeakListener } from "./lib/speak";
 import { getStoredVoiceEnabled, saveVoiceEnabled } from "./lib/voiceStream";
 import { onRecordingStart, onRecordingStop } from "./lib/interruptManager";
 import { QueueSlidePanel } from "./components/QueueSlidePanel";
+import { MacPermissionWizard, useMacPermissionWizard } from "./components/MacPermissionWizard";
 import {
   VolumeOnIcon, VolumeOffIcon, BookIcon, BarChartIcon, ClockIcon,
   ChatBubbleIcon, MonitorIcon, SunIcon, GearIcon, CompareIcon,
@@ -243,6 +244,7 @@ function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [transcriptionCount, setTranscriptionCount] = useState(0); // Increments after each successful transcription
   const [showConfetti, setShowConfetti] = useState(false);
+  const [showMacWizard, setShowMacWizard] = useMacPermissionWizard();
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
@@ -484,10 +486,10 @@ function App() {
     }
   }, [isEditing]);
 
-  // Update tray icon state
+  // Update tray icon, title text (macOS), and dock bounce
   useEffect(() => {
-    setTrayRecordingState(recorder.isRecording);
-  }, [recorder.isRecording]);
+    setTrayRecordingState(recorder.isRecording, status);
+  }, [recorder.isRecording, status]);
 
   // Feature 3: Interrupt-on-Record - auto-pause TTS when recording
   useEffect(() => {
@@ -1437,6 +1439,11 @@ function App() {
         voiceEnabled={voiceEnabled}
         onVoiceToggle={handleVoiceToggle}
       />
+
+      {/* macOS Permission Onboarding Wizard */}
+      {showMacWizard && (
+        <MacPermissionWizard onClose={() => setShowMacWizard(false)} />
+      )}
     </div>
   );
 }
