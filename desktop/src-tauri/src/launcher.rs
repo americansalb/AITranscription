@@ -189,8 +189,13 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             return Err(format!("WMI spawn failed for {}: stdout='{}' stderr='{}'", role, stdout, stderr_str));
         }
 
-        // Clean up temp script (contains prompt text)
-        let _ = std::fs::remove_file(&script_path);
+        // Clean up temp script after a delay — the spawned PowerShell needs time to read it.
+        // WMI returns the PID immediately, but the new process hasn't loaded the file yet.
+        let cleanup_path = script_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let _ = std::fs::remove_file(&cleanup_path);
+        });
 
         eprintln!("[launcher] Spawned {} via WMI (independent of Job Object)", role);
 
@@ -1213,6 +1218,7 @@ fn is_pid_alive(pid: u32) -> bool {
 pub struct MacPermissions {
     pub automation: bool,
     pub accessibility: bool,
+    pub screen_recording: bool,
     pub platform: String,
 }
 
@@ -1249,9 +1255,19 @@ pub fn check_macos_permissions() -> MacPermissions {
             })
             .unwrap_or(false);
 
+        // Test Screen Recording permission via CoreGraphics preflight
+        let screen_recording = {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            extern "C" {
+                fn CGPreflightScreenCaptureAccess() -> u8;
+            }
+            unsafe { CGPreflightScreenCaptureAccess() != 0 }
+        };
+
         MacPermissions {
             automation,
             accessibility,
+            screen_recording,
             platform: "macos".to_string(),
         }
     }
@@ -1261,7 +1277,26 @@ pub fn check_macos_permissions() -> MacPermissions {
         MacPermissions {
             automation: true,
             accessibility: true,
+            screen_recording: true,
             platform: if cfg!(target_os = "windows") { "windows" } else { "linux" }.to_string(),
         }
     }
+}
+
+/// Open a macOS System Settings pane URL (e.g., x-apple.systempreferences:...).
+/// On non-macOS platforms this is a no-op.
+#[tauri::command]
+pub fn open_macos_settings(pane_url: String) -> Result<(), String> {
+    // Only allow macOS system preferences URLs — reject arbitrary URLs/paths
+    if !pane_url.starts_with("x-apple.systempreferences:") {
+        return Err("Invalid settings pane URL".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&pane_url)
+            .output()
+            .map_err(|e| format!("Failed to open System Settings: {}", e))?;
+    }
+    Ok(())
 }

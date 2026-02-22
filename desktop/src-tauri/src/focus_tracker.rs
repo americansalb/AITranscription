@@ -50,7 +50,9 @@ pub fn start_focus_tracking(app: tauri::AppHandle) {
                 let control_type_id = unsafe {
                     focused.CurrentControlType().unwrap_or(UIA_CONTROLTYPE_ID(0))
                 };
-                let role = crate::uia_capture::control_type_to_string(control_type_id.0);
+                let role = crate::a11y::types::uia_control_type_to_role(control_type_id.0)
+                    .as_str()
+                    .to_string();
 
                 let value = unsafe {
                     focused.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
@@ -102,20 +104,22 @@ fn build_announcement(name: &str, role: &str, value: &str) -> String {
         parts.push(name.to_string());
     }
 
+    // Role strings now come from NormalizedRole::as_str() — use normalized names
     let friendly_role = match role {
-        "Edit" => "edit field",
+        "TextInput" => "edit field",
+        "TextArea" => "text area",
         "Button" => "button",
-        "CheckBox" => "checkbox",
+        "Checkbox" => "checkbox",
         "RadioButton" => "radio button",
         "ComboBox" => "combo box",
         "Tab" => "tab",
         "TabItem" => "tab",
         "MenuItem" => "menu item",
-        "Hyperlink" => "link",
+        "Link" => "link",
         "ListItem" => "list item",
         "TreeItem" => "tree item",
         "Slider" => "slider",
-        "SpinButton" => "spin button",
+        "Spinner" => "spin button",
         _ => "",
     };
 
@@ -130,7 +134,7 @@ fn build_announcement(name: &str, role: &str, value: &str) -> String {
             value.to_string()
         };
         parts.push(display_value);
-    } else if role == "Edit" {
+    } else if role == "TextInput" {
         parts.push("empty".to_string());
     }
 
