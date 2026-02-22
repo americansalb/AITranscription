@@ -135,13 +135,19 @@ function getActiveVotes(messages: BoardMessage[], activeCount: number): VoteTall
 
 function getStatusDotClass(status: string): string {
   if (status === "working") return "project-status-dot working";
-  if (status === "active") return "project-status-dot active";
-  if (status === "standby") return "project-status-dot standby";
-  if (status === "idle") return "project-status-dot idle";
+  if (status === "ready") return "project-status-dot ready";
+  if (status === "active") return "project-status-dot working"; // Rust role-level → treat as working
   if (status === "vacant") return "project-status-dot vacant";
-  if (status === "gone") return "project-status-dot gone";
-  if (status === "stale") return "project-status-dot stale";
-  return "project-status-dot";
+  return "project-status-dot vacant"; // unknown → vacant
+}
+
+/** Human-friendly status label for display */
+function getStatusLabel(status: string): string {
+  if (status === "working") return "Working";
+  if (status === "ready") return "Ready";
+  if (status === "active") return "Working"; // Rust role-level
+  if (status === "vacant") return "Not started";
+  return "Offline";
 }
 
 function sortRolesByPipeline(roles: RoleStatus[]): RoleStatus[] {
@@ -156,13 +162,13 @@ interface InstanceCard {
   slug: string;
   title: string;
   instance: number;
-  status: "working" | "standby" | "stale" | "vacant";
+  status: "working" | "ready" | "vacant";
   roleColor: string;
 }
 
 function computeInstanceStatus(
   session: SessionBinding,
-  timeoutSecs: number,
+  _timeoutSecs: number,
   nowSecs: number
 ): InstanceCard["status"] {
   const hbEpoch = new Date(session.last_heartbeat).getTime() / 1000;
@@ -171,44 +177,29 @@ function computeInstanceStatus(
   // Immediate detection: process wrote "disconnected" on exit
   if (session.activity === "disconnected") return "vacant";
 
-  // Heartbeat comes every 30s, but agents in project_wait block up to 55s
-  // between heartbeats. 120s threshold with intermediate "stale" state at 75s.
-  const goneThreshold = Math.min(timeoutSecs, 120);
-  if (age > goneThreshold) return "vacant";
+  // No contact for 10 minutes → disconnected (vacant)
+  const disconnectThreshold = 600; // 10 min
+  if (age > disconnectThreshold) return "vacant";
 
-  // Use activity field if available (set by vaak-mcp.rs)
+  // Working: agent is actively calling tools / doing work
   if (session.activity === "working") {
-    // last_working_at is only set on TRANSITION to working, not refreshed during
-    // sustained work (e.g., 66 consecutive file reads). So agents doing long analysis
-    // will have old last_working_at despite being alive. Use heartbeat freshness to
-    // pick a lenient vs strict threshold:
-    //   - Fresh heartbeat (< 75s): sidecar confirmed alive → 300s (5 min) tolerance
-    //   - Stale heartbeat (75-120s): sidecar may be unresponsive → 180s (3 min)
-    const lwAt = session.last_working_at;
-    if (lwAt) {
-      const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
-      const maxWorkDuration = age < 75 ? 300 : 180;
-      if (workAge > maxWorkDuration) return "stale";
-    }
     return "working";
   }
+
+  // Standby → "ready": agent is in project_wait, available for tasks
   if (session.activity === "standby") {
-    // Minimum display duration: if the session was working within the last 30 seconds,
-    // show "working" instead of "standby" so the human can actually see the transition
+    // Smooth transition: if agent was working within last 30s, keep showing "working"
     const lwAt = session.last_working_at;
     if (lwAt) {
       const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
       if (workAge < 30) return "working";
     }
-    // Staleness: agents call project_wait(timeout=55s). If heartbeat is older than 75s
-    // while still in standby, the agent likely stopped polling (crash, context overflow).
-    if (age > 75) return "stale";
-    return "standby";
+    return "ready";
   }
 
-  // Fallback: heartbeat-based classification for sessions without activity field
-  if (age > 120) return "vacant";
-  return "standby";
+  // Fallback: no activity field — if heartbeat is recent, assume ready
+  if (age > disconnectThreshold) return "vacant";
+  return "ready";
 }
 
 /** Build roster-based instance cards. Uses roster slots if available, falls back to sessions. */
@@ -515,7 +506,7 @@ function buildDefaultConfig(dirPath: string) {
       },
     },
     settings: {
-      heartbeat_timeout_seconds: 120,
+      heartbeat_timeout_seconds: 300,
       message_retention_days: 7,
     },
   };
@@ -612,7 +603,6 @@ export function CollabTab() {
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
   // Auto-buzz watchdog: tracks which agents have been auto-buzzed in the current staleness episode
-  const autoBuzzedRef = useRef<Map<string, number>>(new Map()); // key → timestamp of buzz
   const [openCardMenu, setOpenCardMenu] = useState<string | null>(null); // "slug:instance" key
   const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
   const [claimsCollapsed, setClaimsCollapsed] = useState(true);
@@ -668,7 +658,7 @@ export function CollabTab() {
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
-  const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; platform: string } | null>(null);
+  const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
@@ -1390,7 +1380,7 @@ When multiple instances of this role are active:
     macPermsCheckedRef.current = true;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const perms = await invoke<{ automation: boolean; accessibility: boolean; platform: string }>("check_macos_permissions");
+      const perms = await invoke<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string }>("check_macos_permissions");
       if (perms.platform === "macos") {
         setMacPermissions(perms);
       }
@@ -1954,7 +1944,7 @@ When multiple instances of this role are active:
   useEffect(() => {
     if (!project?.messages || !project?.sessions) return;
     const activeCount = project.sessions.filter(
-      (s) => s.status === "active" || s.status === "idle"
+      (s) => s.status === "active"
     ).length;
     const votes = getActiveVotes(project.messages, activeCount);
     const required = Math.floor((activeCount + 1) / 2) + 1;
@@ -2066,58 +2056,6 @@ When multiple instances of this role are active:
       unlistenFileChanged?.();
     };
   }, [watching, projectDir]);
-
-  // Auto-buzz watchdog: when a session goes stale, buzz it once automatically.
-  // Clears tracking when agent recovers or goes vacant.
-  useEffect(() => {
-    if (!project || !projectDir || !window.__TAURI__) return;
-    const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
-    const nowSecs = Date.now() / 1000;
-    const sessions = project.sessions || [];
-    const buzzed = autoBuzzedRef.current;
-    const activeKeys = new Set<string>();
-
-    for (const s of sessions) {
-      if (s.instance == null || s.instance < 0) continue;
-      const key = `${s.role}:${s.instance}`;
-      const status = computeInstanceStatus(s, timeoutSecs, nowSecs);
-      activeKeys.add(key);
-
-      if (status === "stale") {
-        const lastBuzz = buzzed.get(key);
-        if (!lastBuzz) {
-          // First time stale — auto-buzz once via board message (non-disruptive,
-          // doesn't steal focus like buzz_agent_terminal which calls SetForegroundWindow)
-          // Mark as pending (negative timestamp) so we don't re-fire during the async call
-          buzzed.set(key, -1);
-          const capturedDir = projectDir;
-          (async () => {
-            try {
-              const { invoke } = await import("@tauri-apps/api/core");
-              await invoke("send_team_message", {
-                dir: capturedDir, to: key,
-                subject: "Auto-buzz: stale detected",
-                body: "You appear stale. Rejoin and resume standby.",
-                msgType: "buzz",
-              });
-              buzzed.set(key, Date.now()); // Mark success — won't retry
-              console.log(`[AutoBuzz] Sent board buzz to ${key}`);
-            } catch (e) {
-              buzzed.delete(key); // Clear on failure — will retry next cycle
-              console.error(`[AutoBuzz] Failed to buzz ${key}:`, e);
-            }
-          })();
-        }
-      } else if (status === "working" || status === "standby") {
-        // Agent recovered — clear tracking so it can be buzzed again next time
-        buzzed.delete(key);
-      }
-    }
-    // Clean up entries for agents that are no longer in sessions
-    for (const k of buzzed.keys()) {
-      if (!activeKeys.has(k)) buzzed.delete(k);
-    }
-  }, [project, projectDir]);
 
   const fetchProjectSections = async (path: string) => {
     try {
@@ -2987,7 +2925,7 @@ When multiple instances of this role are active:
 
                       {/* Active Roster inside modal — mirrors the main roster */}
                       {(() => {
-                        const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
+                        const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 300;
                         const modalCards = buildRosterCards(
                           project.config.roster,
                           project.config.roles,
@@ -3032,14 +2970,14 @@ When multiple instances of this role are active:
                                   return (
                                     <button
                                       key={cardKey}
-                                      className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                                      className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
                                       style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
                                       onClick={handleCardClick}
-                                      title={`${card.title} — ${card.status}`}
+                                      title={`${card.title} — ${getStatusLabel(card.status)}`}
                                     >
                                       <span className={getStatusDotClass(card.status)} />
                                       <span className="role-chip-name">{card.title}</span>
-                                      <span className={`role-chip-status role-card-status-${card.status}`}>{card.status}</span>
+                                      <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
                                     </button>
                                   );
                                 }
@@ -3061,7 +2999,7 @@ When multiple instances of this role are active:
                                         aria-label={`Remove ${card.title} from roster`}
                                       >&times;</button>
                                     </div>
-                                    <div className="role-card-status">{card.status}</div>
+                                    <div className="role-card-status">{getStatusLabel(card.status)}</div>
                                     {card.status === "vacant" && claudeInstalled !== false && (
                                       <button
                                         className="role-card-launch-btn"
@@ -3090,7 +3028,7 @@ When multiple instances of this role are active:
 
         {/* Team Roster — shows all roster slots with status */}
         {project && (() => {
-          const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
+          const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 300;
           // Use ALL sessions for roster status (team is project-wide, not section-specific)
           const cards = buildRosterCards(
             project.config.roster,
@@ -3147,15 +3085,15 @@ When multiple instances of this role are active:
                       return (
                         <button
                           key={cardKey}
-                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
                           style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
                           onClick={handleCardClick}
-                          title={`${card.title} — ${card.status}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
-                          aria-label={`${card.title}, status: ${card.status}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                          title={`${card.title} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
+                          aria-label={`${card.title}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
                         >
                           <span className={getStatusDotClass(card.status)} />
                           <span className="role-chip-name">{card.title}</span>
-                          <span className={`role-chip-status role-card-status-${card.status}`}>{card.status}</span>
+                          <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
                         </button>
                       );
                     }
@@ -3167,7 +3105,7 @@ When multiple instances of this role are active:
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}, status: ${card.status}. Click to view details.`}
+                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}. Click to view details.`}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
@@ -3186,7 +3124,7 @@ When multiple instances of this role are active:
                         <div className="role-card-meta">
                           <span className="role-card-slug">{card.slug}</span>
                           <span className={`role-card-status role-card-status-${card.status}`}>
-                            {card.status}
+                            {getStatusLabel(card.status)}
                           </span>
                         </div>
                         {/* Companion badge — show if this role is a companion of another role */}
@@ -3375,10 +3313,8 @@ When multiple instances of this role are active:
                 const filesDisplay = claim.files.length > 2
                   ? `${claim.files[0]} (+${claim.files.length - 1} more)`
                   : claim.files.join(", ");
-                const claimAgeSec = (Date.now() - new Date(claim.claimed_at).getTime()) / 1000;
-                const isStale = claimAgeSec > 900; // >15 minutes
                 return (
-                  <div key={claim.role_instance} className={`claim-card${isStale ? " claim-stale" : ""}`}>
+                  <div key={claim.role_instance} className="claim-card">
                     <div className="claim-role-dot" style={{ background: getRoleColor(roleSlug) }} />
                     <span className="claim-role-label" style={{ color: getRoleColor(roleSlug) }}>
                       {claim.role_instance}
@@ -3436,7 +3372,7 @@ When multiple instances of this role are active:
           ) : (
             (() => {
               const activeCount = project!.sessions.filter(
-                (s) => s.status === "active" || s.status === "idle"
+                (s) => s.status === "active"
               ).length;
               const voteTallies = getActiveVotes(project!.messages, activeCount);
               const voteProposalIds = new Set(voteTallies.map((t) => t.proposalId));

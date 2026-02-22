@@ -8,6 +8,7 @@
   --collab-success: var(--success, #22c55e);
   --collab-error: var(--error, #ef4444);
   --collab-warning: var(--warning, #f59e0b);
+  --collab-ready: #3b82f6;
   --collab-text-primary: var(--text-primary, #fafafa);
   --collab-text-secondary: var(--text-secondary, #a1a1aa);
   --collab-text-muted: var(--text-muted, #71717a);
@@ -193,35 +194,15 @@
   50% { box-shadow: 0 0 14px rgba(23, 191, 99, 0.9); }
 }
 
-.project-status-dot.active {
-  background: var(--collab-success);
-  box-shadow: 0 0 6px rgba(23, 191, 99, 0.3);
-}
-
-.project-status-dot.standby {
-  background: var(--collab-warning);
-  box-shadow: 0 0 6px rgba(245, 197, 24, 0.3);
-}
-
-.project-status-dot.idle {
-  background: var(--collab-warning);
-  box-shadow: 0 0 6px rgba(245, 197, 24, 0.4);
-}
-
-.project-status-dot.stale {
-  background: var(--collab-warning);
-  box-shadow: 0 0 6px rgba(245, 166, 35, 0.4);
+.project-status-dot.ready {
+  background: var(--collab-ready);
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.4);
 }
 
 .project-status-dot.vacant {
   background: var(--collab-text-muted);
   box-shadow: none;
   opacity: 0.5;
-}
-
-.project-status-dot.gone {
-  background: var(--collab-error);
-  box-shadow: 0 0 6px rgba(224, 36, 94, 0.4);
 }
 
 .project-back-btn {
@@ -436,19 +417,9 @@
   background: rgba(23, 191, 99, 0.15);
 }
 
-.role-card-status-standby {
-  color: var(--collab-warning);
-  background: rgba(245, 197, 24, 0.1);
-}
-
-.role-card-status-stale {
-  color: #e8935a;
-  background: rgba(232, 147, 90, 0.15);
-}
-
-.role-card-status-gone {
-  color: var(--collab-error);
-  background: rgba(224, 36, 94, 0.12);
+.role-card-status-ready {
+  color: var(--collab-ready);
+  background: rgba(59, 130, 246, 0.12);
 }
 
 .role-card-status-vacant {
@@ -1213,6 +1184,11 @@
   background: rgba(23, 191, 99, 0.1);
   border-color: rgba(23, 191, 99, 0.35) !important;
   box-shadow: 0 0 10px rgba(23, 191, 99, 0.15);
+}
+
+.role-chip-ready {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.3) !important;
 }
 
 .role-chip-vacant {
@@ -3658,14 +3634,6 @@
   border-radius: 3px;
 }
 
-/* Stale claims — dimmed after 15 minutes */
-.claim-card.claim-stale {
-  opacity: 0.4;
-}
-
-.claim-card.claim-stale .claim-time {
-  color: var(--collab-error);
-}
 
 /* ==================== Saved Projects ==================== */
 
