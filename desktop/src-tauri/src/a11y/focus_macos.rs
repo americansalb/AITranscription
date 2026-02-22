@@ -15,14 +15,20 @@ mod ax_focus {
     use std::ptr;
     use std::sync::Mutex;
 
+    use tauri::Manager;
     use core_foundation::base::TCFType;
     use core_foundation::runloop::{
-        CFRunLoop, CFRunLoopRef, CFRunLoopSourceRef, kCFRunLoopDefaultMode,
+        CFRunLoopRef, CFRunLoopSourceRef, kCFRunLoopDefaultMode,
     };
     use core_foundation::string::{CFString, CFStringRef};
 
+    // Wrapper to allow CFRunLoopRef (raw pointer) in a static Mutex across threads.
+    // Safety: CFRunLoopRef is safe to send across threads — CFRunLoopStop() is thread-safe.
+    struct SendableRunLoop(CFRunLoopRef);
+    unsafe impl Send for SendableRunLoop {}
+
     // Store the run loop ref so stop() can signal it from another thread
-    static RUN_LOOP_REF: Mutex<Option<CFRunLoopRef>> = Mutex::new(None);
+    static RUN_LOOP_REF: Mutex<Option<SendableRunLoop>> = Mutex::new(None);
 
     // AX API FFI
     type AXUIElementRef = *const c_void;
@@ -254,13 +260,13 @@ mod ax_focus {
                 // Store run loop ref so stop() can signal it
                 {
                     let mut stored = RUN_LOOP_REF.lock().unwrap();
-                    *stored = Some(rl);
+                    *stored = Some(SendableRunLoop(rl));
                 }
 
                 CFRunLoopAddSource(
                     rl,
                     source,
-                    kCFRunLoopDefaultMode.as_concrete_TypeRef(),
+                    kCFRunLoopDefaultMode,
                 );
 
                 // Block until CFRunLoopStop is called
@@ -285,8 +291,8 @@ mod ax_focus {
         TRACKING_ACTIVE.store(false, Ordering::SeqCst);
         // Signal the CFRunLoop to exit
         let stored = RUN_LOOP_REF.lock().unwrap();
-        if let Some(rl) = *stored {
-            unsafe { CFRunLoopStop(rl) };
+        if let Some(ref wrapper) = *stored {
+            unsafe { CFRunLoopStop(wrapper.0) };
         }
     }
 }
