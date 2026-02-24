@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
 
+    # BYOK key encryption (Fernet symmetric — generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+    fernet_key: str = ""  # Empty = no encryption (dev mode). Set in production!
+
     # Platform API keys (OUR keys — used for default tier users)
     anthropic_api_key: str = ""
     openai_api_key: str = ""

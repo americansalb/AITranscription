@@ -80,6 +80,11 @@ async def route_completion(
     if not role:
         raise HTTPException(status_code=404, detail=f"Role '{request.role_slug}' not found")
 
+    # Capture role attributes before any commit (which expires ORM objects)
+    role_model = role.model
+    role_provider = role.provider
+    role_briefing = role.briefing
+
     # 2. Reset monthly counters if needed (lazy reset — no cron required)
     await _maybe_reset_monthly_usage(db, user)
 
@@ -103,22 +108,22 @@ async def route_completion(
     # 4. Determine API key (BYOK vs platform)
     byok_key = None
     if user.tier == SubscriptionTier.BYOK:
-        byok_key = _get_byok_key(user, role.provider)
+        byok_key = _get_byok_key(user, role_provider)
         if not byok_key:
             raise HTTPException(
                 status_code=402,
-                detail=f"No API key configured for provider '{role.provider}'. "
-                       f"Add your {role.provider.title()} key in Settings, or switch this role to a provider you have a key for.",
+                detail=f"No API key configured for provider '{role_provider}'. "
+                       f"Add your {role_provider.title()} key in Settings, or switch this role to a provider you have a key for.",
             )
 
     # 5. Call proxy
     try:
         proxy_result = await proxy_completion(
             user_id=user.id,
-            model=role.model,
+            model=role_model,
             messages=request.messages,
             tools=request.tools,
-            system=request.system or role.briefing,
+            system=request.system or role_briefing,
             stream=request.stream,
             byok_key=byok_key,
         )
@@ -280,10 +285,13 @@ async def _get_session_cost(db: AsyncSession, user_id: int, project_id: int) -> 
 
 
 def _get_byok_key(user: WebUser, provider: str) -> str | None:
+    from app.services.key_encryption import decrypt_key
+
+    encrypted = None
     if provider == "anthropic":
-        return user.byok_anthropic_key
+        encrypted = user.byok_anthropic_key
     elif provider == "openai":
-        return user.byok_openai_key
+        encrypted = user.byok_openai_key
     elif provider == "google":
-        return user.byok_google_key
-    return None
+        encrypted = user.byok_google_key
+    return decrypt_key(encrypted) if encrypted else None

@@ -268,12 +268,14 @@ async def update_api_keys(
             detail="API keys can only be set by BYOK-tier subscribers. Upgrade your plan first.",
         )
 
+    from app.services.key_encryption import encrypt_key
+
     if request.anthropic is not None:
-        user.byok_anthropic_key = request.anthropic or None
+        user.byok_anthropic_key = encrypt_key(request.anthropic) if request.anthropic else None
     if request.openai is not None:
-        user.byok_openai_key = request.openai or None
+        user.byok_openai_key = encrypt_key(request.openai) if request.openai else None
     if request.google is not None:
-        user.byok_google_key = request.google or None
+        user.byok_google_key = encrypt_key(request.google) if request.google else None
 
     await db.commit()
     return {"status": "keys_updated", "tier": user.tier.value}

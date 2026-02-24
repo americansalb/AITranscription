@@ -187,16 +187,20 @@ async def _meter_agent_completion(
                 f"exceeded for project {project_id} (current: ${session_cost:.2f})"
             )
 
-        # 4. BYOK key lookup
+        # 4. BYOK key lookup (decrypt from DB)
+        from app.services.key_encryption import decrypt_key
+
         byok_key = None
         if user.tier == SubscriptionTier.BYOK:
+            encrypted = None
             if "claude" in model:
-                byok_key = user.byok_anthropic_key
+                encrypted = user.byok_anthropic_key
             elif "gpt" in model or model.startswith("o"):
-                byok_key = user.byok_openai_key
+                encrypted = user.byok_openai_key
             elif "gemini" in model:
-                byok_key = user.byok_google_key
+                encrypted = user.byok_google_key
 
+            byok_key = decrypt_key(encrypted) if encrypted else None
             if not byok_key:
                 raise ValueError(
                     f"BYOK user {user_id} has no API key for model {model}"
