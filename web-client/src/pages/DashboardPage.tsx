@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useProjectStore, useUIStore } from "../lib/stores";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 const PROJECT_TEMPLATES = [
   { id: "software-dev", name: "Software Development", desc: "Manager, Architect, Developer, Tester — code review pipeline", icon: "\uD83D\uDCBB" },
@@ -20,6 +21,8 @@ export function DashboardPage() {
   const [newName, setNewName] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const closeModal = useCallback(() => setShowCreate(false), []);
+  const modalRef = useFocusTrap(showCreate, closeModal);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -101,12 +104,12 @@ export function DashboardPage() {
       {showCreate && (
         <div
           className="modal-backdrop"
-          onClick={(e) => { if (e.target === e.currentTarget) setShowCreate(false); }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeModal(); }}
           role="dialog"
           aria-modal="true"
           aria-label="Create new project"
         >
-          <div className="modal">
+          <div className="modal" ref={modalRef}
             <div className="modal-header">
               <h2 className="modal-title">New Project</h2>
               <button

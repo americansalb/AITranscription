@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useProjectStore, useMessageStore } from "../lib/stores";
+import { getModelCatalog } from "../lib/api";
 import type { BoardMessage } from "../lib/api";
 
 const ROLE_COLORS: Record<string, string> = {
@@ -15,20 +16,16 @@ function getRoleColor(slug: string): string {
   return ROLE_COLORS[base] || "var(--text-muted)";
 }
 
-const PROVIDER_MODELS: Record<string, Array<{ id: string; label: string }>> = {
+// Fallback models if backend is unreachable
+const FALLBACK_MODELS: Record<string, Array<{ id: string; label: string }>> = {
   anthropic: [
-    { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
   ],
   openai: [
     { id: "gpt-4o", label: "GPT-4o" },
-    { id: "gpt-4o-mini", label: "GPT-4o Mini" },
-    { id: "o3", label: "o3" },
   ],
   google: [
     { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
-    { id: "gemini-2.0-pro", label: "Gemini 2.0 Pro" },
   ],
 };
 
@@ -107,8 +104,23 @@ export function ProjectPage() {
   const [msgTo, setMsgTo] = useState("all");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
+  const [providerModels, setProviderModels] = useState<Record<string, Array<{ id: string; label: string }>>>(FALLBACK_MODELS);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Fetch model catalog from backend (single source of truth)
+  useEffect(() => {
+    getModelCatalog()
+      .then((catalog) => {
+        const grouped: Record<string, Array<{ id: string; label: string }>> = {};
+        for (const m of catalog.models) {
+          if (!grouped[m.provider]) grouped[m.provider] = [];
+          grouped[m.provider].push({ id: m.id, label: m.name });
+        }
+        setProviderModels(grouped);
+      })
+      .catch((e) => console.error("[ProjectPage] Failed to fetch model catalog:", e));
+  }, []);
 
   useEffect(() => {
     if (projectId) {
@@ -213,7 +225,7 @@ export function ProjectPage() {
                       value={role.provider?.provider || "anthropic"}
                       onChange={(e) => {
                         const provider = e.target.value;
-                        const models = PROVIDER_MODELS[provider];
+                        const models = providerModels[provider];
                         const model = models?.[0]?.id || "";
                         updateRoleProvider(slug, provider, model);
                       }}
@@ -232,7 +244,7 @@ export function ProjectPage() {
                       }}
                       aria-label={`Model for ${role.title}`}
                     >
-                      {(PROVIDER_MODELS[role.provider?.provider || "anthropic"] || []).map((m) => (
+                      {(providerModels[role.provider?.provider || "anthropic"] || []).map((m) => (
                         <option key={m.id} value={m.id}>{m.label}</option>
                       ))}
                     </select>

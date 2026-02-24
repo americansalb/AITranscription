@@ -22,46 +22,62 @@ class TestRoleDesignValidation:
 
     async def test_empty_messages(self, client, auth_headers):
         """Empty messages list returns 400."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={"messages": []},
-            headers=auth_headers,
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={"messages": []},
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "At least one message" in response.json()["detail"]
 
     async def test_invalid_message_role(self, client, auth_headers):
         """Message with role other than 'user'/'assistant' returns 400."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={
-                "messages": [
-                    {"role": "system", "content": "You are a role designer."}
-                ]
-            },
-            headers=auth_headers,
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={
+                    "messages": [
+                        {"role": "system", "content": "You are a role designer."}
+                    ]
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "Invalid message role" in response.json()["detail"]
 
     async def test_missing_messages_field(self, client, auth_headers):
         """Request without messages field returns 422."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={},
-            headers=auth_headers,
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={},
+                headers=auth_headers,
+            )
         assert response.status_code == 422
 
     async def test_missing_content_field(self, client, auth_headers):
         """Message without content returns 422."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={
-                "messages": [{"role": "user"}]
-            },
-            headers=auth_headers,
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={
+                    "messages": [{"role": "user"}]
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 422
 
 
@@ -149,7 +165,7 @@ class TestRoleDesignSuccess:
             },
         )
 
-        assert response.status_code == 403
+        assert response.status_code == 401
 
     async def test_with_project_context(self, client, auth_headers):
         """Project context with existing roles is passed through."""
