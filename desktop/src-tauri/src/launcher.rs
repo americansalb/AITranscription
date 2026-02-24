@@ -1349,57 +1349,77 @@ pub fn check_npm_installed() -> Result<bool, String> {
 }
 
 /// Install Claude Code CLI via npm. Returns Ok(output) on success.
-/// Runs `npm install -g @anthropic-ai/claude-code` using a login shell on macOS.
+/// Runs `npm install -g @anthropic-ai/claude-code` with a 120-second timeout.
+/// Uses login shell on macOS to pick up nvm/fnm/homebrew PATH.
 #[tauri::command]
 pub fn install_claude_cli() -> Result<String, String> {
+    let timeout = std::time::Duration::from_secs(120);
+
     #[cfg(target_os = "windows")]
-    {
+    let mut child = {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // Invoke npm directly instead of through cmd /c to avoid shell interpretation
-        let output = Command::new("npm")
+        Command::new("npm")
             .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("Failed to run npm install: {}", e))?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("npm install failed: {}", stderr.trim()))
-        }
-    }
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
 
     #[cfg(target_os = "macos")]
-    {
-        // Use login shell to source nvm/fnm/homebrew PATH
+    let mut child = {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let output = Command::new(&shell)
+        Command::new(&shell)
             .args(["-l", "-c", "npm install -g @anthropic-ai/claude-code"])
-            .output()
-            .map_err(|e| format!("Failed to run npm install: {}", e))?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("npm install failed: {}", stderr.trim()))
-        }
-    }
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
 
     #[cfg(target_os = "linux")]
-    {
-        let output = Command::new("npm")
+    let mut child = {
+        Command::new("npm")
             .args(["install", "-g", "@anthropic-ai/claude-code"])
-            .output()
-            .map_err(|e| format!("Failed to run npm install: {}", e))?;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
 
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(format!("npm install failed: {}", stderr.trim()))
+    // Poll with timeout instead of blocking indefinitely
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take()
+                    .map(|mut s| { let mut buf = String::new(); std::io::Read::read_to_string(&mut s, &mut buf).ok(); buf })
+                    .unwrap_or_default();
+                let stderr = child.stderr.take()
+                    .map(|mut s| { let mut buf = String::new(); std::io::Read::read_to_string(&mut s, &mut buf).ok(); buf })
+                    .unwrap_or_default();
+
+                if status.success() {
+                    return Ok(stdout);
+                } else {
+                    let msg = if stderr.contains("EACCES") || stderr.contains("permission denied") {
+                        "Permission denied. On macOS/Linux, try: sudo npm install -g @anthropic-ai/claude-code".to_string()
+                    } else {
+                        format!("npm install failed: {}", stderr.trim())
+                    };
+                    return Err(msg);
+                }
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err("Installation timed out after 120 seconds. Check your network connection and try again.".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(format!("Failed to check install status: {}", e)),
         }
     }
 }
