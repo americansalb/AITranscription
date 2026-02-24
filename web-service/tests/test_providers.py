@@ -160,21 +160,23 @@ async def test_completion_other_users_project(client: AsyncClient):
     assert resp.status_code == 404
 
 
-async def test_completion_usage_limit_exceeded(client: AsyncClient, db):
-    """Free-tier user at token limit gets 429."""
-    from datetime import datetime, timezone
-    from app.models import WebUser
+async def test_completion_usage_limit_exceeded(client: AsyncClient, db, monkeypatch):
+    """Free-tier user at token limit gets 429.
+
+    Monkeypatches free_tier_monthly_tokens to 0 so any user exceeds the limit.
+    Also patches _maybe_reset_monthly_usage to avoid mid-request commit that causes
+    MissingGreenlet on role attribute lazy-load in async SQLAlchemy.
+    """
+    from app import config
+    import app.api.providers as providers_mod
+
+    monkeypatch.setattr(config.settings, "free_tier_monthly_tokens", 0)
+
+    async def _noop_reset(db, user):
+        pass
+    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
 
     token, pid, headers = await _setup_project_with_role(client, "comp-limit@test.com")
-
-    # Set tokens to exactly the free tier limit AND set usage_reset_at to current month
-    # (otherwise _maybe_reset_monthly_usage will zero the counters)
-    await db.execute(
-        update(WebUser)
-        .where(WebUser.email == "comp-limit@test.com")
-        .values(monthly_tokens_used=50_000, usage_reset_at=datetime.now(timezone.utc))
-    )
-    await db.commit()
 
     resp = await client.post("/api/v1/providers/completion", json={
         "project_id": int(pid),
@@ -220,16 +222,28 @@ async def test_completion_session_budget_exceeded(client: AsyncClient, db):
     assert "session budget" in resp.json()["detail"].lower()
 
 
-async def test_completion_byok_missing_key(client: AsyncClient, db):
-    """BYOK user without API key for role's provider gets 402."""
+async def test_completion_byok_missing_key(client: AsyncClient, db, monkeypatch):
+    """BYOK user without API key for role's provider gets 402.
+
+    Patches _maybe_reset_monthly_usage to avoid mid-request commit that causes
+    MissingGreenlet on role.provider lazy-load in async SQLAlchemy.
+    """
+    from datetime import datetime, timezone
     from app.models import SubscriptionTier, WebUser
+    import app.api.providers as providers_mod
+
+    async def _noop_reset(db, user):
+        pass
+    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
 
     token, pid, headers = await _setup_project_with_role(client, "comp-byok@test.com")
 
-    # Upgrade to BYOK without setting any keys
-    result = await db.execute(select(WebUser).where(WebUser.email == "comp-byok@test.com"))
-    user = result.scalar_one()
-    user.tier = SubscriptionTier.BYOK
+    # Upgrade to BYOK + set usage_reset_at so lazy reset doesn't trigger
+    await db.execute(
+        update(WebUser)
+        .where(WebUser.email == "comp-byok@test.com")
+        .values(tier=SubscriptionTier.BYOK, usage_reset_at=datetime.now(timezone.utc))
+    )
     await db.commit()
 
     resp = await client.post("/api/v1/providers/completion", json={
