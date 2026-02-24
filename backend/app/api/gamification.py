@@ -201,7 +201,12 @@ async def check_achievements(
         }
     except Exception as e:
         logging.getLogger(__name__).exception("Gamification check failed: %s", type(e).__name__)
-        raise HTTPException(status_code=500, detail="Gamification check failed")
+        # Graceful degradation: return empty achievements instead of 500
+        return {
+            "achievements": [],
+            "xp_gained": 0,
+            "level_changes": None,
+        }
 
 
 @router.get("/achievements", response_model=AchievementListResponse)
