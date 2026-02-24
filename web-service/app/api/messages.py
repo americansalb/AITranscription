@@ -192,7 +192,16 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
         await websocket.close(code=4001, reason="Auth timeout or invalid JSON")
         return
 
-    # Register the authenticated connection with the manager
+    # Verify user owns this project (prevents IDOR — any user accessing any project)
+    async with async_session() as db:
+        result = await db.execute(
+            select(Project).where(Project.id == project_id, Project.owner_id == user_id)
+        )
+        if not result.scalar_one_or_none():
+            await websocket.close(code=4003, reason="Not authorized for this project")
+            return
+
+    # Register the authenticated + authorized connection with the manager
     if project_id not in manager._connections:
         manager._connections[project_id] = []
     manager._connections[project_id].append(websocket)
@@ -206,14 +215,20 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
 
             # Handle incoming messages through the socket
             if data.get("type") == "send":
+                # Validate input (same limits as REST SendMessageRequest)
+                ws_body = str(data.get("body", ""))[:10000]
+                ws_subject = str(data.get("subject", ""))[:500]
+                ws_to = str(data.get("to", "all"))[:100]
+                ws_msg_type = str(data.get("msg_type", "message"))[:50]
+
                 async with async_session() as db:
                     msg = Message(
                         project_id=project_id,
                         from_role=f"human:{user_id}",
-                        to_role=data.get("to", "all"),
-                        msg_type=data.get("msg_type", "message"),
-                        subject=data.get("subject", ""),
-                        body=data.get("body", ""),
+                        to_role=ws_to,
+                        msg_type=ws_msg_type,
+                        subject=ws_subject,
+                        body=ws_body,
                     )
                     db.add(msg)
                     await db.commit()

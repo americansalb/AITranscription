@@ -81,3 +81,52 @@ async def test_message_limit(client: AsyncClient):
 
     resp = await client.get(f"/api/v1/messages/{pid}?limit=2", headers=headers)
     assert resp.json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_message(client: AsyncClient):
+    token, pid = await _setup_project(client)
+    headers = auth_headers(token)
+
+    # Send a message
+    resp = await client.post(f"/api/v1/messages/{pid}", json={
+        "to": "all",
+        "body": "To be deleted",
+    }, headers=headers)
+    msg_id = resp.json()["id"]
+
+    # Delete it
+    resp = await client.delete(f"/api/v1/messages/{pid}/{msg_id}", headers=headers)
+    assert resp.status_code == 204
+
+    # Verify it's gone
+    resp = await client.get(f"/api/v1/messages/{pid}", headers=headers)
+    assert not any(m["id"] == msg_id for m in resp.json()["messages"])
+
+
+@pytest.mark.asyncio
+async def test_delete_nonexistent_message(client: AsyncClient):
+    token, pid = await _setup_project(client)
+    headers = auth_headers(token)
+
+    resp = await client.delete(f"/api/v1/messages/{pid}/99999", headers=headers)
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_message_wrong_project(client: AsyncClient):
+    data = await create_test_user(client, f"del-wrong-{id(client)}@test.com")
+    token = data["access_token"]
+    headers = auth_headers(token)
+
+    # Create project
+    resp = await client.post("/api/v1/projects/", json={"name": "Del Test"}, headers=headers)
+    pid = resp.json()["id"]
+
+    # Send message
+    resp = await client.post(f"/api/v1/messages/{pid}", json={"to": "all", "body": "test"}, headers=headers)
+    msg_id = resp.json()["id"]
+
+    # Try to delete from non-existent project
+    resp = await client.delete(f"/api/v1/messages/99999/{msg_id}", headers=headers)
+    assert resp.status_code == 404

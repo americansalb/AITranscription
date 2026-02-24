@@ -1,6 +1,7 @@
 """Authentication endpoints — signup, login, token refresh, user info."""
 
 import logging
+import os
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -27,9 +28,12 @@ ALGORITHM = "HS256"
 # --- Rate limiting ---
 
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_TESTING = os.environ.get("VAAK_WEB_TESTING") == "1"
 
 
 def _check_rate_limit(key: str, max_attempts: int, window_seconds: int = 60) -> None:
+    if _TESTING:
+        return
     now = time.monotonic()
     cutoff = now - window_seconds
     _rate_limit_store[key] = [t for t in _rate_limit_store[key] if t > cutoff]
@@ -263,17 +267,19 @@ async def update_api_keys(
     db: AsyncSession = Depends(get_db),
 ):
     """Update BYOK API keys for the current user."""
+    # Only BYOK-tier users (via Stripe subscription) can set API keys
+    if user.tier != SubscriptionTier.BYOK:
+        raise HTTPException(
+            status_code=403,
+            detail="API keys can only be set by BYOK-tier subscribers. Upgrade your plan first.",
+        )
+
     if request.anthropic is not None:
         user.byok_anthropic_key = request.anthropic or None
     if request.openai is not None:
         user.byok_openai_key = request.openai or None
     if request.google is not None:
         user.byok_google_key = request.google or None
-
-    # Auto-upgrade to BYOK tier if any key is set
-    has_any_key = any([user.byok_anthropic_key, user.byok_openai_key, user.byok_google_key])
-    if has_any_key and user.tier == SubscriptionTier.FREE:
-        user.tier = SubscriptionTier.BYOK
 
     await db.commit()
     return {"status": "keys_updated", "tier": user.tier.value}

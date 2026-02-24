@@ -13,9 +13,15 @@ On restart, agents reload context from the DB.
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
+
 logger = logging.getLogger(__name__)
+
+# Max history messages to include in context (prevents unbounded token growth)
+_MAX_HISTORY_MESSAGES = 50
 
 
 @dataclass
@@ -101,14 +107,21 @@ async def _agent_loop(state: AgentState, briefing: str, user_id: int) -> None:
 
     logger.info("Agent loop started: %s:%s:%d", state.project_id, state.role_slug, state.instance)
 
+    # On startup, load recent history so the agent has context
+    history = await _load_history(state)
+
     try:
         while state.is_running:
             # 1. Poll for new messages
             new_messages = await _poll_messages(state)
 
             if new_messages:
-                # 2. Build context
-                context = _build_context(briefing, state, new_messages)
+                # Append to rolling history, trim to max window
+                history.extend(new_messages)
+                history = history[-_MAX_HISTORY_MESSAGES:]
+
+                # 2. Build context from full history window
+                context = _build_context(briefing, state, history)
 
                 # 3. Call provider proxy
                 try:
@@ -148,35 +161,284 @@ async def _agent_loop(state: AgentState, briefing: str, user_id: int) -> None:
         state.is_running = False
 
 
+async def _load_history(state: AgentState) -> list[dict]:
+    """Load recent message history for an agent starting up.
+
+    Fetches the last N messages directed to this role (or 'all') so the agent
+    has context from before it was started. Updates last_seen_message_id.
+    """
+    from app.database import async_session
+    from app.models import Message
+
+    project_id_int = int(state.project_id)
+    agent_from = f"{state.role_slug}:{state.instance}"
+
+    async with async_session() as db:
+        query = (
+            select(Message)
+            .where(
+                Message.project_id == project_id_int,
+                Message.to_role.in_([state.role_slug, "all", agent_from]),
+            )
+            .order_by(Message.id.desc())
+            .limit(_MAX_HISTORY_MESSAGES)
+        )
+        result = await db.execute(query)
+        messages = list(reversed(result.scalars().all()))  # chronological order
+
+    if messages:
+        state.last_seen_message_id = messages[-1].id
+        logger.info(
+            "Agent %s:%d loaded %d history messages (last_id=%d)",
+            state.role_slug, state.instance, len(messages), state.last_seen_message_id,
+        )
+
+    return [
+        {
+            "id": m.id,
+            "from": m.from_role,
+            "to": m.to_role,
+            "type": m.msg_type,
+            "subject": m.subject,
+            "body": m.body,
+            "timestamp": m.created_at.isoformat() if m.created_at else "",
+        }
+        for m in messages
+    ]
+
+
 async def _poll_messages(state: AgentState) -> list[dict]:
-    """Poll the message board for new messages directed to this role."""
-    # TODO: query DB for messages where to=state.role_slug or to='all'
-    #       and id > state.last_seen_message_id
-    return []
+    """Poll the message board for new messages directed to this role.
+
+    Queries for messages where:
+    - project_id matches
+    - to_role is this agent's role slug, 'all', or a wildcard like 'developer:0'
+    - id > last_seen_message_id (only unseen messages)
+
+    Also excludes messages FROM this agent (don't echo-loop).
+    Updates last_seen_message_id for next poll.
+    """
+    from app.database import async_session
+    from app.models import Message
+
+    project_id_int = int(state.project_id)
+    agent_from = f"{state.role_slug}:{state.instance}"
+
+    async with async_session() as db:
+        query = (
+            select(Message)
+            .where(
+                Message.project_id == project_id_int,
+                Message.id > state.last_seen_message_id,
+                Message.from_role != agent_from,  # don't read own messages
+                Message.to_role.in_([state.role_slug, "all", agent_from]),
+            )
+            .order_by(Message.id.asc())
+            .limit(100)  # safety cap per poll cycle
+        )
+        result = await db.execute(query)
+        messages = result.scalars().all()
+
+    if messages:
+        state.last_seen_message_id = messages[-1].id
+        logger.debug(
+            "Agent %s:%d polled %d new messages (last_id=%d)",
+            state.role_slug, state.instance, len(messages), state.last_seen_message_id,
+        )
+
+    return [
+        {
+            "id": m.id,
+            "from": m.from_role,
+            "to": m.to_role,
+            "type": m.msg_type,
+            "subject": m.subject,
+            "body": m.body,
+            "timestamp": m.created_at.isoformat() if m.created_at else "",
+        }
+        for m in messages
+    ]
 
 
 def _build_context(briefing: str, state: AgentState, new_messages: list[dict]) -> list[dict]:
     """Build the chat context for the LLM call.
 
     Uses sandboxed prompt construction:
-    - System: immutable platform instructions + role identity
-    - User briefing: treated as data, not instructions
-    - Message history: recent board messages as conversation
+    - System prompt (handled by caller via briefing_sanitizer)
+    - Message history: recent board messages as conversation turns
+    - Messages FROM this agent → assistant role; all others → user role
+
+    This creates a natural chat flow where the agent's own prior messages
+    appear as its previous responses, maintaining coherent dialogue.
     """
+    agent_from = f"{state.role_slug}:{state.instance}"
     messages = []
 
-    # Add new board messages as user messages
     for msg in new_messages:
-        messages.append({
+        sender = msg.get("from", "unknown")
+        msg_type = msg.get("type", "message")
+        subject = msg.get("subject", "")
+        body = msg.get("body", "")
+
+        # Format the header line with sender, type, and subject
+        header = f"[{sender}] ({msg_type})"
+        if subject:
+            header += f": {subject}"
+
+        content = f"{header}\n\n{body}" if body else header
+
+        # Messages from this agent instance → assistant turns
+        # Everything else → user turns
+        if sender == agent_from:
+            messages.append({"role": "assistant", "content": content})
+        else:
+            messages.append({"role": "user", "content": content})
+
+    # LLM APIs require the conversation to start with a user message.
+    # If the first message is an assistant turn (our own prior message),
+    # prepend a synthetic context marker.
+    if messages and messages[0]["role"] == "assistant":
+        messages.insert(0, {
             "role": "user",
-            "content": f"[{msg.get('from', 'unknown')}] ({msg.get('type', 'message')}): {msg.get('subject', '')}\n\n{msg.get('body', '')}",
+            "content": "[system] (context) You are resuming from your previous messages on the board.",
         })
 
     return messages
 
 
 async def _post_response(state: AgentState, content: str) -> None:
-    """Post the agent's response to the message board."""
-    # TODO: parse content for message structure (to, type, subject, body)
-    #       and insert into DB + broadcast via WebSocket
-    logger.info("Agent %s:%d would post: %s...", state.role_slug, state.instance, content[:100])
+    """Post the agent's response to the message board.
+
+    Parses the LLM output for structured message directives. Supports:
+
+    1. Single structured message with headers:
+       TO: developer
+       TYPE: directive
+       SUBJECT: Implement feature X
+
+       Body text here...
+
+    2. Multi-message output separated by '---':
+       TO: all
+       TYPE: status
+       SUBJECT: Work complete
+       Body of first message
+       ---
+       TO: manager
+       TYPE: handoff
+       SUBJECT: Ready for review
+       Body of second message
+
+    3. Unstructured fallback: entire content posted as a broadcast to 'all'.
+    """
+    from app.database import async_session
+    from app.models import Message
+    from app.api.messages import manager
+
+    project_id_int = int(state.project_id)
+    agent_from = f"{state.role_slug}:{state.instance}"
+
+    # Split on '---' line for multi-message support
+    segments = re.split(r"\n---\n", content.strip())
+    parsed_messages = []
+
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        parsed_messages.append(_parse_message_segment(segment, agent_from))
+
+    # Fallback: if nothing parsed, send entire content as broadcast
+    if not parsed_messages:
+        parsed_messages = [{
+            "to": "all",
+            "type": "status",
+            "subject": "",
+            "body": content.strip(),
+        }]
+
+    async with async_session() as db:
+        for msg_data in parsed_messages:
+            msg = Message(
+                project_id=project_id_int,
+                from_role=agent_from,
+                to_role=msg_data["to"],
+                msg_type=msg_data["type"],
+                subject=msg_data["subject"],
+                body=msg_data["body"],
+            )
+            db.add(msg)
+            await db.commit()
+            await db.refresh(msg)
+
+            # Broadcast via WebSocket
+            response = {
+                "id": msg.id,
+                "from": msg.from_role,
+                "to": msg.to_role,
+                "type": msg.msg_type,
+                "subject": msg.subject,
+                "body": msg.body,
+                "timestamp": msg.created_at.isoformat() if msg.created_at else "",
+                "metadata": {},
+            }
+            await manager.broadcast(project_id_int, response)
+
+            # Auto-trigger continuous review for status messages
+            if msg.msg_type == "status":
+                try:
+                    from app.api.discussions import maybe_auto_trigger_continuous
+                    await maybe_auto_trigger_continuous(
+                        project_id=project_id_int,
+                        from_role=msg.from_role,
+                        msg_type=msg.msg_type,
+                        message_id=msg.id,
+                        subject=msg.subject,
+                        db=db,
+                    )
+                except Exception as e:
+                    logger.warning("Continuous auto-trigger failed: %s", e)
+
+            logger.info(
+                "Agent %s posted: to=%s type=%s subject=%s (%d chars)",
+                agent_from, msg.to_role, msg.msg_type,
+                msg.subject[:60] if msg.subject else "(none)",
+                len(msg.body),
+            )
+
+
+# Regex for parsing message headers (TO:, TYPE:, SUBJECT:) at the start of a segment
+_HEADER_RE = re.compile(
+    r"^(?:TO:\s*(?P<to>\S+)\s*\n)?"
+    r"(?:TYPE:\s*(?P<type>\S+)\s*\n)?"
+    r"(?:SUBJECT:\s*(?P<subject>.+?)\s*\n)?",
+    re.IGNORECASE,
+)
+
+
+def _parse_message_segment(segment: str, default_from: str) -> dict:
+    """Parse a single message segment for TO/TYPE/SUBJECT headers.
+
+    Returns a dict with keys: to, type, subject, body.
+    Falls back to broadcast if no headers found.
+    """
+    match = _HEADER_RE.match(segment)
+
+    to = "all"
+    msg_type = "message"
+    subject = ""
+    body = segment
+
+    if match and any(match.group(g) for g in ("to", "type", "subject")):
+        to = match.group("to") or "all"
+        msg_type = match.group("type") or "message"
+        subject = match.group("subject") or ""
+        # Body is everything after the matched headers
+        body = segment[match.end():].strip()
+
+    return {
+        "to": to,
+        "type": msg_type,
+        "subject": subject,
+        "body": body or segment,  # fallback: use full segment if body is empty
+    }

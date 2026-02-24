@@ -1,10 +1,11 @@
 """LLM provider proxy — routes requests through LiteLLM with metering and billing."""
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
@@ -79,7 +80,10 @@ async def route_completion(
     if not role:
         raise HTTPException(status_code=404, detail=f"Role '{request.role_slug}' not found")
 
-    # 2. Check usage limits
+    # 2. Reset monthly counters if needed (lazy reset — no cron required)
+    await _maybe_reset_monthly_usage(db, user)
+
+    # 3. Check usage limits
     monthly_limit = _get_monthly_limit(user.tier)
     if user.monthly_tokens_used >= monthly_limit:
         raise HTTPException(
@@ -87,12 +91,18 @@ async def route_completion(
             detail=f"Monthly token limit ({monthly_limit:,}) reached. Upgrade your plan.",
         )
 
-    # 3. Determine API key (BYOK vs platform)
+    # 4. Determine API key (BYOK vs platform)
     byok_key = None
     if user.tier == SubscriptionTier.BYOK:
         byok_key = _get_byok_key(user, role.provider)
+        if not byok_key:
+            raise HTTPException(
+                status_code=402,
+                detail=f"No API key configured for provider '{role.provider}'. "
+                       f"Add your {role.provider.title()} key in Settings, or switch this role to a provider you have a key for.",
+            )
 
-    # 4. Call proxy
+    # 5. Call proxy
     try:
         proxy_result = await proxy_completion(
             user_id=user.id,
@@ -108,7 +118,7 @@ async def route_completion(
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    # 5. Record usage
+    # 6. Record usage
     total_tokens = proxy_result.input_tokens + proxy_result.output_tokens
     record = UsageRecord(
         user_id=user.id,
@@ -122,9 +132,15 @@ async def route_completion(
     )
     db.add(record)
 
-    # Update user's running totals
-    user.monthly_tokens_used += total_tokens
-    user.monthly_cost_usd += proxy_result.marked_up_cost_usd
+    # Atomic update of user's running totals (prevents TOCTOU race with concurrent requests)
+    await db.execute(
+        update(WebUser)
+        .where(WebUser.id == user.id)
+        .values(
+            monthly_tokens_used=WebUser.monthly_tokens_used + total_tokens,
+            monthly_cost_usd=WebUser.monthly_cost_usd + proxy_result.marked_up_cost_usd,
+        )
+    )
     await db.commit()
 
     return CompletionResponse(
@@ -217,6 +233,22 @@ def _get_monthly_limit(tier: SubscriptionTier) -> int:
     elif tier == SubscriptionTier.BYOK:
         return 999_999_999  # Effectively unlimited for BYOK
     return settings.free_tier_monthly_tokens
+
+
+async def _maybe_reset_monthly_usage(db: AsyncSession, user: WebUser) -> None:
+    """Lazy monthly usage reset — resets counters if usage_reset_at is in a previous month."""
+    now = datetime.now(timezone.utc)
+    if user.usage_reset_at is None or (
+        user.usage_reset_at.year != now.year or user.usage_reset_at.month != now.month
+    ):
+        await db.execute(
+            update(WebUser)
+            .where(WebUser.id == user.id)
+            .values(monthly_tokens_used=0, monthly_cost_usd=0.0, usage_reset_at=now)
+        )
+        await db.commit()
+        # Refresh in-memory object so the limit check sees reset values
+        await db.refresh(user)
 
 
 def _get_byok_key(user: WebUser, provider: str) -> str | None:

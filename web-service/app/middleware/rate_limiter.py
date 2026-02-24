@@ -3,6 +3,7 @@
 Uses in-memory counters for MVP. Switch to Redis for horizontal scaling.
 """
 
+import os
 import time
 import logging
 from collections import defaultdict
@@ -12,6 +13,9 @@ from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger(__name__)
+
+# Disable rate limiting in test mode (env var set by conftest.py)
+_TESTING = os.environ.get("VAAK_WEB_TESTING") == "1"
 
 # Rate limit: requests per minute per user
 DEFAULT_RPM = 60
@@ -63,6 +67,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware that enforces per-user rate limits."""
 
     async def dispatch(self, request: Request, call_next):
+        if _TESTING:
+            return await call_next(request)
+
         # Extract user identity from JWT or IP (never from client headers)
         identity = _extract_user_id(request)
         path = request.url.path

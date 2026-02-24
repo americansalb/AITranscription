@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api import auth, projects, messages, billing, providers, discussions
 from app.database import init_db
+from app.middleware.rate_limiter import RateLimitMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,9 @@ app = FastAPI(
     description="Multi-provider AI collaboration platform",
     lifespan=lifespan,
 )
+
+# Rate limiting (applied first — middleware stack is LIFO, so add before CORS)
+app.add_middleware(RateLimitMiddleware)
 
 # CORS
 app.add_middleware(
@@ -57,9 +61,4 @@ async def health_check():
     return {
         "status": "ok",
         "version": settings.version,
-        "providers_configured": {
-            "anthropic": bool(settings.anthropic_api_key),
-            "openai": bool(settings.openai_api_key),
-            "google": bool(settings.google_ai_api_key),
-        },
     }

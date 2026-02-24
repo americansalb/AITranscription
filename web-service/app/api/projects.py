@@ -422,9 +422,11 @@ async def switch_section(
 # --- Helpers ---
 
 async def _get_user_project(db: AsyncSession, project_id: int, user_id: int) -> Project:
-    """Fetch a project, ensuring it belongs to the user."""
+    """Fetch an active project, ensuring it belongs to the user."""
     result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.owner_id == user_id)
+        select(Project).where(
+            Project.id == project_id, Project.owner_id == user_id, Project.is_active == True
+        )
     )
     project = result.scalar_one_or_none()
     if not project:
