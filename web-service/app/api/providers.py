@@ -91,6 +91,15 @@ async def route_completion(
             detail=f"Monthly token limit ({monthly_limit:,}) reached. Upgrade your plan.",
         )
 
+    # 3b. Per-session budget: check project cost in last 24h against ceiling
+    session_cost = await _get_session_cost(db, user.id, project.id)
+    if session_cost >= settings.max_cost_per_session:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Project session budget (${settings.max_cost_per_session:.2f}/day) exceeded. "
+                   f"Current: ${session_cost:.2f}. Try again tomorrow or increase budget.",
+        )
+
     # 4. Determine API key (BYOK vs platform)
     byok_key = None
     if user.tier == SubscriptionTier.BYOK:
@@ -249,6 +258,25 @@ async def _maybe_reset_monthly_usage(db: AsyncSession, user: WebUser) -> None:
         await db.commit()
         # Refresh in-memory object so the limit check sees reset values
         await db.refresh(user)
+
+
+async def _get_session_cost(db: AsyncSession, user_id: int, project_id: int) -> float:
+    """Get the total marked-up cost for a project in the last 24 hours.
+
+    Used to enforce the per-session budget ceiling (max_cost_per_session).
+    """
+    from datetime import timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    result = await db.execute(
+        select(func.coalesce(func.sum(UsageRecord.marked_up_cost_usd), 0.0))
+        .where(
+            UsageRecord.user_id == user_id,
+            UsageRecord.project_id == project_id,
+            UsageRecord.created_at >= cutoff,
+        )
+    )
+    return float(result.scalar())
 
 
 def _get_byok_key(user: WebUser, provider: str) -> str | None:

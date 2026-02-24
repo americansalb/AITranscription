@@ -65,6 +65,8 @@ async def proxy_completion(
     system: str | None = None,
     stream: bool = False,
     byok_key: str | None = None,
+    timeout: float | None = None,
+    max_tokens: int | None = None,
 ) -> ProxyResult:
     """Route an LLM completion through the metered proxy.
 
@@ -79,6 +81,8 @@ async def proxy_completion(
     """
     # 1. Pre-flight: estimate cost and check limits
     estimated_input_tokens = sum(len(m.get("content", "")) // 4 for m in messages)
+    if system:
+        estimated_input_tokens += len(system) // 4
     # Conservative output estimate: assume up to 4096 output tokens for pre-flight check
     estimated_output_tokens = 4096
     estimated_cost = estimate_cost(model, estimated_input_tokens, estimated_output_tokens)
@@ -89,7 +93,8 @@ async def proxy_completion(
             f"${settings.max_cost_per_message:.2f}"
         )
 
-    # TODO: Check user's monthly usage against plan limits
+    # NOTE: Monthly usage limits are enforced at the API layer (providers.py:route_completion)
+    # and by meter_agent_completion() for agent loops. Not duplicated here.
 
     # 2. Determine which API key to use
     api_key = byok_key  # BYOK takes priority
@@ -134,6 +139,10 @@ async def proxy_completion(
         if system:
             # LiteLLM handles system prompt injection per provider
             kwargs["messages"] = [{"role": "system", "content": system}] + messages
+        if timeout:
+            kwargs["timeout"] = timeout
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
 
         response = await litellm.acompletion(**kwargs)
 
@@ -167,7 +176,8 @@ async def proxy_completion(
     raw_cost = estimate_cost(model, input_tokens, output_tokens)
     marked_up_cost = raw_cost * settings.markup_multiplier
 
-    # TODO: Record usage in database (user_id, tokens, cost, model, timestamp)
+    # NOTE: Usage recording is handled at the API layer (providers.py:route_completion)
+    # and by meter_agent_completion() for agent loops. Not duplicated here.
 
     provider = "anthropic" if model.startswith("claude") else "openai" if model.startswith("gpt") else "google"
 

@@ -63,7 +63,9 @@ class WebUser(Base):
     )
 
     # Relationships
-    projects: Mapped[list["Project"]] = relationship(back_populates="owner", lazy="selectin")
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="owner", lazy="selectin", cascade="all, delete-orphan"
+    )
 
 
 class Project(Base):
@@ -79,10 +81,14 @@ class Project(Base):
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
 
-    # Relationships
+    # Relationships (cascade delete: removing a project removes its roles, messages, etc.)
     owner: Mapped["WebUser"] = relationship(back_populates="projects")
-    roles: Mapped[list["ProjectRole"]] = relationship(back_populates="project", lazy="selectin")
-    messages: Mapped[list["Message"]] = relationship(back_populates="project", lazy="noload")
+    roles: Mapped[list["ProjectRole"]] = relationship(
+        back_populates="project", lazy="selectin", cascade="all, delete-orphan"
+    )
+    messages: Mapped[list["Message"]] = relationship(
+        back_populates="project", lazy="noload", cascade="all, delete-orphan"
+    )
 
 
 class ProjectRole(Base):
@@ -95,6 +101,10 @@ class ProjectRole(Base):
     slug: Mapped[str] = mapped_column(String(50), nullable=False)
     title: Mapped[str] = mapped_column(String(100), nullable=False)
     briefing: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # Role metadata (stored as JSON arrays)
+    tags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    permissions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
     # Provider assignment
     provider: Mapped[str] = mapped_column(String(50), default="anthropic", nullable=False)
@@ -197,7 +207,8 @@ class Discussion(Base):
 
     # Relationships
     rounds: Mapped[list["DiscussionRound"]] = relationship(
-        back_populates="discussion", lazy="selectin", order_by="DiscussionRound.number"
+        back_populates="discussion", lazy="selectin", order_by="DiscussionRound.number",
+        cascade="all, delete-orphan",
     )
 
 
@@ -227,7 +238,7 @@ class DiscussionRound(Base):
 
     discussion: Mapped["Discussion"] = relationship(back_populates="rounds")
     submissions: Mapped[list["DiscussionSubmission"]] = relationship(
-        back_populates="round", lazy="selectin"
+        back_populates="round", lazy="selectin", cascade="all, delete-orphan",
     )
 
     __table_args__ = (

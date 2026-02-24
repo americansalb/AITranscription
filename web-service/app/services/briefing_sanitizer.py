@@ -32,7 +32,7 @@ SUBJECT: <brief subject line>
 <message body>
 
 Valid types: directive, status, question, answer, handoff, review, broadcast
-To send multiple messages, separate them with a line containing only "---".
+To send multiple messages, separate them with a line containing only "===MSG===".
 
 Example:
 TO: manager

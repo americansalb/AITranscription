@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     # Agent runtime
     agent_poll_interval_seconds: float = 2.0
     agent_max_context_tokens: int = 100_000
+    agent_max_response_tokens: int = 4096
+    agent_completion_timeout_seconds: int = 120
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
