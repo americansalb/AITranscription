@@ -825,12 +825,12 @@ function App() {
   }, []);
 
   // Control overlay window visibility
-  // Skip overlay on macOS - showing windows activates the app and breaks paste
+  // macOS: skip overlay window (show() steals focus, breaks paste). Use in-app banner instead.
+  // Windows/Linux: use the floating overlay window as before.
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
-      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
-      if (isMacOS()) return;
+      if (isMacOS()) return; // macOS uses in-app recording banner (rendered in JSX below)
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -838,14 +838,12 @@ function App() {
 
         const isActive = recorder.isRecording || status === "processing";
 
-        // Show or hide the floating overlay window (Windows/Linux only)
         if (isActive) {
           await invoke("show_recording_overlay");
         } else {
           await invoke("hide_recording_overlay");
         }
 
-        // Send state to overlay window
         await emit("overlay-update", {
           isRecording: recorder.isRecording,
           isProcessing: status === "processing",
@@ -1105,6 +1103,21 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* macOS in-app recording indicator (replaces floating overlay which steals focus) */}
+      {isMacOS() && (recorder.isRecording || status === "processing") && (
+        <div className="macos-recording-banner" role="alert" aria-live="assertive">
+          <span className="macos-rec-dot" />
+          <span className="macos-rec-label">
+            {status === "processing" ? "Processing..." : `Recording ${Math.floor((recorder.duration || 0) / 60)}:${String(Math.floor((recorder.duration || 0) % 60)).padStart(2, "0")}`}
+          </span>
+          {recorder.isRecording && (
+            <button className="macos-rec-stop" onClick={handleRecordClick} title="Stop recording">
+              Stop
+            </button>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="error-message">

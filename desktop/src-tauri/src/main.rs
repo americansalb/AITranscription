@@ -5,7 +5,6 @@ mod a11y;
 mod audio;
 mod collab;
 mod database;
-mod focus_tracker;
 mod keyboard_hook;
 mod launcher;
 mod queue;
@@ -1508,9 +1507,9 @@ fn capture_uia_tree_cmd() -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn set_focus_tracking(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     if enabled {
-        focus_tracker::start_focus_tracking(app);
+        a11y::start_focus_tracking(app);
     } else {
-        focus_tracker::stop_focus_tracking();
+        a11y::stop_focus_tracking();
     }
     Ok(())
 }
@@ -4325,6 +4324,7 @@ fn main() {
             launcher::buzz_agent_terminal,
             launcher::check_macos_permissions,
             launcher::open_macos_settings,
+            launcher::open_terminal_in_dir,
         ]);
 
     match builder.build(tauri::generate_context!()) {

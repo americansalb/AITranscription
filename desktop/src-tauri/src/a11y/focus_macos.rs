@@ -4,9 +4,13 @@
 //! kAXFocusedUIElementChanged notifications and emits Tauri
 //! "speak-immediate" events for TTS announcements.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static TRACKING_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Monotonic generation counter. Each start() increments this. Cleanup code
+/// only clears shared state if the generation still matches, preventing a
+/// stale thread from overwriting a newer thread's run loop ref or active flag.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 mod ax_focus {
@@ -96,7 +100,7 @@ mod ax_focus {
         if !name.is_empty() {
             parts.push(name.to_string());
         }
-        // Use NormalizedRole names (same as focus_tracker.rs)
+        // Use NormalizedRole names (same as focus_windows.rs)
         let friendly = match role {
             "TextInput" => "edit field",
             "TextArea" => "text area",
@@ -118,8 +122,9 @@ mod ax_focus {
             parts.push(friendly.to_string());
         }
         if !value.is_empty() {
-            let display = if value.len() > 50 {
-                format!("{}...", &value[..50])
+            let display = if value.chars().count() > 50 {
+                let truncated: String = value.chars().take(50).collect();
+                format!("{}...", truncated)
             } else {
                 value.to_string()
             };
@@ -197,22 +202,29 @@ mod ax_focus {
     }
 
     pub fn start(app: tauri::AppHandle) {
-        if TRACKING_ACTIVE.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        // Stop any existing observer before starting a new one
+        stop();
+
+        TRACKING_ACTIVE.store(true, Ordering::SeqCst);
+        let my_gen = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
         std::thread::spawn(move || {
             unsafe {
                 if !AXIsProcessTrusted() {
                     eprintln!("[a11y/focus_macos] Accessibility not trusted — cannot track focus");
-                    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    // Only clear if we're still the current generation
+                    if GENERATION.load(Ordering::SeqCst) == my_gen {
+                        TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    }
                     return;
                 }
 
                 let system_wide = AXUIElementCreateSystemWide();
                 if system_wide.is_null() {
                     eprintln!("[a11y/focus_macos] Failed to create system-wide element");
-                    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    if GENERATION.load(Ordering::SeqCst) == my_gen {
+                        TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    }
                     return;
                 }
 
@@ -222,7 +234,9 @@ mod ax_focus {
                 if err != K_AX_ERROR_SUCCESS || observer.is_null() {
                     eprintln!("[a11y/focus_macos] AXObserverCreate failed: {}", err);
                     CFRelease(system_wide);
-                    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    if GENERATION.load(Ordering::SeqCst) == my_gen {
+                        TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    }
                     return;
                 }
 
@@ -250,7 +264,9 @@ mod ax_focus {
                     let _ = Box::from_raw(ctx_ptr as *mut AppHandleContext);
                     CFRelease(observer);
                     CFRelease(system_wide);
-                    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    if GENERATION.load(Ordering::SeqCst) == my_gen {
+                        TRACKING_ACTIVE.store(false, Ordering::SeqCst);
+                    }
                     return;
                 }
 
@@ -272,17 +288,18 @@ mod ax_focus {
                 // Block until CFRunLoopStop is called
                 CFRunLoopRun();
 
-                // Cleanup after run loop exits
+                // Cleanup after run loop exits — only clear shared state if
+                // no newer start() has been called (generation still matches)
                 let _ = Box::from_raw(ctx_ptr as *mut AppHandleContext);
                 CFRelease(observer);
                 CFRelease(system_wide);
 
-                {
+                if GENERATION.load(Ordering::SeqCst) == my_gen {
                     let mut stored = RUN_LOOP_REF.lock().unwrap();
                     *stored = None;
+                    drop(stored);
+                    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
                 }
-
-                TRACKING_ACTIVE.store(false, Ordering::SeqCst);
             }
         });
     }

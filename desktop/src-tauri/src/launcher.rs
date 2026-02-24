@@ -42,7 +42,20 @@ pub fn check_claude_installed() -> Result<bool, String> {
             .map_err(|e| format!("Failed to run 'where claude': {}", e))?;
         Ok(output.status.success())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS GUI apps (launched from Finder/Dock/Spotlight) get a minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) and do NOT inherit the user's shell PATH.
+        // Running `which claude` directly would return false even if claude is installed
+        // via npm/nvm/fnm/homebrew. Use a login shell to source the user's profile first.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "which claude"])
+            .output()
+            .map_err(|e| format!("Failed to check for claude via login shell: {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "linux")]
     {
         let output = Command::new("which")
             .arg("claude")
@@ -1298,5 +1311,60 @@ pub fn open_macos_settings(pane_url: String) -> Result<(), String> {
             .output()
             .map_err(|e| format!("Failed to open System Settings: {}", e))?;
     }
+    Ok(())
+}
+
+/// Open a terminal window in the given directory.
+/// macOS: opens Terminal.app; Windows: opens PowerShell; Linux: opens default terminal.
+#[tauri::command]
+pub fn open_terminal_in_dir(dir: String) -> Result<(), String> {
+    let path = Path::new(&dir);
+    if !path.exists() {
+        return Err(format!("Directory does not exist: {}", dir));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // Use cmd /c start with .current_dir() to avoid interpolating the path
+        // into a PowerShell string, which would allow injection via $(), backticks, etc.
+        Command::new("cmd")
+            .args(["/c", "start", "powershell", "-NoExit"])
+            .current_dir(&dir)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open PowerShell: {}", e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-a", "Terminal", &dir])
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal.app: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Use .current_dir() so every terminal inherits the right working directory,
+        // regardless of whether it supports --workdir flags.
+        let launched = Command::new("x-terminal-emulator")
+            .current_dir(&dir)
+            .spawn()
+            .is_ok()
+            || Command::new("gnome-terminal")
+                .args(["--working-directory", &dir])
+                .spawn()
+                .is_ok()
+            || Command::new("xterm")
+                .current_dir(&dir)
+                .spawn()
+                .is_ok();
+        if !launched {
+            return Err("No terminal emulator found".to_string());
+        }
+    }
+
     Ok(())
 }

@@ -167,33 +167,33 @@ export function ScreenReaderApp() {
             </h2>
             <div className="sr-row">
               <div>
-                <div className="sr-row-label">UI Automation Tree{!isWindows() && " (Windows only)"}</div>
+                <div className="sr-row-label">Accessibility Tree{!(isWindows() || isMacOS()) && " (Not supported on Linux)"}</div>
                 <div className="sr-row-desc">Send element names, types, and coordinates alongside screenshots for precise interaction</div>
               </div>
               <button
                 className={`sr-toggle ${uiaEnabled ? "active" : ""}`}
-                disabled={!isWindows()}
-                title={!isWindows() ? "Requires Windows UI Automation API" : undefined}
+                disabled={!(isWindows() || isMacOS())}
+                title={!(isWindows() || isMacOS()) ? "Not supported on Linux" : undefined}
                 onClick={() => {
-                  if (!isWindows()) return;
+                  if (!(isWindows() || isMacOS())) return;
                   const next = !uiaEnabled;
                   setUiaEnabled(next);
                   localStorage.setItem("vaak_sr_uia", String(next));
                 }}
-                style={!isWindows() ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
+                style={!(isWindows() || isMacOS()) ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
               />
             </div>
             <div className="sr-row">
               <div>
-                <div className="sr-row-label">Focus Tracking{!isWindows() && " (Windows only)"}</div>
+                <div className="sr-row-label">Focus Tracking{!(isWindows() || isMacOS()) && " (Not supported on Linux)"}</div>
                 <div className="sr-row-desc">Automatically announce focused elements as you Tab through the UI (no API calls)</div>
               </div>
               <button
                 className={`sr-toggle ${focusTrackingEnabled ? "active" : ""}`}
-                disabled={!isWindows()}
-                title={!isWindows() ? "Requires Windows UI Automation API" : undefined}
+                disabled={!(isWindows() || isMacOS())}
+                title={!(isWindows() || isMacOS()) ? "Not supported on Linux" : undefined}
                 onClick={async () => {
-                  if (!isWindows()) return;
+                  if (!(isWindows() || isMacOS())) return;
                   const next = !focusTrackingEnabled;
                   setFocusTrackingEnabled(next);
                   localStorage.setItem("vaak_sr_focus_tracking", String(next));
@@ -206,14 +206,14 @@ export function ScreenReaderApp() {
                     }
                   }
                 }}
-                style={!isWindows() ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
+                style={!(isWindows() || isMacOS()) ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
               />
             </div>
             {isMacOS() && (
               <div className="sr-macos-guidance">
                 <div className="sr-row-label">macOS Accessibility</div>
                 <div className="sr-row-desc">
-                  UI Automation and Focus Tracking require Windows APIs. On macOS, Vaak captures your screen to describe what's visible. For the best experience:
+                  Accessibility Tree and Focus Tracking use the macOS Accessibility API. For the best experience:
                 </div>
                 <ul className="sr-macos-tips">
                   <li>Enable VoiceOver ({getModifierKeyName()}+F5) for native macOS screen reading alongside Vaak</li>

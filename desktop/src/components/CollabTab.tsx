@@ -1372,12 +1372,25 @@ When multiple instances of this role are active:
     })();
   }, []);
 
-  // Check macOS permissions on first launch attempt (deferred from connect
-  // to avoid triggering TCC dialog before user has tried to use Terminal)
+  // Check macOS permissions on connect (not deferred — users need to see permission
+  // issues immediately, especially since the launch button depends on permissions)
   const macPermsCheckedRef = useRef(false);
-  const checkMacPermissions = async () => {
+  useEffect(() => {
     if (macPermsCheckedRef.current || !window.__TAURI__) return;
     macPermsCheckedRef.current = true;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const perms = await invoke<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string }>("check_macos_permissions");
+        if (perms.platform === "macos") {
+          setMacPermissions(perms);
+        }
+      } catch { /* non-critical */ }
+    })();
+  }, []);
+  const checkMacPermissions = async () => {
+    // Re-check on launch attempt in case permissions changed
+    if (!window.__TAURI__) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const perms = await invoke<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string }>("check_macos_permissions");
@@ -3000,13 +3013,13 @@ When multiple instances of this role are active:
                                       >&times;</button>
                                     </div>
                                     <div className="role-card-status">{getStatusLabel(card.status)}</div>
-                                    {card.status === "vacant" && claudeInstalled !== false && (
+                                    {card.status === "vacant" && (
                                       <button
                                         className="role-card-launch-btn"
                                         onClick={(e) => { e.stopPropagation(); handleLaunchMember(card.slug, card.instance); }}
-                                        disabled={launchCooldown}
-                                        title={`Launch Claude agent as ${card.title}`}
-                                      >Launch</button>
+                                        disabled={launchCooldown || claudeInstalled === false}
+                                        title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : `Launch Claude agent as ${card.title}`}
+                                      >{claudeInstalled === false ? "CLI Missing" : "Launch"}</button>
                                     )}
                                   </div>
                                 );
@@ -3240,17 +3253,17 @@ When multiple instances of this role are active:
                           </select>
                         )}
                         {/* Launch button for vacant slots */}
-                        {card.status === "vacant" && claudeInstalled !== false && (
+                        {card.status === "vacant" && (
                           <button
                             className="role-card-launch-btn"
                             onClick={(e) => {
                               e.stopPropagation();
                               handleLaunchMember(card.slug, card.instance);
                             }}
-                            disabled={launchCooldown}
-                            title={`Launch Claude agent as ${card.title}`}
-                            aria-label={`Launch Claude agent as ${card.title}`}
-                          >Launch</button>
+                            disabled={launchCooldown || claudeInstalled === false}
+                            title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : `Launch Claude agent as ${card.title}`}
+                            aria-label={claudeInstalled === false ? "Claude CLI not installed" : `Launch Claude agent as ${card.title}`}
+                          >{claudeInstalled === false ? "CLI Missing" : "Launch"}</button>
                         )}
                       </div>
                     );
@@ -3261,7 +3274,7 @@ When multiple instances of this role are active:
               )}
 
               {/* Launch All Vacant button */}
-              {vacantCount > 1 && claudeInstalled !== false && (
+              {vacantCount > 1 && (
                 <button
                   className="launch-team-btn"
                   onClick={() => {
@@ -3290,10 +3303,11 @@ When multiple instances of this role are active:
                       launchAllVacant();
                     }
                   }}
-                  disabled={launching || launchCooldown}
+                  disabled={launching || launchCooldown || claudeInstalled === false}
+                  title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : undefined}
                 >
                   {launching && <span className="launch-team-spinner" />}
-                  {launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
+                  {claudeInstalled === false ? "Claude CLI Not Found" : launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
                 </button>
               )}
             </>
@@ -3327,6 +3341,36 @@ When multiple instances of this role are active:
                   </div>
                 );
               })}
+            </div>
+          </div>
+        )}
+
+        {/* Claude CLI not found banner */}
+        {claudeInstalled === false && (
+          <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
+            <div className="project-hint-title" style={{ color: "#e8935a" }}>Claude CLI Not Found</div>
+            <div className="project-hint-body">
+              The Claude CLI is required to launch agents. Install it:
+              <br/><code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
+              <br/><br/>Or launch manually: open a terminal in this project folder and run <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>claude</code>
+              {window.__TAURI__ && (
+                <>
+                  <br/><br/>
+                  <button
+                    className="role-card-launch-btn"
+                    style={{ display: "inline-block", marginTop: 4 }}
+                    onClick={async () => {
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        await invoke("open_terminal_in_dir", { dir: projectDir || "" });
+                      } catch (e) {
+                        console.error("[CollabTab] Failed to open terminal:", e);
+                      }
+                    }}
+                    title="Open a terminal window in the project directory"
+                  >Open Terminal Here</button>
+                </>
+              )}
             </div>
           </div>
         )}
