@@ -247,3 +247,5 @@ class DiscussionSubmission(Base):
     submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+
+    round: Mapped["DiscussionRound"] = relationship(back_populates="submissions")

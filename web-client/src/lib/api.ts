@@ -126,6 +126,31 @@ export async function getMe(): Promise<UserResponse> {
   return request("/auth/me");
 }
 
+export async function updateProfile(data: { full_name: string | null }): Promise<UserResponse> {
+  return request("/auth/me", {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  return request("/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
+export async function updateApiKeys(keys: {
+  anthropic?: string;
+  openai?: string;
+  google?: string;
+}): Promise<void> {
+  return request("/auth/api-keys", {
+    method: "PUT",
+    body: JSON.stringify(keys),
+  });
+}
+
 // --- Projects ---
 
 export interface ProjectResponse {
@@ -214,6 +239,69 @@ export async function sendMessage(
   });
 }
 
+export async function deleteMessage(projectId: string, messageId: number): Promise<void> {
+  return request(`/messages/${projectId}/${messageId}`, { method: "DELETE" });
+}
+
+// --- Sections ---
+
+export interface SectionInfo {
+  slug: string;
+  name: string;
+  message_count: number;
+  last_activity: string | null;
+}
+
+export async function listSections(projectId: string): Promise<SectionInfo[]> {
+  return request(`/projects/${projectId}/sections`);
+}
+
+export async function createSection(projectId: string, name: string): Promise<SectionInfo> {
+  return request(`/projects/${projectId}/sections`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function switchSection(projectId: string, slug: string): Promise<void> {
+  return request(`/projects/${projectId}/sections/${slug}/switch`, { method: "POST" });
+}
+
+// --- Agent Actions ---
+
+export async function buzzAgent(projectId: string, roleSlug: string, instance = 0): Promise<void> {
+  return request(`/projects/${projectId}/roles/${roleSlug}/buzz`, {
+    method: "POST",
+    body: JSON.stringify({ instance }),
+  });
+}
+
+export async function interruptAgent(
+  projectId: string,
+  roleSlug: string,
+  reason: string,
+  instance = 0,
+): Promise<void> {
+  return request(`/projects/${projectId}/roles/${roleSlug}/interrupt`, {
+    method: "POST",
+    body: JSON.stringify({ reason, instance }),
+  });
+}
+
+// --- File Claims ---
+
+export interface FileClaim {
+  role: string;
+  instance: number;
+  files: string[];
+  description: string;
+  claimed_at: string;
+}
+
+export async function getFileClaims(projectId: string): Promise<FileClaim[]> {
+  return request(`/projects/${projectId}/claims`);
+}
+
 // --- Billing ---
 
 export interface SubscriptionStatus {
@@ -245,4 +333,136 @@ export async function getModelCatalog(): Promise<ModelCatalog> {
 
 export async function getUsageSummary(projectId: string): Promise<Record<string, unknown>> {
   return request(`/providers/usage/${projectId}`);
+}
+
+// --- Roles ---
+
+export async function getRoleBriefing(projectId: string, roleSlug: string): Promise<{ briefing: string }> {
+  return request(`/projects/${projectId}/roles/${roleSlug}/briefing`);
+}
+
+export async function updateRoleBriefing(projectId: string, roleSlug: string, briefing: string): Promise<void> {
+  return request(`/projects/${projectId}/roles/${roleSlug}/briefing`, {
+    method: "PUT",
+    body: JSON.stringify({ briefing }),
+  });
+}
+
+export async function createRole(
+  projectId: string,
+  slug: string,
+  config: Partial<RoleConfig>,
+): Promise<void> {
+  return request(`/projects/${projectId}/roles`, {
+    method: "POST",
+    body: JSON.stringify({ slug, ...config }),
+  });
+}
+
+export async function deleteRole(projectId: string, roleSlug: string): Promise<void> {
+  return request(`/projects/${projectId}/roles/${roleSlug}`, { method: "DELETE" });
+}
+
+// --- Discussions ---
+
+export interface DiscussionRound {
+  number: number;
+  topic: string | null;
+  auto_triggered: boolean;
+  trigger_from: string | null;
+  opened_at: string;
+  closed_at: string | null;
+  submission_count: number;
+  aggregate: Record<string, unknown> | null;
+}
+
+export interface DiscussionResponse {
+  id: number;
+  project_id: number;
+  mode: string;
+  topic: string;
+  is_active: boolean;
+  phase: string;
+  moderator: string | null;
+  participants: string[];
+  current_round: number;
+  max_rounds: number;
+  timeout_minutes: number;
+  auto_close_timeout_seconds: number;
+  teams: { for: string[]; against: string[] } | null;
+  rounds: DiscussionRound[];
+  started_at: string;
+  ended_at: string | null;
+}
+
+export async function startDiscussion(
+  projectId: string,
+  mode: string,
+  topic: string,
+  participants: string[] = [],
+  options: { max_rounds?: number; auto_close_timeout_seconds?: number } = {},
+): Promise<DiscussionResponse> {
+  return request(`/projects/${projectId}/discussions`, {
+    method: "POST",
+    body: JSON.stringify({ mode, topic, participants, ...options }),
+  });
+}
+
+export async function getActiveDiscussion(projectId: string): Promise<DiscussionResponse | null> {
+  return request(`/projects/${projectId}/discussions/active`);
+}
+
+export async function getDiscussion(projectId: string, discussionId: number): Promise<DiscussionResponse> {
+  return request(`/projects/${projectId}/discussions/${discussionId}`);
+}
+
+export async function openNextRound(projectId: string, discussionId: number): Promise<{ round: number }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/open-round`, { method: "POST" });
+}
+
+export async function submitToRound(
+  projectId: string,
+  discussionId: number,
+  body: string,
+): Promise<{ status: string; round: number }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/submit`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function closeRound(
+  projectId: string,
+  discussionId: number,
+): Promise<{ round: number; aggregate: Record<string, unknown> }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/close-round`, { method: "POST" });
+}
+
+export async function endDiscussion(
+  projectId: string,
+  discussionId: number,
+): Promise<{ status: string }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/end`, { method: "POST" });
+}
+
+export async function setDiscussionTeams(
+  projectId: string,
+  discussionId: number,
+  teams: { for: string[]; against: string[] },
+): Promise<{ teams: { for: string[]; against: string[] } }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/teams`, {
+    method: "POST",
+    body: JSON.stringify({ teams }),
+  });
+}
+
+export async function setDiscussionTimeout(
+  projectId: string,
+  discussionId: number,
+  timeoutSeconds: number,
+): Promise<{ auto_close_timeout_seconds: number }> {
+  return request(`/projects/${projectId}/discussions/${discussionId}/set-timeout`, {
+    method: "POST",
+    body: JSON.stringify({ timeout_seconds: timeoutSeconds }),
+  });
 }

@@ -97,9 +97,18 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   className={({ isActive }) =>
                     `btn btn-ghost ${isActive ? "active" : ""}`
                   }
-                  style={{ width: "100%", justifyContent: "flex-start" }}
+                  style={{ width: "100%", justifyContent: "flex-start", marginBottom: "var(--space-1)" }}
                 >
                   Billing & Usage
+                </NavLink>
+                <NavLink
+                  to="/settings"
+                  className={({ isActive }) =>
+                    `btn btn-ghost ${isActive ? "active" : ""}`
+                  }
+                  style={{ width: "100%", justifyContent: "flex-start" }}
+                >
+                  Settings
                 </NavLink>
               </div>
             </div>

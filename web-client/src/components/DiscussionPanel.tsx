@@ -6,25 +6,11 @@
 import { useState } from "react";
 import { useUIStore } from "../lib/stores";
 import * as api from "../lib/api";
-
-interface DiscussionState {
-  id: number;
-  mode: "delphi" | "oxford" | "red_team" | "continuous";
-  topic: string;
-  phase: "submitting" | "aggregating" | "reviewing" | "paused" | "complete";
-  current_round: number;
-  participants: string[];
-  rounds: Array<{
-    round_number: number;
-    phase: string;
-    submission_count: number;
-    aggregate?: string;
-  }>;
-}
+import type { DiscussionResponse } from "../lib/api";
 
 interface DiscussionPanelProps {
   projectId: string;
-  discussion: DiscussionState | null;
+  discussion: DiscussionResponse | null;
   onRefresh: () => void;
 }
 
@@ -65,7 +51,7 @@ export function DiscussionPanel({ projectId, discussion, onRefresh }: Discussion
     if (!discussion || !submitText.trim()) return;
     setSubmitting(true);
     try {
-      await api.submitToDiscussion(discussion.id, submitText.trim());
+      await api.submitToRound(projectId, discussion.id, submitText.trim());
       addToast("Submitted", "success");
       setSubmitText("");
       onRefresh();
@@ -80,9 +66,9 @@ export function DiscussionPanel({ projectId, discussion, onRefresh }: Discussion
     if (!discussion) return;
     setActionLoading(true);
     try {
-      if (action === "close-round") await api.closeDiscussionRound(discussion.id);
-      else if (action === "open-round") await api.openDiscussionRound(discussion.id);
-      else await api.endDiscussion(discussion.id);
+      if (action === "close-round") await api.closeRound(projectId, discussion.id);
+      else if (action === "open-round") await api.openNextRound(projectId, discussion.id);
+      else await api.endDiscussion(projectId, discussion.id);
       addToast(action === "end" ? "Discussion ended" : `Round ${action === "close-round" ? "closed" : "opened"}`, "success");
       onRefresh();
     } catch (e) {
@@ -207,45 +193,75 @@ export function DiscussionPanel({ projectId, discussion, onRefresh }: Discussion
           background: "var(--bg-tertiary)",
           borderRadius: "var(--radius-sm)",
         }}>
-          Round {latestRound.round_number}: {latestRound.submission_count} submissions
+          Round {latestRound.number}: {latestRound.submission_count} submissions
           {latestRound.aggregate && (
-            <div style={{ marginTop: "var(--space-1)", color: "var(--text-secondary)" }}>
-              {latestRound.aggregate}
+            <div style={{ marginTop: "var(--space-1)", color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
+              {typeof latestRound.aggregate === "string"
+                ? latestRound.aggregate
+                : JSON.stringify(latestRound.aggregate, null, 2)}
             </div>
           )}
         </div>
       )}
 
-      {/* Submit response (if submitting phase) */}
-      {isSubmitting && (
-        <div style={{ display: "flex", gap: "var(--space-2)" }}>
-          <input
+      {/* Continuous timeout selector */}
+      {discussion.mode === "continuous" && (
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
+          <label style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>Timeout:</label>
+          <select
             className="input"
-            value={submitText}
-            onChange={(e) => setSubmitText(e.target.value)}
-            placeholder="Your response..."
-            onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
-            aria-label="Discussion response"
-          />
-          <button className="btn btn-primary" onClick={handleSubmit} disabled={!submitText.trim() || submitting}>
-            {submitting ? "..." : "Submit"}
-          </button>
+            style={{ fontSize: "var(--text-xs)", padding: "2px var(--space-2)", width: 80 }}
+            value={discussion.auto_close_timeout_seconds}
+            onChange={async (e) => {
+              try {
+                await api.setDiscussionTimeout(projectId, discussion.id, parseInt(e.target.value));
+                onRefresh();
+              } catch (err) {
+                addToast("Failed to set timeout", "error");
+              }
+            }}
+            aria-label="Auto-close timeout"
+          >
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+            <option value="120">2m</option>
+            <option value="300">5m</option>
+          </select>
         </div>
       )}
 
-      {/* Round controls */}
-      {!isSubmitting && discussion.phase !== "complete" && (
+      {/* Submit response + close round (if submitting phase) */}
+      {isSubmitting && (
+        <>
+          <div style={{ display: "flex", gap: "var(--space-2)" }}>
+            <input
+              className="input"
+              value={submitText}
+              onChange={(e) => setSubmitText(e.target.value)}
+              placeholder="Your response..."
+              onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+              aria-label="Discussion response"
+            />
+            <button className="btn btn-primary" onClick={handleSubmit} disabled={!submitText.trim() || submitting}>
+              {submitting ? "..." : "Submit"}
+            </button>
+          </div>
+          {discussion.mode !== "continuous" && (
+            <div style={{ marginTop: "var(--space-2)" }}>
+              <button className="btn btn-ghost" style={{ fontSize: "var(--text-xs)" }} onClick={() => handleAction("close-round")} disabled={actionLoading}>
+                Close Round
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Open next round (reviewing/preparing phase) */}
+      {(discussion.phase === "reviewing" || discussion.phase === "preparing") && (
         <div style={{ display: "flex", gap: "var(--space-2)", marginTop: "var(--space-2)" }}>
-          {discussion.phase === "reviewing" && (
-            <button className="btn btn-secondary" onClick={() => handleAction("open-round")} disabled={actionLoading}>
-              Open Next Round
-            </button>
-          )}
-          {discussion.phase === "submitting" && (
-            <button className="btn btn-secondary" onClick={() => handleAction("close-round")} disabled={actionLoading}>
-              Close Round
-            </button>
-          )}
+          <button className="btn btn-secondary" onClick={() => handleAction("open-round")} disabled={actionLoading}>
+            Open Round {discussion.current_round + 1}
+          </button>
         </div>
       )}
     </div>

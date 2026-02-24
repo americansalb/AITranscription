@@ -203,3 +203,77 @@ async def refresh_token(user: WebUser = Depends(get_current_user)):
         access_token=token,
         expires_in=settings.access_token_expire_minutes * 60,
     )
+
+
+# --- Profile management ---
+
+class UpdateProfileRequest(BaseModel):
+    full_name: str | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=72)
+
+
+class UpdateApiKeysRequest(BaseModel):
+    anthropic: str | None = None
+    openai: str | None = None
+    google: str | None = None
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_profile(
+    request: UpdateProfileRequest,
+    user: WebUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update current user's profile (name)."""
+    user.full_name = request.full_name
+    await db.commit()
+    await db.refresh(user)
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        tier=user.tier.value,
+        created_at=user.created_at,
+    )
+
+
+@router.post("/change-password")
+async def change_password(
+    request: ChangePasswordRequest,
+    user: WebUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change the current user's password."""
+    if not pwd_context.verify(request.current_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    user.hashed_password = pwd_context.hash(request.new_password)
+    await db.commit()
+    return {"status": "password_changed"}
+
+
+@router.put("/api-keys")
+async def update_api_keys(
+    request: UpdateApiKeysRequest,
+    user: WebUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update BYOK API keys for the current user."""
+    if request.anthropic is not None:
+        user.byok_anthropic_key = request.anthropic or None
+    if request.openai is not None:
+        user.byok_openai_key = request.openai or None
+    if request.google is not None:
+        user.byok_google_key = request.google or None
+
+    # Auto-upgrade to BYOK tier if any key is set
+    has_any_key = any([user.byok_anthropic_key, user.byok_openai_key, user.byok_google_key])
+    if has_any_key and user.tier == SubscriptionTier.FREE:
+        user.tier = SubscriptionTier.BYOK
+
+    await db.commit()
+    return {"status": "keys_updated", "tier": user.tier.value}

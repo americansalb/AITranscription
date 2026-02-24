@@ -32,24 +32,6 @@ class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
 
-class RoleResponse(BaseModel):
-    slug: str
-    title: str
-    provider: str
-    model: str
-    max_instances: int
-    is_agent_running: bool
-
-
-class ProjectResponse(BaseModel):
-    id: int
-    name: str
-    owner_id: int
-    is_active: bool
-    roles: list[RoleResponse]
-    created_at: str
-
-
 class UpdateRoleProviderRequest(BaseModel):
     provider: str
     model: str
@@ -57,7 +39,7 @@ class UpdateRoleProviderRequest(BaseModel):
 
 # --- Endpoints ---
 
-@router.post("/", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_project(
     request: CreateProjectRequest,
     db: AsyncSession = Depends(get_db),
@@ -87,7 +69,7 @@ async def create_project(
     return _project_response(project)
 
 
-@router.get("/", response_model=list[ProjectResponse])
+@router.get("/")
 async def list_projects(
     db: AsyncSession = Depends(get_db),
     user: WebUser = Depends(get_current_user),
@@ -102,7 +84,7 @@ async def list_projects(
     return [_project_response(p) for p in projects]
 
 
-@router.get("/{project_id}", response_model=ProjectResponse)
+@router.get("/{project_id}")
 async def get_project(
     project_id: int,
     db: AsyncSession = Depends(get_db),
@@ -234,22 +216,23 @@ def _find_role(project: Project, role_slug: str) -> ProjectRole:
     raise HTTPException(status_code=404, detail=f"Role '{role_slug}' not found in project")
 
 
-def _project_response(project: Project) -> ProjectResponse:
-    return ProjectResponse(
-        id=project.id,
-        name=project.name,
-        owner_id=project.owner_id,
-        is_active=project.is_active,
-        roles=[
-            RoleResponse(
-                slug=r.slug,
-                title=r.title,
-                provider=r.provider,
-                model=r.model,
-                max_instances=r.max_instances,
-                is_agent_running=r.is_agent_running,
-            )
-            for r in project.roles
-        ],
-        created_at=project.created_at.isoformat(),
-    )
+def _project_response(project: Project) -> dict:
+    """Convert Project ORM object to dict matching frontend ProjectResponse interface."""
+    roles_dict = {}
+    for r in project.roles:
+        roles_dict[r.slug] = {
+            "title": r.title,
+            "description": r.briefing or "",
+            "tags": [],
+            "permissions": [],
+            "maxInstances": r.max_instances,
+            "provider": {"provider": r.provider, "model": r.model},
+            "is_agent_running": r.is_agent_running,
+        }
+    return {
+        "id": str(project.id),
+        "name": project.name,
+        "owner_id": project.owner_id,
+        "roles": roles_dict,
+        "created_at": project.created_at.isoformat(),
+    }

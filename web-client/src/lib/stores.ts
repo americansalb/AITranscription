@@ -6,7 +6,7 @@
 
 import { create } from "zustand";
 import * as api from "./api";
-import type { BoardMessage, ProjectResponse, UserResponse, RoleConfig } from "./api";
+import type { BoardMessage, DiscussionResponse, ProjectResponse, UserResponse } from "./api";
 
 // --- Auth Store ---
 
@@ -223,6 +223,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const MAX_RECONNECT_ATTEMPTS = 10;
 
     ws.onopen = () => {
+      // Send JWT auth as the first message (required by backend)
+      const token = api.getToken();
+      if (token) {
+        ws.send(JSON.stringify({ type: "auth", token }));
+      }
       set({ connected: true });
       reconnectDelay = 3000;
       reconnectAttempts = 0;
@@ -268,6 +273,128 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     } catch (e) {
       const errMsg = e instanceof api.ApiError ? e.userMessage : "Failed to send message";
       set({ error: errMsg });
+    }
+  },
+}));
+
+// --- Discussion Store ---
+
+interface DiscussionState {
+  discussion: DiscussionResponse | null;
+  loading: boolean;
+  error: string | null;
+  loadActive: (projectId: string) => Promise<void>;
+  start: (
+    projectId: string,
+    mode: string,
+    topic: string,
+    participants?: string[],
+    options?: { max_rounds?: number; auto_close_timeout_seconds?: number },
+  ) => Promise<void>;
+  openRound: (projectId: string) => Promise<void>;
+  closeRound: (projectId: string) => Promise<void>;
+  end: (projectId: string) => Promise<void>;
+  submit: (projectId: string, body: string) => Promise<void>;
+  setTeams: (projectId: string, teams: { for: string[]; against: string[] }) => Promise<void>;
+  setTimeout: (projectId: string, seconds: number) => Promise<void>;
+}
+
+export const useDiscussionStore = create<DiscussionState>((set, get) => ({
+  discussion: null,
+  loading: false,
+  error: null,
+
+  loadActive: async (projectId) => {
+    set({ loading: true, error: null });
+    try {
+      const disc = await api.getActiveDiscussion(projectId);
+      set({ discussion: disc, loading: false });
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to load discussion";
+      set({ error: msg, loading: false });
+    }
+  },
+
+  start: async (projectId, mode, topic, participants = [], options = {}) => {
+    set({ loading: true, error: null });
+    try {
+      const disc = await api.startDiscussion(projectId, mode, topic, participants, options);
+      set({ discussion: disc, loading: false });
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to start discussion";
+      set({ error: msg, loading: false });
+    }
+  },
+
+  openRound: async (projectId) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.openNextRound(projectId, disc.id);
+      await get().loadActive(projectId);
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to open round";
+      set({ error: msg });
+    }
+  },
+
+  closeRound: async (projectId) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.closeRound(projectId, disc.id);
+      await get().loadActive(projectId);
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to close round";
+      set({ error: msg });
+    }
+  },
+
+  end: async (projectId) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.endDiscussion(projectId, disc.id);
+      set({ discussion: null });
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to end discussion";
+      set({ error: msg });
+    }
+  },
+
+  submit: async (projectId, body) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.submitToRound(projectId, disc.id, body);
+      await get().loadActive(projectId);
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to submit";
+      set({ error: msg });
+    }
+  },
+
+  setTeams: async (projectId, teams) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.setDiscussionTeams(projectId, disc.id, teams);
+      await get().loadActive(projectId);
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to set teams";
+      set({ error: msg });
+    }
+  },
+
+  setTimeout: async (projectId, seconds) => {
+    const disc = get().discussion;
+    if (!disc) return;
+    try {
+      await api.setDiscussionTimeout(projectId, disc.id, seconds);
+      await get().loadActive(projectId);
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to set timeout";
+      set({ error: msg });
     }
   },
 }));

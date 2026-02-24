@@ -49,7 +49,7 @@ app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"]
 app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
 app.include_router(billing.router, prefix="/api/v1/billing", tags=["billing"])
 app.include_router(providers.router, prefix="/api/v1/providers", tags=["providers"])
-app.include_router(discussions.router, prefix="/api/v1/messages", tags=["discussions"])
+app.include_router(discussions.router, prefix="/api/v1/projects", tags=["discussions"])
 
 
 @app.get("/health")

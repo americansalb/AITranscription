@@ -12,15 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import decode_access_token, get_current_user
 from app.database import async_session, get_db
-from app.models import (
-    Discussion,
-    DiscussionMode,
-    DiscussionPhase,
-    DiscussionRound,
-    Message,
-    Project,
-    WebUser,
-)
+from app.models import Message, Project, WebUser
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -73,25 +65,9 @@ class SendMessageRequest(BaseModel):
     body: str = Field(max_length=10000)
 
 
-class MessageResponse(BaseModel):
-    id: int
-    project_id: int
-    from_role: str
-    to_role: str
-    msg_type: str
-    subject: str
-    body: str
-    created_at: str
-
-
-class MessageListResponse(BaseModel):
-    messages: list[MessageResponse]
-    total: int
-
-
 # --- REST endpoints ---
 
-@router.get("/{project_id}", response_model=MessageListResponse)
+@router.get("/{project_id}")
 async def get_messages(
     project_id: int,
     since_id: int = 0,
@@ -119,13 +95,13 @@ async def get_messages(
     result = await db.execute(query)
     messages = result.scalars().all()
 
-    return MessageListResponse(
-        messages=[_msg_response(m) for m in messages],
-        total=len(messages),
-    )
+    return {
+        "messages": [_msg_to_dict(m) for m in messages],
+        "total": len(messages),
+    }
 
 
-@router.post("/{project_id}", response_model=MessageResponse)
+@router.post("/{project_id}")
 async def send_message(
     project_id: int,
     request: SendMessageRequest,
@@ -153,8 +129,8 @@ async def send_message(
     await db.refresh(msg)
 
     # Broadcast to WebSocket clients
-    response = _msg_response(msg)
-    await manager.broadcast(project_id, response.model_dump())
+    response = _msg_to_dict(msg)
+    await manager.broadcast(project_id, response)
 
     # Auto-trigger continuous review round if status message
     if request.type == "status":
@@ -216,8 +192,8 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
                     db.add(msg)
                     await db.commit()
                     await db.refresh(msg)
-                    response = _msg_response(msg)
-                    await manager.broadcast(project_id, response.model_dump())
+                    response = _msg_to_dict(msg)
+                    await manager.broadcast(project_id, response)
 
                     # Auto-trigger continuous review for status messages
                     if data.get("msg_type") == "status":
@@ -231,82 +207,34 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
         manager.disconnect(project_id, websocket)
 
 
-def _msg_response(msg: Message) -> MessageResponse:
-    return MessageResponse(
-        id=msg.id,
-        project_id=msg.project_id,
-        from_role=msg.from_role,
-        to_role=msg.to_role,
-        msg_type=msg.msg_type,
-        subject=msg.subject,
-        body=msg.body,
-        created_at=msg.created_at.isoformat(),
-    )
+def _msg_to_dict(msg: Message) -> dict:
+    """Convert a Message ORM object to a dict matching the frontend BoardMessage interface."""
+    return {
+        "id": msg.id,
+        "from": msg.from_role,
+        "to": msg.to_role,
+        "type": msg.msg_type,
+        "subject": msg.subject,
+        "body": msg.body,
+        "timestamp": msg.created_at.isoformat(),
+        "metadata": {},
+    }
 
 
 async def _maybe_trigger_continuous_round(
     db: AsyncSession, project_id: int, trigger_msg: Message
 ) -> None:
-    """Auto-create a continuous review round when a status message is posted.
+    """Delegate to discussions.py for continuous review auto-trigger.
 
-    This mirrors the desktop's auto_create_continuous_round behavior:
-    - Only triggers if there's an active continuous discussion
-    - Creates a new round with trigger_from set to the message author
-    - Posts a review-request broadcast so other participants know to respond
+    Uses lazy import to avoid circular dependency (discussions imports manager from here).
     """
-    result = await db.execute(
-        select(Discussion).where(
-            Discussion.project_id == project_id,
-            Discussion.is_active == True,
-            Discussion.mode == DiscussionMode.CONTINUOUS,
-        )
-    )
-    discussion = result.scalar_one_or_none()
-    if not discussion:
-        return
+    from app.api.discussions import maybe_auto_trigger_continuous
 
-    if discussion.phase not in (DiscussionPhase.REVIEWING, DiscussionPhase.SUBMITTING):
-        return
-
-    if discussion.current_round >= discussion.max_rounds:
-        return
-
-    # Create a new auto-triggered round
-    discussion.current_round += 1
-    discussion.phase = DiscussionPhase.SUBMITTING
-
-    new_round = DiscussionRound(
-        discussion_id=discussion.id,
-        number=discussion.current_round,
-        topic=trigger_msg.subject or trigger_msg.body[:200],
-        auto_triggered=True,
-        trigger_from=trigger_msg.from_role,
-        trigger_message_id=trigger_msg.id,
-    )
-    db.add(new_round)
-
-    # Post review-request broadcast
-    review_msg = Message(
+    await maybe_auto_trigger_continuous(
         project_id=project_id,
-        from_role="system",
-        to_role="all",
-        msg_type="broadcast",
-        subject=f"Review round {discussion.current_round} (auto)",
-        body=f"Status update from {trigger_msg.from_role}: {trigger_msg.subject or trigger_msg.body[:200]}\n"
-             f"Respond with agree/disagree/alternative, or silence = consent "
-             f"(timeout: {discussion.auto_close_timeout_seconds}s).",
-    )
-    db.add(review_msg)
-    await db.commit()
-
-    await manager.broadcast(project_id, {
-        "type": "continuous_round_triggered",
-        "discussion_id": discussion.id,
-        "round": discussion.current_round,
-        "trigger_from": trigger_msg.from_role,
-    })
-
-    logger.info(
-        "Continuous round auto-triggered: discussion=%d round=%d trigger=%s",
-        discussion.id, discussion.current_round, trigger_msg.from_role,
+        from_role=trigger_msg.from_role,
+        msg_type=trigger_msg.msg_type,
+        message_id=trigger_msg.id,
+        subject=trigger_msg.subject,
+        db=db,
     )

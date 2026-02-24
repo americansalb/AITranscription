@@ -109,7 +109,7 @@ export function DashboardPage() {
           aria-modal="true"
           aria-label="Create new project"
         >
-          <div className="modal" ref={modalRef}
+          <div className="modal" ref={modalRef}>
             <div className="modal-header">
               <h2 className="modal-title">New Project</h2>
               <button

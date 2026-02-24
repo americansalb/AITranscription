@@ -5,6 +5,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ProjectPage } from "./pages/ProjectPage";
 import { BillingPage } from "./pages/BillingPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { AppLayout } from "./components/AppLayout";
 import { ToastContainer } from "./components/Toast";
 
@@ -46,6 +47,7 @@ export function App() {
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/project/:projectId" element={<ProjectPage />} />
                   <Route path="/billing" element={<BillingPage />} />
+                  <Route path="/settings" element={<SettingsPage />} />
                 </Routes>
               </AppLayout>
             </ProtectedRoute>

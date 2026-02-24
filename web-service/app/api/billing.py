@@ -18,28 +18,14 @@ router = APIRouter()
 
 # --- Schemas ---
 
-class SubscriptionStatus(BaseModel):
-    tier: str
-    status: str  # "active", "past_due", "canceled", "none"
-    current_period_end: str | None = None
-    usage_tokens: int = 0
-    usage_limit_tokens: int = 0
-
-
 class CreateCheckoutRequest(BaseModel):
-    tier: str  # "pro" or "byok"
-    success_url: str
-    cancel_url: str
-
-
-class CheckoutResponse(BaseModel):
-    checkout_url: str
+    plan: str  # "pro" or "byok"
 
 
 # --- Endpoints ---
 
-@router.get("/subscription", response_model=SubscriptionStatus)
-async def get_subscription(user: WebUser = Depends(get_current_user)):
+@router.get("/status")
+async def get_subscription_status(user: WebUser = Depends(get_current_user)):
     """Get current user's subscription status and usage."""
     limit = settings.free_tier_monthly_tokens
     if user.tier == SubscriptionTier.PRO:
@@ -48,29 +34,30 @@ async def get_subscription(user: WebUser = Depends(get_current_user)):
         limit = 999_999_999
 
     subscription_status = "none"
-    period_end = None
-
     if user.stripe_subscription_id:
         try:
             import stripe
             stripe.api_key = settings.stripe_secret_key
             sub = stripe.Subscription.retrieve(user.stripe_subscription_id)
             subscription_status = sub.status
-            period_end = sub.current_period_end
         except Exception as e:
             logger.error("Failed to fetch Stripe subscription: %s", e)
             subscription_status = "unknown"
 
-    return SubscriptionStatus(
-        tier=user.tier.value,
-        status=subscription_status if user.tier != SubscriptionTier.FREE else "none",
-        current_period_end=str(period_end) if period_end else None,
-        usage_tokens=user.monthly_tokens_used,
-        usage_limit_tokens=limit,
-    )
+    is_active = subscription_status == "active" or user.tier != SubscriptionTier.FREE
+
+    return {
+        "active": is_active,
+        "plan": user.tier.value,
+        "usage": {
+            "tokens_used": user.monthly_tokens_used,
+            "tokens_limit": limit,
+            "cost_usd": round(user.monthly_cost_usd, 4),
+        },
+    }
 
 
-@router.post("/checkout", response_model=CheckoutResponse)
+@router.post("/checkout")
 async def create_checkout(
     request: CreateCheckoutRequest,
     db: AsyncSession = Depends(get_db),
@@ -80,12 +67,18 @@ async def create_checkout(
     if not settings.stripe_secret_key:
         raise HTTPException(status_code=503, detail="Billing not configured")
 
-    if request.tier not in ("pro", "byok"):
-        raise HTTPException(status_code=400, detail="Invalid tier. Choose 'pro' or 'byok'.")
+    plan = request.plan
+    if plan not in ("pro", "byok"):
+        raise HTTPException(status_code=400, detail="Invalid plan. Choose 'pro' or 'byok'.")
 
-    price_id = settings.stripe_price_pro if request.tier == "pro" else settings.stripe_price_byok
+    price_id = settings.stripe_price_pro if plan == "pro" else settings.stripe_price_byok
     if not price_id:
-        raise HTTPException(status_code=503, detail=f"Price not configured for {request.tier} tier")
+        raise HTTPException(status_code=503, detail=f"Price not configured for {plan} plan")
+
+    # Build callback URLs from CORS origins
+    base_url = settings.cors_origins[0] if settings.cors_origins else "http://localhost:3000"
+    success_url = f"{base_url}/billing?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url = f"{base_url}/billing"
 
     try:
         import stripe
@@ -105,12 +98,12 @@ async def create_checkout(
             payment_method_types=["card"],
             line_items=[{"price": price_id, "quantity": 1}],
             mode="subscription",
-            success_url=request.success_url,
-            cancel_url=request.cancel_url,
-            metadata={"user_id": str(user.id), "tier": request.tier},
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={"user_id": str(user.id), "tier": plan},
         )
 
-        return CheckoutResponse(checkout_url=session.url)
+        return {"url": session.url}
 
     except Exception as e:
         logger.error("Stripe checkout creation failed: %s", e)

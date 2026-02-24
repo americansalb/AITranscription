@@ -142,15 +142,17 @@ async def route_completion(
 
 
 @router.get("/usage", response_model=UsageSummary)
+@router.get("/usage/{project_id}", response_model=UsageSummary)
 async def get_usage(
+    project_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     user: WebUser = Depends(get_current_user),
 ):
-    """Get current user's usage summary."""
+    """Get current user's usage summary, optionally scoped to a project."""
     monthly_limit = _get_monthly_limit(user.tier)
 
     # Provider breakdown from usage records
-    result = await db.execute(
+    usage_query = (
         select(
             UsageRecord.provider,
             func.sum(UsageRecord.input_tokens + UsageRecord.output_tokens).label("tokens"),
@@ -160,6 +162,10 @@ async def get_usage(
         .where(UsageRecord.user_id == user.id)
         .group_by(UsageRecord.provider)
     )
+    if project_id is not None:
+        usage_query = usage_query.where(UsageRecord.project_id == project_id)
+
+    result = await db.execute(usage_query)
     breakdown = {}
     for row in result.all():
         breakdown[row.provider] = {
@@ -180,24 +186,25 @@ async def get_usage(
 @router.get("/models")
 async def list_available_models():
     """List all available models across configured providers."""
-    models = {}
+    # Per-million-token pricing (input/output) — approximate as of Feb 2026
+    MODEL_CATALOG = []
     if settings.anthropic_api_key:
-        models["anthropic"] = [
-            {"id": "claude-opus-4-6", "name": "Claude Opus 4.6", "context_window": 200000},
-            {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "context_window": 200000},
-            {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "context_window": 200000},
-        ]
+        MODEL_CATALOG.extend([
+            {"id": "claude-opus-4-6", "provider": "anthropic", "name": "Claude Opus 4.6", "input_cost": 15.0, "output_cost": 75.0},
+            {"id": "claude-sonnet-4-6", "provider": "anthropic", "name": "Claude Sonnet 4.6", "input_cost": 3.0, "output_cost": 15.0},
+            {"id": "claude-haiku-4-5-20251001", "provider": "anthropic", "name": "Claude Haiku 4.5", "input_cost": 0.80, "output_cost": 4.0},
+        ])
     if settings.openai_api_key:
-        models["openai"] = [
-            {"id": "gpt-4o", "name": "GPT-4o", "context_window": 128000},
-            {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "context_window": 128000},
-        ]
+        MODEL_CATALOG.extend([
+            {"id": "gpt-4o", "provider": "openai", "name": "GPT-4o", "input_cost": 2.50, "output_cost": 10.0},
+            {"id": "gpt-4o-mini", "provider": "openai", "name": "GPT-4o Mini", "input_cost": 0.15, "output_cost": 0.60},
+        ])
     if settings.google_ai_api_key:
-        models["google"] = [
-            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "context_window": 1000000},
-            {"id": "gemini-2.0-pro", "name": "Gemini 2.0 Pro", "context_window": 1000000},
-        ]
-    return models
+        MODEL_CATALOG.extend([
+            {"id": "gemini-2.0-flash", "provider": "google", "name": "Gemini 2.0 Flash", "input_cost": 0.10, "output_cost": 0.40},
+            {"id": "gemini-2.0-pro", "provider": "google", "name": "Gemini 2.0 Pro", "input_cost": 1.25, "output_cost": 5.0},
+        ])
+    return {"models": MODEL_CATALOG}
 
 
 # --- Helpers ---
