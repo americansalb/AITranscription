@@ -1,7 +1,6 @@
 """Authentication endpoints — signup, login, token refresh, user info."""
 
 import logging
-import os
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -28,12 +27,7 @@ ALGORITHM = "HS256"
 # --- Rate limiting ---
 
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
-_TESTING = os.environ.get("VAAK_WEB_TESTING") == "1"
-
-
 def _check_rate_limit(key: str, max_attempts: int, window_seconds: int = 60) -> None:
-    if _TESTING:
-        return
     now = time.monotonic()
     cutoff = now - window_seconds
     _rate_limit_store[key] = [t for t in _rate_limit_store[key] if t > cutoff]

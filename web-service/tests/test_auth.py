@@ -247,11 +247,10 @@ async def test_signup_password_too_long(client: AsyncClient):
 async def test_signup_rate_limit(client: AsyncClient):
     """6th signup from same IP in 5 minutes returns 429.
 
-    ASGITransport doesn't set request.client, so the IP resolves to 'unknown'.
+    ASGITransport sets client to ('127.0.0.1', 123).
     """
     from app.api.auth import _rate_limit_store
-    # ASGITransport: raw.client is None → client_ip = "unknown"
-    _rate_limit_store["signup:unknown"] = [time.monotonic()] * 5
+    _rate_limit_store["signup:127.0.0.1"] = [time.monotonic()] * 5
 
     resp = await client.post("/api/v1/auth/signup", json={
         "email": "ratelimited@example.com",
@@ -264,7 +263,7 @@ async def test_signup_rate_limit(client: AsyncClient):
 async def test_login_rate_limit(client: AsyncClient):
     """11th login attempt from same IP in 1 minute returns 429."""
     from app.api.auth import _rate_limit_store
-    _rate_limit_store["login:unknown"] = [time.monotonic()] * 10
+    _rate_limit_store["login:127.0.0.1"] = [time.monotonic()] * 10
 
     resp = await client.post("/api/v1/auth/login", json={
         "email": "test@example.com",
