@@ -1,0 +1,15 @@
+.git
+.vaak
+.analysis
+.claude
+desktop/
+backend/
+*.exe
+*.exe.bak*
+*.exe.old*
+*.exe.new
+nul
+__pycache__
+*.pyc
+node_modules
+.env

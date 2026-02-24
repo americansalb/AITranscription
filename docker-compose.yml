@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:16-alpine
@@ -27,6 +25,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     environment:
       VAAK_WEB_DATABASE_URL: postgresql+asyncpg://vaak:vaak_dev_password@db:5432/vaak_web
       VAAK_WEB_SECRET_KEY: ${VAAK_WEB_SECRET_KEY:-change-me-in-production}
@@ -47,7 +51,8 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:
