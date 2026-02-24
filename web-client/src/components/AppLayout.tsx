@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuthStore, useProjectStore, useUIStore } from "../lib/stores";
-import { useEffect } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -10,6 +10,24 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const toggleSidebar = useUIStore((s) => s.toggleSidebar);
   const navigate = useNavigate();
+
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    return (localStorage.getItem("vaak_theme") as "dark" | "light") || "dark";
+  });
+
+  const toggleTheme = useCallback(() => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("vaak_theme", next);
+    document.documentElement.classList.toggle("light", next === "light");
+    document.documentElement.classList.toggle("dark", next === "dark");
+  }, [theme]);
+
+  // Apply theme on mount
+  useEffect(() => {
+    document.documentElement.classList.toggle("light", theme === "light");
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
 
   useEffect(() => {
     loadProjects();
@@ -120,9 +138,18 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               alignItems: "center",
               justifyContent: "space-between",
             }}>
-              <span style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)" }}>
+              <span style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
                 {user?.email}
               </span>
+              <button
+                className="btn btn-ghost"
+                onClick={toggleTheme}
+                aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+                title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+                style={{ fontSize: "var(--text-sm)", padding: "var(--space-1)" }}
+              >
+                {theme === "dark" ? "\u2600\uFE0F" : "\uD83C\uDF19"}
+              </button>
               <button
                 className="btn btn-ghost"
                 onClick={() => { logout(); navigate("/login"); }}

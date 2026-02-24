@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import { useProjectStore, useMessageStore } from "../lib/stores";
-import { getModelCatalog, getActiveDiscussion, deleteMessage, buzzAgent, interruptAgent, listSections, createSection, switchSection } from "../lib/api";
+import { getModelCatalog, getActiveDiscussion, deleteMessage, buzzAgent, interruptAgent, listSections, createSection, switchSection, deleteRole } from "../lib/api";
 import type { BoardMessage, DiscussionResponse, SectionInfo } from "../lib/api";
 import { useUIStore } from "../lib/stores";
 import { DiscussionPanel } from "../components/DiscussionPanel";
 import { RoleBriefingModal } from "../components/RoleBriefingModal";
 import { FileClaimsPanel } from "../components/FileClaimsPanel";
 import { AddRoleModal } from "../components/AddRoleModal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 const ROLE_COLORS: Record<string, string> = {
   manager: "var(--role-manager)",
@@ -34,8 +35,17 @@ const FALLBACK_MODELS: Record<string, Array<{ id: string; label: string }>> = {
   ],
 };
 
-function MessageCard({ msg, onDelete }: { msg: BoardMessage; onDelete: (id: number) => void }) {
+function MessageCard({
+  msg,
+  onDelete,
+  onQuickReply,
+}: {
+  msg: BoardMessage;
+  onDelete: (id: number) => void;
+  onQuickReply?: (to: string, type: string, subject: string, body: string) => void;
+}) {
   const fromRole = msg.from.split(":")[0];
+  const isReviewType = msg.type === "review" || msg.type === "handoff";
   return (
     <div
       className="card"
@@ -59,7 +69,7 @@ function MessageCard({ msg, onDelete }: { msg: BoardMessage; onDelete: (id: numb
         </span>
         <span style={{ color: "var(--text-muted)" }}>{"\u2192"}</span>
         <span style={{ color: "var(--text-secondary)" }}>{msg.to}</span>
-        <span className={`badge badge-${msg.type === "directive" ? "error" : msg.type === "approval" ? "success" : "accent"}`}>
+        <span className={`badge badge-${msg.type === "directive" ? "error" : msg.type === "approval" ? "success" : msg.type === "revision" ? "warning" : "accent"}`}>
           {msg.type}
         </span>
         <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginLeft: "auto" }}>
@@ -83,6 +93,35 @@ function MessageCard({ msg, onDelete }: { msg: BoardMessage; onDelete: (id: numb
       <div style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", whiteSpace: "pre-wrap" }}>
         {msg.body}
       </div>
+      {/* Quick-action voting for review/handoff messages */}
+      {isReviewType && onQuickReply && (
+        <div style={{ display: "flex", gap: "var(--space-1)", marginTop: "var(--space-2)" }}>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: "var(--text-xs)", color: "var(--success)", padding: "2px var(--space-2)" }}
+            onClick={() => onQuickReply(msg.from, "approval", `Re: ${msg.subject || "review"}`, "Approved.")}
+            aria-label="Approve"
+          >
+            {"\u2713"} Approve
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: "var(--text-xs)", color: "var(--warning)", padding: "2px var(--space-2)" }}
+            onClick={() => onQuickReply(msg.from, "revision", `Re: ${msg.subject || "review"}`, "Needs revision.")}
+            aria-label="Request revision"
+          >
+            {"\u21BA"} Revise
+          </button>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: "var(--text-xs)", color: "var(--error)", padding: "2px var(--space-2)" }}
+            onClick={() => onQuickReply(msg.from, "revision", `Re: ${msg.subject || "review"}`, "Rejected — see below.")}
+            aria-label="Reject"
+          >
+            {"\u2717"} Reject
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -106,6 +145,7 @@ export function ProjectPage() {
   const selectProject = useProjectStore((s) => s.selectProject);
   const updateRoleProvider = useProjectStore((s) => s.updateRoleProvider);
   const startAgent = useProjectStore((s) => s.startAgent);
+  const stopAgent = useProjectStore((s) => s.stopAgent);
   const projectLoading = useProjectStore((s) => s.loading);
 
   const messages = useMessageStore((s) => s.messages);
@@ -116,6 +156,7 @@ export function ProjectPage() {
   const sendMsg = useMessageStore((s) => s.sendMessage);
 
   const [msgTo, setMsgTo] = useState("all");
+  const [msgType, setMsgType] = useState("directive");
   const [msgBody, setMsgBody] = useState("");
   const [sending, setSending] = useState(false);
   const [providerModels, setProviderModels] = useState<Record<string, Array<{ id: string; label: string }>>>(FALLBACK_MODELS);
@@ -130,6 +171,11 @@ export function ProjectPage() {
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [showAddRole, setShowAddRole] = useState(false);
+  const [deleteRoleTarget, setDeleteRoleTarget] = useState<{ slug: string; title: string } | null>(null);
+  const [msgFilter, setMsgFilter] = useState("");
+  const [rosterView, setRosterView] = useState<"cards" | "compact">(() =>
+    (localStorage.getItem("vaak_roster_view") as "cards" | "compact") || "cards"
+  );
 
   // Persist compose draft to localStorage
   const draftKey = projectId ? `vaak_draft_${projectId}` : null;
@@ -178,6 +224,23 @@ export function ProjectPage() {
       addToast("Failed to send interrupt", "error");
     }
   }, [projectId, interruptTarget, interruptReason, addToast]);
+
+  const handleQuickReply = useCallback(async (to: string, type: string, subject: string, body: string) => {
+    if (!projectId) return;
+    await sendMsg(projectId, to, type, subject, body);
+  }, [projectId, sendMsg]);
+
+  const handleDeleteRole = useCallback(async () => {
+    if (!projectId || !deleteRoleTarget) return;
+    try {
+      await deleteRole(projectId, deleteRoleTarget.slug);
+      addToast(`Deleted role: ${deleteRoleTarget.title}`, "success");
+      setDeleteRoleTarget(null);
+      selectProject(projectId);
+    } catch {
+      addToast("Failed to delete role", "error");
+    }
+  }, [projectId, deleteRoleTarget, addToast, selectProject]);
 
   const loadSections = useCallback(async () => {
     if (!projectId) return;
@@ -258,18 +321,25 @@ export function ProjectPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  // Auto-scroll on new messages + refresh discussion state on new messages
+  // Auto-scroll on new messages + debounced discussion refresh (fixes C2: API spam)
+  const discussionRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    // Discussion events arrive as WS messages — refresh discussion state
-    refreshDiscussion();
+    // Debounce discussion refresh to max once per 2 seconds
+    if (discussionRefreshTimer.current) clearTimeout(discussionRefreshTimer.current);
+    discussionRefreshTimer.current = setTimeout(() => {
+      refreshDiscussion();
+    }, 2000);
+    return () => {
+      if (discussionRefreshTimer.current) clearTimeout(discussionRefreshTimer.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
   const handleSend = async () => {
     if (!projectId || !msgBody.trim() || sending) return;
     setSending(true);
-    await sendMsg(projectId, msgTo, "directive", msgSubject.trim(), msgBody.trim());
+    await sendMsg(projectId, msgTo, msgType, msgSubject.trim(), msgBody.trim());
     setMsgBody("");
     setMsgSubject("");
     if (draftKey) localStorage.removeItem(draftKey);
@@ -297,6 +367,17 @@ export function ProjectPage() {
 
   const roles = Object.entries(project.roles);
 
+  const filterLower = msgFilter.toLowerCase();
+  const filteredMessages = filterLower
+    ? messages.filter((m) =>
+        m.from.toLowerCase().includes(filterLower) ||
+        m.to.toLowerCase().includes(filterLower) ||
+        m.type.toLowerCase().includes(filterLower) ||
+        m.subject.toLowerCase().includes(filterLower) ||
+        m.body.toLowerCase().includes(filterLower)
+      )
+    : messages;
+
   return (
     <>
       <div className="page-header">
@@ -323,20 +404,36 @@ export function ProjectPage() {
             </h2>
             <div style={{ display: "flex", gap: "var(--space-1)" }}>
               {roles.length > 0 && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: "var(--text-xs)" }}
-                  onClick={async () => {
-                    for (const [slug] of roles) {
-                      await startAgent(slug);
-                    }
-                    addToast(`Started ${roles.length} agents`, "success");
-                  }}
-                  aria-label="Start all agents"
-                  title="Start all agents"
-                >
-                  Start All
-                </button>
+                <>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: "var(--text-xs)" }}
+                    onClick={async () => {
+                      for (const [slug] of roles) {
+                        await startAgent(slug);
+                      }
+                      addToast(`Started ${roles.length} agents`, "success");
+                    }}
+                    aria-label="Start all agents"
+                    title="Start all agents"
+                  >
+                    Start All
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}
+                    onClick={async () => {
+                      for (const [slug] of roles) {
+                        await stopAgent(slug);
+                      }
+                      addToast(`Stopped ${roles.length} agents`, "info");
+                    }}
+                    aria-label="Stop all agents"
+                    title="Stop all agents"
+                  >
+                    Stop All
+                  </button>
+                </>
               )}
               <button
                 className="btn btn-ghost"
@@ -345,6 +442,19 @@ export function ProjectPage() {
                 aria-label="Add role"
               >
                 + Role
+              </button>
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: "var(--text-xs)", padding: "2px var(--space-1)" }}
+                onClick={() => {
+                  const next = rosterView === "cards" ? "compact" : "cards";
+                  setRosterView(next);
+                  localStorage.setItem("vaak_roster_view", next);
+                }}
+                aria-label={`Switch to ${rosterView === "cards" ? "compact" : "card"} view`}
+                title={rosterView === "cards" ? "Compact view" : "Card view"}
+              >
+                {rosterView === "cards" ? "\u2630" : "\u2BC1"}
               </button>
             </div>
           </div>
@@ -355,7 +465,33 @@ export function ProjectPage() {
             <div className="empty-state" style={{ padding: "var(--space-6) var(--space-4)" }}>
               <div className="empty-state-title" style={{ fontSize: "var(--text-sm)" }}>No roles configured</div>
             </div>
+          ) : rosterView === "compact" ? (
+            /* Compact chip view — role names as horizontal chips */
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-1)", marginBottom: "var(--space-2)" }}>
+              {roles.map(([slug, role]) => (
+                <button
+                  key={slug}
+                  className="badge"
+                  style={{
+                    cursor: "pointer",
+                    borderLeft: `3px solid ${getRoleColor(slug)}`,
+                    padding: "var(--space-1) var(--space-2)",
+                    background: "var(--bg-secondary)",
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-sm)",
+                    fontSize: "var(--text-xs)",
+                  }}
+                  onClick={() => setBriefingRole({ slug, title: role.title })}
+                  aria-label={`${role.title} — click for briefing`}
+                  title={`${role.title} (${role.provider?.provider || "anthropic"}/${role.provider?.model || "default"})`}
+                >
+                  <span style={{ color: getRoleColor(slug), marginRight: "var(--space-1)" }}>{"\u25CF"}</span>
+                  {role.title}
+                </button>
+              ))}
+            </div>
           ) : (
+            /* Full card view — detailed role cards with actions + provider selectors */
             <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
               {roles.map(([slug, role]) => (
                 <div
@@ -399,6 +535,24 @@ export function ProjectPage() {
                         aria-label={`Start ${role.title} agent`}
                       >
                         Start
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ fontSize: "var(--text-xs)", padding: "2px var(--space-1)", color: "var(--text-muted)" }}
+                        onClick={() => stopAgent(slug)}
+                        aria-label={`Stop ${role.title} agent`}
+                        title="Stop agent"
+                      >
+                        Stop
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ fontSize: "var(--text-xs)", padding: "2px var(--space-1)", color: "var(--error)" }}
+                        onClick={() => setDeleteRoleTarget({ slug, title: role.title })}
+                        aria-label={`Delete ${role.title}`}
+                        title="Delete role"
+                      >
+                        {"\u2715"}
                       </button>
                     </div>
                   </div>
@@ -444,6 +598,7 @@ export function ProjectPage() {
           <DiscussionPanel
             projectId={projectId!}
             discussion={discussion}
+            roleSlugs={roles.map(([s]) => s)}
             onRefresh={refreshDiscussion}
           />
         </div>
@@ -459,14 +614,24 @@ export function ProjectPage() {
                 </span>
               )}
             </h2>
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: "var(--text-xs)" }}
-              onClick={() => setShowSections(!showSections)}
-              aria-label="Toggle sections"
-            >
-              Sections {showSections ? "\u25B2" : "\u25BC"}
-            </button>
+            <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center" }}>
+              <input
+                className="input"
+                style={{ width: 140, fontSize: "var(--text-xs)", padding: "2px var(--space-2)" }}
+                value={msgFilter}
+                onChange={(e) => setMsgFilter(e.target.value)}
+                placeholder="Filter messages..."
+                aria-label="Filter messages by role, type, or text"
+              />
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: "var(--text-xs)" }}
+                onClick={() => setShowSections(!showSections)}
+                aria-label="Toggle sections"
+              >
+                Sections {showSections ? "\u25B2" : "\u25BC"}
+              </button>
+            </div>
           </div>
 
           {showSections && (
@@ -518,28 +683,35 @@ export function ProjectPage() {
             aria-label="Message board"
             aria-live="polite"
           >
-            {messages.length === 0 ? (
+            {filteredMessages.length === 0 ? (
               <div className="empty-state" style={{ padding: "var(--space-8) var(--space-4)" }}>
                 <div className="empty-state-icon">{"\uD83D\uDCAC"}</div>
-                <div className="empty-state-title">No messages yet</div>
+                <div className="empty-state-title">{msgFilter ? "No matching messages" : "No messages yet"}</div>
                 <div className="empty-state-desc">
-                  Start the agents and send a directive to kick things off.
+                  {msgFilter
+                    ? `No messages match "${msgFilter}". Try a different search.`
+                    : "Start the agents and send a directive to kick things off."}
                 </div>
               </div>
             ) : (
               <>
-                {messages.length > visibleMsgCount && (
+                {msgFilter && (
+                  <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginBottom: "var(--space-2)" }}>
+                    Showing {filteredMessages.length} of {messages.length} messages
+                  </div>
+                )}
+                {filteredMessages.length > visibleMsgCount && (
                   <button
                     className="btn btn-ghost"
                     style={{ width: "100%", fontSize: "var(--text-xs)", marginBottom: "var(--space-2)" }}
                     onClick={() => setVisibleMsgCount((c) => c + 50)}
-                    aria-label={`Load more messages (showing ${visibleMsgCount} of ${messages.length})`}
+                    aria-label={`Load more messages (showing ${visibleMsgCount} of ${filteredMessages.length})`}
                   >
-                    Load more ({messages.length - visibleMsgCount} hidden)
+                    Load more ({filteredMessages.length - visibleMsgCount} hidden)
                   </button>
                 )}
-                {messages.slice(-visibleMsgCount).map((msg) => (
-                  <MessageCard key={msg.id} msg={msg} onDelete={handleDeleteMessage} />
+                {filteredMessages.slice(-visibleMsgCount).map((msg) => (
+                  <MessageCard key={msg.id} msg={msg} onDelete={handleDeleteMessage} onQuickReply={handleQuickReply} />
                 ))}
               </>
             )}
@@ -566,6 +738,21 @@ export function ProjectPage() {
                   <option key={slug} value={slug}>{role.title}</option>
                 ))}
               </select>
+              <select
+                className="input"
+                style={{ width: 100, flexShrink: 0, fontSize: "var(--text-xs)" }}
+                value={msgType}
+                onChange={(e) => setMsgType(e.target.value)}
+                aria-label="Message type"
+              >
+                <option value="directive">Directive</option>
+                <option value="question">Question</option>
+                <option value="status">Status</option>
+                <option value="review">Review</option>
+                <option value="approval">Approval</option>
+                <option value="revision">Revision</option>
+                <option value="broadcast">Broadcast</option>
+              </select>
               <input
                 className="input"
                 type="text"
@@ -578,22 +765,23 @@ export function ProjectPage() {
               />
             </div>
             <div style={{ display: "flex", gap: "var(--space-2)" }}>
-              <input
+              <textarea
                 className="input"
-                type="text"
                 value={msgBody}
                 onChange={(e) => setMsgBody(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                placeholder="Type a message..."
+                placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
                 disabled={sending}
                 aria-label="Message text"
-                style={{ flex: 1 }}
+                style={{ flex: 1, minHeight: 40, maxHeight: 120, resize: "vertical" }}
+                rows={1}
               />
               <button
                 className="btn btn-primary"
                 onClick={handleSend}
                 disabled={sending || !msgBody.trim()}
                 aria-label="Send message"
+                style={{ alignSelf: "flex-end" }}
               >
                 {sending ? <div className="spinner" style={{ width: 14, height: 14 }} /> : "Send"}
               </button>
@@ -619,6 +807,17 @@ export function ProjectPage() {
           roleSlug={briefingRole.slug}
           roleTitle={briefingRole.title}
           onClose={() => setBriefingRole(null)}
+        />
+      )}
+
+      {/* Delete role confirmation */}
+      {deleteRoleTarget && (
+        <ConfirmDialog
+          title={`Delete ${deleteRoleTarget.title}?`}
+          message="This will permanently remove this role and its briefing. This cannot be undone."
+          confirmLabel="Delete"
+          onConfirm={handleDeleteRole}
+          onCancel={() => setDeleteRoleTarget(null)}
         />
       )}
 

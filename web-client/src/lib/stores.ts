@@ -188,11 +188,17 @@ interface MessageState {
   error: string | null;
   connected: boolean;
   ws: WebSocket | null;
+  /** Tracks reconnect timeout so it can be cancelled on disconnect/navigation */
+  _reconnectTimer: ReturnType<typeof setTimeout> | null;
+  _reconnectAttempts: number;
+  _reconnectDelay: number;
   loadMessages: (projectId: string) => Promise<void>;
   connectWs: (projectId: string) => void;
   disconnectWs: () => void;
   sendMessage: (projectId: string, to: string, type: string, subject: string, body: string) => Promise<void>;
 }
+
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 export const useMessageStore = create<MessageState>((set, get) => ({
   messages: [],
@@ -200,6 +206,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   error: null,
   connected: false,
   ws: null,
+  _reconnectTimer: null,
+  _reconnectAttempts: 0,
+  _reconnectDelay: 3000,
 
   loadMessages: async (projectId) => {
     set({ loading: true, error: null });
@@ -213,33 +222,40 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   },
 
   connectWs: (projectId) => {
+    // Cancel any pending reconnect from a previous connection (fixes C1 + C6)
+    const prevTimer = get()._reconnectTimer;
+    if (prevTimer) clearTimeout(prevTimer);
+
     const existing = get().ws;
     if (existing) existing.close();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/messages/${projectId}/ws`);
-    let reconnectDelay = 3000;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT_ATTEMPTS = 10;
 
     ws.onopen = () => {
-      // Send JWT auth as the first message (required by backend)
       const token = api.getToken();
       if (token) {
         ws.send(JSON.stringify({ type: "auth", token }));
       }
-      set({ connected: true });
-      reconnectDelay = 3000;
-      reconnectAttempts = 0;
+      set({ connected: true, _reconnectAttempts: 0, _reconnectDelay: 3000 });
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       set({ connected: false, ws: null });
-      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttempts++;
-        setTimeout(() => {
+      if (event.code === 4001) {
+        set({ error: "Session expired. Please log in again." });
+        return;
+      }
+      const { _reconnectAttempts: attempts, _reconnectDelay: delay } = get();
+      if (attempts < MAX_RECONNECT_ATTEMPTS) {
+        const timer = setTimeout(() => {
+          // Only reconnect if no WS exists (disconnectWs nulls it)
           if (!get().ws) get().connectWs(projectId);
-        }, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+        }, delay);
+        set({
+          _reconnectTimer: timer,
+          _reconnectAttempts: attempts + 1,
+          _reconnectDelay: Math.min(delay * 2, 60000),
+        });
       } else {
         console.error("[WS] Max reconnect attempts reached, giving up");
       }
@@ -247,9 +263,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as BoardMessage;
+        // Deduplicate by message ID (fixes C4: REST response + WS broadcast race)
         set((s) => {
+          if (msg.id && s.messages.some((m) => m.id === msg.id)) return s;
           const updated = [...s.messages, msg];
-          // Cap at 500 messages to prevent unbounded memory growth
           return { messages: updated.length > 500 ? updated.slice(-500) : updated };
         });
       } catch {
@@ -261,15 +278,22 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   },
 
   disconnectWs: () => {
+    // Cancel pending reconnect timer (fixes C1: stale timer after navigation)
+    const timer = get()._reconnectTimer;
+    if (timer) clearTimeout(timer);
     const ws = get().ws;
     if (ws) ws.close();
-    set({ ws: null, connected: false });
+    set({ ws: null, connected: false, _reconnectTimer: null, _reconnectAttempts: 0, _reconnectDelay: 3000 });
   },
 
   sendMessage: async (projectId, to, type, subject, body) => {
     try {
       const msg = await api.sendMessage(projectId, to, type, subject, body);
-      set((s) => ({ messages: [...s.messages, msg] }));
+      // Deduplicate: WS broadcast may arrive before or after this (fixes C4)
+      set((s) => {
+        if (msg.id && s.messages.some((m) => m.id === msg.id)) return s;
+        return { messages: [...s.messages, msg] };
+      });
     } catch (e) {
       const errMsg = e instanceof api.ApiError ? e.userMessage : "Failed to send message";
       set({ error: errMsg });

@@ -12,7 +12,7 @@ export function ToastContainer() {
         <div
           key={toast.id}
           className={`toast toast-${toast.type}`}
-          role="alert"
+          role={toast.type === "error" ? "alert" : "status"}
           aria-live={toast.type === "error" ? "assertive" : "polite"}
           onClick={() => removeToast(toast.id)}
           tabIndex={0}

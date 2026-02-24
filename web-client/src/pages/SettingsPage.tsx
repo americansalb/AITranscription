@@ -3,6 +3,7 @@
  */
 
 import { useState } from "react";
+import { NavLink } from "react-router-dom";
 import { useAuthStore, useUIStore } from "../lib/stores";
 import * as api from "../lib/api";
 
@@ -197,12 +198,12 @@ export function SettingsPage() {
           </div>
         </section>
 
-        {/* BYOK API Keys — always visible so any user can upgrade to BYOK */}
-        {(
-          <section style={{ marginBottom: "var(--space-6)" }}>
-            <h2 style={{ fontSize: "var(--text-md)", fontWeight: "var(--weight-semibold)", marginBottom: "var(--space-3)" }}>
-              API Keys
-            </h2>
+        {/* BYOK API Keys — only editable for BYOK tier */}
+        <section style={{ marginBottom: "var(--space-6)" }}>
+          <h2 style={{ fontSize: "var(--text-md)", fontWeight: "var(--weight-semibold)", marginBottom: "var(--space-3)" }}>
+            API Keys
+          </h2>
+          {user?.tier === "byok" ? (
             <div className="card" style={{ padding: "var(--space-4)" }}>
               <div style={{
                 fontSize: "var(--text-sm)",
@@ -262,8 +263,22 @@ export function SettingsPage() {
                 {savingKeys ? "Saving..." : "Save API Keys"}
               </button>
             </div>
-          </section>
-        )}
+          ) : (
+            <div className="card" style={{ padding: "var(--space-4)" }}>
+              <div style={{
+                fontSize: "var(--text-sm)",
+                color: "var(--text-secondary)",
+                marginBottom: "var(--space-3)",
+              }}>
+                Bring Your Own Key (BYOK) lets you use your own API keys from Anthropic, OpenAI, and Google.
+                Upgrade to the BYOK plan to configure your keys.
+              </div>
+              <NavLink to="/billing" className="btn btn-primary">
+                View Plans
+              </NavLink>
+            </div>
+          )}
+        </section>
       </div>
     </>
   );
