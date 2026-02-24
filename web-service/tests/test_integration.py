@@ -388,3 +388,100 @@ async def test_password_change_invalidates_old_password(client: AsyncClient):
     })
     assert resp.status_code == 200
     assert "access_token" in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_agent_lifecycle_and_billing_validation(client: AsyncClient, db, monkeypatch):
+    """End-to-end: signup → project → assign provider → start agent → list → stop → billing checks.
+
+    The agent loop is mocked to a no-op (it uses async_session directly, not the test DB).
+    This tests the REST API lifecycle and that billing validation catches over-limit users.
+    """
+    import asyncio
+    import app.services.agent_runtime as runtime_mod
+
+    # Mock the agent loop so it doesn't actually run (avoids needing real LLM + real DB)
+    async def _noop_loop(state, briefing, user_id):
+        while state.is_running:
+            await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(runtime_mod, "_agent_loop", _noop_loop)
+
+    # 1. Sign up
+    data = await create_test_user(client, "agent-lifecycle@test.com")
+    headers = auth_headers(data["access_token"])
+
+    # 2. Create project
+    resp = await client.post("/api/v1/projects/", json={"name": "Agent Lifecycle"}, headers=headers)
+    assert resp.status_code == 201
+    pid = resp.json()["id"]
+    assert len(resp.json()["roles"]) == 4  # default roles
+
+    # 3. Assign provider to developer
+    resp = await client.put(
+        f"/api/v1/projects/{pid}/roles/developer/provider",
+        json={"provider": "anthropic", "model": "claude-sonnet-4-6"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["model"] == "claude-sonnet-4-6"
+
+    # 4. Start agent
+    resp = await client.post(f"/api/v1/projects/{pid}/roles/developer/start", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "started"
+
+    # 5. Starting again should fail (409)
+    resp = await client.post(f"/api/v1/projects/{pid}/roles/developer/start", headers=headers)
+    assert resp.status_code == 409
+
+    # 6. List agents
+    resp = await client.get(f"/api/v1/projects/{pid}/agents", headers=headers)
+    assert resp.status_code == 200
+    agents = resp.json()
+    assert len(agents) == 1
+    assert agents[0]["role"] == "developer"
+    assert agents[0]["is_running"] is True
+
+    # 7. Stop agent
+    resp = await client.post(f"/api/v1/projects/{pid}/roles/developer/stop", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "stopped"
+
+    # 8. Stopping again should fail (409)
+    resp = await client.post(f"/api/v1/projects/{pid}/roles/developer/stop", headers=headers)
+    assert resp.status_code == 409
+
+    # 9. No agents running
+    resp = await client.get(f"/api/v1/projects/{pid}/agents", headers=headers)
+    assert resp.json() == []
+
+    # 10. Billing validation: free-tier user at limit gets 429 on completion
+    # Monkeypatch _maybe_reset_monthly_usage to no-op (avoids MissingGreenlet
+    # from mid-request commit in async SQLAlchemy with test DB)
+    import app.api.providers as providers_mod
+    async def _noop_reset(db, user):
+        pass
+    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
+
+    from app.models import WebUser
+    from sqlalchemy import update as sql_update
+    await db.execute(
+        sql_update(WebUser).where(WebUser.email == "agent-lifecycle@test.com")
+        .values(monthly_tokens_used=50_000)
+    )
+    await db.commit()
+
+    resp = await client.post("/api/v1/providers/completion", json={
+        "project_id": pid,
+        "role_slug": "developer",
+        "messages": [{"role": "user", "content": "test"}],
+    }, headers=headers)
+    assert resp.status_code == 429
+    assert "Monthly token limit" in resp.json()["detail"]
+
+    # 11. Usage endpoint reflects the tokens
+    resp = await client.get("/api/v1/providers/usage", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["total_tokens"] == 50_000
+    assert resp.json()["remaining_tokens"] == 0

@@ -4,6 +4,7 @@ Separate from the desktop backend. Shares models/schemas via the shared/ package
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -33,6 +34,17 @@ async def lifespan(app: FastAPI):
         )
     if settings.secret_key == "change-me-in-production":
         logger.warning("VAAK_WEB_SECRET_KEY is using the default value — change it in production!")
+
+    # Agent runtime limitation: in-memory agent registry is per-process.
+    # Running with --workers > 1 causes duplicate agents and billing desync.
+    web_concurrency = os.environ.get("WEB_CONCURRENCY", "")
+    if web_concurrency and int(web_concurrency) > 1:
+        logger.warning(
+            "WEB_CONCURRENCY=%s detected. Agent runtime requires --workers 1 "
+            "(in-memory agent registry is per-process). Multiple workers will cause "
+            "duplicate agents and double-billing. Use --workers 1 for now.",
+            web_concurrency,
+        )
 
     yield
     logger.info("Shutting down")
