@@ -4325,6 +4325,8 @@ fn main() {
             launcher::check_macos_permissions,
             launcher::open_macos_settings,
             launcher::open_terminal_in_dir,
+            launcher::check_npm_installed,
+            launcher::install_claude_cli,
         ]);
 
     match builder.build(tauri::generate_context!()) {

@@ -449,3 +449,102 @@ class TestTranscribeAndPolishEndpoint:
             )
 
         assert response.status_code == 500
+
+    async def test_combined_polish_failure_returns_raw_text(self, client):
+        """POST /transcribe-and-polish gracefully falls back to raw text when polish fails.
+
+        Regression test for the "polish failed" bug: when the Anthropic API key
+        is missing or the polish service errors, the endpoint should return the
+        raw transcription as both raw_text and polished_text instead of HTTP 500.
+        """
+        mock_transcribe = {
+            "text": "uh hello this is um a test",
+            "duration": 3.0,
+            "language": "en",
+        }
+
+        with patch("app.services.transcription_service.transcribe",
+                    return_value=mock_transcribe), \
+             patch("app.services.polish_service.polish",
+                   side_effect=ValueError("ANTHROPIC_API_KEY is not configured")):
+            response = await client.post(
+                "/api/v1/transcribe-and-polish",
+                files={"audio": ("test.wav", b"fake audio", "audio/wav")},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["raw_text"] == "uh hello this is um a test"
+        # Fallback: polished_text == raw_text when polish fails
+        assert data["polished_text"] == data["raw_text"]
+        assert data["duration"] == 3.0
+        assert data["language"] == "en"
+        assert data["usage"]["input_tokens"] == 0
+        assert data["usage"]["output_tokens"] == 0
+
+    async def test_combined_polish_timeout_returns_raw_text(self, client):
+        """Polish timeout should gracefully fall back to raw text, not 500."""
+        mock_transcribe = {
+            "text": "a longer test of the timeout behavior",
+            "duration": 5.0,
+            "language": "en",
+        }
+
+        with patch("app.services.transcription_service.transcribe",
+                    return_value=mock_transcribe), \
+             patch("app.services.polish_service.polish",
+                   side_effect=TimeoutError("Text polishing timed out after 60s")):
+            response = await client.post(
+                "/api/v1/transcribe-and-polish",
+                files={"audio": ("test.wav", b"fake audio", "audio/wav")},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["polished_text"] == data["raw_text"]
+        assert data["usage"]["input_tokens"] == 0
+
+    async def test_combined_polish_api_error_returns_raw_text(self, client):
+        """Any polish API error should fall back gracefully, not crash."""
+        mock_transcribe = {
+            "text": "testing error handling",
+            "duration": 2.0,
+            "language": "en",
+        }
+
+        with patch("app.services.transcription_service.transcribe",
+                    return_value=mock_transcribe), \
+             patch("app.services.polish_service.polish",
+                   side_effect=RuntimeError("Connection refused")):
+            response = await client.post(
+                "/api/v1/transcribe-and-polish",
+                files={"audio": ("test.wav", b"fake audio", "audio/wav")},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["polished_text"] == "testing error handling"
+        assert data["saved"] is False
+
+    async def test_combined_empty_transcription_skips_polish(self, client):
+        """Empty transcription result should skip polish entirely."""
+        mock_transcribe = {
+            "text": "",
+            "duration": 1.0,
+            "language": "en",
+        }
+
+        # Polish should NOT be called when transcription is empty
+        with patch("app.services.transcription_service.transcribe",
+                    return_value=mock_transcribe), \
+             patch("app.services.polish_service.polish") as mock_polish:
+            response = await client.post(
+                "/api/v1/transcribe-and-polish",
+                files={"audio": ("test.wav", b"silence", "audio/wav")},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["raw_text"] == ""
+        assert data["polished_text"] == ""
+        mock_polish.assert_not_called()

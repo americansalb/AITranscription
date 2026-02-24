@@ -1314,6 +1314,96 @@ pub fn open_macos_settings(pane_url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Check if npm is available on the system PATH.
+/// On macOS, uses a login shell to pick up nvm/fnm/homebrew paths.
+#[tauri::command]
+pub fn check_npm_installed() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let output = Command::new("where")
+            .arg("npm")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Failed to run 'where npm': {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "which npm"])
+            .output()
+            .map_err(|e| format!("Failed to check for npm: {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("which")
+            .arg("npm")
+            .output()
+            .map_err(|e| format!("Failed to run 'which npm': {}", e))?;
+        Ok(output.status.success())
+    }
+}
+
+/// Install Claude Code CLI via npm. Returns Ok(output) on success.
+/// Runs `npm install -g @anthropic-ai/claude-code` using a login shell on macOS.
+#[tauri::command]
+pub fn install_claude_cli() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // Invoke npm directly instead of through cmd /c to avoid shell interpretation
+        let output = Command::new("npm")
+            .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Failed to run npm install: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("npm install failed: {}", stderr.trim()))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // Use login shell to source nvm/fnm/homebrew PATH
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "npm install -g @anthropic-ai/claude-code"])
+            .output()
+            .map_err(|e| format!("Failed to run npm install: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("npm install failed: {}", stderr.trim()))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("npm")
+            .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .output()
+            .map_err(|e| format!("Failed to run npm install: {}", e))?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("npm install failed: {}", stderr.trim()))
+        }
+    }
+}
+
 /// Open a terminal window in the given directory.
 /// macOS: opens Terminal.app; Windows: opens PowerShell; Linux: opens default terminal.
 #[tauri::command]

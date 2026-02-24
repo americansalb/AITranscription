@@ -656,6 +656,7 @@ export function CollabTab() {
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
+  const [installingCli, setInstallingCli] = useState(false);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
   const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
@@ -3350,15 +3351,43 @@ When multiple instances of this role are active:
           <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
             <div className="project-hint-title" style={{ color: "#e8935a" }}>Claude CLI Not Found</div>
             <div className="project-hint-body">
-              The Claude CLI is required to launch agents. Install it:
-              <br/><code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
-              <br/><br/>Or launch manually: open a terminal in this project folder and run <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>claude</code>
+              The Claude CLI is required to launch agents.
               {window.__TAURI__ && (
                 <>
                   <br/><br/>
                   <button
                     className="role-card-launch-btn"
-                    style={{ display: "inline-block", marginTop: 4 }}
+                    style={{ display: "inline-block", marginTop: 4, marginRight: 8 }}
+                    disabled={installingCli}
+                    onClick={async () => {
+                      setInstallingCli(true);
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        const npmOk = await invoke<boolean>("check_npm_installed");
+                        if (!npmOk) {
+                          setInstallingCli(false);
+                          alert("Node.js/npm is not installed. Please install Node.js from https://nodejs.org first, then try again.");
+                          return;
+                        }
+                        await invoke<string>("install_claude_cli");
+                        const installed = await invoke<boolean>("check_claude_installed");
+                        if (installed) {
+                          setClaudeInstalled(true);
+                        } else {
+                          setInstallingCli(false);
+                          alert("Installation completed but Claude CLI was not found. Try restarting the app.");
+                        }
+                      } catch (e: any) {
+                        console.error("[CollabTab] Express install failed:", e);
+                        setInstallingCli(false);
+                        alert(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`);
+                      }
+                    }}
+                    title="Automatically install Claude Code CLI via npm"
+                  >{installingCli ? "Installing..." : "Express Install"}</button>
+                  <button
+                    className="role-card-launch-btn"
+                    style={{ display: "inline-block", marginTop: 4, opacity: 0.7 }}
                     onClick={async () => {
                       try {
                         const { invoke } = await import("@tauri-apps/api/core");
@@ -3367,8 +3396,13 @@ When multiple instances of this role are active:
                         console.error("[CollabTab] Failed to open terminal:", e);
                       }
                     }}
-                    title="Open a terminal window in the project directory"
-                  >Open Terminal Here</button>
+                    title="Open a terminal to install manually"
+                  >Open Terminal</button>
+                  <br/><br/>
+                  <span style={{ fontSize: "0.85em", opacity: 0.7 }}>
+                    Requires <a href="https://nodejs.org" target="_blank" rel="noreferrer" style={{ color: "#e8935a" }}>Node.js</a> to be installed.
+                    Or install manually: <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
+                  </span>
                 </>
               )}
             </div>
