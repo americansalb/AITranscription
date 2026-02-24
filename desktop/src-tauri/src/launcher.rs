@@ -159,17 +159,17 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         };
 
         // Write temp .ps1 script (same as working launch-team.ps1 approach)
-        // Use single quotes to prevent PowerShell subexpression expansion ($(...), `).
-        // Escape single quotes by doubling them: ' → ''
+        // The script uses .current_dir() on the WMI process instead of interpolating
+        // the project_dir into PowerShell, avoiding injection via $(), backticks, etc.
+        // Only the claude path and prompt are interpolated (with single-quote escaping).
         let temp_dir = std::env::temp_dir();
         let script_name = format!("vaak-launch-{}-{}.ps1", role, std::process::id());
         let script_path = temp_dir.join(&script_name);
-        let safe_dir = project_dir.replace('\'', "''");
         let safe_claude = claude_path.replace('\'', "''");
         let safe_prompt = join_prompt.replace('\'', "''");
         let ps_script = format!(
-            "Set-Location '{}'\n& '{}' --dangerously-skip-permissions '{}'",
-            safe_dir, safe_claude, safe_prompt
+            "& '{}' --dangerously-skip-permissions '{}'",
+            safe_claude, safe_prompt
         );
         std::fs::write(&script_path, &ps_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
@@ -178,10 +178,13 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         // WMI creates the process via the WMI service (wmiprvse.exe), so it is
         // NOT in Tauri's Job Object and survives app restarts. This avoids the
         // CREATE_BREAKAWAY_FROM_JOB "Access denied" issue entirely.
+        // Pass CurrentDirectory via WMI instead of interpolating into the PS script,
+        // matching the .current_dir() pattern used in open_terminal_in_dir.
         let script_path_str = script_path.to_str().unwrap_or("").replace("'", "''");
+        let safe_dir_ps = project_dir.replace('\'', "''");
         let ps_cmd = format!(
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -NoExit -File \"{}\"'}}; Write-Output $r.ProcessId",
-            script_path_str
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -NoExit -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
+            script_path_str, safe_dir_ps
         );
         let ps_args = ["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd];
 

@@ -152,11 +152,11 @@ async def polish_text(
         )
 
     except ValueError as e:
-        logger.error("Polish ValueError: %s", e)
-        raise HTTPException(status_code=500, detail="Polish failed due to invalid input")
+        logger.warning("Polish ValueError, returning raw text: %s", e)
+        return PolishResponse(text=request.text, input_tokens=0, output_tokens=0)
     except Exception as e:
-        logger.error("Polish failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Polish failed")
+        logger.warning("Polish failed, returning raw text: %s: %s", type(e).__name__, e)
+        return PolishResponse(text=request.text, input_tokens=0, output_tokens=0)
 
 
 @router.post("/polish-stream")

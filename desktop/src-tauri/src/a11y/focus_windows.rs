@@ -64,7 +64,7 @@ pub fn start(app: tauri::AppHandle) {
             use tauri::{Emitter, Manager};
 
             unsafe {
-                if CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED).is_err() {
+                if CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED).is_err() {
                     TRACKING_ACTIVE.store(false, Ordering::SeqCst);
                     return;
                 }

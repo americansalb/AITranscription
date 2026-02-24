@@ -94,13 +94,25 @@ async def proxy_completion(
     # 2. Determine which API key to use
     api_key = byok_key  # BYOK takes priority
     if not api_key:
-        # Use platform key based on model prefix
-        if model.startswith("claude"):
-            api_key = settings.anthropic_api_key
-        elif model.startswith("gpt"):
-            api_key = settings.openai_api_key
-        elif model.startswith("gemini"):
-            api_key = settings.google_ai_api_key
+        # Map model to provider API key. LiteLLM handles provider routing internally,
+        # but we need to supply the correct API key.
+        provider_keys = {
+            "anthropic": settings.anthropic_api_key,
+            "openai": settings.openai_api_key,
+            "google": settings.google_ai_api_key,
+        }
+        try:
+            import litellm
+            provider = litellm.get_llm_provider(model)[1]  # returns (model, provider, ...)
+            api_key = provider_keys.get(provider, "")
+        except Exception:
+            # Fallback: prefix matching for common models
+            if "claude" in model:
+                api_key = settings.anthropic_api_key
+            elif "gpt" in model or model.startswith("o"):
+                api_key = settings.openai_api_key
+            elif "gemini" in model:
+                api_key = settings.google_ai_api_key
 
     if not api_key:
         raise ValueError(f"No API key configured for model {model}")

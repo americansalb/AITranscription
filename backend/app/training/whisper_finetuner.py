@@ -24,17 +24,9 @@ from transformers import (
 
 from app.models.learning import AudioSample, ModelVersion
 from app.services.audio_collector import AudioCollector
+from app.training.utils import _get_torch_device
 
 logger = logging.getLogger(__name__)
-
-
-def _get_torch_device() -> torch.device:
-    """Select the best available compute device: CUDA > MPS > CPU."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 # Configuration
