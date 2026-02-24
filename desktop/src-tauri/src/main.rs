@@ -1185,7 +1185,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap();
+                    .unwrap_or_default();
                 let timestamp = now.as_millis();
                 let nanos = now.as_nanos();
 
@@ -4399,12 +4399,14 @@ fn show_error_dialog(message: &str) {
         .args(["--error", "--title=Vaak Error", &format!("--text={}", message)])
         .output();
 
-    if zenity.is_err() || !zenity.unwrap().status.success() {
+    let zenity_ok = zenity.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    if !zenity_ok {
         let kdialog = Command::new("kdialog")
             .args(["--error", message, "--title", "Vaak Error"])
             .output();
 
-        if kdialog.is_err() || !kdialog.unwrap().status.success() {
+        let kdialog_ok = kdialog.as_ref().map(|o| o.status.success()).unwrap_or(false);
+        if !kdialog_ok {
             // Last resort: notification
             let _ = Command::new("notify-send")
                 .args(["Vaak Error", message])

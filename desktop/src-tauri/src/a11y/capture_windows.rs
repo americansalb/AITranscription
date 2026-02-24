@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 pub fn capture() -> Result<NormalizedTree, String> {
     // Initialize COM on this thread
     unsafe {
-        CoInitializeEx(Some(std::ptr::null()), COINIT_MULTITHREADED)
+        CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED)
             .ok()
             .map_err(|e| format!("COM init failed: {}", e))?;
     }
