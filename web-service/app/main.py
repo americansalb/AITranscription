@@ -4,20 +4,34 @@ Separate from the desktop backend. Shares models/schemas via the shared/ package
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.api import auth, projects, messages, billing, providers
+from app.database import init_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle."""
+    logger.info("Starting %s v%s", settings.app_name, settings.version)
+    await init_db()
+    logger.info("Database initialized")
+    yield
+    logger.info("Shutting down")
+
 
 app = FastAPI(
     title=settings.app_name,
     version=settings.version,
     description="Multi-provider AI collaboration platform",
+    lifespan=lifespan,
 )
 
 # CORS

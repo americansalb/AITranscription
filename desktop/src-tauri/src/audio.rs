@@ -6,7 +6,8 @@
 //! Uses a dedicated audio thread since cpal::Stream is not Send on some platforms.
 
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -95,7 +96,7 @@ impl AudioRecorder {
     /// Start recording
     pub fn start(&self, app_handle: Option<AppHandle>) -> Result<(), String> {
         {
-            let recording = self.is_recording.lock().unwrap();
+            let recording = self.is_recording.lock();
             if *recording {
                 return Err("Already recording".to_string());
             }
@@ -106,14 +107,14 @@ impl AudioRecorder {
             .map_err(|e| format!("Failed to send start command: {}", e))?;
 
         // Update recording state
-        *self.is_recording.lock().unwrap() = true;
+        *self.is_recording.lock() = true;
         Ok(())
     }
 
     /// Stop recording and return the audio data
     pub fn stop(&self) -> Result<AudioData, String> {
         {
-            let recording = self.is_recording.lock().unwrap();
+            let recording = self.is_recording.lock();
             if !*recording {
                 return Err("Not recording".to_string());
             }
@@ -126,7 +127,7 @@ impl AudioRecorder {
             .map_err(|e| format!("Failed to send stop command: {}", e))?;
 
         // Update recording state
-        *self.is_recording.lock().unwrap() = false;
+        *self.is_recording.lock() = false;
 
         // Wait for result from audio thread with timeout
         // For medical transcription, recordings can be several minutes long
@@ -140,12 +141,12 @@ impl AudioRecorder {
     /// Cancel recording without returning data
     pub fn cancel(&self) {
         let _ = self.command_tx.send(AudioCommand::Cancel);
-        *self.is_recording.lock().unwrap() = false;
+        *self.is_recording.lock() = false;
     }
 
     /// Check if currently recording
     pub fn is_recording(&self) -> bool {
-        *self.is_recording.lock().unwrap()
+        *self.is_recording.lock()
     }
 }
 
@@ -171,7 +172,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
             Ok(AudioCommand::Start(handle)) => {
                 app_handle = handle;
                 // Clear the buffer for new recording
-                samples_buffer.lock().unwrap().clear();
+                samples_buffer.lock().clear();
 
                 let host = cpal::default_host();
 
@@ -179,7 +180,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     Some(d) => d,
                     None => {
                         eprintln!("[Audio] No input device available");
-                        *is_recording.lock().unwrap() = false;
+                        *is_recording.lock() = false;
                         continue;
                     }
                 };
@@ -188,7 +189,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("[Audio] Failed to get config: {}", e);
-                        *is_recording.lock().unwrap() = false;
+                        *is_recording.lock() = false;
                         continue;
                     }
                 };
@@ -245,7 +246,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     }
                     _ => {
                         eprintln!("[Audio] Unsupported sample format");
-                        *is_recording.lock().unwrap() = false;
+                        *is_recording.lock() = false;
                         continue;
                     }
                 };
@@ -254,7 +255,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     Ok(s) => {
                         if let Err(e) = s.play() {
                             eprintln!("[Audio] Failed to start stream: {}", e);
-                            *is_recording.lock().unwrap() = false;
+                            *is_recording.lock() = false;
                             continue;
                         }
                         stream = Some(s);
@@ -262,7 +263,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                     }
                     Err(e) => {
                         eprintln!("[Audio] Failed to build stream: {}", e);
-                        *is_recording.lock().unwrap() = false;
+                        *is_recording.lock() = false;
                     }
                 }
             }
@@ -277,7 +278,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                 thread::sleep(std::time::Duration::from_millis(50));
 
                 // Get samples from the shared buffer
-                let samples = samples_buffer.lock().unwrap().clone();
+                let samples = samples_buffer.lock().clone();
                 let duration_secs = samples.len() as f32 / sample_rate as f32;
 
                 println!("[Audio] Recording stopped: {} samples, {:.2}s", samples.len(), duration_secs);
@@ -293,7 +294,7 @@ fn audio_thread_main(command_rx: Receiver<AudioCommand>, is_recording: Arc<Mutex
                 if let Some(s) = stream.take() {
                     drop(s);
                 }
-                samples_buffer.lock().unwrap().clear();
+                samples_buffer.lock().clear();
                 app_handle = None;
                 println!("[Audio] Recording cancelled");
             }
@@ -316,7 +317,7 @@ fn process_samples(
     samples: &Arc<Mutex<Vec<f32>>>,
     app_handle: &Option<AppHandle>,
 ) {
-    let mut buffer = samples.lock().unwrap();
+    let mut buffer = samples.lock();
     let mut sum = 0.0f32;
     let mut count = 0;
 
