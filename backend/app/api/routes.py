@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import get_optional_user
+from app.api.auth import get_current_user
 from app.api.schemas import (
     ComputerUseRequest,
     ComputerUseResponse,
@@ -56,12 +56,13 @@ async def health_check():
 async def transcribe_audio(
     audio: UploadFile = File(..., description="Audio file to transcribe"),
     language: str | None = Form(default=None, description="Optional language code (e.g., 'en')"),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Transcribe audio using Groq's Whisper API.
 
     Accepts audio files in various formats: wav, mp3, m4a, webm, ogg, flac.
-    Returns raw transcription text.
+    Returns raw transcription text. Requires authentication.
     """
     # Validate file type
     allowed_types = {
@@ -110,10 +111,13 @@ async def transcribe_audio(
 
     except ValueError as e:
         logger.error("Transcription ValueError: %s", e)
-        raise HTTPException(status_code=500, detail="Transcription failed due to invalid input")
+        raise HTTPException(status_code=400, detail="Transcription failed: invalid input")
+    except TimeoutError as e:
+        logger.error("Transcription timed out: %s", e)
+        raise HTTPException(status_code=504, detail="Transcription timed out — try a shorter recording")
     except Exception as e:
         logger.error("Transcription failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Transcription failed")
+        raise HTTPException(status_code=502, detail="Transcription service unavailable")
 
 
 @router.post(
@@ -124,13 +128,13 @@ async def transcribe_audio(
 async def polish_text(
     request: PolishRequest,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
 ):
     """
     Polish raw transcription text using Claude Haiku.
 
     Removes filler words, fixes grammar, and formats appropriately for context.
-    If authenticated, uses learned corrections from the user's history.
+    Uses learned corrections from the user's history. Requires authentication.
     """
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
@@ -141,8 +145,8 @@ async def polish_text(
             context=request.context,
             custom_words=request.custom_words,
             formality=request.formality,
-            db=db if user else None,
-            user_id=user.id if user else None,
+            db=db,
+            user_id=user.id,
         )
 
         return PolishResponse(
@@ -163,13 +167,14 @@ async def polish_text(
 async def polish_text_stream(
     request: PolishRequest,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
 ):
     """
     Stream polished text using Server-Sent Events.
 
     This endpoint provides progressive polish results as they arrive from Claude.
     Falls back to batch /polish endpoint if streaming fails.
+    Requires authentication.
 
     Returns SSE stream with events:
     - correction_info: Number of learned corrections used
@@ -188,8 +193,8 @@ async def polish_text_stream(
                 context=request.context,
                 custom_words=request.custom_words,
                 formality=request.formality,
-                db=db if user else None,
-                user_id=user.id if user else None,
+                db=db,
+                user_id=user.id,
             ):
                 # Format as SSE: "data: {json}\n\n"
                 yield f"data: {json.dumps(event)}\n\n"
@@ -220,17 +225,17 @@ async def transcribe_and_polish(
     context: str | None = Form(default=None, description="Context like 'email', 'slack'"),
     formality: str = Form(default="neutral", description="'casual', 'neutral', or 'formal'"),
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
 ):
     """
     Combined endpoint: transcribe audio and polish the result.
 
     This is the main endpoint for the transcription pipeline.
     Provides both raw and polished text for comparison/debugging.
-    If authenticated, uses learned corrections from the user's history.
+    Uses learned corrections from the user's history. Requires authentication.
     """
     # First, transcribe
-    transcribe_response = await transcribe_audio(audio=audio, language=language)
+    transcribe_response = await transcribe_audio(audio=audio, language=language, current_user=user)
 
     if not transcribe_response.raw_text.strip():
         return TranscribeAndPolishResponse(
@@ -247,12 +252,12 @@ async def transcribe_and_polish(
             raw_text=transcribe_response.raw_text,
             context=context,
             formality=formality,
-            db=db if user else None,
-            user_id=user.id if user else None,
+            db=db,
+            user_id=user.id,
         )
 
-        # Save transcript to database if user is authenticated
-        if user and db:
+        # Save transcript to database (user is always authenticated now)
+        if db:
             # Calculate metrics — use regex for accurate word boundaries (H8 fix)
             word_count = len(re.findall(r'\b\w+\b', result["text"]))
             character_count = len(result["text"])
@@ -343,20 +348,22 @@ async def text_to_speech(
     text: str = Form(..., description="Text to convert to speech"),
     session_id: str | None = Form(default=None, description="Claude Code session identifier"),
     voice_id: str | None = Form(default=None, description="ElevenLabs voice ID for per-session voice"),
-    user: User | None = Depends(get_optional_user),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Convert text to speech using Groq TTS (Orpheus model).
+    Convert text to speech using ElevenLabs API.
 
     Used for Claude Code speak integration - when Claude wants to speak responses aloud.
-    Returns MP3 audio data.
+    Returns MP3 audio data. Requires authentication.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-    # No arbitrary limit - chunking is handled in elevenlabs_tts service
-    # ElevenLabs API limits are respected via automatic chunking
+    # Limit text length to prevent API cost abuse (5000 chars ≈ ~1000 words)
+    if len(text) > 5000:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 5000 characters.")
+
     full_text = text
 
     try:
@@ -365,10 +372,10 @@ async def text_to_speech(
         audio_bytes = await elevenlabs_tts.synthesize(text, voice_id=voice_id)
 
         if not audio_bytes:
-            raise HTTPException(status_code=500, detail="ElevenLabs TTS generation failed")
+            raise HTTPException(status_code=502, detail="TTS service returned empty audio")
 
-        # Save as output transcript if user is logged in
-        if user and db:
+        # Save as output transcript (user is always authenticated now)
+        if db:
             try:
                 word_count = len(full_text.split())
                 character_count = len(full_text)
@@ -405,10 +412,10 @@ async def text_to_speech(
 
     except ValueError as e:
         logger.error("TTS ValueError: %s", e)
-        raise HTTPException(status_code=500, detail="TTS failed due to invalid input")
+        raise HTTPException(status_code=400, detail="TTS failed: invalid input")
     except Exception as e:
         logger.error("TTS failed: %s: %s", type(e).__name__, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="TTS failed")
+        raise HTTPException(status_code=502, detail="TTS service unavailable")
 
 
 @router.post(
@@ -419,14 +426,19 @@ async def text_to_speech_stream(
     text: str = Form(..., description="Text to convert to speech"),
     session_id: str | None = Form(default=None, description="Claude Code session identifier"),
     voice_id: str | None = Form(default=None, description="ElevenLabs voice ID"),
+    user: User = Depends(get_current_user),
 ):
     """
     Stream text-to-speech audio using ElevenLabs streaming API.
 
     Returns chunked audio data for lower latency playback (~200ms to first audio).
+    Requires authentication.
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    if len(text) > 5000:
+        raise HTTPException(status_code=400, detail="Text too long. Maximum 5000 characters.")
 
     async def audio_stream():
         async for chunk in elevenlabs_tts.synthesize_stream(text, voice_id=voice_id):
@@ -448,10 +460,10 @@ async def text_to_speech_stream(
     response_model=DescribeScreenResponse,
     responses={500: {"model": ErrorResponse}},
 )
-async def describe_screen(request: DescribeScreenRequest):
-    """Describe a screenshot using Claude Vision API."""
+async def describe_screen(request: DescribeScreenRequest, current_user: User = Depends(get_current_user)):
+    """Describe a screenshot using Claude Vision API. Requires authentication."""
     if not settings.anthropic_api_key:
-        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+        raise HTTPException(status_code=503, detail="Anthropic API key not configured")
 
     try:
         from app.services.screen_reader import screen_reader_service
@@ -467,7 +479,7 @@ async def describe_screen(request: DescribeScreenRequest):
         return DescribeScreenResponse(**result)
     except Exception as e:
         logger.error("Screen description failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Screen description failed")
+        raise HTTPException(status_code=502, detail="Screen description service failed")
 
 
 @router.post(
@@ -475,12 +487,13 @@ async def describe_screen(request: DescribeScreenRequest):
     response_model=TranscribeResponse,
     responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
 )
-async def transcribe_audio_base64(request: TranscribeBase64Request):
+async def transcribe_audio_base64(request: TranscribeBase64Request, current_user: User = Depends(get_current_user)):
     """
     Transcribe base64-encoded audio using Groq's Whisper API.
 
     Accepts JSON with base64-encoded WAV audio instead of multipart form upload.
     Used by the Rust desktop client for push-to-talk screen reader questions.
+    Requires authentication.
     """
     import base64
 
@@ -506,7 +519,7 @@ async def transcribe_audio_base64(request: TranscribeBase64Request):
         )
     except Exception as e:
         logger.error("SR transcription failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Transcription failed")
+        raise HTTPException(status_code=502, detail="Transcription service unavailable")
 
 
 @router.post(
@@ -514,15 +527,16 @@ async def transcribe_audio_base64(request: TranscribeBase64Request):
     response_model=ScreenReaderChatResponse,
     responses={500: {"model": ErrorResponse}},
 )
-async def screen_reader_chat(request: ScreenReaderChatRequest):
+async def screen_reader_chat(request: ScreenReaderChatRequest, current_user: User = Depends(get_current_user)):
     """
     Multi-turn conversation about a screenshot.
 
     The image is included in the first user message. Follow-up questions
     reference the same screenshot through conversation context.
+    Requires authentication.
     """
     if not settings.anthropic_api_key:
-        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+        raise HTTPException(status_code=503, detail="Anthropic API key not configured")
 
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages cannot be empty")
@@ -542,7 +556,7 @@ async def screen_reader_chat(request: ScreenReaderChatRequest):
         return ScreenReaderChatResponse(**result)
     except Exception as e:
         logger.error("Screen reader chat failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Screen reader chat failed")
+        raise HTTPException(status_code=502, detail="Screen reader chat service failed")
 
 
 @router.post(
@@ -550,13 +564,14 @@ async def screen_reader_chat(request: ScreenReaderChatRequest):
     response_model=ComputerUseResponse,
     responses={500: {"model": ErrorResponse}},
 )
-async def computer_use(request: ComputerUseRequest):
+async def computer_use(request: ComputerUseRequest, current_user: User = Depends(get_current_user)):
     """
     Single-turn computer use call. Rust drives the tool_use loop,
     calling this endpoint repeatedly until stop_reason is 'end_turn'.
+    Requires authentication.
     """
     if not settings.anthropic_api_key:
-        raise HTTPException(status_code=500, detail="Anthropic API key not configured")
+        raise HTTPException(status_code=503, detail="Anthropic API key not configured")
 
     if not request.messages:
         raise HTTPException(status_code=400, detail="Messages cannot be empty")
@@ -581,16 +596,16 @@ async def computer_use(request: ComputerUseRequest):
         return ComputerUseResponse(**result)
     except Exception as e:
         logger.error("Computer use failed: %s: %s", type(e).__name__, e, exc_info=True)
-        raise HTTPException(status_code=500, detail="Computer use failed")
+        raise HTTPException(status_code=502, detail="Computer use service failed")
 
 
 @router.get("/voices")
-async def get_voices():
+async def get_voices(current_user: User = Depends(get_current_user)):
     """
     Get available ElevenLabs voices.
 
     Returns a list of voice objects with voice_id and name.
-    Used for per-session voice assignment.
+    Used for per-session voice assignment. Requires authentication.
     """
     voices = await elevenlabs_tts.get_available_voices()
     return {"voices": voices}

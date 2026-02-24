@@ -3,9 +3,11 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.auth import get_current_user
+from app.models.user import User
 from app.services.role_designer import design_role
 
 logger = logging.getLogger(__name__)
@@ -51,12 +53,12 @@ class RoleDesignResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/roles/design", response_model=RoleDesignResponse)
-async def post_role_design(req: RoleDesignRequest):
+async def post_role_design(req: RoleDesignRequest, current_user: User = Depends(get_current_user)):
     """Run one turn of the LLM role design conversation.
 
     Send the conversation history and project context. The LLM will either
     ask a follow-up question (role_config=null) or generate a complete role
-    configuration (role_config populated).
+    configuration (role_config populated). Requires authentication.
     """
     if not req.messages:
         raise HTTPException(status_code=400, detail="At least one message is required")
@@ -80,4 +82,4 @@ async def post_role_design(req: RoleDesignRequest):
         raise HTTPException(status_code=502, detail="Role design service unavailable")
     except Exception as e:
         logger.exception("Unexpected error in role design")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=502, detail="Role design service failed")
