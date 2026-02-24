@@ -8,6 +8,16 @@ from tests.conftest import auth_headers, create_test_user
 
 
 @pytest.mark.asyncio
+async def test_health_endpoint(client: AsyncClient):
+    """GET /health returns 200 with status and version."""
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert "version" in data
+
+
+@pytest.mark.asyncio
 async def test_full_flow_signup_to_discussion(client: AsyncClient):
     """Complete user journey: signup → create project → send messages → run discussion."""
 
