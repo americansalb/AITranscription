@@ -77,9 +77,12 @@ async def post_role_design(req: RoleDesignRequest, current_user: User = Depends(
             project_context=req.project_context,
         )
         return result
-    except RuntimeError as e:
-        logger.error("Role design error: %s", e)
-        raise HTTPException(status_code=502, detail="Role design service unavailable")
-    except Exception as e:
-        logger.exception("Unexpected error in role design")
-        raise HTTPException(status_code=502, detail="Role design service failed")
+    except (RuntimeError, Exception) as e:
+        logger.error("Role design error: %s: %s", type(e).__name__, e)
+        # Graceful degradation: return a helpful message instead of 502
+        return RoleDesignResponse(
+            reply="I'm having trouble connecting to the AI service right now. "
+                  "You can still create a role manually using the wizard — "
+                  "just describe what you need and I'll help when the service is back.",
+            role_config=None,
+        )

@@ -7,13 +7,17 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="toast-container" role="log" aria-live="polite" aria-label="Notifications">
+    <div className="toast-container" aria-label="Notifications">
       {toasts.map((toast) => (
         <div
           key={toast.id}
           className={`toast toast-${toast.type}`}
           role="alert"
+          aria-live={toast.type === "error" ? "assertive" : "polite"}
           onClick={() => removeToast(toast.id)}
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") removeToast(toast.id); }}
+          aria-label={`${toast.type}: ${toast.message}. Press Enter or Escape to dismiss.`}
         >
           {toast.message}
         </div>

@@ -4,6 +4,7 @@ import { useAuthStore } from "./lib/stores";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ProjectPage } from "./pages/ProjectPage";
+import { BillingPage } from "./pages/BillingPage";
 import { AppLayout } from "./components/AppLayout";
 import { ToastContainer } from "./components/Toast";
 
@@ -44,6 +45,7 @@ export function App() {
                 <Routes>
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/project/:projectId" element={<ProjectPage />} />
+                  <Route path="/billing" element={<BillingPage />} />
                 </Routes>
               </AppLayout>
             </ProtectedRoute>

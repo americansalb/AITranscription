@@ -479,6 +479,12 @@ async def describe_screen(request: DescribeScreenRequest, current_user: User = D
         return DescribeScreenResponse(**result)
     except Exception as e:
         logger.error("Screen description failed: %s: %s", type(e).__name__, e)
+        # Graceful degradation: return raw UIA tree if Vision API fails
+        if request.uia_tree:
+            return DescribeScreenResponse(
+                description=f"Vision API unavailable. Raw accessibility tree:\n{request.uia_tree[:2000]}",
+                elements=[],
+            )
         raise HTTPException(status_code=502, detail="Screen description service failed")
 
 
@@ -556,7 +562,11 @@ async def screen_reader_chat(request: ScreenReaderChatRequest, current_user: Use
         return ScreenReaderChatResponse(**result)
     except Exception as e:
         logger.error("Screen reader chat failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=502, detail="Screen reader chat service failed")
+        # Graceful degradation: return helpful error as chat response instead of 502
+        return ScreenReaderChatResponse(
+            description="I'm having trouble analyzing the screen right now. The Vision API may be temporarily unavailable. Please try again in a moment.",
+            elements=[],
+        )
 
 
 @router.post(

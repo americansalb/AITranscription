@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import decode_access_token, get_current_user
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models import Message, Project, WebUser
 
 logger = logging.getLogger(__name__)
@@ -178,12 +178,7 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
         await websocket.close(code=4001, reason="Auth timeout or invalid JSON")
         return
 
-    # Re-register after auth validation
-    await websocket.close()  # Close the pre-auth connection
-
-    # Reopen properly through the manager
-    ws2 = websocket  # In practice, we'd reuse the same socket
-    # For simplicity, register this connection
+    # Register the authenticated connection with the manager
     if project_id not in manager._connections:
         manager._connections[project_id] = []
     manager._connections[project_id].append(websocket)
@@ -197,7 +192,7 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
 
             # Handle incoming messages through the socket
             if data.get("type") == "send":
-                async with get_db().__anext__() as db:  # type: ignore
+                async with async_session() as db:
                     msg = Message(
                         project_id=project_id,
                         from_role=f"human:{user_id}",

@@ -1285,6 +1285,20 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 "session_id": session_id,
                 "instructions": instructions
             }).to_string();
+            // CORS: only allow localhost origins (Tauri WebView + local dev)
+            let origin = request.headers().iter()
+                .find(|h| h.field.as_str().eq_ignore_ascii_case("origin"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let cors_origin = if origin.starts_with("http://localhost")
+                || origin.starts_with("https://localhost")
+                || origin.starts_with("http://127.0.0.1")
+                || origin.starts_with("tauri://localhost")
+            {
+                origin.as_str()
+            } else {
+                "http://localhost"
+            };
             let response = Response::from_string(response_body)
                 .with_header(
                     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
@@ -1293,7 +1307,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 .with_header(
                     tiny_http::Header::from_bytes(
                         &b"Access-Control-Allow-Origin"[..],
-                        &b"*"[..],
+                        cors_origin.as_bytes(),
                     )
                     .unwrap(),
                 );
@@ -2517,17 +2531,45 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     Ok(())
 }
 
+/// Dedicated channel for collab change notifications. Uses a single background
+/// thread instead of spawning a new OS thread per call (25+ call sites).
+/// Notifications are coalesced: rapid successive calls result in a single HTTP request.
+static COLLAB_NOTIFY_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
+
+fn init_collab_notifier() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    COLLAB_NOTIFY_TX.set(tx).ok();
+    std::thread::Builder::new()
+        .name("collab-notifier".into())
+        .spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(2))
+                .build();
+            loop {
+                // Block until a notification arrives
+                match rx.recv() {
+                    Ok(()) => {}
+                    Err(_) => break, // Channel closed, exit thread
+                }
+                // Drain any queued notifications (coalesce rapid-fire calls)
+                while rx.try_recv().is_ok() {}
+                // Small delay to coalesce further
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                while rx.try_recv().is_ok() {}
+                // Send single HTTP notification
+                let _ = agent.post("http://127.0.0.1:7865/collab/notify").send_string("");
+            }
+        })
+        .ok();
+}
+
 /// Fire-and-forget notification to the local HTTP server (port 7865) so that
 /// the MCP sidecar and frontend windows learn about board/discussion changes
 /// made by Tauri commands. Without this, MCP waits up to 55s to discover changes.
 fn notify_collab_change() {
-    std::thread::spawn(|| {
-        let _ = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .post("http://127.0.0.1:7865/collab/notify")
-            .send_string("");
-    });
+    if let Some(tx) = COLLAB_NOTIFY_TX.get() {
+        let _ = tx.send(());
+    }
 }
 
 // ==================== Discussion Control Commands ====================
@@ -3773,6 +3815,9 @@ fn main() {
 
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
+
+            // Initialize collab change notifier (single thread, coalesced notifications)
+            init_collab_notifier();
 
             // Start project file watcher (polls .vaak/ files every 1s)
             start_project_watcher(app.handle().clone());

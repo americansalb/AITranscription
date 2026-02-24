@@ -1,5 +1,5 @@
 import { useState, FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useAuthStore } from "../lib/stores";
 
 export function LoginPage({ signup = false }: { signup?: boolean }) {
@@ -11,12 +11,10 @@ export function LoginPage({ signup = false }: { signup?: boolean }) {
   const loading = useAuthStore((s) => s.loading);
   const error = useAuthStore((s) => s.error);
   const user = useAuthStore((s) => s.user);
-  const navigate = useNavigate();
 
   // Redirect if already logged in
   if (user) {
-    navigate("/", { replace: true });
-    return null;
+    return <Navigate to="/" replace />;
   }
 
   const handleSubmit = async (e: FormEvent) => {

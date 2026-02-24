@@ -1218,7 +1218,7 @@ pub fn roster_add_slot(dir: &str, role: &str, metadata: Option<serde_json::Value
         if let Ok(sc) = std::fs::read_to_string(&sessions_path) {
             if let Ok(sv) = serde_json::from_str::<serde_json::Value>(&sc) {
                 if let Some(bindings) = sv.get("bindings").and_then(|b| b.as_array()) {
-                    let arr = seed.as_array_mut().unwrap();
+                    let arr = seed.as_array_mut().expect("seed is always json!([])");
                     for b in bindings {
                         let b_role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
                         let b_inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);

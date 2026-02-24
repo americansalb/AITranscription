@@ -218,19 +218,35 @@ export const useMessageStore = create<MessageState>((set, get) => ({
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${window.location.host}/api/v1/messages/${projectId}/ws`);
+    let reconnectDelay = 3000;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 10;
 
-    ws.onopen = () => set({ connected: true });
+    ws.onopen = () => {
+      set({ connected: true });
+      reconnectDelay = 3000;
+      reconnectAttempts = 0;
+    };
     ws.onclose = () => {
       set({ connected: false, ws: null });
-      // Auto-reconnect after 3 seconds
-      setTimeout(() => {
-        if (!get().ws) get().connectWs(projectId);
-      }, 3000);
+      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        setTimeout(() => {
+          if (!get().ws) get().connectWs(projectId);
+        }, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+      } else {
+        console.error("[WS] Max reconnect attempts reached, giving up");
+      }
     };
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as BoardMessage;
-        set((s) => ({ messages: [...s.messages, msg] }));
+        set((s) => {
+          const updated = [...s.messages, msg];
+          // Cap at 500 messages to prevent unbounded memory growth
+          return { messages: updated.length > 500 ? updated.slice(-500) : updated };
+        });
       } catch {
         // Ignore non-message frames (e.g., status acks)
       }
@@ -281,8 +297,9 @@ export const useUIStore = create<UIState>((set) => ({
   addToast: (message, type = "info") => {
     const id = `toast-${Date.now()}`;
     set((s) => ({ toasts: [...s.toasts, { id, message, type }] }));
-    // Auto-remove after 5 seconds
-    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), 5000);
+    // Errors persist longer (10s) for screen reader users; info/success auto-dismiss at 5s
+    const duration = type === "error" ? 10000 : 5000;
+    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), duration);
   },
 
   removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),

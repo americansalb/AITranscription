@@ -80,6 +80,28 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   </NavLink>
                 ))}
               </div>
+
+              <div style={{ marginTop: "var(--space-4)" }}>
+                <div style={{
+                  fontSize: "var(--text-xs)",
+                  color: "var(--text-muted)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  marginBottom: "var(--space-2)",
+                  fontWeight: "var(--weight-semibold)",
+                }}>
+                  Account
+                </div>
+                <NavLink
+                  to="/billing"
+                  className={({ isActive }) =>
+                    `btn btn-ghost ${isActive ? "active" : ""}`
+                  }
+                  style={{ width: "100%", justifyContent: "flex-start" }}
+                >
+                  Billing & Usage
+                </NavLink>
+              </div>
             </div>
 
             <div style={{

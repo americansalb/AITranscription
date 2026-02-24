@@ -8,10 +8,10 @@ Covers:
   - Internal error (Exception → 500)
   - Successful conversation turn (reply + no config)
   - Successful config generation (reply + role_config)
-  - No auth required
+  - Authentication required
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 # =============================================================================
@@ -20,16 +20,17 @@ from unittest.mock import AsyncMock, patch
 
 class TestRoleDesignValidation:
 
-    async def test_empty_messages(self, client):
+    async def test_empty_messages(self, client, auth_headers):
         """Empty messages list returns 400."""
         response = await client.post(
             "/api/v1/roles/design",
             json={"messages": []},
+            headers=auth_headers,
         )
         assert response.status_code == 400
         assert "At least one message" in response.json()["detail"]
 
-    async def test_invalid_message_role(self, client):
+    async def test_invalid_message_role(self, client, auth_headers):
         """Message with role other than 'user'/'assistant' returns 400."""
         response = await client.post(
             "/api/v1/roles/design",
@@ -38,25 +39,28 @@ class TestRoleDesignValidation:
                     {"role": "system", "content": "You are a role designer."}
                 ]
             },
+            headers=auth_headers,
         )
         assert response.status_code == 400
         assert "Invalid message role" in response.json()["detail"]
 
-    async def test_missing_messages_field(self, client):
+    async def test_missing_messages_field(self, client, auth_headers):
         """Request without messages field returns 422."""
         response = await client.post(
             "/api/v1/roles/design",
             json={},
+            headers=auth_headers,
         )
         assert response.status_code == 422
 
-    async def test_missing_content_field(self, client):
+    async def test_missing_content_field(self, client, auth_headers):
         """Message without content returns 422."""
         response = await client.post(
             "/api/v1/roles/design",
             json={
                 "messages": [{"role": "user"}]
             },
+            headers=auth_headers,
         )
         assert response.status_code == 422
 

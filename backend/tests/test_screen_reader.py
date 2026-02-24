@@ -1,13 +1,14 @@
 """Tests for screen reader and computer use API endpoints.
 
 Covers:
-  - POST /describe-screen (vision API, no auth)
-  - POST /screen-reader-chat (multi-turn, empty messages)
-  - POST /computer-use (tool loop, empty messages)
+  - POST /describe-screen (vision API, requires auth)
+  - POST /screen-reader-chat (multi-turn, requires auth)
+  - POST /computer-use (tool loop, requires auth)
   - API key validation for all vision endpoints
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from tests.conftest import make_user
 
 
 # A minimal valid 1x1 PNG in base64
@@ -23,16 +24,18 @@ TINY_PNG_BASE64 = (
 
 class TestDescribeScreen:
 
-    async def test_describe_screen_success(self, client):
+    async def test_describe_screen_success(self, client, auth_headers):
         """POST /describe-screen with valid image returns description."""
         mock_result = {
             "description": "A desktop application window showing a text editor.",
             "input_tokens": 1200,
             "output_tokens": 150,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.describe",
-                    return_value=mock_result):
+                    return_value=mock_result), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/describe-screen",
                 json={
@@ -40,6 +43,7 @@ class TestDescribeScreen:
                     "blind_mode": True,
                     "detail": 3,
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
@@ -48,47 +52,47 @@ class TestDescribeScreen:
         assert data["input_tokens"] == 1200
         assert data["output_tokens"] == 150
 
-    async def test_describe_screen_no_api_key(self, client):
-        """POST /describe-screen without Anthropic key returns 500."""
-        with patch("app.core.config.settings.anthropic_api_key", ""):
+    async def test_describe_screen_no_api_key(self, client, auth_headers):
+        """POST /describe-screen without Anthropic key returns 503."""
+        user = make_user()
+
+        with patch("app.core.config.settings.anthropic_api_key", ""), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/describe-screen",
                 json={
                     "image_base64": TINY_PNG_BASE64,
                 },
+                headers=auth_headers,
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 503
         assert "Anthropic API key not configured" in response.json()["detail"]
 
-    async def test_describe_screen_service_error(self, client):
-        """POST /describe-screen when service fails returns 500."""
+    async def test_describe_screen_service_error(self, client, auth_headers):
+        """POST /describe-screen when service fails returns 502."""
+        user = make_user()
+
         with patch("app.services.screen_reader.screen_reader_service.describe",
-                    side_effect=Exception("Vision API error")):
+                    side_effect=Exception("Vision API error")), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/describe-screen",
                 json={"image_base64": TINY_PNG_BASE64},
+                headers=auth_headers,
             )
 
-        assert response.status_code == 500
-        assert "Screen description failed" in response.json()["detail"]
+        assert response.status_code == 502
+        assert "Screen description service failed" in response.json()["detail"]
 
-    async def test_describe_screen_no_auth_needed(self, client):
-        """Describe screen does not require authentication."""
-        mock_result = {
-            "description": "A window.",
-            "input_tokens": 100,
-            "output_tokens": 20,
-        }
+    async def test_describe_screen_auth_required(self, client):
+        """Describe screen requires authentication."""
+        response = await client.post(
+            "/api/v1/describe-screen",
+            json={"image_base64": TINY_PNG_BASE64},
+        )
 
-        with patch("app.services.screen_reader.screen_reader_service.describe",
-                    return_value=mock_result):
-            response = await client.post(
-                "/api/v1/describe-screen",
-                json={"image_base64": TINY_PNG_BASE64},
-            )
-
-        assert response.status_code == 200
+        assert response.status_code == 401
 
     async def test_describe_screen_missing_image(self, client):
         """POST /describe-screen without image returns 422."""
