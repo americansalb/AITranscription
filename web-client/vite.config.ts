@@ -9,10 +9,7 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:8100",
         changeOrigin: true,
-      },
-      "/ws": {
-        target: "ws://127.0.0.1:8100",
-        ws: true,
+        ws: true, // Enable WebSocket proxy (WS endpoints are under /api/v1/messages/*/ws)
       },
     },
   },

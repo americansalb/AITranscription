@@ -38,25 +38,46 @@ class RateBucket:
 _buckets: dict[str, RateBucket] = defaultdict(RateBucket)
 
 
+def _extract_user_id(request: Request) -> str:
+    """Extract user identity from JWT token, falling back to client IP.
+
+    NEVER trust client-supplied headers like X-User-Id for rate limiting.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        try:
+            from app.api.auth import decode_access_token
+            user_id = decode_access_token(token)
+            if user_id is not None:
+                return f"user:{user_id}"
+        except Exception:
+            pass
+
+    # Fall back to client IP for unauthenticated requests
+    client_ip = request.client.host if request.client else "unknown"
+    return f"ip:{client_ip}"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """FastAPI middleware that enforces per-user rate limits."""
 
     async def dispatch(self, request: Request, call_next):
-        # Extract user ID from JWT (simplified — real implementation checks auth)
-        user_id = request.headers.get("X-User-Id", "anonymous")
+        # Extract user identity from JWT or IP (never from client headers)
+        identity = _extract_user_id(request)
         path = request.url.path
 
         # Stricter limit for provider proxy
         if "/api/v1/providers/" in path:
-            key = f"provider:{user_id}"
+            key = f"provider:{identity}"
             limit = PROVIDER_RPM
         else:
-            key = f"api:{user_id}"
+            key = f"api:{identity}"
             limit = DEFAULT_RPM
 
         bucket = _buckets[key]
         if not bucket.allow(limit):
-            logger.warning("Rate limited: user=%s path=%s", user_id, path)
+            logger.warning("Rate limited: identity=%s path=%s", identity, path)
             raise HTTPException(
                 status_code=429,
                 detail=f"Rate limit exceeded. Max {limit} requests per minute.",

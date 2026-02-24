@@ -117,7 +117,9 @@ export function ProjectPage() {
       connectWs(projectId);
     }
     return () => disconnectWs();
-  }, [projectId, selectProject, loadMessages, connectWs, disconnectWs]);
+    // Zustand selectors return stable references, so only projectId triggers re-runs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -125,7 +127,7 @@ export function ProjectPage() {
   }, [messages.length]);
 
   const handleSend = async () => {
-    if (!projectId || !msgBody.trim()) return;
+    if (!projectId || !msgBody.trim() || sending) return;
     setSending(true);
     await sendMsg(projectId, msgTo, "directive", "", msgBody.trim());
     setMsgBody("");

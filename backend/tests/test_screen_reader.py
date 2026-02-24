@@ -102,16 +102,18 @@ class TestDescribeScreen:
         )
         assert response.status_code == 422
 
-    async def test_describe_screen_blind_mode(self, client):
+    async def test_describe_screen_blind_mode(self, client, auth_headers):
         """Blind mode provides more detailed description."""
         mock_result = {
             "description": "Exhaustive visual description of the screen...",
             "input_tokens": 1500,
             "output_tokens": 500,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.describe",
-                    return_value=mock_result) as mock_describe:
+                    return_value=mock_result) as mock_describe, \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/describe-screen",
                 json={
@@ -119,6 +121,7 @@ class TestDescribeScreen:
                     "blind_mode": True,
                     "detail": 5,
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
@@ -135,16 +138,18 @@ class TestDescribeScreen:
 
 class TestScreenReaderChat:
 
-    async def test_chat_success(self, client):
+    async def test_chat_success(self, client, auth_headers):
         """POST /screen-reader-chat with valid messages returns response."""
         mock_result = {
             "response": "The top right shows a close button.",
             "input_tokens": 1300,
             "output_tokens": 45,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.chat",
-                    return_value=mock_result):
+                    return_value=mock_result), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/screen-reader-chat",
                 json={
@@ -153,61 +158,78 @@ class TestScreenReaderChat:
                         {"role": "user", "content": "What's in the top right?"}
                     ],
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
         data = response.json()
         assert data["response"] == "The top right shows a close button."
 
-    async def test_chat_empty_messages(self, client):
+    async def test_chat_empty_messages(self, client, auth_headers):
         """POST /screen-reader-chat with empty messages returns 400."""
-        response = await client.post(
-            "/api/v1/screen-reader-chat",
-            json={
-                "image_base64": TINY_PNG_BASE64,
-                "messages": [],
-            },
-        )
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", return_value=user):
+            response = await client.post(
+                "/api/v1/screen-reader-chat",
+                json={
+                    "image_base64": TINY_PNG_BASE64,
+                    "messages": [],
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "Messages cannot be empty" in response.json()["detail"]
 
-    async def test_chat_no_api_key(self, client):
-        """POST /screen-reader-chat without API key returns 500."""
-        with patch("app.core.config.settings.anthropic_api_key", ""):
+    async def test_chat_no_api_key(self, client, auth_headers):
+        """POST /screen-reader-chat without API key returns 503."""
+        user = make_user()
+
+        with patch("app.core.config.settings.anthropic_api_key", ""), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/screen-reader-chat",
                 json={
                     "image_base64": TINY_PNG_BASE64,
                     "messages": [{"role": "user", "content": "Hello"}],
                 },
+                headers=auth_headers,
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 503
 
-    async def test_chat_service_error(self, client):
-        """POST /screen-reader-chat when service fails returns 500."""
+    async def test_chat_service_error(self, client, auth_headers):
+        """POST /screen-reader-chat when service fails returns 200 with fallback."""
+        user = make_user()
+
         with patch("app.services.screen_reader.screen_reader_service.chat",
-                    side_effect=Exception("Chat error")):
+                    side_effect=Exception("Chat error")), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/screen-reader-chat",
                 json={
                     "image_base64": TINY_PNG_BASE64,
                     "messages": [{"role": "user", "content": "What's here?"}],
                 },
+                headers=auth_headers,
             )
 
-        assert response.status_code == 500
+        # Routes.py returns graceful degradation with helpful message instead of 502
+        assert response.status_code == 200
+        assert "Vision API may be temporarily unavailable" in response.json()["description"]
 
-    async def test_chat_multi_turn(self, client):
+    async def test_chat_multi_turn(self, client, auth_headers):
         """Multi-turn conversation passes full message history."""
         mock_result = {
             "response": "The button is labeled 'Submit'.",
             "input_tokens": 1500,
             "output_tokens": 30,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.chat",
-                    return_value=mock_result) as mock_chat:
+                    return_value=mock_result) as mock_chat, \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/screen-reader-chat",
                 json={
@@ -218,6 +240,7 @@ class TestScreenReaderChat:
                         {"role": "user", "content": "What does the main button say?"},
                     ],
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
@@ -231,22 +254,29 @@ class TestScreenReaderChat:
 
 class TestComputerUse:
 
-    async def test_computer_use_empty_messages(self, client):
+    async def test_computer_use_empty_messages(self, client, auth_headers):
         """POST /computer-use with empty messages returns 400."""
-        response = await client.post(
-            "/api/v1/computer-use",
-            json={
-                "messages": [],
-                "display_width": 1920,
-                "display_height": 1080,
-            },
-        )
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", return_value=user):
+            response = await client.post(
+                "/api/v1/computer-use",
+                json={
+                    "messages": [],
+                    "display_width": 1920,
+                    "display_height": 1080,
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "Messages cannot be empty" in response.json()["detail"]
 
-    async def test_computer_use_no_api_key(self, client):
-        """POST /computer-use without API key returns 500."""
-        with patch("app.core.config.settings.anthropic_api_key", ""):
+    async def test_computer_use_no_api_key(self, client, auth_headers):
+        """POST /computer-use without API key returns 503."""
+        user = make_user()
+
+        with patch("app.core.config.settings.anthropic_api_key", ""), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/computer-use",
                 json={
@@ -254,11 +284,12 @@ class TestComputerUse:
                     "display_width": 1920,
                     "display_height": 1080,
                 },
+                headers=auth_headers,
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 503
 
-    async def test_computer_use_has_default_dimensions(self, client):
+    async def test_computer_use_has_default_dimensions(self, client, auth_headers):
         """ComputerUseRequest defaults display_width=1920, display_height=1080."""
         mock_result = {
             "stop_reason": "end_turn",
@@ -266,20 +297,23 @@ class TestComputerUse:
             "input_tokens": 500,
             "output_tokens": 20,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.computer_use",
-                    return_value=mock_result):
+                    return_value=mock_result), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             # Omit display dimensions — should use defaults
             response = await client.post(
                 "/api/v1/computer-use",
                 json={
                     "messages": [{"role": "user", "content": "Click"}],
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
 
-    async def test_computer_use_success(self, client):
+    async def test_computer_use_success(self, client, auth_headers):
         """POST /computer-use with valid request returns tool actions."""
         mock_result = {
             "stop_reason": "tool_use",
@@ -295,9 +329,11 @@ class TestComputerUse:
             "input_tokens": 800,
             "output_tokens": 50,
         }
+        user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.computer_use",
-                    return_value=mock_result):
+                    return_value=mock_result), \
+             patch("app.api.auth.get_user_by_id", return_value=user):
             response = await client.post(
                 "/api/v1/computer-use",
                 json={
@@ -305,6 +341,7 @@ class TestComputerUse:
                     "display_width": 1920,
                     "display_height": 1080,
                 },
+                headers=auth_headers,
             )
 
         assert response.status_code == 200
