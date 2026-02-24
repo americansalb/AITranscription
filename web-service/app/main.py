@@ -24,6 +24,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting %s v%s", settings.app_name, settings.version)
     await init_db()
     logger.info("Database initialized")
+
+    # Security warnings
+    if not settings.fernet_key:
+        logger.warning(
+            "VAAK_WEB_FERNET_KEY not set — BYOK API keys will be stored UNENCRYPTED. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    if settings.secret_key == "change-me-in-production":
+        logger.warning("VAAK_WEB_SECRET_KEY is using the default value — change it in production!")
+
     yield
     logger.info("Shutting down")
 

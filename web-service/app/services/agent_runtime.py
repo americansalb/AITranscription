@@ -187,20 +187,33 @@ async def _meter_agent_completion(
                 f"exceeded for project {project_id} (current: ${session_cost:.2f})"
             )
 
-        # 4. BYOK key lookup (decrypt from DB)
-        from app.services.key_encryption import decrypt_key
+        # 4. BYOK key lookup (decrypt from DB, auto-encrypt legacy plaintext)
+        from app.services.key_encryption import decrypt_key, encrypt_key, is_encrypted
 
         byok_key = None
         if user.tier == SubscriptionTier.BYOK:
-            encrypted = None
+            stored = None
+            attr_name = None
             if "claude" in model:
-                encrypted = user.byok_anthropic_key
+                stored = user.byok_anthropic_key
+                attr_name = "byok_anthropic_key"
             elif "gpt" in model or model.startswith("o"):
-                encrypted = user.byok_openai_key
+                stored = user.byok_openai_key
+                attr_name = "byok_openai_key"
             elif "gemini" in model:
-                encrypted = user.byok_google_key
+                stored = user.byok_google_key
+                attr_name = "byok_google_key"
 
-            byok_key = decrypt_key(encrypted) if encrypted else None
+            if stored:
+                byok_key = decrypt_key(stored)
+                # Auto-encrypt legacy plaintext keys on first read
+                if attr_name and not is_encrypted(stored):
+                    encrypted_value = encrypt_key(byok_key)
+                    if encrypted_value != stored:
+                        setattr(user, attr_name, encrypted_value)
+                        await db.commit()
+                        logger.info("Auto-encrypted legacy BYOK key for user %d", user_id)
+
             if not byok_key:
                 raise ValueError(
                     f"BYOK user {user_id} has no API key for model {model}"

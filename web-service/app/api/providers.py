@@ -108,7 +108,7 @@ async def route_completion(
     # 4. Determine API key (BYOK vs platform)
     byok_key = None
     if user.tier == SubscriptionTier.BYOK:
-        byok_key = _get_byok_key(user, role_provider)
+        byok_key = await _get_byok_key(user, role_provider, db)
         if not byok_key:
             raise HTTPException(
                 status_code=402,
@@ -284,14 +284,34 @@ async def _get_session_cost(db: AsyncSession, user_id: int, project_id: int) -> 
     return float(result.scalar())
 
 
-def _get_byok_key(user: WebUser, provider: str) -> str | None:
-    from app.services.key_encryption import decrypt_key
+async def _get_byok_key(
+    user: WebUser, provider: str, db: AsyncSession | None = None
+) -> str | None:
+    from app.services.key_encryption import decrypt_key, encrypt_key, is_encrypted
 
-    encrypted = None
+    stored = None
+    attr_name = None
     if provider == "anthropic":
-        encrypted = user.byok_anthropic_key
+        stored = user.byok_anthropic_key
+        attr_name = "byok_anthropic_key"
     elif provider == "openai":
-        encrypted = user.byok_openai_key
+        stored = user.byok_openai_key
+        attr_name = "byok_openai_key"
     elif provider == "google":
-        encrypted = user.byok_google_key
-    return decrypt_key(encrypted) if encrypted else None
+        stored = user.byok_google_key
+        attr_name = "byok_google_key"
+
+    if not stored:
+        return None
+
+    plaintext = decrypt_key(stored)
+
+    # Auto-encrypt legacy plaintext keys on first read
+    if db is not None and attr_name and not is_encrypted(stored):
+        encrypted = encrypt_key(plaintext)
+        if encrypted != stored:
+            setattr(user, attr_name, encrypted)
+            await db.commit()
+            logger.info("Auto-encrypted legacy %s BYOK key for user %d", provider, user.id)
+
+    return plaintext

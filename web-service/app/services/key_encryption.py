@@ -62,3 +62,17 @@ def decrypt_key(ciphertext: str) -> str:
         # Legacy unencrypted key — return as-is
         logger.debug("Key appears to be unencrypted (legacy), returning as-is")
         return ciphertext
+
+
+def is_encrypted(value: str) -> bool:
+    """Check if a stored value looks like a Fernet-encrypted token.
+
+    Fernet tokens are base64-encoded and always start with 'gAAAAA'.
+    Used to detect legacy plaintext keys that need re-encryption.
+    """
+    if not value:
+        return False
+    f = _get_fernet()
+    if f is None:
+        return False  # No Fernet configured — can't determine
+    return value.startswith("gAAAAA")
