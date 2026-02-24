@@ -502,7 +502,7 @@ export function TranscriptApp() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessions: sessions.map(s => ({ id: s.id, name: s.name })) }),
-      }).catch(() => { /* backend not running */ });
+      }).catch((e) => console.debug("[TranscriptApp] Session sync skipped (backend not running):", e));
     }
   }, [sessions, voiceAssignments]);
 

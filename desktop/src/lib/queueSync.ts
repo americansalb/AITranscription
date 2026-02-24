@@ -87,8 +87,8 @@ class QueueSync {
     // Also emit Tauri event
     if (window.__TAURI__) {
       import('@tauri-apps/api/event').then(({ emit }) => {
-        emit('queue-state-update', state).catch(() => {});
-      }).catch(() => {});
+        emit('queue-state-update', state).catch((e) => console.debug("[QueueSync] Tauri emit failed:", e));
+      }).catch((e) => console.debug("[QueueSync] Tauri event import failed:", e));
     }
   }
 

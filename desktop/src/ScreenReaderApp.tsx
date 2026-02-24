@@ -53,7 +53,7 @@ export function ScreenReaderApp() {
     fetch(`${apiUrl}/api/v1/voices`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data?.voices) setVoices(data.voices); })
-      .catch(() => {});
+      .catch((e) => console.error("[ScreenReader] Failed to fetch voices:", e));
   }, []);
 
   // Check backend status
@@ -62,7 +62,7 @@ export function ScreenReaderApp() {
     const check = () => {
       fetch(`${apiUrl}/api/v1/health`)
         .then((r) => setBackendStatus(r.ok ? "connected" : "disconnected"))
-        .catch(() => setBackendStatus("disconnected"));
+        .catch((e) => { console.error("[ScreenReader] Health check failed:", e); setBackendStatus("disconnected"); });
     };
     check();
     const interval = setInterval(check, 10000);

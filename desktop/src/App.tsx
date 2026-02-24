@@ -552,7 +552,8 @@ function App() {
                   setError(null);
                   showToast("Microphone access granted!", "success");
                 })
-                .catch(() => {
+                .catch((e) => {
+                  console.error("[App] Microphone permission denied:", e);
                   showToast("Please enable microphone in system settings", "error");
                 });
             },
@@ -672,7 +673,8 @@ function App() {
                 showToast("Connection restored!", "success");
                 setBackendReady(true);
               }
-            }).catch(() => {
+            }).catch((e) => {
+              console.error("[App] Health check retry failed:", e);
               showToast("Still unable to connect", "error");
             });
           },
@@ -749,7 +751,8 @@ function App() {
             });
           }
         })
-        .catch(() => {
+        .catch((e) => {
+          console.error("[App] Backend health check failed:", e);
           setBackendReady(false);
           setError({
             message: "Cannot connect to backend. Is it running?",
@@ -905,7 +908,8 @@ function App() {
                     setError(null);
                     showToast("Microphone access granted!", "success");
                   })
-                  .catch(() => {
+                  .catch((e) => {
+                    console.error("[App] Microphone permission denied:", e);
                     showToast("Please enable microphone in system settings", "error");
                   });
               },
