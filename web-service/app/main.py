@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api import auth, projects, messages, billing, providers
+from app.api import auth, projects, messages, billing, providers, discussions
 from app.database import init_db
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +49,7 @@ app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"]
 app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"])
 app.include_router(billing.router, prefix="/api/v1/billing", tags=["billing"])
 app.include_router(providers.router, prefix="/api/v1/providers", tags=["providers"])
+app.include_router(discussions.router, prefix="/api/v1/messages", tags=["discussions"])
 
 
 @app.get("/health")

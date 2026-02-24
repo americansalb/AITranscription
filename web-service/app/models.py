@@ -10,6 +10,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -144,5 +145,105 @@ class UsageRecord(Base):
     raw_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
     marked_up_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class DiscussionMode(str, enum.Enum):
+    DELPHI = "delphi"
+    OXFORD = "oxford"
+    RED_TEAM = "red_team"
+    CONTINUOUS = "continuous"
+
+
+class DiscussionPhase(str, enum.Enum):
+    PREPARING = "preparing"
+    SUBMITTING = "submitting"
+    AGGREGATING = "aggregating"
+    REVIEWING = "reviewing"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+
+
+class Discussion(Base):
+    """A structured discussion within a project."""
+
+    __tablename__ = "web_discussions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("web_projects.id"), nullable=False, index=True)
+    mode: Mapped[DiscussionMode] = mapped_column(Enum(DiscussionMode), nullable=False)
+    topic: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    phase: Mapped[DiscussionPhase] = mapped_column(
+        Enum(DiscussionPhase), default=DiscussionPhase.PREPARING, nullable=False
+    )
+    moderator: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    participants: Mapped[dict] = mapped_column(JSON, default=list, nullable=False)
+    current_round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Settings
+    max_rounds: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    timeout_minutes: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    auto_close_timeout_seconds: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+
+    # Oxford mode teams
+    teams: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    rounds: Mapped[list["DiscussionRound"]] = relationship(
+        back_populates="discussion", lazy="selectin", order_by="DiscussionRound.number"
+    )
+
+
+class DiscussionRound(Base):
+    """A single round within a discussion."""
+
+    __tablename__ = "web_discussion_rounds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    discussion_id: Mapped[int] = mapped_column(ForeignKey("web_discussions.id"), nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    topic: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Continuous review trigger info
+    auto_triggered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    trigger_from: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    trigger_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Aggregate result (JSON: tally, anonymized submissions, etc.)
+    aggregate: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    aggregate_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    discussion: Mapped["Discussion"] = relationship(back_populates="rounds")
+    submissions: Mapped[list["DiscussionSubmission"]] = relationship(
+        back_populates="round", lazy="selectin"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("discussion_id", "number", name="uq_discussion_round_number"),
+    )
+
+
+class DiscussionSubmission(Base):
+    """A participant's submission in a discussion round."""
+
+    __tablename__ = "web_discussion_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    round_id: Mapped[int] = mapped_column(ForeignKey("web_discussion_rounds.id"), nullable=False)
+    from_role: Mapped[str] = mapped_column(String(100), nullable=False)
+    message_id: Mapped[int] = mapped_column(ForeignKey("web_messages.id"), nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )

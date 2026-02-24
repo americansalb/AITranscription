@@ -12,7 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import decode_access_token, get_current_user
 from app.database import async_session, get_db
-from app.models import Message, Project, WebUser
+from app.models import (
+    Discussion,
+    DiscussionMode,
+    DiscussionPhase,
+    DiscussionRound,
+    Message,
+    Project,
+    WebUser,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -148,6 +156,10 @@ async def send_message(
     response = _msg_response(msg)
     await manager.broadcast(project_id, response.model_dump())
 
+    # Auto-trigger continuous review round if status message
+    if request.type == "status":
+        await _maybe_trigger_continuous_round(db, project_id, msg)
+
     return response
 
 
@@ -207,6 +219,10 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
                     response = _msg_response(msg)
                     await manager.broadcast(project_id, response.model_dump())
 
+                    # Auto-trigger continuous review for status messages
+                    if data.get("msg_type") == "status":
+                        await _maybe_trigger_continuous_round(db, project_id, msg)
+
     except WebSocketDisconnect:
         manager.disconnect(project_id, websocket)
         logger.info("WS disconnected: project=%d user=%d", project_id, user_id)
@@ -225,4 +241,72 @@ def _msg_response(msg: Message) -> MessageResponse:
         subject=msg.subject,
         body=msg.body,
         created_at=msg.created_at.isoformat(),
+    )
+
+
+async def _maybe_trigger_continuous_round(
+    db: AsyncSession, project_id: int, trigger_msg: Message
+) -> None:
+    """Auto-create a continuous review round when a status message is posted.
+
+    This mirrors the desktop's auto_create_continuous_round behavior:
+    - Only triggers if there's an active continuous discussion
+    - Creates a new round with trigger_from set to the message author
+    - Posts a review-request broadcast so other participants know to respond
+    """
+    result = await db.execute(
+        select(Discussion).where(
+            Discussion.project_id == project_id,
+            Discussion.is_active == True,
+            Discussion.mode == DiscussionMode.CONTINUOUS,
+        )
+    )
+    discussion = result.scalar_one_or_none()
+    if not discussion:
+        return
+
+    if discussion.phase not in (DiscussionPhase.REVIEWING, DiscussionPhase.SUBMITTING):
+        return
+
+    if discussion.current_round >= discussion.max_rounds:
+        return
+
+    # Create a new auto-triggered round
+    discussion.current_round += 1
+    discussion.phase = DiscussionPhase.SUBMITTING
+
+    new_round = DiscussionRound(
+        discussion_id=discussion.id,
+        number=discussion.current_round,
+        topic=trigger_msg.subject or trigger_msg.body[:200],
+        auto_triggered=True,
+        trigger_from=trigger_msg.from_role,
+        trigger_message_id=trigger_msg.id,
+    )
+    db.add(new_round)
+
+    # Post review-request broadcast
+    review_msg = Message(
+        project_id=project_id,
+        from_role="system",
+        to_role="all",
+        msg_type="broadcast",
+        subject=f"Review round {discussion.current_round} (auto)",
+        body=f"Status update from {trigger_msg.from_role}: {trigger_msg.subject or trigger_msg.body[:200]}\n"
+             f"Respond with agree/disagree/alternative, or silence = consent "
+             f"(timeout: {discussion.auto_close_timeout_seconds}s).",
+    )
+    db.add(review_msg)
+    await db.commit()
+
+    await manager.broadcast(project_id, {
+        "type": "continuous_round_triggered",
+        "discussion_id": discussion.id,
+        "round": discussion.current_round,
+        "trigger_from": trigger_msg.from_role,
+    })
+
+    logger.info(
+        "Continuous round auto-triggered: discussion=%d round=%d trigger=%s",
+        discussion.id, discussion.current_round, trigger_msg.from_role,
     )
