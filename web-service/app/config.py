@@ -1,4 +1,9 @@
-"""Web service configuration — loaded from environment variables."""
+"""Web service configuration — loaded from environment variables.
+
+IMPORTANT: The agent runtime uses in-memory state (_active_agents dict).
+Run with --workers 1 to avoid state desync between processes.
+For horizontal scaling, a DB-backed agent state table or Redis is needed.
+"""
 
 from pydantic_settings import BaseSettings
 
