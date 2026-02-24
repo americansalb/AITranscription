@@ -140,7 +140,7 @@ const STORAGE_KEYS = {
 
 export function getPolishEnabled(): boolean {
   const stored = localStorage.getItem(STORAGE_KEYS.POLISH_ENABLED);
-  return stored === null ? true : stored === "true";
+  return stored === null ? false : stored === "true";
 }
 
 export function savePolishEnabled(enabled: boolean): void {

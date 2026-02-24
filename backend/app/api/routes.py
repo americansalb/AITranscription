@@ -324,8 +324,15 @@ async def transcribe_and_polish(
             saved=bool(user),
         )
     except Exception as e:
-        logger.error("Polish (transcribe+polish) failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Polish failed")
+        logger.warning("Polish failed, returning raw text: %s: %s", type(e).__name__, e)
+        # Graceful degradation: return raw text as polished text instead of 500
+        return TranscribeAndPolishResponse(
+            raw_text=transcribe_response.raw_text,
+            polished_text=transcribe_response.raw_text,
+            duration=transcribe_response.duration,
+            language=transcribe_response.language,
+            usage={"input_tokens": 0, "output_tokens": 0},
+        )
 
 
 @router.post(
