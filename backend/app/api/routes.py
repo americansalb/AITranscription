@@ -564,8 +564,9 @@ async def screen_reader_chat(request: ScreenReaderChatRequest, current_user: Use
         logger.error("Screen reader chat failed: %s: %s", type(e).__name__, e)
         # Graceful degradation: return helpful error as chat response instead of 502
         return ScreenReaderChatResponse(
-            description="I'm having trouble analyzing the screen right now. The Vision API may be temporarily unavailable. Please try again in a moment.",
-            elements=[],
+            response="I'm having trouble analyzing the screen right now. The Vision API may be temporarily unavailable. Please try again in a moment.",
+            input_tokens=0,
+            output_tokens=0,
         )
 
 

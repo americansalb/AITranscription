@@ -203,7 +203,7 @@ class TestScreenReaderChat:
         assert response.status_code == 503
 
     async def test_chat_service_error(self, client, auth_headers):
-        """POST /screen-reader-chat when service fails returns 502."""
+        """POST /screen-reader-chat when service fails returns 200 with fallback."""
         user = make_user()
 
         with patch("app.services.screen_reader.screen_reader_service.chat",
@@ -218,9 +218,9 @@ class TestScreenReaderChat:
                 headers=auth_headers,
             )
 
-        # Routes.py currently has a bug in graceful degradation - missing required fields
-        # The service error is caught but the fallback response is incomplete
-        assert response.status_code == 500
+        # Routes.py returns graceful degradation with helpful message instead of 502
+        assert response.status_code == 200
+        assert "Vision API may be temporarily unavailable" in response.json()["response"]
 
     async def test_chat_multi_turn(self, client, auth_headers):
         """Multi-turn conversation passes full message history."""
