@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.models import Message, Project, ProjectRole, WebUser
+from app.models import Project, ProjectRole, WebUser
 from app.services.agent_runtime import get_active_agents, start_agent, stop_agent
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,29 @@ class CreateProjectRequest(BaseModel):
 class UpdateRoleProviderRequest(BaseModel):
     provider: str
     model: str
+
+
+class CreateRoleRequest(BaseModel):
+    slug: str = Field(min_length=1, max_length=50, pattern=r"^[a-z][a-z0-9_-]*$")
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=5000)
+    tags: list[str] = Field(default_factory=list)
+    permissions: list[str] = Field(default_factory=list)
+    maxInstances: int = Field(default=1, ge=1, le=10)
+    provider: dict | None = Field(default=None, description='{"provider": "anthropic", "model": "..."}')
+
+
+class UpdateBriefingRequest(BaseModel):
+    briefing: str = Field(max_length=50000)
+
+
+class BuzzAgentRequest(BaseModel):
+    instance: int = Field(default=0, ge=0)
+
+
+class InterruptAgentRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    instance: int = Field(default=0, ge=0)
 
 
 # --- Endpoints ---
@@ -194,6 +217,206 @@ async def list_agents(
         }
         for a in agents
     ]
+
+
+# --- Role CRUD ---
+
+@router.get("/{project_id}/roles/{role_slug}/briefing")
+async def get_role_briefing(
+    project_id: int,
+    role_slug: str,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Get a role's briefing text."""
+    project = await _get_user_project(db, project_id, user.id)
+    role = _find_role(project, role_slug)
+    return {"briefing": role.briefing or ""}
+
+
+@router.put("/{project_id}/roles/{role_slug}/briefing")
+async def update_role_briefing(
+    project_id: int,
+    role_slug: str,
+    request: UpdateBriefingRequest,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Update a role's briefing text."""
+    project = await _get_user_project(db, project_id, user.id)
+    role = _find_role(project, role_slug)
+    role.briefing = request.briefing
+    await db.commit()
+    return {"status": "updated", "slug": role_slug}
+
+
+@router.post("/{project_id}/roles", status_code=status.HTTP_201_CREATED)
+async def create_role(
+    project_id: int,
+    request: CreateRoleRequest,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Create a new role in a project."""
+    project = await _get_user_project(db, project_id, user.id)
+
+    # Check for duplicate slug
+    for r in project.roles:
+        if r.slug == request.slug:
+            raise HTTPException(status_code=409, detail=f"Role '{request.slug}' already exists")
+
+    prov = request.provider or {}
+    role = ProjectRole(
+        project_id=project.id,
+        slug=request.slug,
+        title=request.title,
+        briefing=request.description,
+        provider=prov.get("provider", "anthropic"),
+        model=prov.get("model", "claude-sonnet-4-6"),
+        max_instances=request.maxInstances,
+    )
+    db.add(role)
+    await db.commit()
+    await db.refresh(role)
+
+    logger.info("Role created: %s in project %d", request.slug, project_id)
+    return {
+        "slug": role.slug,
+        "title": role.title,
+        "description": role.briefing,
+        "tags": request.tags,
+        "permissions": request.permissions,
+        "maxInstances": role.max_instances,
+        "provider": {"provider": role.provider, "model": role.model},
+    }
+
+
+@router.delete("/{project_id}/roles/{role_slug}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_role(
+    project_id: int,
+    role_slug: str,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Delete a role from a project."""
+    project = await _get_user_project(db, project_id, user.id)
+    role = _find_role(project, role_slug)
+
+    if role.is_agent_running:
+        raise HTTPException(status_code=409, detail="Stop the agent before deleting the role")
+
+    await db.delete(role)
+    await db.commit()
+    logger.info("Role deleted: %s from project %d", role_slug, project_id)
+
+
+# --- Agent actions ---
+
+@router.post("/{project_id}/roles/{role_slug}/buzz")
+async def buzz_role_agent(
+    project_id: int,
+    role_slug: str,
+    request: BuzzAgentRequest,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Send a wake-up buzz to an agent instance."""
+    project = await _get_user_project(db, project_id, user.id)
+    _find_role(project, role_slug)  # validates role exists
+
+    # Post a buzz message to the board
+    from app.models import Message as MsgModel
+    msg = MsgModel(
+        project_id=project_id,
+        from_role=f"human:{user.id}",
+        to_role=f"{role_slug}:{request.instance}",
+        msg_type="buzz",
+        subject="Wake up",
+        body=f"Buzz signal sent to {role_slug}:{request.instance}",
+    )
+    db.add(msg)
+    await db.commit()
+
+    logger.info("Buzzed agent %s:%d in project %d", role_slug, request.instance, project_id)
+    return {"status": "buzzed", "role": role_slug, "instance": request.instance}
+
+
+@router.post("/{project_id}/roles/{role_slug}/interrupt")
+async def interrupt_role_agent(
+    project_id: int,
+    role_slug: str,
+    request: InterruptAgentRequest,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Send a priority interrupt to an agent instance."""
+    project = await _get_user_project(db, project_id, user.id)
+    _find_role(project, role_slug)  # validates role exists
+
+    from app.models import Message as MsgModel
+    msg = MsgModel(
+        project_id=project_id,
+        from_role=f"human:{user.id}",
+        to_role=f"{role_slug}:{request.instance}",
+        msg_type="interrupt",
+        subject="Priority Interrupt",
+        body=request.reason,
+    )
+    db.add(msg)
+    await db.commit()
+
+    logger.info("Interrupted agent %s:%d in project %d: %s", role_slug, request.instance, project_id, request.reason[:100])
+    return {"status": "interrupted", "role": role_slug, "instance": request.instance}
+
+
+# --- File Claims (stub — no desktop-style file lock system yet) ---
+
+@router.get("/{project_id}/claims")
+async def get_file_claims(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Get active file claims for a project. Stub — returns empty list until claim system is built."""
+    await _get_user_project(db, project_id, user.id)
+    return []
+
+
+# --- Sections (lightweight — no ORM, stored as project metadata) ---
+
+@router.get("/{project_id}/sections")
+async def list_sections(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """List sections. Stub — returns default section only."""
+    await _get_user_project(db, project_id, user.id)
+    return [
+        {"slug": "default", "name": "Default", "message_count": 0, "last_activity": None},
+    ]
+
+
+@router.post("/{project_id}/sections", status_code=status.HTTP_201_CREATED)
+async def create_section(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Create a section. Stub — returns 501 until section system is built."""
+    raise HTTPException(status_code=501, detail="Sections not yet implemented in web service")
+
+
+@router.post("/{project_id}/sections/{slug}/switch")
+async def switch_section(
+    project_id: int,
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Switch active section. Stub — no-op for default section."""
+    await _get_user_project(db, project_id, user.id)
+    return {"status": "switched", "slug": slug}
 
 
 # --- Helpers ---

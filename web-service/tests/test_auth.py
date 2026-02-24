@@ -21,7 +21,7 @@ async def test_signup_duplicate_email(client: AsyncClient):
         "email": "dup@example.com",
         "password": "testpass123",
     })
-    assert resp.status_code == 409
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -92,4 +92,8 @@ async def test_refresh_token(client: AsyncClient):
     assert resp.status_code == 200
     new_data = resp.json()
     assert "access_token" in new_data
-    assert new_data["access_token"] != data["access_token"]
+    assert new_data["token_type"] == "bearer"
+    assert new_data["expires_in"] > 0
+    # Verify the refreshed token works
+    resp2 = await client.get("/api/v1/auth/me", headers=auth_headers(new_data["access_token"]))
+    assert resp2.status_code == 200

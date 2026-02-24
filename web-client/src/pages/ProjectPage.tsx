@@ -7,6 +7,7 @@ import { useUIStore } from "../lib/stores";
 import { DiscussionPanel } from "../components/DiscussionPanel";
 import { RoleBriefingModal } from "../components/RoleBriefingModal";
 import { FileClaimsPanel } from "../components/FileClaimsPanel";
+import { AddRoleModal } from "../components/AddRoleModal";
 
 const ROLE_COLORS: Record<string, string> = {
   manager: "var(--role-manager)",
@@ -128,6 +129,7 @@ export function ProjectPage() {
   const [visibleMsgCount, setVisibleMsgCount] = useState(50);
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
+  const [showAddRole, setShowAddRole] = useState(false);
 
   // Persist compose draft to localStorage
   const draftKey = projectId ? `vaak_draft_${projectId}` : null;
@@ -315,9 +317,37 @@ export function ProjectPage() {
       <div className="page-body" style={{ display: "flex", gap: "var(--space-4)", height: "100%" }}>
         {/* Left: Team roster + provider config */}
         <div style={{ width: 300, flexShrink: 0, overflowY: "auto" }}>
-          <h2 style={{ fontSize: "var(--text-md)", fontWeight: "var(--weight-semibold)", marginBottom: "var(--space-3)" }}>
-            Team
-          </h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "var(--space-3)" }}>
+            <h2 style={{ fontSize: "var(--text-md)", fontWeight: "var(--weight-semibold)" }}>
+              Team
+            </h2>
+            <div style={{ display: "flex", gap: "var(--space-1)" }}>
+              {roles.length > 0 && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: "var(--text-xs)" }}
+                  onClick={async () => {
+                    for (const [slug] of roles) {
+                      await startAgent(slug);
+                    }
+                    addToast(`Started ${roles.length} agents`, "success");
+                  }}
+                  aria-label="Start all agents"
+                  title="Start all agents"
+                >
+                  Start All
+                </button>
+              )}
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: "var(--text-xs)" }}
+                onClick={() => setShowAddRole(true)}
+                aria-label="Add role"
+              >
+                + Role
+              </button>
+            </div>
+          </div>
 
           <FileClaimsPanel projectId={projectId!} />
 
@@ -352,6 +382,15 @@ export function ProjectPage() {
                         title="Send wake-up signal"
                       >
                         {"\uD83D\uDCE2"}
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ fontSize: "var(--text-xs)", padding: "2px var(--space-1)", color: "var(--warning)" }}
+                        onClick={() => setInterruptTarget({ slug, title: role.title })}
+                        aria-label={`Interrupt ${role.title}`}
+                        title="Send priority interrupt"
+                      >
+                        {"\u26A0"}
                       </button>
                       <button
                         className="btn btn-ghost"
@@ -563,6 +602,16 @@ export function ProjectPage() {
         </div>
       </div>
 
+      {/* Add role modal */}
+      {showAddRole && (
+        <AddRoleModal
+          projectId={projectId!}
+          existingSlugs={roles.map(([s]) => s)}
+          onClose={() => setShowAddRole(false)}
+          onCreated={() => selectProject(projectId!)}
+        />
+      )}
+
       {/* Role briefing modal */}
       {briefingRole && (
         <RoleBriefingModal
@@ -571,6 +620,52 @@ export function ProjectPage() {
           roleTitle={briefingRole.title}
           onClose={() => setBriefingRole(null)}
         />
+      )}
+
+      {/* Interrupt modal */}
+      {interruptTarget && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => { if (e.target === e.currentTarget) setInterruptTarget(null); }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Interrupt ${interruptTarget.title}`}
+        >
+          <div className="modal" style={{ maxWidth: 420 }}>
+            <div className="modal-header">
+              <h2 className="modal-title">Interrupt {interruptTarget.title}</h2>
+              <button className="btn btn-ghost" onClick={() => setInterruptTarget(null)} aria-label="Close">
+                {"\u2715"}
+              </button>
+            </div>
+            <div style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", marginBottom: "var(--space-3)" }}>
+              This sends a priority interrupt that appears at the top of the agent's next prompt.
+              Use for urgent course corrections.
+            </div>
+            <div className="field" style={{ marginBottom: "var(--space-3)" }}>
+              <label className="field-label" htmlFor="interrupt-reason">Reason</label>
+              <textarea
+                id="interrupt-reason"
+                className="input"
+                value={interruptReason}
+                onChange={(e) => setInterruptReason(e.target.value)}
+                placeholder="What should the agent change immediately?"
+                style={{ minHeight: 80, resize: "vertical" }}
+                autoFocus
+              />
+            </div>
+            <div style={{ display: "flex", gap: "var(--space-2)", justifyContent: "flex-end" }}>
+              <button className="btn btn-ghost" onClick={() => setInterruptTarget(null)}>Cancel</button>
+              <button
+                className="btn btn-danger"
+                onClick={handleInterrupt}
+                disabled={!interruptReason.trim()}
+              >
+                Send Interrupt
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

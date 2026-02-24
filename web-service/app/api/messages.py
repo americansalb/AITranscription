@@ -139,6 +139,32 @@ async def send_message(
     return response
 
 
+@router.delete("/{project_id}/{message_id}", status_code=204)
+async def delete_message(
+    project_id: int,
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+):
+    """Delete a message from the board. Only project owner can delete."""
+    # Verify project ownership
+    result = await db.execute(
+        select(Project).where(Project.id == project_id, Project.owner_id == user.id)
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await db.execute(
+        select(Message).where(Message.id == message_id, Message.project_id == project_id)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    await db.delete(msg)
+    await db.commit()
+
+
 # --- WebSocket endpoint ---
 
 @router.websocket("/{project_id}/ws")

@@ -192,15 +192,16 @@ async def _post_system_message(
     await db.flush()
     await db.refresh(msg)
 
+    # Use frontend-compatible field names matching BoardMessage interface
     await ws_manager.broadcast(project_id, {
         "id": msg.id,
-        "project_id": msg.project_id,
-        "from_role": msg.from_role,
-        "to_role": msg.to_role,
-        "msg_type": msg.msg_type,
+        "from": msg.from_role,
+        "to": msg.to_role,
+        "type": msg.msg_type,
         "subject": msg.subject,
         "body": msg.body,
-        "created_at": msg.created_at.isoformat(),
+        "timestamp": msg.created_at.isoformat(),
+        "metadata": {},
     })
     return msg
 

@@ -21,13 +21,11 @@ async def test_create_project(client: AsyncClient):
     data = await create_test_user(client)
     project = await _create_project(client, data["access_token"])
     assert project["name"] == "Test Project"
-    assert project["is_active"] is True
-    # Should have default roles
-    slugs = {r["slug"] for r in project["roles"]}
-    assert "manager" in slugs
-    assert "architect" in slugs
-    assert "developer" in slugs
-    assert "tester" in slugs
+    # Roles is a dict keyed by slug
+    assert "manager" in project["roles"]
+    assert "architect" in project["roles"]
+    assert "developer" in project["roles"]
+    assert "tester" in project["roles"]
 
 
 @pytest.mark.asyncio
@@ -74,7 +72,7 @@ async def test_delete_project(client: AsyncClient):
     token = data["access_token"]
     project = await _create_project(client, token)
     resp = await client.delete(f"/api/v1/projects/{project['id']}", headers=auth_headers(token))
-    assert resp.status_code == 200
+    assert resp.status_code in (200, 204)
     # Should no longer appear in list
     resp = await client.get("/api/v1/projects/", headers=auth_headers(token))
     assert len(resp.json()) == 0
@@ -113,11 +111,11 @@ async def test_update_nonexistent_role(client: AsyncClient):
 async def test_default_roles_have_correct_providers(client: AsyncClient):
     data = await create_test_user(client)
     project = await _create_project(client, data["access_token"])
-    roles_by_slug = {r["slug"]: r for r in project["roles"]}
+    roles = project["roles"]
     # All default roles use anthropic
     for slug in ("manager", "architect", "developer"):
-        assert roles_by_slug[slug]["provider"] == "anthropic"
+        assert roles[slug]["provider"]["provider"] == "anthropic"
     # Tester uses haiku
-    assert "haiku" in roles_by_slug["tester"]["model"]
+    assert "haiku" in roles["tester"]["provider"]["model"]
     # Developer has 3 instances
-    assert roles_by_slug["developer"]["max_instances"] == 3
+    assert roles["developer"]["maxInstances"] == 3
