@@ -20,6 +20,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "stripe>=8.0",
     "websockets>=12.0",
+    "alembic>=1.13",
     "vaak-shared",
 ]
 
