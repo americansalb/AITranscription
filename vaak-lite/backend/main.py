@@ -1,9 +1,12 @@
 """Vaak Lite — Live interpretation and translation API."""
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import config
@@ -12,6 +15,8 @@ from translation import translate, get_available_providers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Vaak Lite",
@@ -179,6 +184,21 @@ async def interpret(
         "provider": translation["provider"],
         "model": translation["model"],
     }
+
+
+# ── Serve Frontend ───────────────────────────────────────
+
+if STATIC_DIR.exists():
+    # Serve static assets (JS, CSS, images, etc.)
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve the frontend SPA. Any non-API path returns index.html."""
+        file_path = STATIC_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(STATIC_DIR / "index.html")
 
 
 if __name__ == "__main__":
