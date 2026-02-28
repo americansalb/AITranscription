@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 vaaklite_app = FastAPI(title="Vaak Lite", docs_url=None, redoc_url=None)
+
+# Mounted sub-apps don't inherit parent CORS middleware — add our own
+vaaklite_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".mp4"}
 
@@ -163,6 +172,9 @@ if STATIC_DIR.exists():
 
     @vaaklite_app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        # Never serve index.html for API paths — return 404 so errors are clear
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
         file_path = STATIC_DIR / full_path
         if file_path.is_file():
             return FileResponse(file_path)
