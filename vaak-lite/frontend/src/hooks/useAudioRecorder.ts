@@ -117,8 +117,12 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
   }, []);
 
   // ── Chunked mode (simultaneous) ─────────────────────
-  // Accumulates all chunks and sends the *full* recording so far each interval.
-  // This gives Whisper full context so sentences aren't cut mid-word.
+  // Sends a rolling window of the most recent audio chunks each interval.
+  // This keeps the Whisper payload bounded so it doesn't grow unbounded
+  // and time out after long recordings. We keep the last ~30 seconds of
+  // raw chunks (6 x 5-second slices) to give Whisper enough context.
+
+  const MAX_WINDOW_CHUNKS = 6; // 6 * 5s = 30 seconds of audio context
 
   const startChunked = useCallback(
     async (intervalMs: number, onChunk: (blob: Blob, seq: number) => void) => {
@@ -136,26 +140,20 @@ export function useAudioRecorder(): UseAudioRecorderReturn {
             chunksRef.current.push(e.data);
           }
         };
-        recorder.onstop = () => {
-          const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
-          resolveStopRef.current?.(blob);
-          resolveStopRef.current = null;
-          cleanup();
-        };
 
-        // Use timeslice to get periodic data, but send accumulated audio
+        // Use timeslice to get periodic data
         recorder.start(intervalMs);
 
-        // Periodically send the full accumulated audio for context
+        // Periodically send a rolling window of recent audio
         const chunkInterval = window.setInterval(() => {
           if (chunksRef.current.length > 0) {
-            const fullBlob = new Blob(chunksRef.current, { type: recorder.mimeType });
-            onChunk(fullBlob, seq++);
+            // Send the last MAX_WINDOW_CHUNKS slices (bounded ~30s of audio)
+            const windowChunks = chunksRef.current.slice(-MAX_WINDOW_CHUNKS);
+            const windowBlob = new Blob(windowChunks, { type: recorder.mimeType });
+            onChunk(windowBlob, seq++);
           }
         }, intervalMs + 200); // slight offset so ondataavailable fires first
 
-        // Store interval for cleanup
-        const origCleanup = recorder.onstop;
         recorder.onstop = () => {
           clearInterval(chunkInterval);
           const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
