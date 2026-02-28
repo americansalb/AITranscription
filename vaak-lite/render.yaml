@@ -1,15 +1,16 @@
-# Render Blueprint — deploys Vaak Lite automatically
+# Render Blueprint — deploys Vaak Lite as a single web service
 # See: https://render.com/docs/blueprint-spec
 
 services:
-  # API backend
   - type: web
-    name: vaak-lite-api
+    name: vaak-lite
     plan: free
     runtime: python
-    rootDir: vaak-lite/backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: |
+      cd vaak-lite/frontend && npm install && npm run build &&
+      rm -rf ../backend/static && cp -r dist ../backend/static &&
+      cd ../backend && pip install -r requirements.txt
+    startCommand: cd vaak-lite/backend && uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -20,19 +21,3 @@ services:
       - key: GOOGLE_API_KEY
         sync: false
     healthCheckPath: /health
-
-  # Frontend (static site)
-  - type: web
-    name: vaak-lite
-    plan: free
-    runtime: static
-    rootDir: vaak-lite/frontend
-    buildCommand: npm install && npm run build
-    staticPublishPath: dist
-    headers:
-      - path: /*
-        name: Cache-Control
-        value: public, max-age=0, must-revalidate
-    envVars:
-      - key: VITE_API_URL
-        sync: false

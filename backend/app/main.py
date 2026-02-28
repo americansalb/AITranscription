@@ -79,6 +79,11 @@ app.include_router(audience_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 
 
+# Mount Vaak Lite sub-app at /vaaklite
+from app.vaaklite.app import vaaklite_app  # noqa: E402
+app.mount("/vaaklite", vaaklite_app)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API info."""
@@ -87,4 +92,5 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
         "health": "/api/v1/health",
+        "vaaklite": "/vaaklite",
     }
