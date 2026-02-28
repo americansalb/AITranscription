@@ -58,7 +58,14 @@ html, body {
   letter-spacing: -0.02em;
 }
 
-.settings-toggle {
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-toggle,
+.clear-btn {
   font-size: 13px;
   padding: 6px 12px;
   background: var(--surface);
@@ -69,7 +76,9 @@ html, body {
   font-family: inherit;
 }
 
-.settings-toggle:hover { color: var(--text); border-color: var(--accent); }
+.settings-toggle:hover,
+.clear-btn:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.clear-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ── Settings Panel ───────────────────────────────── */
 
@@ -260,9 +269,25 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--surface2);
   border-radius: var(--radius-sm);
   margin-bottom: 10px;
+  border-left: 3px solid transparent;
 }
 
 .interp-entry.pending { opacity: 0.6; }
+.interp-entry.status-in_progress { border-left-color: var(--accent); opacity: 0.85; }
+.interp-entry.status-revised { opacity: 0.7; }
+
+.status-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+.status-in_progress .status-badge { background: var(--accent-dim); color: var(--accent); }
+.status-revised .status-badge { background: rgba(167, 139, 250, 0.15); color: var(--purple); }
 
 .interp-entry.speaker-B {
   border-left: 3px solid var(--purple);
