@@ -1,68 +1,47 @@
-"""Vaak Lite — Live interpretation and translation API."""
+"""Vaak Lite sub-app — mounted at /vaaklite on the main service."""
 
 import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-import config
-from transcription import transcription_service
-from translation import translate, get_available_providers
+from app.vaaklite.transcription import transcription_service
+from app.vaaklite.translation import translate, get_available_providers
+from app.vaaklite import GROQ_API_KEY, WHISPER_MODEL
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(
-    title="Vaak Lite",
-    description="Live interpretation and translation API — Whisper transcription + multi-LLM translation",
-    version="0.1.0",
-    docs_url="/docs" if config.DEBUG else None,
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
-)
-
-
-# ── Health & Config ──────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    providers = get_available_providers()
-    return {
-        "status": "healthy",
-        "groq_configured": bool(config.GROQ_API_KEY),
-        "whisper_model": config.WHISPER_MODEL,
-        "translation_providers": [p["id"] for p in providers],
-    }
-
-
-@app.get("/providers")
-async def list_providers():
-    """List available translation LLM providers and their models."""
-    return {"providers": get_available_providers()}
-
-
-# ── Transcribe Only ──────────────────────────────────────
+vaaklite_app = FastAPI(title="Vaak Lite", docs_url=None, redoc_url=None)
 
 ALLOWED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".webm", ".ogg", ".flac", ".mp4"}
 
 
-@app.post("/transcribe")
+@vaaklite_app.get("/api/health")
+async def health():
+    providers = get_available_providers()
+    return {
+        "status": "healthy",
+        "groq_configured": bool(GROQ_API_KEY),
+        "whisper_model": WHISPER_MODEL,
+        "translation_providers": [p["id"] for p in providers],
+    }
+
+
+@vaaklite_app.get("/api/providers")
+async def list_providers():
+    return {"providers": get_available_providers()}
+
+
+@vaaklite_app.post("/api/transcribe")
 async def transcribe_audio(
     audio: UploadFile = File(...),
     language: str | None = Form(default=None),
 ):
-    """Transcribe audio → text in the source language."""
     filename = audio.filename or "audio.wav"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext and ext not in ALLOWED_EXTENSIONS:
@@ -85,8 +64,6 @@ async def transcribe_audio(
         raise HTTPException(status_code=500, detail="Transcription failed")
 
 
-# ── Translate Only ───────────────────────────────────────
-
 class TranslateRequest(BaseModel):
     text: str
     source_lang: str
@@ -94,9 +71,8 @@ class TranslateRequest(BaseModel):
     provider: str = "claude"
 
 
-@app.post("/translate")
+@vaaklite_app.post("/api/translate")
 async def translate_text(req: TranslateRequest):
-    """Translate text from source language to target language using the selected LLM."""
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
@@ -114,19 +90,13 @@ async def translate_text(req: TranslateRequest):
         raise HTTPException(status_code=500, detail="Translation failed")
 
 
-# ── Transcribe + Translate (single call) ─────────────────
-
-@app.post("/interpret")
+@vaaklite_app.post("/api/interpret")
 async def interpret(
     audio: UploadFile = File(...),
     source_lang: str | None = Form(default=None),
     target_lang: str = Form(...),
     provider: str = Form(default="claude"),
 ):
-    """Full interpretation pipeline: transcribe audio then translate.
-
-    This is the main endpoint for live interpretation.
-    """
     filename = audio.filename or "audio.wav"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if ext and ext not in ALLOWED_EXTENSIONS:
@@ -189,18 +159,11 @@ async def interpret(
 # ── Serve Frontend ───────────────────────────────────────
 
 if STATIC_DIR.exists():
-    # Serve static assets (JS, CSS, images, etc.)
-    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+    vaaklite_app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="vaaklite-assets")
 
-    @app.get("/{full_path:path}")
+    @vaaklite_app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        """Serve the frontend SPA. Any non-API path returns index.html."""
         file_path = STATIC_DIR / full_path
         if file_path.is_file():
             return FileResponse(file_path)
         return FileResponse(STATIC_DIR / "index.html")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=config.PORT, reload=config.DEBUG)

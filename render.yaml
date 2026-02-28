@@ -7,12 +7,22 @@ services:
     plan: free
     runtime: python
     rootDir: backend
-    buildCommand: pip install -e . && alembic upgrade head && python -m scripts.seed_admin --force
+    buildCommand: |
+      pip install -e . &&
+      alembic upgrade head &&
+      python -m scripts.seed_admin --force &&
+      cd ../vaak-lite/frontend && npm install && npm run build &&
+      rm -rf ../../backend/app/vaaklite/static &&
+      cp -r dist ../../backend/app/vaaklite/static
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
         sync: false
       - key: SECRET_KEY
         generateValue: true

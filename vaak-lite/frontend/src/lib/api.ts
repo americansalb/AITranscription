@@ -2,7 +2,7 @@
  * API client for the Vaak Lite interpretation backend.
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:19837";
+const API_BASE = import.meta.env.VITE_API_URL || "/vaaklite/api";
 
 export interface TranscribeResult {
   text: string;
