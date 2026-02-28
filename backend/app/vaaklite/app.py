@@ -78,6 +78,7 @@ class TranslateRequest(BaseModel):
     source_lang: str
     target_lang: str
     provider: str = "claude-opus"
+    previous_translation: str = ""
 
 
 @vaaklite_app.post("/api/translate")
@@ -91,6 +92,7 @@ async def translate_text(req: TranslateRequest):
             source_lang=req.source_lang,
             target_lang=req.target_lang,
             provider=req.provider,
+            previous_translation=req.previous_translation,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -105,6 +107,7 @@ async def interpret(
     source_lang: str | None = Form(default=None),
     target_lang: str = Form(...),
     provider: str = Form(default="claude-opus"),
+    previous_translation: str = Form(default=""),
 ):
     filename = audio.filename or "audio.wav"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -146,6 +149,7 @@ async def interpret(
             source_lang=detected_lang,
             target_lang=target_lang,
             provider=provider,
+            previous_translation=previous_translation,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

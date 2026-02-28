@@ -19,6 +19,8 @@ export default function App() {
   // Track the in-progress entry for simultaneous mode
   const simultaneousEntryId = useRef<number | null>(null);
   const lastSimultaneousText = useRef("");
+  const lastSimultaneousTranslation = useRef("");
+  const simultaneousProcessing = useRef(false);
   const recorder = useAudioRecorder();
 
   // Fetch available providers on mount
@@ -131,15 +133,36 @@ export default function App() {
   );
 
   // ── Process a blob for simultaneous mode ────────────────
-  // Updates the single in-progress entry instead of creating new ones.
-  // Each chunk contains the full accumulated audio, so each Whisper result
-  // supersedes the previous one. The text is "in_progress" until recording stops.
+  // Each chunk contains a rolling window of recent audio (~30s max).
+  // The text updates in-place within a single entry. Every ~30 seconds
+  // the entry is finalized and a new one starts, so audio never grows
+  // unbounded. A processing guard prevents requests from piling up.
+
+  const CHUNKS_PER_ENTRY = 6; // 6 * 5s = 30s before starting a new entry
 
   const processSimultaneousChunk = useCallback(
     async (blob: Blob, seq: number, speaker?: "A" | "B") => {
+      // Skip if previous chunk is still being processed
+      if (simultaneousProcessing.current) return;
+      simultaneousProcessing.current = true;
+
       const isTranslation = settings.mode === "interpret";
 
-      // Create in-progress entry on first chunk
+      // Every CHUNKS_PER_ENTRY chunks, finalize the current entry and start fresh.
+      // This keeps each entry bounded to ~30s of audio.
+      if (simultaneousEntryId.current !== null && seq > 0 && seq % CHUNKS_PER_ENTRY === 0) {
+        const prevId = simultaneousEntryId.current;
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === prevId ? { ...e, status: "complete" as EntryStatus } : e,
+          ),
+        );
+        simultaneousEntryId.current = null;
+        // Keep lastSimultaneousTranslation for continuity context
+        lastSimultaneousText.current = "";
+      }
+
+      // Create in-progress entry on first chunk or after rotation
       if (simultaneousEntryId.current === null) {
         const entryId = nextId.current++;
         simultaneousEntryId.current = entryId;
@@ -165,12 +188,12 @@ export default function App() {
 
       try {
         if (isTranslation) {
-          const result = await interpret(blob, settings.targetLang, settings.provider, settings.sourceLang);
+          const result = await interpret(blob, settings.targetLang, settings.provider, settings.sourceLang, lastSimultaneousTranslation.current);
           if (!result.source_text.trim()) return;
 
-          // Only update if this result has more text (later chunk = more audio = more complete)
           if (result.source_text.length >= lastSimultaneousText.current.length) {
             lastSimultaneousText.current = result.source_text;
+            lastSimultaneousTranslation.current = result.translated_text;
             setEntries((prev) =>
               prev.map((e) =>
                 e.id === currentEntryId
@@ -217,8 +240,9 @@ export default function App() {
           }
         }
       } catch (err) {
-        // Don't remove the entry on chunk failure — next chunk may succeed
         console.warn("Simultaneous chunk failed:", err);
+      } finally {
+        simultaneousProcessing.current = false;
       }
     },
     [settings],
@@ -235,6 +259,8 @@ export default function App() {
       );
       simultaneousEntryId.current = null;
       lastSimultaneousText.current = "";
+      lastSimultaneousTranslation.current = "";
+      simultaneousProcessing.current = false;
     }
   }, []);
 
@@ -286,6 +312,8 @@ export default function App() {
     } else if (settings.timing === "simultaneous") {
       simultaneousEntryId.current = null;
       lastSimultaneousText.current = "";
+      lastSimultaneousTranslation.current = "";
+      simultaneousProcessing.current = false;
       await recorder.startChunked(5000, async (chunk, seq) => {
         const speaker = useBidirectional ? speakerRef.current : undefined;
         processSimultaneousChunk(chunk, seq, speaker);

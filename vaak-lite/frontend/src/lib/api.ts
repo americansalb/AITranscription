@@ -45,6 +45,7 @@ export async function interpret(
   targetLang: string,
   provider: string,
   sourceLang?: string,
+  previousTranslation?: string,
 ): Promise<InterpretResult> {
   const fd = new FormData();
   const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("wav") ? "wav" : "webm";
@@ -53,6 +54,9 @@ export async function interpret(
   fd.append("provider", provider);
   if (sourceLang && sourceLang !== "auto") {
     fd.append("source_lang", sourceLang);
+  }
+  if (previousTranslation) {
+    fd.append("previous_translation", previousTranslation);
   }
 
   const res = await fetch(`${API_BASE}/interpret`, { method: "POST", body: fd });
