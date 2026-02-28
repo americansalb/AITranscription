@@ -79,20 +79,24 @@ export function InterpretationView({ entries, bidirectional, transcribeOnly, isR
 
             {label && <span className="status-badge">{label}</span>}
 
-            <div className="interp-source">
-              <span className="lang-badge">{langName(entry.sourceLang)}</span>
-              <p>{entry.sourceText || (entry.pending ? "Transcribing..." : "")}</p>
-            </div>
-
-            {/* Only show translation row in interpret mode */}
-            {!transcribeOnly && (
-              <>
-                <div className="interp-arrow">&#8595;</div>
+            {/* Side-by-side layout when translating, single column when transcribe-only */}
+            {!transcribeOnly ? (
+              <div className="interp-columns">
+                <div className="interp-source">
+                  <span className="lang-badge">{langName(entry.sourceLang)}</span>
+                  <p>{entry.sourceText || (entry.pending ? "Transcribing..." : "")}</p>
+                </div>
+                <div className="interp-divider" />
                 <div className="interp-translation">
                   <span className="lang-badge target">{langName(entry.targetLang)}</span>
                   <p>{entry.translatedText || (entry.pending ? "Translating..." : "")}</p>
                 </div>
-              </>
+              </div>
+            ) : (
+              <div className="interp-source">
+                <span className="lang-badge">{langName(entry.sourceLang)}</span>
+                <p>{entry.sourceText || (entry.pending ? "Transcribing..." : "")}</p>
+              </div>
             )}
 
             <div className="interp-meta">
