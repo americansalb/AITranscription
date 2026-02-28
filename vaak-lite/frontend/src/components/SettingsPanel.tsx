@@ -16,6 +16,14 @@ export interface InterpretationSettings {
   silenceThreshold: number;
   /** Selected LLM provider for translation. */
   provider: string;
+  /** Whether to read translations aloud. */
+  ttsEnabled: boolean;
+  /** Voice URI for TTS (empty = system default). */
+  ttsVoice: string;
+  /** Seconds of no new text before TTS triggers. */
+  ttsSilenceDelay: number;
+  /** Speech rate (0.5–2.0). */
+  ttsRate: number;
 }
 
 export const DEFAULT_SETTINGS: InterpretationSettings = {
@@ -27,16 +35,22 @@ export const DEFAULT_SETTINGS: InterpretationSettings = {
   trigger: "auto",
   silenceThreshold: 2.0,
   provider: "claude-opus",
+  ttsEnabled: false,
+  ttsVoice: "",
+  ttsSilenceDelay: 2.0,
+  ttsRate: 1.0,
 };
 
 interface SettingsPanelProps {
   settings: InterpretationSettings;
   onChange: (settings: InterpretationSettings) => void;
   availableProviders: { id: string; model: string }[];
+  /** Voices available for the current target language. */
+  ttsVoices?: SpeechSynthesisVoice[];
   disabled?: boolean;
 }
 
-export function SettingsPanel({ settings, onChange, availableProviders, disabled }: SettingsPanelProps) {
+export function SettingsPanel({ settings, onChange, availableProviders, ttsVoices = [], disabled }: SettingsPanelProps) {
   const update = (patch: Partial<InterpretationSettings>) => {
     onChange({ ...settings, ...patch });
   };
@@ -164,6 +178,82 @@ export function SettingsPanel({ settings, onChange, availableProviders, disabled
               </select>
             </div>
           </div>
+
+          {/* Read Aloud (TTS) */}
+          <div className="settings-row">
+            <div className="setting-group">
+              <span className="group-label">Read Aloud</span>
+              <div className="toggle-group">
+                <button
+                  className={settings.ttsEnabled ? "active" : ""}
+                  onClick={() => update({ ttsEnabled: true })}
+                  disabled={disabled}
+                >
+                  On
+                </button>
+                <button
+                  className={!settings.ttsEnabled ? "active" : ""}
+                  onClick={() => update({ ttsEnabled: false })}
+                  disabled={disabled}
+                >
+                  Off
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {settings.ttsEnabled && (
+            <>
+              <div className="settings-row">
+                <div className="setting-field">
+                  <label htmlFor="tts-voice">Voice</label>
+                  <select
+                    id="tts-voice"
+                    value={settings.ttsVoice}
+                    onChange={(e) => update({ ttsVoice: e.target.value })}
+                    disabled={disabled}
+                  >
+                    <option value="">System Default</option>
+                    {ttsVoices.map((v) => (
+                      <option key={v.voiceURI} value={v.voiceURI}>
+                        {v.name} ({v.lang})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="settings-row">
+                <div className="setting-field silence-field">
+                  <label htmlFor="tts-delay">Read after: {settings.ttsSilenceDelay.toFixed(1)}s</label>
+                  <input
+                    id="tts-delay"
+                    type="range"
+                    min="0.5"
+                    max="5.0"
+                    step="0.5"
+                    value={settings.ttsSilenceDelay}
+                    onChange={(e) => update({ ttsSilenceDelay: parseFloat(e.target.value) })}
+                    disabled={disabled}
+                  />
+                </div>
+
+                <div className="setting-field silence-field">
+                  <label htmlFor="tts-rate">Speed: {settings.ttsRate.toFixed(1)}x</label>
+                  <input
+                    id="tts-rate"
+                    type="range"
+                    min="0.5"
+                    max="2.0"
+                    step="0.1"
+                    value={settings.ttsRate}
+                    onChange={(e) => update({ ttsRate: parseFloat(e.target.value) })}
+                    disabled={disabled}
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </>
       )}
 
