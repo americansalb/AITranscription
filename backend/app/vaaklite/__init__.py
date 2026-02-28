@@ -13,7 +13,10 @@ ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 GOOGLE_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")
 
-ANTHROPIC_MODEL: str = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+# Claude model tiers
+CLAUDE_OPUS_MODEL: str = "claude-opus-4-6"
+CLAUDE_SONNET_MODEL: str = "claude-sonnet-4-6"
+
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 GROQ_LLAMA_MODEL: str = os.environ.get("GROQ_LLAMA_MODEL", "llama-3.3-70b-versatile")
 GOOGLE_MODEL: str = os.environ.get("GOOGLE_MODEL", "gemini-2.0-flash")

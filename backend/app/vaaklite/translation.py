@@ -1,13 +1,13 @@
 """Multi-LLM translation service for Vaak Lite.
 
-Supports Claude, GPT, Groq (Llama), and Gemini.
+Supports Claude (Opus & Sonnet), GPT, Groq (Llama), and Gemini.
 """
 
 import logging
-from typing import Literal
+from functools import partial
 
 from app.vaaklite import (
-    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+    ANTHROPIC_API_KEY, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL,
     OPENAI_API_KEY, OPENAI_MODEL,
     GROQ_API_KEY, GROQ_LLAMA_MODEL,
     GOOGLE_API_KEY, GOOGLE_MODEL,
@@ -15,16 +15,16 @@ from app.vaaklite import (
 
 logger = logging.getLogger(__name__)
 
-Provider = Literal["claude", "gpt", "groq", "gemini"]
-
-AVAILABLE_PROVIDERS: dict[Provider, str] = {}
+# Provider ID -> model ID mapping (populated dynamically)
+AVAILABLE_PROVIDERS: dict[str, str] = {}
 
 
 def _check_providers():
     global AVAILABLE_PROVIDERS
     AVAILABLE_PROVIDERS = {}
     if ANTHROPIC_API_KEY:
-        AVAILABLE_PROVIDERS["claude"] = ANTHROPIC_MODEL
+        AVAILABLE_PROVIDERS["claude-opus"] = CLAUDE_OPUS_MODEL
+        AVAILABLE_PROVIDERS["claude-sonnet"] = CLAUDE_SONNET_MODEL
     if OPENAI_API_KEY:
         AVAILABLE_PROVIDERS["gpt"] = OPENAI_MODEL
     if GROQ_API_KEY:
@@ -36,27 +36,36 @@ def _check_providers():
 _check_providers()
 
 
-SYSTEM_PROMPT = """You are a professional interpreter providing live translation.
+SYSTEM_PROMPT = """You are a professional interpreter and editor providing polished translations.
 
 RULES:
-1. Translate the source text faithfully into the target language.
-2. Preserve the speaker's tone, register, and intent.
-3. Do NOT add commentary, notes, or explanations.
-4. Do NOT censor or modify the content in any way.
-5. If a word or phrase has no direct equivalent, use the closest natural expression in the target language.
-6. Preserve proper nouns, technical terms, and brand names as-is unless they have an established translation.
-7. Output ONLY the translated text. Nothing else."""
+1. Translate the source text into the target language.
+2. REORGANIZE and RESTRUCTURE the text for clarity — spoken language is messy, your output should read like clean written prose.
+3. Remove filler words (um, uh, like, you know), false starts, repetitions, and verbal stumbles.
+4. Break long rambling sentences into clear, well-structured paragraphs.
+5. If you detect MULTIPLE SPEAKERS in the text (conversation, interview, dialogue), format the output as a script:
+   - Label each speaker (Speaker 1, Speaker 2, etc., or by name/role if identifiable from context).
+   - Start each speaker's turn on a new line with their label followed by a colon.
+   - Example:
+     Speaker 1: Their translated dialogue here.
+     Speaker 2: Their translated response here.
+6. For single-speaker text, just output clean paragraphs without labels.
+7. Preserve the speaker's meaning, tone, and intent — but improve the structure and flow.
+8. If a word or phrase has no direct equivalent, use the closest natural expression in the target language.
+9. Preserve proper nouns, technical terms, and brand names as-is unless they have an established translation.
+10. Do NOT add commentary, notes, or explanations.
+11. Output ONLY the translated, reorganized text. Nothing else."""
 
 
 def _build_user_prompt(text: str, source_lang: str, target_lang: str) -> str:
     return f"Translate from {source_lang} to {target_lang}:\n\n{text}"
 
 
-async def translate_claude(text: str, source_lang: str, target_lang: str) -> str:
+async def translate_claude(text: str, source_lang: str, target_lang: str, *, model: str) -> str:
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     response = await client.messages.create(
-        model=ANTHROPIC_MODEL,
+        model=model,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_prompt(text, source_lang, target_lang)}],
@@ -106,8 +115,9 @@ async def translate_gemini(text: str, source_lang: str, target_lang: str) -> str
     return response.text or ""
 
 
-_TRANSLATORS = {
-    "claude": translate_claude,
+_TRANSLATORS: dict[str, object] = {
+    "claude-opus": partial(translate_claude, model=CLAUDE_OPUS_MODEL),
+    "claude-sonnet": partial(translate_claude, model=CLAUDE_SONNET_MODEL),
     "gpt": translate_gpt,
     "groq": translate_groq,
     "gemini": translate_gemini,
@@ -118,7 +128,7 @@ async def translate(
     text: str,
     source_lang: str,
     target_lang: str,
-    provider: Provider = "claude",
+    provider: str = "claude-opus",
 ) -> dict:
     if not text.strip():
         return {"translated_text": "", "provider": provider, "model": ""}
