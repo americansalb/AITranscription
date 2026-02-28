@@ -12,12 +12,9 @@ export function AudioVisualizer({ analyser, isRecording }: AudioVisualizerProps)
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !analyser || !isRecording) {
-      // Clear canvas when not recording
       if (canvas) {
         const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
       }
       return;
     }
@@ -29,7 +26,6 @@ export function AudioVisualizer({ analyser, isRecording }: AudioVisualizerProps)
     const draw = () => {
       rafRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(data);
-
       const w = canvas.width;
       const h = canvas.height;
       ctx.clearRect(0, 0, w, h);
@@ -43,7 +39,6 @@ export function AudioVisualizer({ analyser, isRecording }: AudioVisualizerProps)
         const barH = Math.max(2, val * h);
         const x = i * (barWidth + 2);
         const y = (h - barH) / 2;
-
         ctx.fillStyle = `hsl(210, 80%, ${50 + val * 30}%)`;
         ctx.beginPath();
         ctx.roundRect(x, y, barWidth, barH, 2);
@@ -52,19 +47,10 @@ export function AudioVisualizer({ analyser, isRecording }: AudioVisualizerProps)
     };
 
     draw();
-
-    return () => {
-      cancelAnimationFrame(rafRef.current);
-    };
+    return () => cancelAnimationFrame(rafRef.current);
   }, [analyser, isRecording]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className="audio-visualizer"
-      width={320}
-      height={48}
-      aria-hidden="true"
-    />
+    <canvas ref={canvasRef} className="audio-visualizer" width={320} height={48} aria-hidden="true" />
   );
 }

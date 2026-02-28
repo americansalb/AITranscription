@@ -1,257 +1,164 @@
-import { useState, useCallback, useRef } from "react";
-import { ModeSelector, type TranscriptionMode } from "./components/ModeSelector";
-import { LanguageSelector } from "./components/LanguageSelector";
+import { useState, useCallback, useRef, useEffect } from "react";
+import { SettingsPanel, DEFAULT_SETTINGS, type InterpretationSettings } from "./components/SettingsPanel";
+import { InterpretationView, type InterpretationEntry } from "./components/InterpretationView";
 import { RecordButton } from "./components/RecordButton";
 import { AudioVisualizer } from "./components/AudioVisualizer";
-import { TranscriptPanel, type TranscriptEntry } from "./components/TranscriptPanel";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { transcribe } from "./lib/api";
+import { interpret, getProviders, type ProviderInfo } from "./lib/api";
 
 export default function App() {
-  const [mode, setMode] = useState<TranscriptionMode>("unidirectional");
-  const [language, setLanguage] = useState("auto");
-  const [entries, setEntries] = useState<TranscriptEntry[]>([]);
+  const [settings, setSettings] = useState<InterpretationSettings>(DEFAULT_SETTINGS);
+  const [entries, setEntries] = useState<InterpretationEntry[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [processing, setProcessing] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const nextId = useRef(1);
-  const segmentCount = useRef(0);
-  const speakerToggle = useRef<"A" | "B">("A");
+  const [showSettings, setShowSettings] = useState(true);
 
+  const nextId = useRef(1);
+  const speakerRef = useRef<"A" | "B">("A");
   const recorder = useAudioRecorder();
 
-  // ── Helpers ────────────────────────────────────────────────
-
-  const addEntry = useCallback(
-    (
-      text: string,
-      result: { language: string | null; duration: number | null; segments: any[] },
-      extra: Partial<TranscriptEntry> = {}
-    ) => {
-      const entry: TranscriptEntry = {
-        id: nextId.current++,
-        text,
-        language: result.language,
-        duration: result.duration,
-        segments: result.segments ?? [],
-        timestamp: new Date(),
-        ...extra,
-      };
-      setEntries((prev) => [...prev, entry]);
-    },
-    []
-  );
-
-  const showStatus = useCallback((msg: string, durationMs = 3000) => {
-    setStatusMsg(msg);
-    setTimeout(() => setStatusMsg(null), durationMs);
+  // Fetch available providers on mount
+  useEffect(() => {
+    getProviders().then((p) => {
+      setProviders(p);
+      // Default to first available provider
+      if (p.length > 0 && !p.find((x) => x.id === settings.provider)) {
+        setSettings((s) => ({ ...s, provider: p[0].id }));
+      }
+    });
   }, []);
 
-  // ── Mode-specific recording logic ─────────────────────────
+  const showStatus = useCallback((msg: string, ms = 3000) => {
+    setStatusMsg(msg);
+    setTimeout(() => setStatusMsg(null), ms);
+  }, []);
 
-  const handleUnidirectional = useCallback(async () => {
-    if (recorder.isRecording) {
+  // ── Process a recorded blob through the interpretation pipeline ──
+
+  const processBlob = useCallback(
+    async (blob: Blob, speaker?: "A" | "B") => {
+      const entryId = nextId.current++;
+      const pendingEntry: InterpretationEntry = {
+        id: entryId,
+        sourceText: "",
+        translatedText: "",
+        sourceLang: settings.sourceLang,
+        targetLang: settings.targetLang,
+        duration: null,
+        provider: settings.provider,
+        timestamp: new Date(),
+        speaker,
+        pending: true,
+      };
+
+      setEntries((prev) => [...prev, pendingEntry]);
       setProcessing(true);
-      try {
-        const blob = await recorder.stop();
-        const result = await transcribe(blob, language);
-        if (result.text.trim()) {
-          addEntry(result.text, result);
-        } else {
-          showStatus("No speech detected");
-        }
-      } catch (err) {
-        showStatus(err instanceof Error ? err.message : "Transcription failed");
-      } finally {
-        setProcessing(false);
-      }
-    } else {
-      await recorder.start();
-    }
-  }, [recorder, language, addEntry, showStatus]);
 
-  const handleConversational = useCallback(async () => {
-    if (recorder.isRecording) {
-      setProcessing(true);
       try {
-        const blob = await recorder.stop();
-        const result = await transcribe(blob, language);
+        const result = await interpret(blob, settings.targetLang, settings.provider, settings.sourceLang);
 
-        if (!result.text.trim()) {
+        if (!result.source_text.trim()) {
+          setEntries((prev) => prev.filter((e) => e.id !== entryId));
           showStatus("No speech detected");
-          setProcessing(false);
           return;
         }
 
-        // Use Whisper segments to detect speaker turns via silence gaps
-        if (result.segments && result.segments.length > 1) {
-          let currentSpeaker = speakerToggle.current;
-          let currentGroup: string[] = [];
-          let groupStart = result.segments[0]?.start ?? 0;
-
-          for (let i = 0; i < result.segments.length; i++) {
-            const seg = result.segments[i];
-            const prevEnd = i > 0 ? result.segments[i - 1].end : seg.start;
-            const gap = seg.start - prevEnd;
-
-            if (gap > 1.5 && currentGroup.length > 0) {
-              // Speaker turn: flush current group
-              addEntry(currentGroup.join(" ").trim(), result, {
-                speaker: currentSpeaker,
-                duration: prevEnd - groupStart,
-              });
-              currentSpeaker = currentSpeaker === "A" ? "B" : "A";
-              currentGroup = [];
-              groupStart = seg.start;
-            }
-            currentGroup.push(seg.text.trim());
-          }
-
-          // Flush remaining
-          if (currentGroup.length > 0) {
-            addEntry(currentGroup.join(" ").trim(), result, {
-              speaker: currentSpeaker,
-            });
-            speakerToggle.current = currentSpeaker === "A" ? "B" : "A";
-          }
-        } else {
-          // Single segment — assign to current speaker and toggle
-          addEntry(result.text, result, { speaker: speakerToggle.current });
-          speakerToggle.current = speakerToggle.current === "A" ? "B" : "A";
-        }
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId
+              ? {
+                  ...e,
+                  sourceText: result.source_text,
+                  translatedText: result.translated_text,
+                  sourceLang: result.source_lang,
+                  targetLang: result.target_lang,
+                  duration: result.duration,
+                  provider: result.provider,
+                  pending: false,
+                }
+              : e,
+          ),
+        );
       } catch (err) {
-        showStatus(err instanceof Error ? err.message : "Transcription failed");
+        setEntries((prev) => prev.filter((e) => e.id !== entryId));
+        showStatus(err instanceof Error ? err.message : "Interpretation failed");
       } finally {
         setProcessing(false);
       }
-    } else {
-      await recorder.start();
-    }
-  }, [recorder, language, addEntry, showStatus]);
+    },
+    [settings, showStatus],
+  );
 
-  const handleConsecutive = useCallback(async () => {
+  // ── Recording handlers per mode combination ──────────────
+
+  const handleRecord = useCallback(async () => {
     if (recorder.isRecording) {
-      setProcessing(true);
-      segmentCount.current += 1;
+      // Stop recording
       try {
         const blob = await recorder.stop();
-        const result = await transcribe(blob, language);
-        if (result.text.trim()) {
-          addEntry(result.text, result, { segmentNumber: segmentCount.current });
-        } else {
-          showStatus("No speech detected in this segment");
-          segmentCount.current -= 1;
+        const speaker = settings.direction === "bidirectional" ? speakerRef.current : undefined;
+        await processBlob(blob, speaker);
+
+        // Toggle speaker for bidirectional
+        if (settings.direction === "bidirectional") {
+          speakerRef.current = speakerRef.current === "A" ? "B" : "A";
         }
-      } catch (err) {
-        showStatus(err instanceof Error ? err.message : "Transcription failed");
-        segmentCount.current -= 1;
-      } finally {
-        setProcessing(false);
+      } catch {
+        // recorder.stop() can throw if already stopped (e.g. auto-consecutive)
       }
+      return;
+    }
+
+    // Start recording based on mode
+    if (settings.timing === "consecutive" && settings.trigger === "auto") {
+      // Auto-consecutive: start with silence detection
+      await recorder.startWithSilenceDetection(
+        settings.silenceThreshold * 1000,
+        async () => {
+          // Silence detected — stop and process
+          try {
+            const blob = await recorder.stop();
+            const speaker = settings.direction === "bidirectional" ? speakerRef.current : undefined;
+            await processBlob(blob, speaker);
+
+            if (settings.direction === "bidirectional") {
+              speakerRef.current = speakerRef.current === "A" ? "B" : "A";
+            }
+          } catch {
+            // ignore
+          }
+        },
+      );
+    } else if (settings.timing === "simultaneous") {
+      // Simultaneous: chunk every 5 seconds, process each chunk
+      await recorder.startChunked(5000, async (chunk, _seq) => {
+        const speaker = settings.direction === "bidirectional" ? speakerRef.current : undefined;
+        // Process in background — don't await to keep recording flowing
+        processBlob(chunk, speaker);
+      });
     } else {
+      // Manual consecutive: simple start, user clicks stop
       await recorder.start();
     }
-  }, [recorder, language, addEntry, showStatus]);
+  }, [recorder, settings, processBlob]);
 
-  const handleSimultaneous = useCallback(async () => {
+  // ── UI hints ──────────────────────────────────────────────
+
+  const recordHint = (() => {
+    if (processing && !recorder.isRecording) return "Processing...";
     if (recorder.isRecording) {
-      setProcessing(true);
-      try {
-        await recorder.stop();
-      } catch {
-        // ignore
+      if (settings.timing === "consecutive" && settings.trigger === "auto") {
+        return `Listening... auto-stops after ${settings.silenceThreshold}s silence`;
       }
-      // Mark all partials as confirmed
-      setEntries((prev) => prev.map((e) => (e.partial ? { ...e, partial: false } : e)));
-      setProcessing(false);
-    } else {
-      await recorder.startChunked(5000, async (chunk, seq) => {
-        try {
-          // Add a partial placeholder
-          const placeholderId = nextId.current++;
-          setEntries((prev) => [
-            ...prev,
-            {
-              id: placeholderId,
-              text: "...",
-              language: null,
-              duration: null,
-              segments: [],
-              timestamp: new Date(),
-              partial: true,
-            },
-          ]);
-
-          const result = await transcribe(chunk, language);
-
-          // Replace placeholder with actual result
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === placeholderId
-                ? {
-                    ...e,
-                    text: result.text,
-                    language: result.language,
-                    duration: result.duration,
-                    segments: result.segments,
-                    partial: false,
-                  }
-                : e
-            )
-          );
-        } catch {
-          // Remove failed placeholder
-          setEntries((prev) => prev.filter((e) => !e.partial || e.text !== "..."));
-        }
-      });
+      if (settings.timing === "simultaneous") return "Live interpreting...";
+      return "Tap to stop and interpret";
     }
-  }, [recorder, language]);
-
-  // ── Dispatch to mode handler ──────────────────────────────
-
-  const handleRecord = useCallback(() => {
-    switch (mode) {
-      case "unidirectional":
-        return handleUnidirectional();
-      case "conversational":
-        return handleConversational();
-      case "consecutive":
-        return handleConsecutive();
-      case "simultaneous":
-        return handleSimultaneous();
+    if (settings.direction === "bidirectional") {
+      return `Tap to record Speaker ${speakerRef.current}`;
     }
-  }, [mode, handleUnidirectional, handleConversational, handleConsecutive, handleSimultaneous]);
-
-  // ── Mode change resets state ──────────────────────────────
-
-  const handleModeChange = useCallback(
-    (newMode: TranscriptionMode) => {
-      if (recorder.isRecording) return; // Don't switch while recording
-      setMode(newMode);
-      setEntries([]);
-      segmentCount.current = 0;
-      speakerToggle.current = "A";
-    },
-    [recorder.isRecording]
-  );
-
-  // ── Hints per mode ────────────────────────────────────────
-
-  const recordHint = recorder.isRecording
-    ? mode === "consecutive"
-      ? "Tap to end this segment"
-      : "Tap to stop"
-    : mode === "consecutive"
-      ? "Tap to record a segment"
-      : mode === "simultaneous"
-        ? "Tap to start live transcription"
-        : "Tap to start";
-
-  // ── Word count ────────────────────────────────────────────
-
-  const totalWords = entries.reduce(
-    (sum, e) => sum + (e.text === "..." ? 0 : e.text.split(/\s+/).filter(Boolean).length),
-    0
-  );
+    return "Tap to start";
+  })();
 
   const formatDuration = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -265,40 +172,43 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <h1>Vaak Lite</h1>
+        <button
+          className="settings-toggle"
+          onClick={() => setShowSettings((v) => !v)}
+          aria-label={showSettings ? "Hide settings" : "Show settings"}
+        >
+          {showSettings ? "Hide Settings" : "Settings"}
+        </button>
       </header>
 
-      <ModeSelector
-        mode={mode}
-        onChange={handleModeChange}
-        disabled={recorder.isRecording || processing}
-      />
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          availableProviders={providers}
+          disabled={recorder.isRecording}
+        />
+      )}
 
-      <LanguageSelector
-        value={language}
-        onChange={setLanguage}
-        disabled={recorder.isRecording}
+      <InterpretationView
+        entries={entries}
+        bidirectional={settings.direction === "bidirectional"}
+        isRecording={recorder.isRecording}
       />
-
-      <TranscriptPanel entries={entries} mode={mode} isRecording={recorder.isRecording} />
 
       <div className="controls">
         <AudioVisualizer analyser={recorder.analyser} isRecording={recorder.isRecording} />
         <RecordButton
           isRecording={recorder.isRecording}
           onClick={handleRecord}
-          disabled={processing}
-          hint={processing ? "Processing..." : recordHint}
+          disabled={processing && !recorder.isRecording}
+          hint={recordHint}
         />
       </div>
 
       <footer className="app-footer">
-        {recorder.isRecording && (
-          <span className="stat">{formatDuration(recorder.duration)}</span>
-        )}
-        {totalWords > 0 && <span className="stat">{totalWords} words</span>}
-        {entries.length > 0 && entries[entries.length - 1].language && (
-          <span className="stat">{entries[entries.length - 1].language}</span>
-        )}
+        {recorder.isRecording && <span className="stat">{formatDuration(recorder.duration)}</span>}
+        {entries.length > 0 && <span className="stat">{entries.length} segments</span>}
       </footer>
 
       {recorder.error && <div className="error-toast">{recorder.error}</div>}

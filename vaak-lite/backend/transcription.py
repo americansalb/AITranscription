@@ -29,13 +29,7 @@ class TranscriptionService:
     ) -> dict:
         """Transcribe audio bytes using Groq Whisper.
 
-        Args:
-            audio_data: Raw audio bytes.
-            filename: Original filename (used for format detection).
-            language: Optional ISO language code (e.g. 'en'). None = auto-detect.
-
-        Returns:
-            dict with keys: text, duration, language, segments
+        Returns dict with: text, duration, language, segments
         """
         kwargs: dict = {
             "model": config.WHISPER_MODEL,

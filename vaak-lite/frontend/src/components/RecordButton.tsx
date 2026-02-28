@@ -2,7 +2,6 @@ interface RecordButtonProps {
   isRecording: boolean;
   onClick: () => void;
   disabled?: boolean;
-  /** Label shown beneath the button (mode-dependent). */
   hint?: string;
 }
 

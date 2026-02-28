@@ -1,4 +1,4 @@
-/** Languages supported by Whisper. */
+/** Languages supported by Whisper, used for both source and target selection. */
 
 export interface Language {
   code: string;
@@ -38,3 +38,11 @@ export const LANGUAGES: Language[] = [
   { code: "ms", name: "Malay" },
   { code: "tl", name: "Tagalog" },
 ];
+
+/** Same list but without "Auto-detect" — for target language selection. */
+export const TARGET_LANGUAGES: Language[] = LANGUAGES.filter((l) => l.code !== "auto");
+
+/** Get display name for a language code. */
+export function langName(code: string): string {
+  return LANGUAGES.find((l) => l.code === code)?.name || code;
+}
