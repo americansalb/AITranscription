@@ -1,13 +1,13 @@
 """Multi-LLM translation service for Vaak Lite.
 
-Supports Claude, GPT, Groq (Llama), and Gemini.
+Supports Claude (Opus & Sonnet), GPT, Groq (Llama), and Gemini.
 """
 
 import logging
-from typing import Literal
+from functools import partial
 
 from app.vaaklite import (
-    ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+    ANTHROPIC_API_KEY, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL,
     OPENAI_API_KEY, OPENAI_MODEL,
     GROQ_API_KEY, GROQ_LLAMA_MODEL,
     GOOGLE_API_KEY, GOOGLE_MODEL,
@@ -15,16 +15,16 @@ from app.vaaklite import (
 
 logger = logging.getLogger(__name__)
 
-Provider = Literal["claude", "gpt", "groq", "gemini"]
-
-AVAILABLE_PROVIDERS: dict[Provider, str] = {}
+# Provider ID -> model ID mapping (populated dynamically)
+AVAILABLE_PROVIDERS: dict[str, str] = {}
 
 
 def _check_providers():
     global AVAILABLE_PROVIDERS
     AVAILABLE_PROVIDERS = {}
     if ANTHROPIC_API_KEY:
-        AVAILABLE_PROVIDERS["claude"] = ANTHROPIC_MODEL
+        AVAILABLE_PROVIDERS["claude-opus"] = CLAUDE_OPUS_MODEL
+        AVAILABLE_PROVIDERS["claude-sonnet"] = CLAUDE_SONNET_MODEL
     if OPENAI_API_KEY:
         AVAILABLE_PROVIDERS["gpt"] = OPENAI_MODEL
     if GROQ_API_KEY:
@@ -61,11 +61,11 @@ def _build_user_prompt(text: str, source_lang: str, target_lang: str) -> str:
     return f"Translate from {source_lang} to {target_lang}:\n\n{text}"
 
 
-async def translate_claude(text: str, source_lang: str, target_lang: str) -> str:
+async def translate_claude(text: str, source_lang: str, target_lang: str, *, model: str) -> str:
     from anthropic import AsyncAnthropic
     client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     response = await client.messages.create(
-        model=ANTHROPIC_MODEL,
+        model=model,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_prompt(text, source_lang, target_lang)}],
@@ -115,8 +115,9 @@ async def translate_gemini(text: str, source_lang: str, target_lang: str) -> str
     return response.text or ""
 
 
-_TRANSLATORS = {
-    "claude": translate_claude,
+_TRANSLATORS: dict[str, object] = {
+    "claude-opus": partial(translate_claude, model=CLAUDE_OPUS_MODEL),
+    "claude-sonnet": partial(translate_claude, model=CLAUDE_SONNET_MODEL),
     "gpt": translate_gpt,
     "groq": translate_groq,
     "gemini": translate_gemini,
@@ -127,7 +128,7 @@ async def translate(
     text: str,
     source_lang: str,
     target_lang: str,
-    provider: Provider = "claude",
+    provider: str = "claude-opus",
 ) -> dict:
     if not text.strip():
         return {"translated_text": "", "provider": provider, "model": ""}

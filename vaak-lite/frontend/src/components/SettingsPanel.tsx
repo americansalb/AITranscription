@@ -26,7 +26,7 @@ export const DEFAULT_SETTINGS: InterpretationSettings = {
   timing: "consecutive",
   trigger: "auto",
   silenceThreshold: 2.0,
-  provider: "claude",
+  provider: "claude-opus",
 };
 
 interface SettingsPanelProps {
@@ -155,8 +155,7 @@ export function SettingsPanel({ settings, onChange, availableProviders, disabled
               >
                 {availableProviders.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.id === "claude" ? "Claude" : p.id === "gpt" ? "GPT" : p.id === "groq" ? "Groq (Llama)" : p.id === "gemini" ? "Gemini" : p.id}
-                    {" "}&mdash; {p.model}
+                    {p.id === "claude-opus" ? "Claude Opus" : p.id === "claude-sonnet" ? "Claude Sonnet" : p.id === "gpt" ? "GPT" : p.id === "groq" ? "Groq (Llama)" : p.id === "gemini" ? "Gemini" : p.id}
                   </option>
                 ))}
                 {availableProviders.length === 0 && (

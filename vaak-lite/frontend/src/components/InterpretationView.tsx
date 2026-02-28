@@ -45,9 +45,15 @@ function statusLabel(status: EntryStatus): string | null {
 
 export function InterpretationView({ entries, bidirectional, transcribeOnly, isRecording }: InterpretationViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const prevEntryCount = useRef(0);
 
+  // Only auto-scroll when a NEW entry is added, not when existing entries update.
+  // This prevents the page from jumping while reading during simultaneous mode.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (entries.length > prevEntryCount.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    prevEntryCount.current = entries.length;
   }, [entries]);
 
   if (entries.length === 0) {

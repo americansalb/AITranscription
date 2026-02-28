@@ -77,7 +77,7 @@ class TranslateRequest(BaseModel):
     text: str
     source_lang: str
     target_lang: str
-    provider: str = "claude"
+    provider: str = "claude-opus"
 
 
 @vaaklite_app.post("/api/translate")
@@ -104,7 +104,7 @@ async def interpret(
     audio: UploadFile = File(...),
     source_lang: str | None = Form(default=None),
     target_lang: str = Form(...),
-    provider: str = Form(default="claude"),
+    provider: str = Form(default="claude-opus"),
 ):
     filename = audio.filename or "audio.wav"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
