@@ -107,7 +107,10 @@ async def submit_feedback(
     except Exception as e:
         import logging
         logging.getLogger(__name__).error("Failed to store feedback: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Failed to store feedback")
+        return FeedbackResponse(
+            success=False,
+            message="Failed to store feedback — correction not saved",
+        )
 
 
 @router.get("/stats", response_model=LearningStatsResponse)
@@ -322,7 +325,10 @@ async def train_correction_model(
     except Exception as e:
         import logging
         logging.getLogger(__name__).error("Training failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Training failed")
+        return TrainModelResponse(
+            success=False,
+            message=f"Training failed: {type(e).__name__}",
+        )
 
 
 @router.post("/train-whisper", response_model=TrainModelResponse)
@@ -372,7 +378,10 @@ async def train_whisper_model(
     except Exception as e:
         import logging
         logging.getLogger(__name__).error("Whisper training failed: %s: %s", type(e).__name__, e)
-        raise HTTPException(status_code=500, detail="Training failed")
+        return TrainModelResponse(
+            success=False,
+            message=f"Whisper training failed: {type(e).__name__}",
+        )
 
 
 @router.get("/rules", response_model=RulesListResponse)

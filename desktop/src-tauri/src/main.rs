@@ -1,14 +1,14 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod a11y;
 mod audio;
 mod collab;
 mod database;
-mod focus_tracker;
 mod keyboard_hook;
 mod launcher;
 mod queue;
-mod uia_capture;
+
 
 use audio::{AudioData, AudioDevice, AudioRecorder};
 use enigo::{Enigo, Keyboard, Mouse, Settings, Coordinate};
@@ -81,7 +81,9 @@ fn validate_project_dir(dir: &str) -> Result<String, String> {
         return Err(format!("Not a Vaak project (no .vaak/ directory): {}", canonical.display()));
     }
 
-    Ok(canonical.to_string_lossy().to_string())
+    // Strip Windows extended-length path prefix (\\?\) that canonicalize() adds
+    let s = canonical.to_string_lossy().to_string();
+    Ok(s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string())
 }
 
 /// Helper to create an Image from PNG bytes
@@ -1183,7 +1185,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap();
+                    .unwrap_or_default();
                 let timestamp = now.as_millis();
                 let nanos = now.as_nanos();
 
@@ -1283,6 +1285,20 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 "session_id": session_id,
                 "instructions": instructions
             }).to_string();
+            // CORS: only allow localhost origins (Tauri WebView + local dev)
+            let origin = request.headers().iter()
+                .find(|h| h.field.as_str().eq_ignore_ascii_case("origin"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let cors_origin = if origin.starts_with("http://localhost")
+                || origin.starts_with("https://localhost")
+                || origin.starts_with("http://127.0.0.1")
+                || origin.starts_with("tauri://localhost")
+            {
+                origin.as_str()
+            } else {
+                "http://localhost"
+            };
             let response = Response::from_string(response_body)
                 .with_header(
                     tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
@@ -1291,7 +1307,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 .with_header(
                     tiny_http::Header::from_bytes(
                         &b"Access-Control-Allow-Origin"[..],
-                        &b"*"[..],
+                        cors_origin.as_bytes(),
                     )
                     .unwrap(),
                 );
@@ -1413,15 +1429,15 @@ fn describe_screen_core(app: &tauri::AppHandle) -> Result<String, String> {
     let sr_settings = load_sr_settings_from_disk();
     let voice_settings = load_voice_settings();
 
-    // 3b. Capture UIA tree (best-effort, don't fail if unavailable)
-    let uia_tree_json = match uia_capture::capture_uia_tree() {
+    // 3b. Capture accessibility tree (best-effort, don't fail if unavailable)
+    let uia_tree_json = match a11y::capture_tree() {
         Ok(tree) => {
-            let text = uia_capture::format_tree_for_prompt(&tree);
-            log_error(&format!("UIA tree captured: {} elements", tree.element_count));
+            let text = a11y::format_tree_for_prompt(&tree);
+            log_error(&format!("A11y tree captured: {} elements", tree.element_count));
             Some(text)
         }
         Err(e) => {
-            log_error(&format!("UIA capture failed (non-fatal): {}", e));
+            log_error(&format!("A11y capture failed (non-fatal): {}", e));
             None
         }
     };
@@ -1494,10 +1510,10 @@ fn describe_screen(app: tauri::AppHandle) -> Result<String, String> {
     describe_screen_core(&app)
 }
 
-/// Capture the UIA tree from the foreground window and return as JSON
+/// Capture the accessibility tree from the foreground window and return as JSON
 #[tauri::command]
 fn capture_uia_tree_cmd() -> Result<serde_json::Value, String> {
-    let tree = uia_capture::capture_uia_tree()?;
+    let tree = a11y::capture_tree()?;
     serde_json::to_value(&tree).map_err(|e| format!("Serialize failed: {}", e))
 }
 
@@ -1505,9 +1521,9 @@ fn capture_uia_tree_cmd() -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn set_focus_tracking(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     if enabled {
-        focus_tracker::start_focus_tracking(app);
+        a11y::start_focus_tracking(app);
     } else {
-        focus_tracker::stop_focus_tracking();
+        a11y::stop_focus_tracking();
     }
     Ok(())
 }
@@ -1946,27 +1962,60 @@ fn update_native_hotkey(hotkey: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Update tray icon to show recording state
+/// Update tray icon, title, and tooltip to show recording/processing state.
+/// `state` is one of: "idle", "recording", "processing", "success", "error"
+/// On macOS, also sets tray title text (visible next to icon in menu bar)
+/// and bounces the dock icon on recording start and processing complete.
 #[tauri::command]
-fn set_recording_state(app: tauri::AppHandle, recording: bool) -> Result<(), String> {
+fn set_recording_state(app: tauri::AppHandle, recording: bool, state: Option<String>) -> Result<(), String> {
+    let state_str = state.as_deref().unwrap_or(if recording { "recording" } else { "idle" });
+
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let icon_bytes: &[u8] = if recording {
+        // Icon: recording uses red icon, everything else uses idle
+        let icon_bytes: &[u8] = if state_str == "recording" {
             include_bytes!("../icons/tray-recording.png")
+        } else if state_str == "processing" {
+            include_bytes!("../icons/tray-recording.png") // keep red during processing
         } else {
             include_bytes!("../icons/tray-idle.png")
         };
-
         if let Ok(icon) = load_png_image(icon_bytes) {
             let _ = tray.set_icon(Some(icon));
         }
 
-        let tooltip = if recording {
-            "Vaak - Recording..."
-        } else {
-            "Vaak - Ready"
+        // Tooltip: detailed state description
+        let tooltip = match state_str {
+            "recording" => "Vaak - Recording...",
+            "processing" => "Vaak - Processing transcription...",
+            "success" => "Vaak - Transcription complete",
+            "error" => "Vaak - Transcription failed",
+            _ => "Vaak - Ready",
         };
         let _ = tray.set_tooltip(Some(tooltip));
+
+        // macOS: set tray title text (appears next to the tray icon in menu bar)
+        #[cfg(target_os = "macos")]
+        {
+            let title: Option<&str> = match state_str {
+                "recording" => Some("REC"),
+                "processing" => Some("..."),
+                _ => None, // clear title for idle/success/error
+            };
+            let _ = tray.set_title(title);
+        }
     }
+
+    // macOS: dock bounce on recording start and processing complete
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::UserAttentionType;
+        if state_str == "recording" || state_str == "success" {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -2111,7 +2160,9 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
     if !canonical.is_dir() {
         return Err(format!("Not a directory: {}", canonical.display()));
     }
-    let dir = canonical.to_string_lossy().to_string();
+    // Strip Windows extended-length prefix (\\?\) to match validate_project_dir
+    let raw = canonical.to_string_lossy().to_string();
+    let dir = raw.strip_prefix("\\\\?\\").unwrap_or(&raw).to_string();
 
     let vaak_dir = std::path::Path::new(&dir).join(".vaak");
     let roles_dir = vaak_dir.join("roles");
@@ -2156,6 +2207,112 @@ fn initialize_project(dir: String, config: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Copy roles (briefings + project.json entries + role_groups) from one project to another.
+#[tauri::command]
+fn copy_project_roles(source_dir: String, dest_dir: String) -> Result<u32, String> {
+    // Source must be a valid vaak project; dest needs only .vaak/ to exist
+    let source = validate_project_dir(&source_dir)?;
+    let dest_path = std::path::Path::new(&dest_dir);
+    let dest_vaak = dest_path.join(".vaak");
+    if !dest_vaak.is_dir() {
+        return Err(format!("Destination has no .vaak/ directory: {}", dest_dir));
+    }
+    // Strip \\?\ from dest too
+    let dest_canonical = dest_path.canonicalize()
+        .map_err(|e| format!("Invalid dest directory: {}", e))?;
+    let dest = {
+        let s = dest_canonical.to_string_lossy().to_string();
+        s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string()
+    };
+
+    let source_vaak = std::path::Path::new(&source).join(".vaak");
+    let dest_vaak = std::path::Path::new(&dest).join(".vaak");
+    let mut copied: u32 = 0;
+
+    // 1. Copy role briefing .md files from source/roles/ to dest/roles/
+    let source_roles_dir = source_vaak.join("roles");
+    let dest_roles_dir = dest_vaak.join("roles");
+    let _ = std::fs::create_dir_all(&dest_roles_dir);
+    if source_roles_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&source_roles_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.ends_with(".md") {
+                    let dest_file = dest_roles_dir.join(&name);
+                    if !dest_file.exists() {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if std::fs::write(&dest_file, &content).is_ok() {
+                                copied += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Merge roles and role_groups from source project.json into dest project.json
+    let source_config_path = source_vaak.join("project.json");
+    let dest_config_path = dest_vaak.join("project.json");
+    if source_config_path.exists() && dest_config_path.exists() {
+        let source_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&source_config_path)
+                .map_err(|e| format!("Failed to read source project.json: {}", e))?
+        ).map_err(|e| format!("Failed to parse source project.json: {}", e))?;
+
+        let mut dest_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&dest_config_path)
+                .map_err(|e| format!("Failed to read dest project.json: {}", e))?
+        ).map_err(|e| format!("Failed to parse dest project.json: {}", e))?;
+
+        // Merge roles: copy entries from source that don't exist in dest
+        if let Some(source_roles) = source_json.get("roles").and_then(|r| r.as_object()) {
+            let dest_roles = dest_json.get_mut("roles")
+                .and_then(|r| r.as_object_mut());
+            if let Some(dest_roles) = dest_roles {
+                for (slug, config) in source_roles {
+                    if !dest_roles.contains_key(slug) {
+                        dest_roles.insert(slug.clone(), config.clone());
+                        copied += 1;
+                    }
+                }
+            }
+        }
+
+        // Merge role_groups: copy groups from source that don't exist in dest (by slug)
+        if let Some(source_groups) = source_json.get("role_groups").and_then(|g| g.as_array()) {
+            let dest_groups = dest_json.get_mut("role_groups")
+                .and_then(|g| g.as_array_mut());
+            if let Some(dest_groups) = dest_groups {
+                let existing_slugs: std::collections::HashSet<String> = dest_groups.iter()
+                    .filter_map(|g| g.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+                for group in source_groups {
+                    if let Some(slug) = group.get("slug").and_then(|s| s.as_str()) {
+                        if !existing_slugs.contains(slug) {
+                            dest_groups.push(group.clone());
+                            copied += 1;
+                        }
+                    }
+                }
+            } else {
+                // dest has no role_groups array — create it
+                dest_json["role_groups"] = serde_json::Value::Array(source_groups.clone());
+                copied += source_groups.len() as u32;
+            }
+        }
+
+        // Write back dest project.json
+        let pretty = serde_json::to_string_pretty(&dest_json)
+            .map_err(|e| format!("Failed to format dest project.json: {}", e))?;
+        std::fs::write(&dest_config_path, pretty)
+            .map_err(|e| format!("Failed to write dest project.json: {}", e))?;
+    }
+
+    Ok(copied)
 }
 
 #[tauri::command]
@@ -2374,17 +2531,45 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     Ok(())
 }
 
+/// Dedicated channel for collab change notifications. Uses a single background
+/// thread instead of spawning a new OS thread per call (25+ call sites).
+/// Notifications are coalesced: rapid successive calls result in a single HTTP request.
+static COLLAB_NOTIFY_TX: std::sync::OnceLock<std::sync::mpsc::Sender<()>> = std::sync::OnceLock::new();
+
+fn init_collab_notifier() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    COLLAB_NOTIFY_TX.set(tx).ok();
+    std::thread::Builder::new()
+        .name("collab-notifier".into())
+        .spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(2))
+                .build();
+            loop {
+                // Block until a notification arrives
+                match rx.recv() {
+                    Ok(()) => {}
+                    Err(_) => break, // Channel closed, exit thread
+                }
+                // Drain any queued notifications (coalesce rapid-fire calls)
+                while rx.try_recv().is_ok() {}
+                // Small delay to coalesce further
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                while rx.try_recv().is_ok() {}
+                // Send single HTTP notification
+                let _ = agent.post("http://127.0.0.1:7865/collab/notify").send_string("");
+            }
+        })
+        .ok();
+}
+
 /// Fire-and-forget notification to the local HTTP server (port 7865) so that
 /// the MCP sidecar and frontend windows learn about board/discussion changes
 /// made by Tauri commands. Without this, MCP waits up to 55s to discover changes.
 fn notify_collab_change() {
-    std::thread::spawn(|| {
-        let _ = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .post("http://127.0.0.1:7865/collab/notify")
-            .send_string("");
-    });
+    if let Some(tx) = COLLAB_NOTIFY_TX.get() {
+        let _ = tx.send(());
+    }
 }
 
 // ==================== Discussion Control Commands ====================
@@ -3631,6 +3816,9 @@ fn main() {
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
 
+            // Initialize collab change notifier (single thread, coalesced notifications)
+            init_collab_notifier();
+
             // Start project file watcher (polls .vaak/ files every 1s)
             start_project_watcher(app.handle().clone());
 
@@ -3795,9 +3983,9 @@ fn main() {
                                     }
                                 };
 
-                                // Capture UIA tree for initial message
-                                let initial_uia = match uia_capture::capture_uia_tree() {
-                                    Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                // Capture accessibility tree for initial message
+                                let initial_uia = match a11y::capture_tree() {
+                                    Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                     Err(_) => None,
                                 };
                                 let user_text = if let Some(ref tree_text) = initial_uia {
@@ -3840,9 +4028,9 @@ fn main() {
 
                                     log_error(&format!("Alt+A: Computer use iteration {}", iteration));
 
-                                    // Capture fresh UIA tree for the system prompt
-                                    let cu_uia_tree = match uia_capture::capture_uia_tree() {
-                                        Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                    // Capture fresh accessibility tree for the system prompt
+                                    let cu_uia_tree = match a11y::capture_tree() {
+                                        Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                         Err(_) => None,
                                     };
                                     let mut cu_body = serde_json::json!({
@@ -4000,9 +4188,9 @@ fn main() {
 
                                             match screenshot_result {
                                                 Ok((new_screenshot, _, _)) => {
-                                                    // Capture fresh UIA tree after action
-                                                    let uia_text = match uia_capture::capture_uia_tree() {
-                                                        Ok(tree) => Some(uia_capture::format_tree_for_prompt(&tree)),
+                                                    // Capture fresh accessibility tree after action
+                                                    let uia_text = match a11y::capture_tree() {
+                                                        Ok(tree) => Some(a11y::format_tree_for_prompt(&tree)),
                                                         Err(_) => None,
                                                     };
                                                     let mut content_blocks = vec![
@@ -4132,6 +4320,7 @@ fn main() {
             watch_project_dir,
             stop_watching_project,
             initialize_project,
+            copy_project_roles,
             read_role_briefing,
             send_team_message,
             set_workflow_type,
@@ -4178,6 +4367,11 @@ fn main() {
             launcher::repopulate_spawned,
             launcher::focus_agent_window,
             launcher::buzz_agent_terminal,
+            launcher::check_macos_permissions,
+            launcher::open_macos_settings,
+            launcher::open_terminal_in_dir,
+            launcher::check_npm_installed,
+            launcher::install_claude_cli,
         ]);
 
     match builder.build(tauri::generate_context!()) {
@@ -4250,12 +4444,14 @@ fn show_error_dialog(message: &str) {
         .args(["--error", "--title=Vaak Error", &format!("--text={}", message)])
         .output();
 
-    if zenity.is_err() || !zenity.unwrap().status.success() {
+    let zenity_ok = zenity.as_ref().map(|o| o.status.success()).unwrap_or(false);
+    if !zenity_ok {
         let kdialog = Command::new("kdialog")
             .args(["--error", message, "--title", "Vaak Error"])
             .output();
 
-        if kdialog.is_err() || !kdialog.unwrap().status.success() {
+        let kdialog_ok = kdialog.as_ref().map(|o| o.status.success()).unwrap_or(false);
+        if !kdialog_ok {
             // Last resort: notification
             let _ = Command::new("notify-send")
                 .args(["Vaak Error", message])

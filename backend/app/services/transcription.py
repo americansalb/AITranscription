@@ -1,7 +1,14 @@
+import asyncio
 import io
+import logging
+import time
+
+import httpx
 from groq import AsyncGroq
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class TranscriptionService:
@@ -15,7 +22,10 @@ class TranscriptionService:
         if self._client is None:
             if not settings.groq_api_key:
                 raise ValueError("GROQ_API_KEY is not configured")
-            self._client = AsyncGroq(api_key=settings.groq_api_key)
+            self._client = AsyncGroq(
+                api_key=settings.groq_api_key,
+                timeout=httpx.Timeout(120.0, connect=10.0),
+            )
         return self._client
 
     async def transcribe(
@@ -49,8 +59,41 @@ class TranscriptionService:
         if language:
             params["language"] = language
 
-        # Call Groq Whisper API
-        response = await self.client.audio.transcriptions.create(**params)
+        # Proportional timeout from configurable settings
+        estimated_audio_secs = max(len(audio_data) / 16000, 1)
+        timeout_secs = min(
+            settings.groq_timeout_base + (estimated_audio_secs / 60) * settings.groq_timeout_per_min_audio,
+            settings.timeout_ceiling,
+        )
+
+        start_time = time.monotonic()
+
+        try:
+            response = await asyncio.wait_for(
+                self.client.audio.transcriptions.create(**params),
+                timeout=timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start_time
+            logger.error(
+                '{"api": "groq", "audio_seconds": %.1f, "response_time_ms": %.0f, '
+                '"status": "timeout", "timeout_limit_s": %.0f}',
+                estimated_audio_secs,
+                elapsed * 1000,
+                timeout_secs,
+            )
+            raise TimeoutError(
+                f"Transcription timed out after {int(timeout_secs)}s"
+            )
+
+        elapsed = time.monotonic() - start_time
+        logger.info(
+            '{"api": "groq", "audio_seconds": %.1f, "response_time_ms": %.0f, '
+            '"status": "ok", "timeout_limit_s": %.0f}',
+            estimated_audio_secs,
+            elapsed * 1000,
+            timeout_secs,
+        )
 
         return {
             "text": response.text,

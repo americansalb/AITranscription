@@ -2667,7 +2667,9 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         .unwrap_or(0);
     if max_recent_id > 0 {
         let ls_path = last_seen_path(&normalized, session_id);
-        let _ = std::fs::create_dir_all(ls_path.parent().unwrap());
+        if let Some(parent) = ls_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let _ = std::fs::write(&ls_path, serde_json::json!({
             "last_seen_id": max_recent_id,
             "updated_at": utc_now_iso()
@@ -3964,7 +3966,9 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         .max();
     if let Some(max_id) = max_hook_id {
         let hook_ls_path = last_seen_path(&project_dir, session_id);
-        let _ = std::fs::create_dir_all(hook_ls_path.parent().unwrap());
+        if let Some(parent) = hook_ls_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let _ = std::fs::write(&hook_ls_path, serde_json::json!({
             "last_seen_id": max_id,
             "updated_at": utc_now_iso()

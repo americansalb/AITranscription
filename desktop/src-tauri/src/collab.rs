@@ -130,6 +130,9 @@ pub struct RoleConfig {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub companions: Vec<CompanionConfig>,
+    /// true for roles the user created via UI; false for system/imported roles
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,41 +406,27 @@ fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: 
     result
 }
 
-fn compute_role_statuses(config: &ProjectConfig, bindings: &[SessionBinding], now_secs: u64, timeout_secs: u64) -> Vec<RoleStatus> {
-    let auto_collab = config.settings.auto_collab.unwrap_or(false);
-    let gone_threshold = (timeout_secs as f64 * 2.5) as u64;
+fn compute_role_statuses(config: &ProjectConfig, bindings: &[SessionBinding], now_secs: u64, _timeout_secs: u64) -> Vec<RoleStatus> {
+    // 10-minute disconnect threshold — matches frontend computeInstanceStatus
+    let disconnect_threshold = 600u64;
     config.roles.iter().map(|(slug, role)| {
         let role_bindings: Vec<&SessionBinding> = bindings.iter()
             .filter(|b| b.role == *slug && b.status == "active")
             .collect();
         let total = role_bindings.len() as u32;
 
-        let mut fresh_count = 0u32;
-        let mut idle_count = 0u32;
-        let mut gone_count = 0u32;
+        let mut active_count = 0u32;
         for b in &role_bindings {
             let age = parse_iso_epoch(&b.last_heartbeat)
                 .map(|hb| now_secs.saturating_sub(hb))
                 .unwrap_or(u64::MAX);
-            if age <= timeout_secs {
-                fresh_count += 1;
-            } else if age <= gone_threshold {
-                idle_count += 1;
-            } else if auto_collab {
-                // When auto_collab is on, never mark sessions as "gone" —
-                // treat them as idle so they persist in the UI
-                idle_count += 1;
-            } else {
-                gone_count += 1;
+            if age <= disconnect_threshold {
+                active_count += 1;
             }
         }
 
-        let status = if fresh_count > 0 {
+        let status = if active_count > 0 {
             "active"
-        } else if idle_count > 0 {
-            "idle"
-        } else if gone_count > 0 {
-            "gone"
         } else {
             "vacant"
         };
@@ -1229,7 +1218,7 @@ pub fn roster_add_slot(dir: &str, role: &str, metadata: Option<serde_json::Value
         if let Ok(sc) = std::fs::read_to_string(&sessions_path) {
             if let Ok(sv) = serde_json::from_str::<serde_json::Value>(&sc) {
                 if let Some(bindings) = sv.get("bindings").and_then(|b| b.as_array()) {
-                    let arr = seed.as_array_mut().unwrap();
+                    let arr = seed.as_array_mut().expect("seed is always json!([])");
                     for b in bindings {
                         let b_role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
                         let b_inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
@@ -1544,6 +1533,7 @@ fn create_role_inner(
         created_at: now.clone(),
         tags: tags.to_vec(),
         companions: companions.to_vec(),
+        custom: true,
     };
 
     // Add role to config
@@ -1554,6 +1544,7 @@ fn create_role_inner(
         "permissions": permissions,
         "created_at": now,
         "tags": tags,
+        "custom": true,
     });
     if !companions.is_empty() {
         role_json["companions"] = serde_json::to_value(companions)

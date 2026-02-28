@@ -94,7 +94,9 @@ pub fn get_queue_items(
         sql.push_str(" ORDER BY CASE WHEN status IN ('pending', 'playing', 'paused') THEN position ELSE created_at END");
 
         if let Some(l) = limit {
-            sql.push_str(&format!(" LIMIT {}", l));
+            // Clamp to safe range to prevent DoS via excessive LIMIT values
+            let safe_limit = l.clamp(0, 1000);
+            sql.push_str(&format!(" LIMIT {}", safe_limit));
         }
 
         let mut stmt = conn

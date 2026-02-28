@@ -564,7 +564,17 @@ async def get_my_stats(
         )
     except Exception as e:
         logger.exception("Stats retrieval failed: %s", type(e).__name__)
-        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
+        # Graceful degradation: return zeroed-out stats instead of 500
+        return UserStatsResponse(
+            total_transcriptions=0,
+            total_words=0,
+            total_audio_seconds=0,
+            transcriptions_today=0,
+            words_today=0,
+            average_words_per_transcription=0,
+            average_words_per_minute=0,
+            typing_wpm=current_user.typing_wpm if current_user else 40,
+        )
 
 
 class UpdateTypingWpmRequest(BaseModel):

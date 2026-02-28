@@ -4,9 +4,11 @@ import logging
 import re
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.api.auth import get_current_user
+from app.models.user import User
 from app.services.audience import (
     collect_audience_votes,
     list_pools,
@@ -80,8 +82,8 @@ class CreatePoolRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/audience/vote", response_model=AudienceVoteResponse)
-async def audience_vote(req: AudienceVoteRequest):
-    """Collect votes from AI audience members across 3 LLM providers."""
+async def audience_vote(req: AudienceVoteRequest, user: User = Depends(get_current_user)):
+    """Collect votes from AI audience members across 3 LLM providers. Requires auth."""
     logger.info(f"Audience vote requested: topic='{req.topic[:80]}', phase={req.phase}, pool={req.pool}")
     try:
         result = await collect_audience_votes(
@@ -143,8 +145,8 @@ async def get_pool(pool_id: str):
 
 
 @router.post("/audience/pools")
-async def create_pool(req: CreatePoolRequest):
-    """Create a custom audience pool."""
+async def create_pool(req: CreatePoolRequest, user: User = Depends(get_current_user)):
+    """Create a custom audience pool. Requires auth."""
     # Validate ID format
     if not re.match(r'^[a-z0-9][a-z0-9-]*$', req.id):
         raise HTTPException(status_code=400, detail="Pool ID must be lowercase alphanumeric with hyphens (e.g., 'my-custom-pool')")
@@ -181,8 +183,8 @@ async def create_pool(req: CreatePoolRequest):
 
 
 @router.delete("/audience/pools/{pool_id}")
-async def remove_pool(pool_id: str):
-    """Delete a custom audience pool. Built-in pools cannot be deleted."""
+async def remove_pool(pool_id: str, user: User = Depends(get_current_user)):
+    """Delete a custom audience pool. Built-in pools cannot be deleted. Requires auth."""
     try:
         deleted = delete_pool(pool_id)
     except ValueError as e:

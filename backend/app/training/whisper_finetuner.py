@@ -24,8 +24,10 @@ from transformers import (
 
 from app.models.learning import AudioSample, ModelVersion
 from app.services.audio_collector import AudioCollector
+from app.training.utils import _get_torch_device
 
 logger = logging.getLogger(__name__)
+
 
 # Configuration
 MODEL_DIR = os.environ.get("MODEL_DIR", "./models")
@@ -53,7 +55,7 @@ class WhisperFineTuner:
         self.user_id = user_id
         self.model_dir = Path(MODEL_DIR) / str(user_id) / "whisper"
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _get_torch_device()
         self.audio_collector = AudioCollector(db, user_id)
 
     async def get_training_samples(self) -> Optional[list[AudioSample]]:
@@ -114,9 +116,9 @@ class WhisperFineTuner:
                 "PEFT library not available. Install with: pip install peft"
             )
 
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "GPU required for Whisper fine-tuning. No CUDA device found."
+        if self.device.type == "cpu":
+            logger.warning(
+                "No GPU detected (CUDA or MPS). Whisper fine-tuning on CPU will be very slow."
             )
 
         # Get training samples
@@ -182,7 +184,7 @@ class WhisperFineTuner:
             save_strategy="epoch",
             logging_steps=10,
             remove_unused_columns=False,
-            fp16=torch.cuda.is_available(),
+            fp16=self.device.type == "cuda",
             predict_with_generate=True,
         )
 
@@ -252,7 +254,7 @@ class LocalWhisperInference:
         self.db = db
         self.user_id = user_id
         self.model_dir = Path(MODEL_DIR) / str(user_id) / "whisper"
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _get_torch_device()
         self._model = None
         self._processor = None
         self._model_version = None

@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vaak
+      POSTGRES_PASSWORD: vaak_dev_password
+      POSTGRES_DB: vaak_web
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaak"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    # NOTE: Dockerfile uses --workers 1 (required — agent runtime uses in-memory state)
+    build:
+      context: .
+      dockerfile: web-service/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    environment:
+      VAAK_WEB_DATABASE_URL: postgresql+asyncpg://vaak:vaak_dev_password@db:5432/vaak_web
+      VAAK_WEB_SECRET_KEY: ${VAAK_WEB_SECRET_KEY:-change-me-in-production}
+      VAAK_WEB_FERNET_KEY: ${VAAK_WEB_FERNET_KEY:-}
+      VAAK_WEB_ANTHROPIC_API_KEY: ${VAAK_WEB_ANTHROPIC_API_KEY:-}
+      VAAK_WEB_OPENAI_API_KEY: ${VAAK_WEB_OPENAI_API_KEY:-}
+      VAAK_WEB_GOOGLE_AI_API_KEY: ${VAAK_WEB_GOOGLE_AI_API_KEY:-}
+      VAAK_WEB_STRIPE_SECRET_KEY: ${VAAK_WEB_STRIPE_SECRET_KEY:-}
+      VAAK_WEB_STRIPE_WEBHOOK_SECRET: ${VAAK_WEB_STRIPE_WEBHOOK_SECRET:-}
+      VAAK_WEB_STRIPE_PRICE_PRO: ${VAAK_WEB_STRIPE_PRICE_PRO:-}
+      VAAK_WEB_STRIPE_PRICE_BYOK: ${VAAK_WEB_STRIPE_PRICE_BYOK:-}
+      VAAK_WEB_CORS_ORIGINS: '["http://localhost:3000"]'
+
+  web:
+    build:
+      context: web-client
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

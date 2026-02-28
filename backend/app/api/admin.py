@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator as pydantic_field_validator
 
@@ -605,6 +605,7 @@ class BootstrapRequest(BaseModel):
 @router.post("/bootstrap")
 async def bootstrap_admin(
     request: BootstrapRequest,
+    raw_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -612,6 +613,11 @@ async def bootstrap_admin(
     Requires the SECRET_KEY from environment to authorize.
     This is a one-time setup endpoint for initial admin creation.
     """
+    # Rate limit to prevent brute-force on secret key
+    from app.api.auth import _check_rate_limit
+    client_ip = raw_request.client.host if raw_request.client else "unknown"
+    _check_rate_limit(f"bootstrap:{client_ip}", max_attempts=3, window_seconds=300)
+
     # Verify the secret matches our app secret key
     if request.secret != settings.secret_key:
         raise HTTPException(
@@ -647,12 +653,18 @@ class SeedAdminsRequest(BaseModel):
 @router.post("/seed-admins")
 async def seed_admin_accounts(
     request: SeedAdminsRequest,
+    raw_request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """
     One-time endpoint to create the initial admin accounts.
     Requires SECRET_KEY to authorize.
     """
+    # Rate limit to prevent brute-force on secret key
+    from app.api.auth import _check_rate_limit
+    client_ip = raw_request.client.host if raw_request.client else "unknown"
+    _check_rate_limit(f"seed-admins:{client_ip}", max_attempts=3, window_seconds=300)
+
     if request.secret != settings.secret_key:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

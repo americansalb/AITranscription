@@ -1,6 +1,9 @@
+import asyncio
 import logging
+import time
 from typing import AsyncGenerator, Optional
 
+import httpx
 from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +24,10 @@ class PolishService:
         if self._client is None:
             if not settings.anthropic_api_key:
                 raise ValueError("ANTHROPIC_API_KEY is not configured")
-            self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+            self._client = AsyncAnthropic(
+                api_key=settings.anthropic_api_key,
+                timeout=httpx.Timeout(120.0, connect=10.0),
+            )
         return self._client
 
     def _build_system_prompt(
@@ -266,11 +272,44 @@ class PolishService:
             context, custom_words, formality, learned_corrections
         )
 
-        response = await self.client.messages.create(
-            model=settings.haiku_model,
-            max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": raw_text}],
+        # Proportional timeout from configurable settings
+        timeout_secs = min(
+            settings.anthropic_timeout_base + (len(raw_text) / 1000) * settings.anthropic_timeout_per_1k_chars,
+            settings.timeout_ceiling,
+        )
+
+        start_time = time.monotonic()
+
+        try:
+            response = await asyncio.wait_for(
+                self.client.messages.create(
+                    model=settings.haiku_model,
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": raw_text}],
+                ),
+                timeout=timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start_time
+            logger.error(
+                '{"api": "anthropic", "text_length": %d, "response_time_ms": %.0f, '
+                '"status": "timeout", "timeout_limit_s": %.0f}',
+                len(raw_text),
+                elapsed * 1000,
+                timeout_secs,
+            )
+            raise TimeoutError(
+                f"Text polishing timed out after {int(timeout_secs)}s"
+            )
+
+        elapsed = time.monotonic() - start_time
+        logger.info(
+            '{"api": "anthropic", "text_length": %d, "response_time_ms": %.0f, '
+            '"status": "ok", "timeout_limit_s": %.0f}',
+            len(raw_text),
+            elapsed * 1000,
+            timeout_secs,
         )
 
         polished_text = response.content[0].text if response.content else ""

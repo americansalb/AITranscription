@@ -107,9 +107,9 @@ export function OverlayApp() {
       const dy = e.screenY - dragStartRef.current.y;
       try {
         const { getCurrentWindow, PhysicalPosition } = await import("@tauri-apps/api/window");
-        await getCurrentWindow().setPosition(
-          new PhysicalPosition(windowPosRef.current.x + dx, windowPosRef.current.y + dy)
-        );
+        const newX = windowPosRef.current.x + dx;
+        const newY = Math.max(0, windowPosRef.current.y + dy);
+        await getCurrentWindow().setPosition(new PhysicalPosition(newX, newY));
       } catch {
         // ignore
       }

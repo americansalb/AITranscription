@@ -3,9 +3,11 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.api.auth import get_current_user
+from app.models.user import User
 from app.services.role_designer import design_role
 
 logger = logging.getLogger(__name__)
@@ -51,12 +53,12 @@ class RoleDesignResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/roles/design", response_model=RoleDesignResponse)
-async def post_role_design(req: RoleDesignRequest):
+async def post_role_design(req: RoleDesignRequest, current_user: User = Depends(get_current_user)):
     """Run one turn of the LLM role design conversation.
 
     Send the conversation history and project context. The LLM will either
     ask a follow-up question (role_config=null) or generate a complete role
-    configuration (role_config populated).
+    configuration (role_config populated). Requires authentication.
     """
     if not req.messages:
         raise HTTPException(status_code=400, detail="At least one message is required")
@@ -75,9 +77,12 @@ async def post_role_design(req: RoleDesignRequest):
             project_context=req.project_context,
         )
         return result
-    except RuntimeError as e:
-        logger.error("Role design error: %s", e)
-        raise HTTPException(status_code=502, detail="Role design service unavailable")
-    except Exception as e:
-        logger.exception("Unexpected error in role design")
-        raise HTTPException(status_code=500, detail="Internal error")
+    except (RuntimeError, Exception) as e:
+        logger.error("Role design error: %s: %s", type(e).__name__, e)
+        # Graceful degradation: return a helpful message instead of 502
+        return RoleDesignResponse(
+            reply="I'm having trouble connecting to the AI service right now. "
+                  "You can still create a role manually using the wizard — "
+                  "just describe what you need and I'll help when the service is back.",
+            role_config=None,
+        )

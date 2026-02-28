@@ -22,6 +22,7 @@ import { initSpeakListener } from "./lib/speak";
 import { getStoredVoiceEnabled, saveVoiceEnabled } from "./lib/voiceStream";
 import { onRecordingStart, onRecordingStop } from "./lib/interruptManager";
 import { QueueSlidePanel } from "./components/QueueSlidePanel";
+import { MacPermissionWizard, useMacPermissionWizard } from "./components/MacPermissionWizard";
 import {
   VolumeOnIcon, VolumeOffIcon, BookIcon, BarChartIcon, ClockIcon,
   ChatBubbleIcon, MonitorIcon, SunIcon, GearIcon, CompareIcon,
@@ -139,7 +140,7 @@ const STORAGE_KEYS = {
 
 export function getPolishEnabled(): boolean {
   const stored = localStorage.getItem(STORAGE_KEYS.POLISH_ENABLED);
-  return stored === null ? true : stored === "true";
+  return stored === null ? false : stored === "true";
 }
 
 export function savePolishEnabled(enabled: boolean): void {
@@ -243,6 +244,7 @@ function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [transcriptionCount, setTranscriptionCount] = useState(0); // Increments after each successful transcription
   const [showConfetti, setShowConfetti] = useState(false);
+  const [showMacWizard, setShowMacWizard] = useMacPermissionWizard();
   const [previousTranscriptionCount, setPreviousTranscriptionCount] = useState(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => loadSetting(STORAGE_KEYS.SOUND_ENABLED, true));
   const [currentHotkey, setCurrentHotkey] = useState<string>(() => getStoredHotkey());
@@ -325,6 +327,41 @@ function App() {
   const [editedText, setEditedText] = useState("");
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("recording");
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Elapsed time tracker for processing — shows "Transcribing... (12s)" to prevent "is it stuck?" perception
+  const [processingElapsed, setProcessingElapsed] = useState(0);
+  const processingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // AbortController for cancelling in-flight transcription requests
+  const processingAbortRef = useRef<AbortController | null>(null);
+
+  // Abort in-flight requests on unmount to prevent orphaned connections
+  useEffect(() => {
+    return () => {
+      processingAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (status === "processing") {
+      setProcessingElapsed(0);
+      const startTime = Date.now();
+      processingTimerRef.current = setInterval(() => {
+        setProcessingElapsed(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+    } else {
+      if (processingTimerRef.current) {
+        clearInterval(processingTimerRef.current);
+        processingTimerRef.current = null;
+      }
+      setProcessingElapsed(0);
+    }
+    return () => {
+      if (processingTimerRef.current) {
+        clearInterval(processingTimerRef.current);
+      }
+    };
+  }, [status]);
 
   // Week 3: New state for comparison, regenerate, history, confidence
   const [showComparison, setShowComparison] = useState(false);
@@ -449,10 +486,10 @@ function App() {
     }
   }, [isEditing]);
 
-  // Update tray icon state
+  // Update tray icon, title text (macOS), and dock bounce
   useEffect(() => {
-    setTrayRecordingState(recorder.isRecording);
-  }, [recorder.isRecording]);
+    setTrayRecordingState(recorder.isRecording, status);
+  }, [recorder.isRecording, status]);
 
   // Feature 3: Interrupt-on-Record - auto-pause TTS when recording
   useEffect(() => {
@@ -515,7 +552,8 @@ function App() {
                   setError(null);
                   showToast("Microphone access granted!", "success");
                 })
-                .catch(() => {
+                .catch((e) => {
+                  console.error("[App] Microphone permission denied:", e);
                   showToast("Please enable microphone in system settings", "error");
                 });
             },
@@ -531,8 +569,20 @@ function App() {
     }
   }, [recorder, backendReady, showToast, soundEnabled]);
 
+  // Cancel in-flight transcription processing
+  const cancelProcessing = useCallback(() => {
+    if (processingAbortRef.current) {
+      processingAbortRef.current.abort();
+      processingAbortRef.current = null;
+    }
+  }, []);
+
   // Shared transcription processing logic — used by both hotkey and click handlers
   const processRecording = useCallback(async (audioBlob: Blob, ctx: string, fmt: "casual" | "neutral" | "formal") => {
+    // Create a new AbortController for this processing run
+    const abortController = new AbortController();
+    processingAbortRef.current = abortController;
+
     setProcessingStep("transcribing");
 
     let rawText: string;
@@ -543,13 +593,14 @@ function App() {
       const response = await transcribeAndPolish(audioBlob, {
         context: ctx === "general" ? undefined : ctx,
         formality: fmt,
+        signal: abortController.signal,
       });
       setProcessingStep("polishing");
       rawText = response.raw_text;
       polishedText = response.polished_text;
       transcriptSaved = response.saved;
     } else {
-      const response = await transcribe(audioBlob);
+      const response = await transcribe(audioBlob, undefined, abortController.signal);
       rawText = response.raw_text;
       polishedText = response.raw_text;
       transcriptSaved = false;
@@ -596,6 +647,13 @@ function App() {
 
   // Shared error handling for transcription failures
   const handleTranscriptionError = useCallback((err: unknown) => {
+    // User-initiated cancellation — don't show error, already handled by cancel button
+    if (err instanceof ApiError && err.message === "Transcription cancelled") {
+      setProcessingStep("recording");
+      setStatus("idle");
+      return;
+    }
+
     const message =
       err instanceof ApiError
         ? err.detail || err.message
@@ -615,7 +673,8 @@ function App() {
                 showToast("Connection restored!", "success");
                 setBackendReady(true);
               }
-            }).catch(() => {
+            }).catch((e) => {
+              console.error("[App] Health check retry failed:", e);
               showToast("Still unable to connect", "error");
             });
           },
@@ -692,7 +751,8 @@ function App() {
             });
           }
         })
-        .catch(() => {
+        .catch((e) => {
+          console.error("[App] Backend health check failed:", e);
           setBackendReady(false);
           setError({
             message: "Cannot connect to backend. Is it running?",
@@ -768,12 +828,12 @@ function App() {
   }, []);
 
   // Control overlay window visibility
-  // Skip overlay on macOS - showing windows activates the app and breaks paste
+  // macOS: skip overlay window (show() steals focus, breaks paste). Use in-app banner instead.
+  // Windows/Linux: use the floating overlay window as before.
   useEffect(() => {
     const updateOverlay = async () => {
       if (!window.__TAURI__) return;
-      // Don't show overlay on macOS - it activates the app and breaks keyboard simulation
-      if (isMacOS()) return;
+      if (isMacOS()) return; // macOS uses in-app recording banner (rendered in JSX below)
 
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -781,14 +841,12 @@ function App() {
 
         const isActive = recorder.isRecording || status === "processing";
 
-        // Show or hide the floating overlay window (Windows/Linux only)
         if (isActive) {
           await invoke("show_recording_overlay");
         } else {
           await invoke("hide_recording_overlay");
         }
 
-        // Send state to overlay window
         await emit("overlay-update", {
           isRecording: recorder.isRecording,
           isProcessing: status === "processing",
@@ -850,7 +908,8 @@ function App() {
                     setError(null);
                     showToast("Microphone access granted!", "success");
                   })
-                  .catch(() => {
+                  .catch((e) => {
+                    console.error("[App] Microphone permission denied:", e);
                     showToast("Please enable microphone in system settings", "error");
                   });
               },
@@ -1049,6 +1108,21 @@ function App() {
         </div>
       </header>
 
+      {/* macOS in-app recording indicator (replaces floating overlay which steals focus) */}
+      {isMacOS() && (recorder.isRecording || status === "processing") && (
+        <div className="macos-recording-banner" role="alert" aria-live="assertive">
+          <span className="macos-rec-dot" />
+          <span className="macos-rec-label">
+            {status === "processing" ? "Processing..." : `Recording ${Math.floor((recorder.duration || 0) / 60)}:${String(Math.floor((recorder.duration || 0) % 60)).padStart(2, "0")}`}
+          </span>
+          {recorder.isRecording && (
+            <button className="macos-rec-stop" onClick={handleRecordClick} title="Stop recording">
+              Stop
+            </button>
+          )}
+        </div>
+      )}
+
       {error && (
         <div className="error-message">
           <span>{error.message}</span>
@@ -1112,10 +1186,27 @@ function App() {
                       <span>{index + 1}</span>
                     )}
                   </div>
-                  <span className="progress-step-label">{step.label}</span>
+                  <span className="progress-step-label">
+                    {step.label}
+                    {isCurrent && processingElapsed > 0 && ` (${processingElapsed}s)`}
+                  </span>
                 </div>
               );
             })}
+            <button
+              className="cancel-processing-btn"
+              onClick={() => {
+                cancelProcessing();
+                setProcessingStep("recording");
+                setStatus("idle");
+                isProcessingRef.current = false;
+                showToast("Transcription cancelled", "warning");
+              }}
+              title="Cancel transcription"
+              aria-label="Cancel transcription"
+            >
+              Cancel
+            </button>
           </div>
         ) : (
           <div className="status">
@@ -1365,6 +1456,11 @@ function App() {
         voiceEnabled={voiceEnabled}
         onVoiceToggle={handleVoiceToggle}
       />
+
+      {/* macOS Permission Onboarding Wizard */}
+      {showMacWizard && (
+        <MacPermissionWizard onClose={() => setShowMacWizard(false)} />
+      )}
     </div>
   );
 }

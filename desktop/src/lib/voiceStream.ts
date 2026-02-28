@@ -233,8 +233,8 @@ export function saveVoiceEnabled(enabled: boolean): void {
       stopPlayback();
       clearPending();
       console.log('[VoiceStream] Voice disabled — stopped playback and cleared pending queue');
-    }).catch(() => {
-      // Ignore import errors (e.g., during startup)
+    }).catch((e) => {
+      console.debug("[VoiceStream] queueStore import failed (startup):", e);
     });
   }
 }

@@ -37,11 +37,11 @@ export function Settings({ onClose, refreshTrigger = 0, onHotkeyChange, onModelC
     if (isLoggedIn()) {
       getCurrentUser()
         .then((userData) => setUser(userData))
-        .catch(() => setUser(null))
+        .catch((e) => { console.error("[Settings] Failed to fetch user:", e); setUser(null); })
         .finally(() => setLoading(false));
       getUserStats()
         .then((statsData) => setStats(statsData))
-        .catch(() => setStats(null));
+        .catch((e) => { console.error("[Settings] Failed to fetch stats:", e); setStats(null); });
     } else {
       setLoading(false);
     }

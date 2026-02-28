@@ -8,10 +8,10 @@ Covers:
   - Internal error (Exception → 500)
   - Successful conversation turn (reply + no config)
   - Successful config generation (reply + role_config)
-  - No auth required
+  - Authentication required
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 # =============================================================================
@@ -20,44 +20,64 @@ from unittest.mock import AsyncMock, patch
 
 class TestRoleDesignValidation:
 
-    async def test_empty_messages(self, client):
+    async def test_empty_messages(self, client, auth_headers):
         """Empty messages list returns 400."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={"messages": []},
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={"messages": []},
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "At least one message" in response.json()["detail"]
 
-    async def test_invalid_message_role(self, client):
+    async def test_invalid_message_role(self, client, auth_headers):
         """Message with role other than 'user'/'assistant' returns 400."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={
-                "messages": [
-                    {"role": "system", "content": "You are a role designer."}
-                ]
-            },
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={
+                    "messages": [
+                        {"role": "system", "content": "You are a role designer."}
+                    ]
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 400
         assert "Invalid message role" in response.json()["detail"]
 
-    async def test_missing_messages_field(self, client):
+    async def test_missing_messages_field(self, client, auth_headers):
         """Request without messages field returns 422."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={},
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={},
+                headers=auth_headers,
+            )
         assert response.status_code == 422
 
-    async def test_missing_content_field(self, client):
+    async def test_missing_content_field(self, client, auth_headers):
         """Message without content returns 422."""
-        response = await client.post(
-            "/api/v1/roles/design",
-            json={
-                "messages": [{"role": "user"}]
-            },
-        )
+        from tests.conftest import make_user
+        user = make_user()
+
+        with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+            response = await client.post(
+                "/api/v1/roles/design",
+                json={
+                    "messages": [{"role": "user"}]
+                },
+                headers=auth_headers,
+            )
         assert response.status_code == 422
 
 
@@ -67,30 +87,38 @@ class TestRoleDesignValidation:
 
 class TestRoleDesignSuccess:
 
-    async def test_conversation_turn_no_config(self, client):
+    async def test_conversation_turn_no_config(self, client, auth_headers):
         """LLM asks follow-up question — role_config is null."""
+        from tests.conftest import make_user
+        user = make_user()
+
         mock_result = {
             "reply": "What kind of tasks should this role handle?",
             "role_config": None,
         }
 
         with patch("app.api.roles.design_role", new=AsyncMock(return_value=mock_result)):
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "I want to create a QA role"}
-                    ]
-                },
-            )
+            with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+                response = await client.post(
+                    "/api/v1/roles/design",
+                    json={
+                        "messages": [
+                            {"role": "user", "content": "I want to create a QA role"}
+                        ]
+                    },
+                    headers=auth_headers,
+                )
 
         assert response.status_code == 200
         data = response.json()
         assert data["reply"] == "What kind of tasks should this role handle?"
         assert data["role_config"] is None
 
-    async def test_config_generated(self, client):
+    async def test_config_generated(self, client, auth_headers):
         """LLM generates complete role config after conversation."""
+        from tests.conftest import make_user
+        user = make_user()
+
         mock_result = {
             "reply": "Here's the role configuration I designed:",
             "role_config": {
@@ -105,16 +133,18 @@ class TestRoleDesignSuccess:
         }
 
         with patch("app.api.roles.design_role", new=AsyncMock(return_value=mock_result)):
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Create a QA role"},
-                        {"role": "assistant", "content": "What testing focus?"},
-                        {"role": "user", "content": "Integration and E2E testing"},
-                    ]
-                },
-            )
+            with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+                response = await client.post(
+                    "/api/v1/roles/design",
+                    json={
+                        "messages": [
+                            {"role": "user", "content": "Create a QA role"},
+                            {"role": "assistant", "content": "What testing focus?"},
+                            {"role": "user", "content": "Integration and E2E testing"},
+                        ]
+                    },
+                    headers=auth_headers,
+                )
 
         assert response.status_code == 200
         data = response.json()
@@ -124,53 +154,51 @@ class TestRoleDesignSuccess:
         assert config["max_instances"] == 2
         assert "testing" in config["tags"]
 
-    async def test_no_auth_required(self, client):
-        """Role design endpoint works without authentication."""
-        mock_result = {
-            "reply": "Tell me about the role you want to create.",
-            "role_config": None,
-        }
+    async def test_auth_required(self, client):
+        """Role design endpoint requires authentication."""
+        response = await client.post(
+            "/api/v1/roles/design",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Design a developer role"}
+                ]
+            },
+        )
 
-        with patch("app.api.roles.design_role", new=AsyncMock(return_value=mock_result)):
-            # No auth headers
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Design a developer role"}
-                    ]
-                },
-            )
+        assert response.status_code == 401
 
-        assert response.status_code == 200
-
-    async def test_with_project_context(self, client):
+    async def test_with_project_context(self, client, auth_headers):
         """Project context with existing roles is passed through."""
+        from tests.conftest import make_user
+        user = make_user()
+
         mock_result = {
             "reply": "I see you already have a developer role.",
             "role_config": None,
         }
 
         with patch("app.api.roles.design_role", new=AsyncMock(return_value=mock_result)) as mock_design:
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Create a tester role"}
-                    ],
-                    "project_context": {
-                        "roles": {
-                            "developer": {
-                                "title": "Developer",
-                                "description": "Writes code",
-                                "tags": ["implementation"],
-                                "permissions": ["status"],
-                                "max_instances": 3,
+            with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+                response = await client.post(
+                    "/api/v1/roles/design",
+                    json={
+                        "messages": [
+                            {"role": "user", "content": "Create a tester role"}
+                        ],
+                        "project_context": {
+                            "roles": {
+                                "developer": {
+                                    "title": "Developer",
+                                    "description": "Writes code",
+                                    "tags": ["implementation"],
+                                    "permissions": ["status"],
+                                    "max_instances": 3,
+                                }
                             }
-                        }
+                        },
                     },
-                },
-            )
+                    headers=auth_headers,
+                )
 
         assert response.status_code == 200
         # Verify project_context was passed to the service
@@ -186,34 +214,48 @@ class TestRoleDesignSuccess:
 
 class TestRoleDesignErrors:
 
-    async def test_service_runtime_error(self, client):
-        """RuntimeError from design_role → 502 Bad Gateway."""
+    async def test_service_runtime_error(self, client, auth_headers):
+        """RuntimeError from design_role returns graceful response."""
+        from tests.conftest import make_user
+        user = make_user()
+
         with patch("app.api.roles.design_role",
                     new=AsyncMock(side_effect=RuntimeError("API key not configured"))):
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Create a role"}
-                    ]
-                },
-            )
+            with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+                response = await client.post(
+                    "/api/v1/roles/design",
+                    json={
+                        "messages": [
+                            {"role": "user", "content": "Create a role"}
+                        ]
+                    },
+                    headers=auth_headers,
+                )
 
-        assert response.status_code == 502
-        assert "service unavailable" in response.json()["detail"].lower()
+        assert response.status_code == 200
+        data = response.json()
+        assert "trouble connecting" in data["reply"].lower()
+        assert data["role_config"] is None
 
-    async def test_unexpected_exception(self, client):
-        """Unexpected exception → 500 Internal Error."""
+    async def test_unexpected_exception(self, client, auth_headers):
+        """Unexpected exception returns graceful response."""
+        from tests.conftest import make_user
+        user = make_user()
+
         with patch("app.api.roles.design_role",
                     new=AsyncMock(side_effect=Exception("Unexpected error"))):
-            response = await client.post(
-                "/api/v1/roles/design",
-                json={
-                    "messages": [
-                        {"role": "user", "content": "Create a role"}
-                    ]
-                },
-            )
+            with patch("app.api.auth.get_user_by_id", new=AsyncMock(return_value=user)):
+                response = await client.post(
+                    "/api/v1/roles/design",
+                    json={
+                        "messages": [
+                            {"role": "user", "content": "Create a role"}
+                        ]
+                    },
+                    headers=auth_headers,
+                )
 
-        assert response.status_code == 500
-        assert "Internal error" in response.json()["detail"]
+        assert response.status_code == 200
+        data = response.json()
+        assert "trouble connecting" in data["reply"].lower()
+        assert data["role_config"] is None

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from "react";
+import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
@@ -134,13 +135,19 @@ function getActiveVotes(messages: BoardMessage[], activeCount: number): VoteTall
 
 function getStatusDotClass(status: string): string {
   if (status === "working") return "project-status-dot working";
-  if (status === "active") return "project-status-dot active";
-  if (status === "standby") return "project-status-dot standby";
-  if (status === "idle") return "project-status-dot idle";
+  if (status === "ready") return "project-status-dot ready";
+  if (status === "active") return "project-status-dot working"; // Rust role-level → treat as working
   if (status === "vacant") return "project-status-dot vacant";
-  if (status === "gone") return "project-status-dot gone";
-  if (status === "stale") return "project-status-dot stale";
-  return "project-status-dot";
+  return "project-status-dot vacant"; // unknown → vacant
+}
+
+/** Human-friendly status label for display */
+function getStatusLabel(status: string): string {
+  if (status === "working") return "Working";
+  if (status === "ready") return "Ready";
+  if (status === "active") return "Working"; // Rust role-level
+  if (status === "vacant") return "Not started";
+  return "Offline";
 }
 
 function sortRolesByPipeline(roles: RoleStatus[]): RoleStatus[] {
@@ -155,13 +162,13 @@ interface InstanceCard {
   slug: string;
   title: string;
   instance: number;
-  status: "working" | "standby" | "vacant";
+  status: "working" | "ready" | "vacant";
   roleColor: string;
 }
 
 function computeInstanceStatus(
   session: SessionBinding,
-  timeoutSecs: number,
+  _timeoutSecs: number,
   nowSecs: number
 ): InstanceCard["status"] {
   const hbEpoch = new Date(session.last_heartbeat).getTime() / 1000;
@@ -170,27 +177,29 @@ function computeInstanceStatus(
   // Immediate detection: process wrote "disconnected" on exit
   if (session.activity === "disconnected") return "vacant";
 
-  // Heartbeat comes every 30s, but agents in project_wait block up to 55s
-  // between heartbeats. Use 180s threshold to avoid false "vacant" during waits.
-  const goneThreshold = Math.min(timeoutSecs, 180);
-  if (age > goneThreshold) return "vacant";
+  // No contact for 10 minutes → disconnected (vacant)
+  const disconnectThreshold = 600; // 10 min
+  if (age > disconnectThreshold) return "vacant";
 
-  // Use activity field if available (set by vaak-mcp.rs)
-  if (session.activity === "working") return "working";
+  // Working: agent is actively calling tools / doing work
+  if (session.activity === "working") {
+    return "working";
+  }
+
+  // Standby → "ready": agent is in project_wait, available for tasks
   if (session.activity === "standby") {
-    // Minimum display duration: if the session was working within the last 30 seconds,
-    // show "working" instead of "standby" so the human can actually see the transition
+    // Smooth transition: if agent was working within last 30s, keep showing "working"
     const lwAt = session.last_working_at;
     if (lwAt) {
       const workAge = nowSecs - new Date(lwAt).getTime() / 1000;
       if (workAge < 30) return "working";
     }
-    return "standby";
+    return "ready";
   }
 
-  // Fallback: heartbeat-based classification for sessions without activity field
-  if (age > 120) return "vacant";
-  return "standby";
+  // Fallback: no activity field — if heartbeat is recent, assume ready
+  if (age > disconnectThreshold) return "vacant";
+  return "ready";
 }
 
 /** Build roster-based instance cards. Uses roster slots if available, falls back to sessions. */
@@ -497,7 +506,7 @@ function buildDefaultConfig(dirPath: string) {
       },
     },
     settings: {
-      heartbeat_timeout_seconds: 120,
+      heartbeat_timeout_seconds: 300,
       message_retention_days: 7,
     },
   };
@@ -536,9 +545,14 @@ function loadSavedProjects(): SavedProject[] {
   } catch { return []; }
 }
 
+function normalizePath(p: string): string {
+  return p.replace(/^\\\\\?\\/, "").replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+}
+
 function addSavedProject(path: string, name?: string): void {
   try {
-    const projects = loadSavedProjects().filter(p => p.path !== path);
+    const norm = normalizePath(path);
+    const projects = loadSavedProjects().filter(p => normalizePath(p.path) !== norm);
     const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
     const autoName = name || parts[parts.length - 1] || "My Project";
     projects.unshift({ name: autoName, path, addedAt: new Date().toISOString() });
@@ -550,7 +564,8 @@ function addSavedProject(path: string, name?: string): void {
 
 function removeSavedProject(path: string): void {
   try {
-    const projects = loadSavedProjects().filter(p => p.path !== path);
+    const norm = normalizePath(path);
+    const projects = loadSavedProjects().filter(p => normalizePath(p.path) !== norm);
     localStorage.setItem(SAVED_PROJECTS_KEY, JSON.stringify(projects));
   } catch { /* ignore */ }
 }
@@ -587,15 +602,30 @@ export function CollabTab() {
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
+  // Auto-buzz watchdog: tracks which agents have been auto-buzzed in the current staleness episode
+  const [openCardMenu, setOpenCardMenu] = useState<string | null>(null); // "slug:instance" key
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
   const [claimsCollapsed, setClaimsCollapsed] = useState(true);
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
   const [groupSearch, setGroupSearch] = useState("");
-  const [rosterViewMode, setRosterViewMode] = useState<"grid" | "list">("grid");
+  const [rosterViewMode, setRosterViewMode] = useState<"grid" | "list" | "chip">(() => {
+    try {
+      const saved = localStorage.getItem("vaak_roster_view_mode");
+      if (saved === "grid" || saved === "list" || saved === "chip") return saved;
+    } catch { /* ignore */ }
+    return "grid";
+  });
+  const updateRosterViewMode = (mode: "grid" | "list" | "chip") => {
+    setRosterViewMode(mode);
+    try { localStorage.setItem("vaak_roster_view_mode", mode); } catch { /* ignore */ }
+  };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
+  const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
+  const [importRolesStatus, setImportRolesStatus] = useState<string | null>(null);
   const [newGroupName, setNewGroupName] = useState("");
   const [newGroupIcon, setNewGroupIcon] = useState("\uD83D\uDCE6");
   const [newGroupDesc, setNewGroupDesc] = useState("");
@@ -626,12 +656,13 @@ export function CollabTab() {
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
+  const [installingCli, setInstallingCli] = useState(false);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
+  const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
-  const BUILT_IN_ROLES = ["developer", "manager", "architect", "tester", "moderator"];
   const [_globalTemplates, _setGlobalTemplates] = useState<Set<string>>(new Set());
 
   const PERM_TOOLTIPS: Record<string, string> = {
@@ -883,7 +914,8 @@ export function CollabTab() {
   };
 
   const handleDeleteRole = async (slug: string) => {
-    if (BUILT_IN_ROLES.includes(slug)) return;
+    // Only allow deleting user-created custom roles
+    if (project?.config?.roles?.[slug]?.custom !== true) return;
     const roleTitle = project?.config?.roles?.[slug]?.title || slug;
     setConfirmTypedInput("");
     setConfirmAction({
@@ -1341,8 +1373,38 @@ When multiple instances of this role are active:
     })();
   }, []);
 
+  // Check macOS permissions on connect (not deferred — users need to see permission
+  // issues immediately, especially since the launch button depends on permissions)
+  const macPermsCheckedRef = useRef(false);
+  useEffect(() => {
+    if (macPermsCheckedRef.current || !window.__TAURI__) return;
+    macPermsCheckedRef.current = true;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const perms = await invoke<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string }>("check_macos_permissions");
+        if (perms.platform === "macos") {
+          setMacPermissions(perms);
+        }
+      } catch { /* non-critical */ }
+    })();
+  }, []);
+  const checkMacPermissions = async () => {
+    // Re-check on launch attempt in case permissions changed
+    if (!window.__TAURI__) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const perms = await invoke<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string }>("check_macos_permissions");
+      if (perms.platform === "macos") {
+        setMacPermissions(perms);
+      }
+    } catch { /* non-critical */ }
+  };
+
   // Team launcher handlers
   const handleLaunchMember = async (role: string, instance: number) => {
+    // Check macOS permissions on first launch attempt
+    await checkMacPermissions();
     // Check for companion roles before launching
     const roleConfig = project?.config?.roles?.[role];
     const companions = (roleConfig as any)?.companions;
@@ -1405,30 +1467,6 @@ When multiple instances of this role are active:
     }
   };
 
-
-  const handleKillMember = async (role: string, instance: number) => {
-    const roleConfig = project?.config?.roles?.[role];
-    const companions = roleConfig?.companions?.map((c: { role: string }) => c.role) || [];
-    const companionNote = companions.length > 0
-      ? ` This will also disconnect companion roles: ${companions.join(", ")}.`
-      : "";
-    setConfirmAction({
-      title: "Remove team member",
-      message: `Remove ${role}:${instance} from the team? This will close their terminal window.${companionNote}`,
-      confirmLabel: "Remove",
-      onConfirm: async () => {
-        try {
-          if (window.__TAURI__) {
-            const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("kill_team_member", { role, instance });
-          }
-        } catch (e) {
-          console.error("[CollabTab] Failed to kill team member:", e);
-        }
-        setConfirmAction(null);
-      },
-    });
-  };
 
   const handleSendInterrupt = async () => {
     if (!interruptTarget || !projectDir) return;
@@ -1507,6 +1545,7 @@ When multiple instances of this role are active:
 
   /** Open the create-group modal, optionally pre-filling from current roster */
   const openCreateGroupModal = (fromRoster?: boolean, parentSlug?: string) => {
+    setEditingGroupSlug(null);
     setNewGroupName("");
     setNewGroupIcon("\uD83D\uDCE6");
     setNewGroupDesc("");
@@ -1522,10 +1561,25 @@ When multiple instances of this role are active:
     setCreateGroupOpen(true);
   };
 
-  /** Save a custom group to project.json via Tauri */
+  /** Open the group modal pre-filled for editing an existing group */
+  const openEditGroupModal = (group: RoleGroup) => {
+    setEditingGroupSlug(group.slug);
+    setNewGroupName(group.name);
+    setNewGroupIcon(group.icon || "\uD83D\uDCE6");
+    setNewGroupDesc(group.description || "");
+    setNewGroupParent(group.parent || null);
+    const roles: Record<string, number> = {};
+    for (const r of group.roles) {
+      roles[r.slug] = r.instances;
+    }
+    setNewGroupRoles(roles);
+    setCreateGroupOpen(true);
+  };
+
+  /** Save a custom group (create new or update existing) to project.json via Tauri */
   const handleSaveCustomGroup = async () => {
     if (!projectDir || !newGroupName.trim() || !window.__TAURI__) return;
-    const slug = newGroupName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const slug = editingGroupSlug || newGroupName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
     const group: RoleGroup = {
       slug,
       name: newGroupName.trim(),
@@ -1546,6 +1600,55 @@ When multiple instances of this role are active:
       // Fallback: if Tauri command doesn't exist yet, store locally
       console.error("[CollabTab] Failed to save group:", e);
       setCreateGroupOpen(false);
+    }
+  };
+
+  /** Delete a custom group from project.json via Tauri */
+  const handleDeleteGroup = async (slug: string) => {
+    if (!projectDir || !window.__TAURI__) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("delete_role_group", { projectDir, slug });
+    } catch (e) {
+      console.error("[CollabTab] Failed to delete group:", e);
+    }
+  };
+
+  const handleImportRoles = async () => {
+    if (!projectDir || !window.__TAURI__) return;
+    const savedProjects = loadSavedProjects();
+    const otherProjects = savedProjects.filter(p => normalizePath(p.path) !== normalizePath(projectDir));
+    if (otherProjects.length === 0) {
+      setImportRolesStatus("No other projects to import from");
+      setTimeout(() => setImportRolesStatus(null), 3000);
+      return;
+    }
+    try {
+      setImportRolesStatus("Importing...");
+      const { invoke } = await import("@tauri-apps/api/core");
+      // Try each saved project until one succeeds
+      let imported = 0;
+      for (const source of otherProjects) {
+        try {
+          const count = await invoke<number>("copy_project_roles", {
+            sourceDir: source.path,
+            destDir: projectDir,
+          });
+          imported += count;
+        } catch {
+          // Source project may not exist or have no roles — try next
+        }
+      }
+      if (imported > 0) {
+        setImportRolesStatus(`Imported ${imported} role${imported !== 1 ? "s" : ""}`);
+      } else {
+        setImportRolesStatus("No new roles to import");
+      }
+      setTimeout(() => setImportRolesStatus(null), 4000);
+    } catch (e) {
+      console.error("[CollabTab] Failed to import roles:", e);
+      setImportRolesStatus("Import failed");
+      setTimeout(() => setImportRolesStatus(null), 3000);
     }
   };
 
@@ -1607,14 +1710,25 @@ When multiple instances of this role are active:
   };
 
   const handleRemoveRosterSlot = async (role: string, instance: number) => {
+    const roleTitle = project?.config?.roles?.[role]?.title || role;
     setConfirmAction({
-      title: "Remove role from roster",
-      message: `Remove ${role}:${instance} from the project roster? This will also disconnect any active agent in this slot.`,
+      title: "Remove from roster",
+      message: `Remove ${roleTitle} :${instance} from the roster? This hides the card and disconnects any active agent.`,
       confirmLabel: "Remove",
       onConfirm: async () => {
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
+            // If no explicit roster exists, create one from all defined roles first
+            const hasExplicitRoster = project?.config?.roster && project.config.roster.length > 0;
+            if (!hasExplicitRoster && project) {
+              const allSlugs = Object.keys(project.config.roles);
+              for (const slug of allSlugs) {
+                try {
+                  await invoke("roster_add_slot", { projectDir, role: slug, metadata: null });
+                } catch { /* slot may already exist from migration */ }
+              }
+            }
             await invoke("roster_remove_slot", { projectDir, role, instance });
             // Refresh project state so the removed slot disappears from the UI
             const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
@@ -1844,7 +1958,7 @@ When multiple instances of this role are active:
   useEffect(() => {
     if (!project?.messages || !project?.sessions) return;
     const activeCount = project.sessions.filter(
-      (s) => s.status === "active" || s.status === "idle"
+      (s) => s.status === "active"
     ).length;
     const votes = getActiveVotes(project.messages, activeCount);
     const required = Math.floor((activeCount + 1) / 2) + 1;
@@ -1991,18 +2105,39 @@ When multiple instances of this role are active:
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
 
-        // Try to read existing project
-        let result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
-
-        // No .vaak/ found — auto-create it
-        if (!result) {
-          const config = buildDefaultConfig(dir);
-          await invoke("initialize_project", {
-            dir,
-            config: JSON.stringify(config),
-          });
-          // Re-read after creation
+        // Try to read existing project; auto-create .vaak/ if missing
+        let result: (ParsedProject & { effective_dir?: string }) | null;
+        try {
           result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
+        } catch (watchErr) {
+          // watch_project_dir throws when .vaak/ doesn't exist — auto-create it
+          if (String(watchErr).includes("Not a Vaak project") || String(watchErr).includes("no .vaak")) {
+            const config = buildDefaultConfig(dir);
+            await invoke("initialize_project", {
+              dir,
+              config: JSON.stringify(config),
+            });
+            // Copy roles from an existing project if available
+            const savedProjects = loadSavedProjects();
+            const otherProjects = savedProjects.filter(p => normalizePath(p.path) !== normalizePath(dir));
+            if (otherProjects.length > 0) {
+              try {
+                // Auto-copy from the most recently added project
+                const sourceProject = otherProjects[0];
+                await invoke("copy_project_roles", {
+                  sourceDir: sourceProject.path,
+                  destDir: dir,
+                });
+              } catch (copyErr) {
+                // Non-fatal — project still initializes with defaults
+                console.warn("[CollabTab] Could not copy roles from existing project:", copyErr);
+              }
+            }
+            // Re-read after creation
+            result = await invoke<(ParsedProject & { effective_dir?: string }) | null>("watch_project_dir", { dir });
+          } else {
+            throw watchErr;
+          }
         }
 
         // Update projectDir if the backend found a better subdirectory
@@ -2559,6 +2694,16 @@ When multiple instances of this role are active:
                 return count;
               };
 
+              // Count active (non-vacant) roles in a group including children
+              const deepActiveCount = (g: RoleGroup): number => {
+                const activeSessions = project.sessions || [];
+                let count = g.roles.filter(r =>
+                  activeSessions.some(s => s.role === r.slug && s.status === "active")
+                ).length;
+                for (const child of childrenOf(g.slug)) count += deepActiveCount(child);
+                return count;
+              };
+
               // Breadcrumb path from root to active group
               const breadcrumbs: { slug: string; name: string }[] = [];
               if (activeGroup !== "all") {
@@ -2586,16 +2731,18 @@ When multiple instances of this role are active:
                 const isExpanded = treeExpanded.has(group.slug);
                 const isActive = activeGroup === group.slug;
                 const count = deepRoleCount(group);
+                const activeCount = deepActiveCount(group);
+                const hasActiveRoles = activeCount > 0;
 
                 return (
                   <div key={group.slug} className="group-tree-branch">
                     <button
-                      className={`group-tree-node${isActive ? " group-tree-node-active" : ""}${!group.builtin ? " group-tree-node-custom" : ""}`}
+                      className={`group-tree-node${isActive ? " group-tree-node-active" : ""}${!group.builtin ? " group-tree-node-custom" : ""}${!hasActiveRoles ? " group-tree-node-dim" : ""}`}
                       style={{ paddingLeft: `${8 + depth * 16}px` }}
                       onClick={() => setExpandedGroup(group.slug)}
                       title={group.description}
                       aria-expanded={hasChildren ? isExpanded : undefined}
-                      aria-label={`${group.name}, ${count} roles${isActive ? ", selected" : ""}`}
+                      aria-label={`${group.name}, ${activeCount} active of ${count} roles${isActive ? ", selected" : ""}`}
                     >
                       {hasChildren && (
                         <span
@@ -2608,7 +2755,31 @@ When multiple instances of this role are active:
                       {!hasChildren && <span className="group-tree-leaf" />}
                       <span className="group-tree-icon">{group.icon}</span>
                       <span className="group-tree-name">{group.name}</span>
-                      <span className="group-tree-count">{count}</span>
+                      <span className="group-tree-count">{hasActiveRoles ? `${activeCount}/${count}` : count}</span>
+                      {!group.builtin && (
+                        <span className="group-tree-actions" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            className="group-tree-action-btn"
+                            onClick={(e) => { e.stopPropagation(); openEditGroupModal(group); }}
+                            title={`Edit ${group.name} group`}
+                            aria-label={`Edit ${group.name} group`}
+                          >&#9998;</button>
+                          <button
+                            className="group-tree-action-btn group-tree-action-delete"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmAction({
+                                title: `Delete "${group.name}" group?`,
+                                message: `This will remove the group definition. Running sessions are not affected.`,
+                                onConfirm: () => handleDeleteGroup(group.slug),
+                                confirmLabel: "Delete Group",
+                              });
+                            }}
+                            title={`Delete ${group.name} group`}
+                            aria-label={`Delete ${group.name} group`}
+                          >&times;</button>
+                        </span>
+                      )}
                     </button>
                     {hasChildren && isExpanded && (
                       <div className="group-tree-children">
@@ -2619,40 +2790,46 @@ When multiple instances of this role are active:
                 );
               };
 
-              const activeGroupName = activeGroup === "all" ? "All" : (selectedGroupData?.name || activeGroup);
-              const activeGroupIcon = activeGroup === "all" ? "\u2B50" : (selectedGroupData?.icon || "");
-
               return (
                 <>
-                  {/* Compact header bar — always visible, one line */}
+                  {/* Compact trigger button — opens role management modal */}
                   <button
-                    className="add-team-header"
-                    onClick={() => setTeamSectionOpen(prev => !prev)}
-                    aria-expanded={teamSectionOpen}
-                    aria-label={`Groups & Roles: ${activeGroupName}, ${allRoleSlugs.length} roles. Click to ${teamSectionOpen ? "collapse" : "expand"}`}
+                    className="manage-roles-trigger"
+                    onClick={() => setTeamSectionOpen(true)}
+                    aria-label={`Manage Roles & Groups. ${allRoleSlugs.length} roles in ${topLevel.length} groups. Click to open.`}
                   >
-                    <span className={`add-team-header-arrow${teamSectionOpen ? " add-team-header-arrow-open" : ""}`} />
-                    <span className="add-team-header-label">Groups & Roles</span>
-                    <span className="add-team-header-current">{activeGroupIcon} {activeGroupName}</span>
-                    <span className="add-team-header-count">{allRoleSlugs.length}</span>
-                    {/* View toggle — always accessible */}
-                    <span className="add-team-header-views" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        className={`roster-view-btn${rosterViewMode === "grid" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => setRosterViewMode("grid")}
-                        title="Grid view"
-                      >&#9638;</button>
-                      <button
-                        className={`roster-view-btn${rosterViewMode === "list" ? " roster-view-btn-active" : ""}`}
-                        onClick={() => setRosterViewMode("list")}
-                        title="List view"
-                      >&#9776;</button>
-                    </span>
+                    <span className="manage-roles-trigger-icon">{"\u2699\uFE0F"}</span>
+                    <span className="manage-roles-trigger-label">Manage Roles & Groups</span>
+                    <span className="manage-roles-trigger-count">{allRoleSlugs.length} roles</span>
                   </button>
 
-                  {/* Expandable content — only visible when open */}
+                  {/* Full-screen modal for role management */}
                   {teamSectionOpen && (
-                    <div className="add-team-expandable">
+                    <div className="roles-modal-overlay" onClick={() => setTeamSectionOpen(false)}>
+                      <div className="roles-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="roles-modal-header">
+                          <h2 className="roles-modal-title">Roles & Groups</h2>
+                          <span className="roles-modal-subtitle">{allRoleSlugs.length} roles in {topLevel.length} groups</span>
+                          <span className="roles-modal-views">
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "grid" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("grid")}
+                              title="Grid view"
+                            >&#9638;</button>
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "list" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("list")}
+                              title="List view"
+                            >&#9776;</button>
+                            <button
+                              className={`roster-view-btn${rosterViewMode === "chip" ? " roster-view-btn-active" : ""}`}
+                              onClick={() => updateRosterViewMode("chip")}
+                              title="Compact chip view"
+                            >&#11044;</button>
+                          </span>
+                          <button className="roles-modal-close" onClick={() => setTeamSectionOpen(false)} aria-label="Close">&times;</button>
+                        </div>
+                        <div className="roles-modal-body">
                       {/* Search bar */}
                       <input
                         className="group-search-input"
@@ -2691,6 +2868,18 @@ When multiple instances of this role are active:
                           <span className="group-tree-leaf" />
                           <span className="group-tree-icon" style={{ color: "#1da1f2" }}>+</span>
                           <span className="group-tree-name">New Group</span>
+                        </button>
+                        <button
+                          className="group-tree-node group-tree-node-import"
+                          style={{ paddingLeft: "8px" }}
+                          onClick={() => handleImportRoles()}
+                          title="Import roles from another saved project"
+                          aria-label="Import roles from another project"
+                          disabled={importRolesStatus === "Importing..."}
+                        >
+                          <span className="group-tree-leaf" />
+                          <span className="group-tree-icon" style={{ color: "#f5a623" }}>{"\u{1F4E5}"}</span>
+                          <span className="group-tree-name">{importRolesStatus || "Import Roles"}</span>
                         </button>
                       </div>
 
@@ -2747,8 +2936,104 @@ When multiple instances of this role are active:
                           <span className="add-team-btn-label">+ New Role</span>
                         </button>
                       </div>
+
+                      {/* Active Roster inside modal — mirrors the main roster */}
+                      {(() => {
+                        const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 300;
+                        const modalCards = buildRosterCards(
+                          project.config.roster,
+                          project.config.roles,
+                          project.role_statuses,
+                          project.sessions,
+                          timeoutSecs
+                        );
+                        const companionSlugs = new Set<string>();
+                        for (const [, roleDef] of Object.entries(project.config.roles)) {
+                          const rd = roleDef as RoleConfig;
+                          if (rd.companions) {
+                            for (const comp of rd.companions) {
+                              companionSlugs.add((comp as any).role);
+                            }
+                          }
+                        }
+                        const modalFiltered = modalCards.filter(card => {
+                          if (!companionSlugs.has(card.slug)) return true;
+                          const parentActive = Object.entries(project.config.roles).some(([parentSlug, parentDef]) => {
+                            const pd = parentDef as RoleConfig;
+                            if (!pd.companions?.some((c: any) => c.role === card.slug)) return false;
+                            return project.sessions?.some(s => s.role === parentSlug && s.status === "active");
+                          });
+                          return parentActive;
+                        });
+                        if (modalFiltered.length === 0) return null;
+                        return (
+                          <>
+                            <div className="roles-modal-roster-label">Active Roster</div>
+                            <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                              {modalFiltered.map((card) => {
+                                const cardKey = `${card.slug}:${card.instance}`;
+                                const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
+                                const handleCardClick = () => {
+                                  if (card.slug === "audience") {
+                                    setAudiencePanelOpen(true);
+                                  } else {
+                                    matchingRole && setSelectedRole(matchingRole);
+                                  }
+                                };
+                                if (rosterViewMode === "chip") {
+                                  return (
+                                    <button
+                                      key={cardKey}
+                                      className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                                      style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
+                                      onClick={handleCardClick}
+                                      title={`${card.title} — ${getStatusLabel(card.status)}`}
+                                    >
+                                      <span className={getStatusDotClass(card.status)} />
+                                      <span className="role-chip-name">{card.title}</span>
+                                      <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
+                                    </button>
+                                  );
+                                }
+                                return (
+                                  <div
+                                    key={cardKey}
+                                    className={`project-role-card role-card-status-${card.status}`}
+                                    style={{ borderColor: card.roleColor + "30" }}
+                                    onClick={handleCardClick}
+                                  >
+                                    <div className="role-card-header">
+                                      <span className={getStatusDotClass(card.status)} />
+                                      <span className="role-card-title" style={{ color: card.roleColor }}>{card.title}</span>
+                                      {card.instance > 0 && <span className="role-card-instance">#{card.instance}</span>}
+                                      <button
+                                        className="role-card-remove-x"
+                                        onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
+                                        title="Remove from roster"
+                                        aria-label={`Remove ${card.title} from roster`}
+                                      >&times;</button>
+                                    </div>
+                                    <div className="role-card-status">{getStatusLabel(card.status)}</div>
+                                    {card.status === "vacant" && (
+                                      <button
+                                        className="role-card-launch-btn"
+                                        onClick={(e) => { e.stopPropagation(); handleLaunchMember(card.slug, card.instance); }}
+                                        disabled={launchCooldown || claudeInstalled === false}
+                                        title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : `Launch Claude agent as ${card.title}`}
+                                      >{claudeInstalled === false ? "CLI Missing" : "Launch"}</button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        );
+                      })()}
+
                     </div>
-                  )}
+                  </div>
+                </div>
+              )}
                 </>
               );
             })()}
@@ -2757,7 +3042,7 @@ When multiple instances of this role are active:
 
         {/* Team Roster — shows all roster slots with status */}
         {project && (() => {
-          const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 120;
+          const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 300;
           // Use ALL sessions for roster status (team is project-wide, not section-specific)
           const cards = buildRosterCards(
             project.config.roster,
@@ -2786,15 +3071,47 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
-          const hasRoster = project.config.roster && project.config.roster.length > 0;
           const vacantCount = filteredCards.filter(c => c.status === "vacant").length;
           return (
             <>
               {filteredCards.length > 0 && (
-                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}`}>
+                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
                   {filteredCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
+                    const handleCardClick = () => {
+                      if (card.slug === "audience") {
+                        setAudiencePanelOpen(true);
+                        if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
+                      } else {
+                        matchingRole && setSelectedRole(matchingRole);
+                      }
+                    };
+                    const handleCardKeyDown = (e: React.KeyboardEvent) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        handleCardClick();
+                      }
+                    };
+
+                    // Compact chip view
+                    if (rosterViewMode === "chip") {
+                      return (
+                        <button
+                          key={cardKey}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                          style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
+                          onClick={handleCardClick}
+                          title={`${card.title} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
+                          aria-label={`${card.title}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                        >
+                          <span className={getStatusDotClass(card.status)} />
+                          <span className="role-chip-name">{card.title}</span>
+                          <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
+                        </button>
+                      );
+                    }
+
                     return (
                       <div
                         key={cardKey}
@@ -2802,37 +3119,26 @@ When multiple instances of this role are active:
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}, status: ${card.status}. Click to view details.`}
-                        onClick={() => {
-                          if (card.slug === "audience") {
-                            setAudiencePanelOpen(true);
-                            if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
-                          } else {
-                            matchingRole && setSelectedRole(matchingRole);
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            if (card.slug === "audience") {
-                              setAudiencePanelOpen(true);
-                              if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
-                            } else {
-                              matchingRole && setSelectedRole(matchingRole);
-                            }
-                          }
-                        }}
+                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}. Click to view details.`}
+                        onClick={handleCardClick}
+                        onKeyDown={handleCardKeyDown}
                       >
                         <div className="role-card-header">
                           <span className={getStatusDotClass(card.status)} />
                           <span className="role-card-title" style={{ color: card.roleColor }}>
                             {card.title}
                           </span>
+                          <button
+                            className="role-card-remove-x"
+                            onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
+                            title="Remove from roster"
+                            aria-label={`Remove ${card.title} from roster`}
+                          >&times;</button>
                         </div>
                         <div className="role-card-meta">
                           <span className="role-card-slug">{card.slug}</span>
                           <span className={`role-card-status role-card-status-${card.status}`}>
-                            {card.status}
+                            {getStatusLabel(card.status)}
                           </span>
                         </div>
                         {/* Companion badge — show if this role is a companion of another role */}
@@ -2843,81 +3149,95 @@ When multiple instances of this role are active:
                           if (!parentRole) return null;
                           return <span className="role-companion-badge">paired with {(parentRole[1] as any).title || parentRole[0]}</span>;
                         })()}
-                        {/* Action row — always visible, grouped by severity */}
-                        <div className="role-card-actions" role="group" aria-label={`Actions for ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`} onClick={(e) => e.stopPropagation()}>
-                          {/* Safe actions: View, Edit */}
+                        {/* Action row — primary action + overflow menu */}
+                        <div className="role-card-actions" role="group" aria-label={`Actions for ${card.title}`} onClick={(e) => e.stopPropagation()}>
+                          {/* Primary action: View for active, nothing extra for vacant */}
                           {card.status !== "vacant" && (
                             <button
                               className="role-action-btn role-action-view"
                               onClick={() => handleViewAgent(card.slug, card.instance >= 0 ? card.instance : 0)}
-                              title={`View ${card.title} — bring terminal to front`}
-                              aria-label={`View ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""} terminal`}
+                              title={`View ${card.title} terminal`}
                             >&#128065; View</button>
                           )}
-                          {card.instance === 0 && (
-                            <button
-                              className="role-action-btn"
-                              onClick={() => openEditRoleForm(card.slug)}
-                              title={`Edit ${card.title} role settings`}
-                              aria-label={`Edit ${card.title} role settings`}
-                            >&#9998; Edit</button>
-                          )}
-                          {/* Global badge removed — all roles are global, badge was redundant and broke layout consistency */}
-                          {/* Gentle nudge: Buzz — wake up stale agents */}
-                          {card.status !== "vacant" && (() => {
-                            const bk = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
-                            const isBuzzed = buzzedKey === bk;
+                          {/* Overflow menu trigger */}
+                          {(() => {
+                            const cardKey = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                            const isOpen = openCardMenu === cardKey;
                             return (
-                              <button
-                                className={`role-action-btn role-action-buzz${isBuzzed ? " role-action-buzz-sent" : ""}`}
-                                onClick={() => handleBuzz(card.slug, card.instance >= 0 ? card.instance : 0)}
-                                disabled={isBuzzed}
-                                title={isBuzzed ? "Buzz sent!" : `Buzz ${card.title} — wake up a stale agent`}
-                                aria-label={isBuzzed ? `Buzz sent to ${card.title}` : `Buzz ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`}
-                              >{isBuzzed ? "\u2713 Sent" : "\uD83D\uDD14 Buzz"}</button>
+                              <div className="role-action-overflow-wrap">
+                                <button
+                                  className={`role-action-btn role-action-overflow-btn${isOpen ? " active" : ""}`}
+                                  onClick={(e) => {
+                                    if (isOpen) { setOpenCardMenu(null); setMenuPos(null); }
+                                    else {
+                                      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                      const menuW = 200; // approx menu width
+                                      // If menu would overflow left edge, anchor to left of button; otherwise right-align
+                                      const wouldClipLeft = r.right - menuW < 8;
+                                      setMenuPos({
+                                        top: r.bottom + 4,
+                                        right: wouldClipLeft ? -1 : window.innerWidth - r.right,
+                                        left: wouldClipLeft ? Math.max(8, r.left) : -1,
+                                      });
+                                      setOpenCardMenu(cardKey);
+                                    }
+                                  }}
+                                  title="More actions"
+                                  aria-expanded={isOpen}
+                                  aria-haspopup="menu"
+                                >&#8943;</button>
+                                {isOpen && menuPos && createPortal(
+                                  <>
+                                  <div className="role-action-overflow-backdrop" onClick={() => { setOpenCardMenu(null); setMenuPos(null); }} />
+                                  <div className="role-action-overflow-menu" role="menu" style={{ position: 'fixed', top: menuPos.top, ...(menuPos.left >= 0 ? { left: menuPos.left, right: 'auto' } : { right: menuPos.right, left: 'auto' }) }} onClick={() => { setOpenCardMenu(null); setMenuPos(null); }}>
+                                    {card.instance === 0 && (
+                                      <button className="role-overflow-item role-overflow-edit" role="menuitem" onClick={() => openEditRoleForm(card.slug)}>&#9998; Edit Role</button>
+                                    )}
+                                    {card.status !== "vacant" && (() => {
+                                      const bk = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                                      const isBuzzed = buzzedKey === bk;
+                                      return (
+                                        <button className="role-overflow-item role-overflow-buzz" role="menuitem" onClick={() => handleBuzz(card.slug, card.instance >= 0 ? card.instance : 0)} disabled={isBuzzed}>
+                                          {isBuzzed ? "\u2713 Buzzed" : "\uD83D\uDD14 Buzz"}
+                                        </button>
+                                      );
+                                    })()}
+                                    {card.status !== "vacant" && (
+                                      <button className="role-overflow-item role-overflow-interrupt" role="menuitem" onClick={() => setInterruptTarget({ slug: card.slug, instance: card.instance >= 0 ? card.instance : 0, title: card.title })}>&#9889; Interrupt</button>
+                                    )}
+                                    {card.status !== "vacant" && (
+                                      <button className="role-overflow-item role-overflow-disconnect" role="menuitem" onClick={() => {
+                                        const inst = card.instance >= 0 ? card.instance : 0;
+                                        setConfirmAction({
+                                          title: "Disconnect agent",
+                                          message: `Disconnect ${card.title}:${inst}? This ends their session but keeps the slot on the roster.`,
+                                          confirmLabel: "Disconnect",
+                                          onConfirm: async () => {
+                                            try {
+                                              if (window.__TAURI__) {
+                                                const { invoke } = await import("@tauri-apps/api/core");
+                                                await invoke("kill_team_member", { role: card.slug, instance: inst });
+                                              }
+                                            } catch (e) {
+                                              console.error("[CollabTab] Failed to disconnect:", e);
+                                            }
+                                            setConfirmAction(null);
+                                          },
+                                        });
+                                      }}>&#10005; Disconnect</button>
+                                    )}
+                                    <span className="role-overflow-separator" />
+                                    <button className="role-overflow-item role-overflow-remove" role="menuitem" onClick={() => handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0)}>&#8722; Remove from Roster</button>
+                                    {card.instance === 0 && card.status === "vacant" && project?.config?.roles?.[card.slug]?.custom === true && (
+                                      <button className="role-overflow-item role-overflow-delete" role="menuitem" onClick={() => handleDeleteRole(card.slug)}>&#128465; Delete Role</button>
+                                    )}
+                                  </div>
+                                  </>,
+                                  document.body
+                                )}
+                              </div>
                             );
                           })()}
-                          {/* Warning actions: Interrupt */}
-                          {card.status !== "vacant" && (
-                            <button
-                              className="role-action-btn role-action-interrupt"
-                              onClick={() => setInterruptTarget({ slug: card.slug, instance: card.instance >= 0 ? card.instance : 0, title: card.title })}
-                              title={`Interrupt ${card.title} — stop their current work`}
-                              aria-label={`Send interrupt to ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""}`}
-                            >&#9889; Interrupt</button>
-                          )}
-                          {/* Separator between safe and destructive actions */}
-                          {(card.status !== "vacant" || (hasRoster && card.status === "vacant")) && (
-                            <span className="role-actions-separator" aria-hidden="true" />
-                          )}
-                          {/* Destructive actions: Disconnect, Remove, Delete */}
-                          {card.status !== "vacant" && (
-                            <button
-                              className="role-action-btn role-action-disconnect"
-                              onClick={() => {
-                                const inst = card.instance >= 0 ? card.instance : 0;
-                                handleKillMember(card.slug, inst);
-                              }}
-                              title={`Disconnect ${card.title} agent — ends their session`}
-                              aria-label={`Disconnect ${card.title}${card.instance >= 0 ? ` instance ${card.instance}` : ""} agent`}
-                            >&times; Disconnect</button>
-                          )}
-                          {hasRoster && card.status === "vacant" && (
-                            <button
-                              className="role-action-btn role-action-remove"
-                              onClick={() => handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0)}
-                              title={`Remove ${card.title} slot from roster`}
-                              aria-label={`Remove ${card.title} roster slot`}
-                            >&#128465; Remove</button>
-                          )}
-                          {card.instance === 0 && card.status === "vacant" && !BUILT_IN_ROLES.includes(card.slug) && (
-                            <button
-                              className="role-action-btn role-action-delete"
-                              onClick={() => handleDeleteRole(card.slug)}
-                              title={`Permanently delete ${card.title} role`}
-                              aria-label={`Permanently delete ${card.title} role from project`}
-                            >&#128465; Delete</button>
-                          )}
                         </div>
                         {voiceList.length > 0 && (
                           <select
@@ -2934,17 +3254,17 @@ When multiple instances of this role are active:
                           </select>
                         )}
                         {/* Launch button for vacant slots */}
-                        {card.status === "vacant" && claudeInstalled !== false && (
+                        {card.status === "vacant" && (
                           <button
                             className="role-card-launch-btn"
                             onClick={(e) => {
                               e.stopPropagation();
                               handleLaunchMember(card.slug, card.instance);
                             }}
-                            disabled={launchCooldown}
-                            title={`Launch Claude agent as ${card.title}`}
-                            aria-label={`Launch Claude agent as ${card.title}`}
-                          >Launch</button>
+                            disabled={launchCooldown || claudeInstalled === false}
+                            title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : `Launch Claude agent as ${card.title}`}
+                            aria-label={claudeInstalled === false ? "Claude CLI not installed" : `Launch Claude agent as ${card.title}`}
+                          >{claudeInstalled === false ? "CLI Missing" : "Launch"}</button>
                         )}
                       </div>
                     );
@@ -2955,7 +3275,7 @@ When multiple instances of this role are active:
               )}
 
               {/* Launch All Vacant button */}
-              {vacantCount > 1 && claudeInstalled !== false && (
+              {vacantCount > 1 && (
                 <button
                   className="launch-team-btn"
                   onClick={() => {
@@ -2984,10 +3304,11 @@ When multiple instances of this role are active:
                       launchAllVacant();
                     }
                   }}
-                  disabled={launching || launchCooldown}
+                  disabled={launching || launchCooldown || claudeInstalled === false}
+                  title={claudeInstalled === false ? "Claude CLI not found — install with: npm i -g @anthropic-ai/claude-code" : undefined}
                 >
                   {launching && <span className="launch-team-spinner" />}
-                  {launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
+                  {claudeInstalled === false ? "Claude CLI Not Found" : launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
                 </button>
               )}
             </>
@@ -3007,10 +3328,8 @@ When multiple instances of this role are active:
                 const filesDisplay = claim.files.length > 2
                   ? `${claim.files[0]} (+${claim.files.length - 1} more)`
                   : claim.files.join(", ");
-                const claimAgeSec = (Date.now() - new Date(claim.claimed_at).getTime()) / 1000;
-                const isStale = claimAgeSec > 900; // >15 minutes
                 return (
-                  <div key={claim.role_instance} className={`claim-card${isStale ? " claim-stale" : ""}`}>
+                  <div key={claim.role_instance} className="claim-card">
                     <div className="claim-role-dot" style={{ background: getRoleColor(roleSlug) }} />
                     <span className="claim-role-label" style={{ color: getRoleColor(roleSlug) }}>
                       {claim.role_instance}
@@ -3027,6 +3346,69 @@ When multiple instances of this role are active:
           </div>
         )}
 
+        {/* Claude CLI not found banner */}
+        {claudeInstalled === false && (
+          <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
+            <div className="project-hint-title" style={{ color: "#e8935a" }}>Claude CLI Not Found</div>
+            <div className="project-hint-body">
+              The Claude CLI is required to launch agents.
+              {window.__TAURI__ && (
+                <>
+                  <br/><br/>
+                  <button
+                    className="role-card-launch-btn"
+                    style={{ display: "inline-block", marginTop: 4, marginRight: 8 }}
+                    disabled={installingCli}
+                    onClick={async () => {
+                      setInstallingCli(true);
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        const npmOk = await invoke<boolean>("check_npm_installed");
+                        if (!npmOk) {
+                          setInstallingCli(false);
+                          alert("Node.js/npm is not installed. Please install Node.js from https://nodejs.org first, then try again.");
+                          return;
+                        }
+                        await invoke<string>("install_claude_cli");
+                        const installed = await invoke<boolean>("check_claude_installed");
+                        if (installed) {
+                          setClaudeInstalled(true);
+                        } else {
+                          setInstallingCli(false);
+                          alert("Installation completed but Claude CLI was not found. Try restarting the app.");
+                        }
+                      } catch (e: any) {
+                        console.error("[CollabTab] Express install failed:", e);
+                        setInstallingCli(false);
+                        alert(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`);
+                      }
+                    }}
+                    title="Automatically install Claude Code CLI via npm"
+                  >{installingCli ? "Installing..." : "Express Install"}</button>
+                  <button
+                    className="role-card-launch-btn"
+                    style={{ display: "inline-block", marginTop: 4, opacity: 0.7 }}
+                    onClick={async () => {
+                      try {
+                        const { invoke } = await import("@tauri-apps/api/core");
+                        await invoke("open_terminal_in_dir", { dir: projectDir || "" });
+                      } catch (e) {
+                        console.error("[CollabTab] Failed to open terminal:", e);
+                      }
+                    }}
+                    title="Open a terminal to install manually"
+                  >Open Terminal</button>
+                  <br/><br/>
+                  <span style={{ fontSize: "0.85em", opacity: 0.7 }}>
+                    Requires <a href="https://nodejs.org" target="_blank" rel="noreferrer" style={{ color: "#e8935a" }}>Node.js</a> to be installed.
+                    Or install manually: <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Contextual hint when no sessions */}
         {hasNoSessions && (
           <div className="project-hint-banner">
@@ -3034,6 +3416,25 @@ When multiple instances of this role are active:
             <div className="project-hint-body">
               Any Claude Code session running in this folder will automatically detect the project
               and join a role. Just start chatting — Claude will see the team and join on its own.
+            </div>
+          </div>
+        )}
+
+        {/* macOS permission warning banner */}
+        {macPermissions && (!macPermissions.automation || !macPermissions.accessibility) && (
+          <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
+            <div className="project-hint-title" style={{ color: "#e8935a" }}>macOS Permissions Required</div>
+            <div className="project-hint-body">
+              {!macPermissions.automation && !macPermissions.accessibility
+                ? "Vaak needs Automation and Accessibility permissions to launch and buzz team agents."
+                : !macPermissions.automation
+                  ? "Vaak needs Automation permission to launch and manage Terminal windows for agents."
+                  : "Vaak needs Accessibility permission to buzz agents and read screen content."
+              }
+              {" "}Go to <strong>System Settings → Privacy & Security</strong>:
+              {!macPermissions.automation && <><br/>• <strong>Automation</strong> → enable Terminal for Vaak</>}
+              {!macPermissions.accessibility && <><br/>• <strong>Accessibility</strong> → enable Vaak</>}
+              <br/>Then restart the app.
             </div>
           </div>
         )}
@@ -3049,7 +3450,7 @@ When multiple instances of this role are active:
           ) : (
             (() => {
               const activeCount = project!.sessions.filter(
-                (s) => s.status === "active" || s.status === "idle"
+                (s) => s.status === "active"
               ).length;
               const voteTallies = getActiveVotes(project!.messages, activeCount);
               const voteProposalIds = new Set(voteTallies.map((t) => t.proposalId));
@@ -4145,7 +4546,7 @@ When multiple instances of this role are active:
         {createGroupOpen && (
           <div className="confirm-dialog" onClick={() => setCreateGroupOpen(false)}>
             <div className="confirm-dialog-box" style={{ maxWidth: 460 }} onClick={(e) => e.stopPropagation()}>
-              <div className="confirm-dialog-title">Create Role Group</div>
+              <div className="confirm-dialog-title">{editingGroupSlug ? "Edit Role Group" : "Create Role Group"}</div>
               <div className="create-group-form">
                 <div className="create-group-row">
                   <input
@@ -4203,7 +4604,7 @@ When multiple instances of this role are active:
                     className="group-card-deploy-btn"
                     onClick={handleSaveCustomGroup}
                     disabled={!newGroupName.trim() || !Object.values(newGroupRoles).some(v => v > 0)}
-                  >Save Group</button>
+                  >{editingGroupSlug ? "Update Group" : "Save Group"}</button>
                 </div>
               </div>
             </div>
@@ -4325,8 +4726,6 @@ When multiple instances of this role are active:
                   const { open } = await import("@tauri-apps/plugin-dialog");
                   const selected = await open({ directory: true, multiple: false });
                   if (selected) {
-                    addSavedProject(selected as string);
-                    setSavedProjects(loadSavedProjects());
                     startWatching(selected as string);
                   }
                 }

@@ -12,6 +12,7 @@ export interface RoleConfig {
   created_at: string;
   tags?: string[];
   companions?: CompanionConfig[];
+  custom?: boolean;
 }
 
 export interface ProjectConfig {

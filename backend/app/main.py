@@ -20,6 +20,8 @@ from app.models.base import Base
 # CORS: restrict to Tauri app origins by default; override via CORS_ORIGINS env var
 _DEFAULT_CORS_ORIGINS = [
     "http://localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:19836",

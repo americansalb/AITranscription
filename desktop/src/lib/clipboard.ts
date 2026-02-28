@@ -291,16 +291,17 @@ export async function injectTextWithFeedback(text: string): Promise<InjectionRes
 }
 
 /**
- * Update tray icon to show recording state
+ * Update tray icon, title, and tooltip to show recording/processing state.
+ * On macOS, also sets tray title text ("REC", "...") and bounces the dock icon.
  */
-export async function setTrayRecordingState(recording: boolean): Promise<void> {
+export async function setTrayRecordingState(recording: boolean, state?: string): Promise<void> {
   if (!tauriCore) {
     await loadTauriCore();
   }
 
   if (tauriCore) {
     try {
-      await tauriCore.invoke("set_recording_state", { recording });
+      await tauriCore.invoke("set_recording_state", { recording, state: state ?? null });
     } catch (error) {
       console.error("Failed to set tray recording state:", error);
     }

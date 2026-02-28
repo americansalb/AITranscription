@@ -42,7 +42,20 @@ pub fn check_claude_installed() -> Result<bool, String> {
             .map_err(|e| format!("Failed to run 'where claude': {}", e))?;
         Ok(output.status.success())
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS GUI apps (launched from Finder/Dock/Spotlight) get a minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) and do NOT inherit the user's shell PATH.
+        // Running `which claude` directly would return false even if claude is installed
+        // via npm/nvm/fnm/homebrew. Use a login shell to source the user's profile first.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "which claude"])
+            .output()
+            .map_err(|e| format!("Failed to check for claude via login shell: {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "linux")]
     {
         let output = Command::new("which")
             .arg("claude")
@@ -146,12 +159,17 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         };
 
         // Write temp .ps1 script (same as working launch-team.ps1 approach)
+        // The script uses .current_dir() on the WMI process instead of interpolating
+        // the project_dir into PowerShell, avoiding injection via $(), backticks, etc.
+        // Only the claude path and prompt are interpolated (with single-quote escaping).
         let temp_dir = std::env::temp_dir();
         let script_name = format!("vaak-launch-{}-{}.ps1", role, std::process::id());
         let script_path = temp_dir.join(&script_name);
+        let safe_claude = claude_path.replace('\'', "''");
+        let safe_prompt = join_prompt.replace('\'', "''");
         let ps_script = format!(
-            "Set-Location \"{}\"\n& \"{}\" --dangerously-skip-permissions \"{}\"",
-            project_dir, claude_path, join_prompt
+            "& '{}' --dangerously-skip-permissions '{}'",
+            safe_claude, safe_prompt
         );
         std::fs::write(&script_path, &ps_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
@@ -160,10 +178,13 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         // WMI creates the process via the WMI service (wmiprvse.exe), so it is
         // NOT in Tauri's Job Object and survives app restarts. This avoids the
         // CREATE_BREAKAWAY_FROM_JOB "Access denied" issue entirely.
+        // Pass CurrentDirectory via WMI instead of interpolating into the PS script,
+        // matching the .current_dir() pattern used in open_terminal_in_dir.
         let script_path_str = script_path.to_str().unwrap_or("").replace("'", "''");
+        let safe_dir_ps = project_dir.replace('\'', "''");
         let ps_cmd = format!(
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -NoExit -File \"{}\"'}}; Write-Output $r.ProcessId",
-            script_path_str
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -NoExit -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
+            script_path_str, safe_dir_ps
         );
         let ps_args = ["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd];
 
@@ -171,14 +192,26 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             .args(&ps_args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .map_err(|e| format!("Failed to spawn via WMI: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&script_path);
+                format!("Failed to spawn via WMI: {}", e)
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr_str = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
         if !output.status.success() || stdout.is_empty() {
+            let _ = std::fs::remove_file(&script_path);
             return Err(format!("WMI spawn failed for {}: stdout='{}' stderr='{}'", role, stdout, stderr_str));
         }
+
+        // Clean up temp script after a delay — the spawned PowerShell needs time to read it.
+        // WMI returns the PID immediately, but the new process hasn't loaded the file yet.
+        let cleanup_path = script_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let _ = std::fs::remove_file(&cleanup_path);
+        });
 
         eprintln!("[launcher] Spawned {} via WMI (independent of Job Object)", role);
 
@@ -197,21 +230,33 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         let script_name = format!("vaak-launch-{}-{}-{}.sh", role, inst, std::process::id());
         let script_path = temp_dir.join(&script_name);
 
-        // Use single quotes around prompt to prevent shell metacharacter expansion.
-        // Escape any single quotes in the prompt with the standard shell idiom: ' → '\''
+        // Escape single quotes in prompt and project_dir for safe shell interpolation.
+        // Uses the standard shell idiom: ' → '\'' (end quote, escaped quote, reopen quote).
+        // Both values are placed inside single quotes in the script to prevent
+        // metacharacter expansion ($, `, \, etc.) — fixing command injection risk.
         let safe_prompt = join_prompt.replace('\'', "'\\''");
+        let safe_dir = project_dir.replace('\'', "'\\''");
+        let safe_pid = pid_file.to_string_lossy().replace('\'', "'\\''");
         let sh_script = format!(
-            "#!/bin/sh\necho $$ > \"{pid_file}\"\ncd \"{project_dir}\"\nexec claude --dangerously-skip-permissions '{prompt}'\n",
-            pid_file = pid_file.to_string_lossy(),
-            project_dir = project_dir,
+            "#!/bin/sh\n\
+             # Verify claude is on PATH before proceeding\n\
+             if ! command -v claude >/dev/null 2>&1; then\n\
+               echo 'ERROR: claude not found on PATH' >&2\n\
+               exit 1\n\
+             fi\n\
+             echo $$ > '{pid_file}'\n\
+             cd '{project_dir}'\n\
+             exec claude --dangerously-skip-permissions '{prompt}'\n",
+            pid_file = safe_pid,
+            project_dir = safe_dir,
             prompt = safe_prompt,
         );
         std::fs::write(&script_path, &sh_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
 
-        // Make executable
+        // Make executable (owner-only: rwx for owner, no access for others)
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
 
         // Launch in Terminal.app via `open -a Terminal`
         // Use .output() to capture exit code and detect permission failures
@@ -221,6 +266,7 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             .map_err(|e| format!("Failed to run 'open -a Terminal': {}", e))?;
 
         if !open_result.status.success() {
+            let _ = std::fs::remove_file(&script_path);
             let stderr = String::from_utf8_lossy(&open_result.stderr);
             // Best-effort detection of macOS permission denial from Launch Services.
             // `open -a Terminal` uses Launch Services (not osascript), so error strings
@@ -240,15 +286,16 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
 
         eprintln!("[launcher] Spawned {} via Terminal.app, waiting for PID file...", role);
 
-        // Poll for the PID file (250ms intervals, 10s timeout)
+        // Poll for the PID file (250ms intervals, 20s timeout — generous for cold Terminal.app launch)
         let mut pid: Option<u32> = None;
-        for _ in 0..40 {
+        for _ in 0..80 {
             std::thread::sleep(std::time::Duration::from_millis(250));
             if let Ok(content) = std::fs::read_to_string(&pid_file) {
                 if let Ok(p) = content.trim().parse::<u32>() {
                     pid = Some(p);
-                    // Clean up PID file
+                    // Clean up PID file and launch script (contains prompt text)
                     let _ = std::fs::remove_file(&pid_file);
+                    let _ = std::fs::remove_file(&script_path);
                     break;
                 }
             }
@@ -260,12 +307,14 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
                 p
             }
             None => {
-                // Clean up stale PID file if it exists
+                // Clean up stale PID file and launch script
                 let _ = std::fs::remove_file(&pid_file);
+                let _ = std::fs::remove_file(&script_path);
                 return Err(format!(
                     "Timed out waiting for agent PID for {}. \
                      If Terminal.app did not open, check System Settings > \
-                     Privacy & Security > Automation permissions for Vaak.", role
+                     Privacy & Security > Automation permissions for Vaak. \
+                     If claude is not installed, install it with: npm install -g @anthropic-ai/claude-code", role
                 ));
             }
         }
@@ -273,37 +322,26 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
 
     #[cfg(target_os = "linux")]
     let child = {
+        // Escape single quotes to prevent shell injection in project_dir and prompt
+        let safe_dir = project_dir.replace('\'', "'\\''");
+        let safe_prompt = join_prompt.replace('\'', "'\\''");
+        let bash_cmd = format!(
+            "cd '{}' && claude --dangerously-skip-permissions '{}'",
+            safe_dir, safe_prompt
+        );
+        // Pass bash_cmd as a direct -c argument to bash, NOT through a shell string.
+        // Using separate args avoids double-quote re-interpretation of $, `, \.
         Command::new("x-terminal-emulator")
-            .args([
-                "-e",
-                &format!(
-                    "bash -c \"cd '{}' && claude --dangerously-skip-permissions '{}'\"",
-                    project_dir, join_prompt
-                ),
-            ])
+            .args(["-e", "bash", "-c", &bash_cmd])
             .spawn()
             .or_else(|_| {
                 Command::new("gnome-terminal")
-                    .args([
-                        "--",
-                        "bash",
-                        "-c",
-                        &format!(
-                            "cd '{}' && claude --dangerously-skip-permissions '{}'",
-                            project_dir, join_prompt
-                        ),
-                    ])
+                    .args(["--", "bash", "-c", &bash_cmd])
                     .spawn()
             })
             .or_else(|_| {
                 Command::new("xterm")
-                    .args([
-                        "-e",
-                        &format!(
-                            "cd '{}' && claude --dangerously-skip-permissions '{}'",
-                            project_dir, join_prompt
-                        ),
-                    ])
+                    .args(["-e", "bash", "-c", &bash_cmd])
                     .spawn()
             })
             .map_err(|e| format!("Failed to spawn terminal: {}", e))?
@@ -672,8 +710,8 @@ end tell"#,
             let stderr = String::from_utf8_lossy(&result.stderr);
             if stderr.contains("not allowed") || stderr.contains("-1743") {
                 return Err(
-                    "Automation permission required. Go to System Settings > Privacy & Security > \
-                     Automation and enable Terminal for Vaak."
+                    "Automation permission required. Go to System Settings > \
+                     Privacy & Security > Automation and enable Terminal for Vaak."
                         .to_string(),
                 );
             }
@@ -752,12 +790,15 @@ pub fn buzz_agent_terminal(
 
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, GetForegroundWindow};
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
         // Find and focus the agent's terminal window
         let hwnd = find_window_by_pid(pid)
             .ok_or(format!("No visible window found for {}:{} (PID {})", role, instance, pid))?;
+
+        // Save the current foreground window so we can restore it after buzzing
+        let prev_hwnd = unsafe { GetForegroundWindow() };
 
         unsafe {
             SetForegroundWindow(hwnd);
@@ -834,7 +875,17 @@ pub fn buzz_agent_terminal(
         };
 
         if sent == 0 {
+            // Restore focus even on failure
+            if !prev_hwnd.is_null() {
+                unsafe { SetForegroundWindow(prev_hwnd); }
+            }
             return Err(format!("SendInput failed for {}:{} (PID {})", role, instance, pid));
+        }
+
+        // Brief pause to let keystrokes land, then restore the user's window
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        if !prev_hwnd.is_null() {
+            unsafe { SetForegroundWindow(prev_hwnd); }
         }
 
         Ok(format!("Buzzed {}:{} — sent {} keystrokes to PID {}", role, instance, sent, pid))
@@ -855,6 +906,17 @@ pub fn buzz_agent_terminal(
                 role, instance, pid
             ));
         }
+
+        // Save the frontmost app so we can restore focus after buzzing
+        let save_front = std::process::Command::new("osascript")
+            .args(["-e", r#"tell application "System Events" to get name of first process whose frontmost is true"#])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            });
 
         // Focus the Terminal window/tab, then type "back" + Enter via System Events keystroke
         let script = format!(
@@ -887,9 +949,12 @@ end tell"#,
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
             if stderr.contains("not allowed") || stderr.contains("-1743") {
+                // System Events keystroke requires Accessibility permission;
+                // Terminal window iteration requires Automation permission.
                 return Err(
-                    "Automation permission required for Terminal. Go to System Settings > \
-                     Privacy & Security > Automation and enable Terminal for Vaak."
+                    "Buzz requires two macOS permissions: \
+                     (1) System Settings > Privacy & Security > Automation — enable Terminal for Vaak. \
+                     (2) System Settings > Privacy & Security > Accessibility — enable Vaak."
                         .to_string(),
                 );
             }
@@ -897,6 +962,16 @@ end tell"#,
                 "Failed to buzz {}:{}: {}",
                 role, instance, stderr.trim()
             ));
+        }
+
+        // Restore the user's previously-focused app (avoid focus stealing)
+        if let Some(front_app) = save_front {
+            if front_app != "Terminal" {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let _ = std::process::Command::new("osascript")
+                    .args(["-e", &format!(r#"tell application "{}" to activate"#, front_app)])
+                    .output();
+            }
         }
 
         Ok(format!(
@@ -1150,4 +1225,259 @@ fn is_pid_alive(pid: u32) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+}
+
+/// Check macOS TCC permissions needed for the app to function.
+/// Returns a JSON-serializable struct with boolean fields for each permission.
+/// On non-macOS platforms, all permissions return true (not applicable).
+#[derive(serde::Serialize)]
+pub struct MacPermissions {
+    pub automation: bool,
+    pub accessibility: bool,
+    pub screen_recording: bool,
+    pub platform: String,
+}
+
+#[tauri::command]
+pub fn check_macos_permissions() -> MacPermissions {
+    #[cfg(target_os = "macos")]
+    {
+        // Test Automation permission: can we talk to Terminal.app?
+        let automation = Command::new("osascript")
+            .args(["-e", r#"tell application "Terminal" to get name"#])
+            .output()
+            .map(|o| {
+                if o.status.success() {
+                    true
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    // -1743 = "not allowed assistive access" / Automation denied
+                    !(stderr.contains("not allowed") || stderr.contains("-1743"))
+                }
+            })
+            .unwrap_or(false);
+
+        // Test Accessibility permission: can we use System Events?
+        let accessibility = Command::new("osascript")
+            .args(["-e", r#"tell application "System Events" to get name of first process whose frontmost is true"#])
+            .output()
+            .map(|o| {
+                if o.status.success() {
+                    true
+                } else {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    !(stderr.contains("not allowed") || stderr.contains("-1743"))
+                }
+            })
+            .unwrap_or(false);
+
+        // Test Screen Recording permission via CoreGraphics preflight
+        let screen_recording = {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            extern "C" {
+                fn CGPreflightScreenCaptureAccess() -> u8;
+            }
+            unsafe { CGPreflightScreenCaptureAccess() != 0 }
+        };
+
+        MacPermissions {
+            automation,
+            accessibility,
+            screen_recording,
+            platform: "macos".to_string(),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        MacPermissions {
+            automation: true,
+            accessibility: true,
+            screen_recording: true,
+            platform: if cfg!(target_os = "windows") { "windows" } else { "linux" }.to_string(),
+        }
+    }
+}
+
+/// Open a macOS System Settings pane URL (e.g., x-apple.systempreferences:...).
+/// On non-macOS platforms this is a no-op.
+#[tauri::command]
+pub fn open_macos_settings(pane_url: String) -> Result<(), String> {
+    // Only allow macOS system preferences URLs — reject arbitrary URLs/paths
+    if !pane_url.starts_with("x-apple.systempreferences:") {
+        return Err("Invalid settings pane URL".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&pane_url)
+            .output()
+            .map_err(|e| format!("Failed to open System Settings: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Check if npm is available on the system PATH.
+/// On macOS, uses a login shell to pick up nvm/fnm/homebrew paths.
+#[tauri::command]
+pub fn check_npm_installed() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let output = Command::new("where")
+            .arg("npm")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("Failed to run 'where npm': {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "which npm"])
+            .output()
+            .map_err(|e| format!("Failed to check for npm: {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("which")
+            .arg("npm")
+            .output()
+            .map_err(|e| format!("Failed to run 'which npm': {}", e))?;
+        Ok(output.status.success())
+    }
+}
+
+/// Install Claude Code CLI via npm. Returns Ok(output) on success.
+/// Runs `npm install -g @anthropic-ai/claude-code` with a 120-second timeout.
+/// Uses login shell on macOS to pick up nvm/fnm/homebrew PATH.
+#[tauri::command]
+pub fn install_claude_cli() -> Result<String, String> {
+    let timeout = std::time::Duration::from_secs(120);
+
+    #[cfg(target_os = "windows")]
+    let mut child = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("npm")
+            .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut child = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        Command::new(&shell)
+            .args(["-l", "-c", "npm install -g @anthropic-ai/claude-code"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut child = {
+        Command::new("npm")
+            .args(["install", "-g", "@anthropic-ai/claude-code"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to start npm install: {}", e))?
+    };
+
+    // Poll with timeout instead of blocking indefinitely
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take()
+                    .map(|mut s| { let mut buf = String::new(); std::io::Read::read_to_string(&mut s, &mut buf).ok(); buf })
+                    .unwrap_or_default();
+                let stderr = child.stderr.take()
+                    .map(|mut s| { let mut buf = String::new(); std::io::Read::read_to_string(&mut s, &mut buf).ok(); buf })
+                    .unwrap_or_default();
+
+                if status.success() {
+                    return Ok(stdout);
+                } else {
+                    let msg = if stderr.contains("EACCES") || stderr.contains("permission denied") {
+                        "Permission denied. On macOS/Linux, try: sudo npm install -g @anthropic-ai/claude-code".to_string()
+                    } else {
+                        format!("npm install failed: {}", stderr.trim())
+                    };
+                    return Err(msg);
+                }
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err("Installation timed out after 120 seconds. Check your network connection and try again.".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(format!("Failed to check install status: {}", e)),
+        }
+    }
+}
+
+/// Open a terminal window in the given directory.
+/// macOS: opens Terminal.app; Windows: opens PowerShell; Linux: opens default terminal.
+#[tauri::command]
+pub fn open_terminal_in_dir(dir: String) -> Result<(), String> {
+    let path = Path::new(&dir);
+    if !path.exists() {
+        return Err(format!("Directory does not exist: {}", dir));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // Use cmd /c start with .current_dir() to avoid interpolating the path
+        // into a PowerShell string, which would allow injection via $(), backticks, etc.
+        Command::new("cmd")
+            .args(["/c", "start", "powershell", "-NoExit"])
+            .current_dir(&dir)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open PowerShell: {}", e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-a", "Terminal", &dir])
+            .spawn()
+            .map_err(|e| format!("Failed to open Terminal.app: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Use .current_dir() so every terminal inherits the right working directory,
+        // regardless of whether it supports --workdir flags.
+        let launched = Command::new("x-terminal-emulator")
+            .current_dir(&dir)
+            .spawn()
+            .is_ok()
+            || Command::new("gnome-terminal")
+                .args(["--working-directory", &dir])
+                .spawn()
+                .is_ok()
+            || Command::new("xterm")
+                .current_dir(&dir)
+                .spawn()
+                .is_ok();
+        if !launched {
+            return Err("No terminal emulator found".to_string());
+        }
+    }
+
+    Ok(())
 }

@@ -25,8 +25,10 @@ from app.models.correction_transformer import (
     create_correction_model,
 )
 from app.models.learning import CorrectionEmbedding, ModelVersion
+from app.training.utils import _get_torch_device
 
 logger = logging.getLogger(__name__)
+
 
 # Configuration
 MODEL_DIR = os.environ.get("MODEL_DIR", "./models")
@@ -45,7 +47,7 @@ class CorrectionTrainer:
         self.user_id = user_id
         self.model_dir = Path(MODEL_DIR) / str(user_id)
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _get_torch_device()
 
     async def get_training_data(self) -> tuple[list[str], list[str]]:
         """Fetch correction pairs from database."""
@@ -80,7 +82,7 @@ class CorrectionTrainer:
 
         if model_path and Path(model_path).exists():
             try:
-                checkpoint = torch.load(model_path, map_location=self.device)
+                checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
                 model.load_state_dict(checkpoint["model_state_dict"])
                 logger.info(f"Loaded model from {model_path}")
             except Exception as e:
@@ -287,7 +289,7 @@ class MLCorrector:
         self.db = db
         self.user_id = user_id
         self.model_dir = Path(MODEL_DIR) / str(user_id)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _get_torch_device()
         self._model: Optional[CorrectionTransformer] = None
         self._model_version: Optional[int] = None
 
@@ -312,7 +314,7 @@ class MLCorrector:
             return None
 
         model = create_correction_model()
-        checkpoint = torch.load(model_version.model_path, map_location=self.device)
+        checkpoint = torch.load(model_version.model_path, map_location=self.device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
         model = model.to(self.device)
         model.eval()
