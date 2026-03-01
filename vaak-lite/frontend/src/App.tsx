@@ -5,7 +5,7 @@ import { RecordButton } from "./components/RecordButton";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
 import { useSpeechSynthesis } from "./hooks/useSpeechSynthesis";
-import { interpret, transcribe, getProviders, type ProviderInfo } from "./lib/api";
+import { interpret, transcribe, translateText, getProviders, type ProviderInfo } from "./lib/api";
 
 export default function App() {
   const [settings, setSettings] = useState<InterpretationSettings>(DEFAULT_SETTINGS);
@@ -19,11 +19,14 @@ export default function App() {
   const speakerRef = useRef<"A" | "B">("A");
   // Track the in-progress entry for simultaneous mode
   const simultaneousEntryId = useRef<number | null>(null);
-  const lastSimultaneousTranslation = useRef("");
-  // AbortController for cancelling stale in-flight requests
-  const simultaneousAbort = useRef<AbortController | null>(null);
-  // Track the seq of the latest result we accepted (to ignore out-of-order responses)
+  // Track the seq of the latest transcription result we accepted
   const lastAcceptedSeq = useRef(-1);
+  // Debounced translation: abort stale LLM calls, timer for debounce
+  const translateAbort = useRef<AbortController | null>(null);
+  const translateTimer = useRef<number>(0);
+  // Latest source text for the current simultaneous entry (for debounced translation)
+  const latestSourceText = useRef("");
+  const latestSourceLang = useRef("");
   const recorder = useAudioRecorder();
   const tts = useSpeechSynthesis();
 
@@ -186,27 +189,56 @@ export default function App() {
   );
 
   // ── Process a blob for simultaneous mode ────────────────
-  // Uses AbortController to cancel stale in-flight requests when a new
-  // chunk arrives. This prevents request pile-up and ghost entries.
-  // One entry per session — text updates in-place.
+  // Transcription (Whisper) runs on every chunk without throttling — it's
+  // fast and each chunk's rolling window supersedes the previous one.
+  // Translation (LLM) is debounced: it only fires 2 seconds after the
+  // source text stops changing, and stale translations are aborted.
+
+  /** Fire a debounced translation for the current source text. */
+  const scheduleTranslation = useCallback(
+    (entryId: number) => {
+      if (translateTimer.current) clearTimeout(translateTimer.current);
+      translateTimer.current = window.setTimeout(async () => {
+        const text = latestSourceText.current;
+        const srcLang = latestSourceLang.current;
+        if (!text.trim() || settings.mode !== "interpret") return;
+
+        // Abort any previous in-flight translation
+        if (translateAbort.current) translateAbort.current.abort();
+        const controller = new AbortController();
+        translateAbort.current = controller;
+
+        try {
+          const result = await translateText(
+            text, srcLang, settings.targetLang, settings.provider, controller.signal,
+          );
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId
+                ? { ...e, translatedText: result.translated_text, provider: result.provider }
+                : e,
+            ),
+          );
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          console.warn("Translation failed:", err);
+        }
+      }, 2000);
+    },
+    [settings],
+  );
 
   const processSimultaneousChunk = useCallback(
     async (blob: Blob, seq: number, speaker?: "A" | "B") => {
       const isTranslation = settings.mode === "interpret";
 
-      // Abort previous in-flight request — the new chunk has more audio
-      if (simultaneousAbort.current) {
-        simultaneousAbort.current.abort();
-      }
-      const controller = new AbortController();
-      simultaneousAbort.current = controller;
-
       // Create the entry on first chunk only
       if (simultaneousEntryId.current === null) {
         const entryId = nextId.current++;
         simultaneousEntryId.current = entryId;
-        lastSimultaneousTranslation.current = "";
         lastAcceptedSeq.current = -1;
+        latestSourceText.current = "";
+        latestSourceLang.current = "";
         const entry: InterpretationEntry = {
           id: entryId,
           sourceText: "",
@@ -227,85 +259,100 @@ export default function App() {
       const currentEntryId = simultaneousEntryId.current;
 
       try {
+        // Always transcribe — Whisper is fast, don't throttle it
+        const lang = settings.sourceLang !== "auto" ? settings.sourceLang : undefined;
+        const result = await transcribe(blob, lang);
+        if (!result.text.trim()) return;
+
+        // Ignore out-of-order responses
+        if (seq <= lastAcceptedSeq.current) return;
+        lastAcceptedSeq.current = seq;
+
+        // Update source text immediately
+        latestSourceText.current = result.text;
+        latestSourceLang.current = result.language || settings.sourceLang;
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === currentEntryId
+              ? {
+                  ...e,
+                  sourceText: result.text,
+                  sourceLang: result.language || settings.sourceLang,
+                  duration: result.duration,
+                  pending: false,
+                  status: "in_progress",
+                  seq,
+                }
+              : e,
+          ),
+        );
+
+        // Schedule translation (debounced — only fires when text stabilizes)
         if (isTranslation) {
-          const result = await interpret(
-            blob, settings.targetLang, settings.provider, settings.sourceLang,
-            lastSimultaneousTranslation.current, controller.signal,
-          );
-          if (!result.source_text.trim()) return;
-          // Ignore out-of-order responses (earlier chunk finishing after a later one)
-          if (seq <= lastAcceptedSeq.current) return;
-          lastAcceptedSeq.current = seq;
-          lastSimultaneousTranslation.current = result.translated_text;
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === currentEntryId
-                ? {
-                    ...e,
-                    sourceText: result.source_text,
-                    translatedText: result.translated_text,
-                    sourceLang: result.source_lang,
-                    targetLang: result.target_lang,
-                    duration: result.duration,
-                    provider: result.provider,
-                    pending: false,
-                    status: "in_progress",
-                    seq,
-                  }
-                : e,
-            ),
-          );
-        } else {
-          const lang = settings.sourceLang !== "auto" ? settings.sourceLang : undefined;
-          const result = await transcribe(blob, lang, controller.signal);
-          if (!result.text.trim()) return;
-          if (seq <= lastAcceptedSeq.current) return;
-          lastAcceptedSeq.current = seq;
-          setEntries((prev) =>
-            prev.map((e) =>
-              e.id === currentEntryId
-                ? {
-                    ...e,
-                    sourceText: result.text,
-                    translatedText: "",
-                    sourceLang: result.language || settings.sourceLang,
-                    duration: result.duration,
-                    provider: "",
-                    pending: false,
-                    status: "in_progress",
-                    seq,
-                  }
-                : e,
-            ),
-          );
+          scheduleTranslation(currentEntryId);
         }
       } catch (err) {
-        // Aborted requests are expected — only warn on real errors
-        if (err instanceof DOMException && err.name === "AbortError") return;
         console.warn("Simultaneous chunk failed:", err);
       }
     },
-    [settings],
+    [settings, scheduleTranslation],
   );
 
   // Finalize the in-progress simultaneous entry
-  const finalizeSimultaneous = useCallback(() => {
-    if (simultaneousAbort.current) {
-      simultaneousAbort.current.abort();
-      simultaneousAbort.current = null;
-    }
-    const entryId = simultaneousEntryId.current;
-    if (entryId !== null) {
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
-        ),
-      );
+  const finalizeSimultaneous = useCallback(
+    async () => {
+      // Cancel pending translation timer
+      if (translateTimer.current) {
+        clearTimeout(translateTimer.current);
+        translateTimer.current = 0;
+      }
+
+      const entryId = simultaneousEntryId.current;
+      if (entryId === null) return;
+
+      // If in interpret mode, fire one final translation with the latest text
+      if (settings.mode === "interpret" && latestSourceText.current.trim()) {
+        if (translateAbort.current) translateAbort.current.abort();
+        const controller = new AbortController();
+        translateAbort.current = controller;
+        try {
+          const result = await translateText(
+            latestSourceText.current,
+            latestSourceLang.current,
+            settings.targetLang,
+            settings.provider,
+            controller.signal,
+          );
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId
+                ? { ...e, translatedText: result.translated_text, provider: result.provider, status: "complete" as EntryStatus }
+                : e,
+            ),
+          );
+        } catch {
+          // Even if translation fails, still mark entry complete
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
+            ),
+          );
+        }
+      } else {
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
+          ),
+        );
+      }
+
       simultaneousEntryId.current = null;
-      lastSimultaneousTranslation.current = "";
       lastAcceptedSeq.current = -1;
-    }
-  }, []);
+      latestSourceText.current = "";
+      latestSourceLang.current = "";
+    },
+    [settings],
+  );
 
   // ── Recording handlers per mode combination ──────────────
 
@@ -354,11 +401,16 @@ export default function App() {
       );
     } else if (settings.timing === "simultaneous") {
       simultaneousEntryId.current = null;
-      lastSimultaneousTranslation.current = "";
       lastAcceptedSeq.current = -1;
-      if (simultaneousAbort.current) {
-        simultaneousAbort.current.abort();
-        simultaneousAbort.current = null;
+      latestSourceText.current = "";
+      latestSourceLang.current = "";
+      if (translateAbort.current) {
+        translateAbort.current.abort();
+        translateAbort.current = null;
+      }
+      if (translateTimer.current) {
+        clearTimeout(translateTimer.current);
+        translateTimer.current = 0;
       }
       await recorder.startChunked(5000, async (chunk, seq) => {
         const speaker = useBidirectional ? speakerRef.current : undefined;

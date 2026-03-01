@@ -89,11 +89,13 @@ export async function translateText(
   sourceLang: string,
   targetLang: string,
   provider: string,
+  signal?: AbortSignal,
 ): Promise<TranslateResult> {
   const res = await fetch(`${API_BASE}/translate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang, provider }),
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
