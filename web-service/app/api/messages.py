@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import time
+from collections import deque
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -54,6 +56,33 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+# --- WebSocket rate limiter ---
+
+WS_RATE_LIMIT = 30  # max messages per window
+WS_RATE_WINDOW = 60  # window in seconds
+
+
+class WSRateLimiter:
+    """Sliding-window rate limiter for a single WebSocket connection."""
+
+    def __init__(self, max_messages: int = WS_RATE_LIMIT, window_secs: int = WS_RATE_WINDOW):
+        self._max = max_messages
+        self._window = window_secs
+        self._timestamps: deque[float] = deque()
+
+    def check(self) -> bool:
+        """Return True if the message is allowed, False if rate-limited."""
+        now = time.monotonic()
+        cutoff = now - self._window
+        # Evict expired timestamps
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+        if len(self._timestamps) >= self._max:
+            return False
+        self._timestamps.append(now)
+        return True
 
 
 # --- Schemas ---
@@ -208,10 +237,28 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
 
     logger.info("WS authenticated: project=%d user=%d", project_id, user_id)
 
+    rate_limiter = WSRateLimiter()
+
     try:
         while True:
-            raw = await websocket.receive_text()
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=300)
             data = json.loads(raw)
+
+            # Ping/pong keepalive — client sends {"type": "ping"}, we respond
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            # Rate-limit incoming messages (not pings)
+            if not rate_limiter.check():
+                await websocket.close(
+                    code=4029,
+                    reason=f"Rate limit exceeded: max {WS_RATE_LIMIT} messages per {WS_RATE_WINDOW}s",
+                )
+                logger.warning(
+                    "WS rate-limited: project=%d user=%d", project_id, user_id
+                )
+                return
 
             # Handle incoming messages through the socket
             if data.get("type") == "send":
@@ -240,6 +287,14 @@ async def websocket_endpoint(websocket: WebSocket, project_id: int):
                     if data.get("msg_type") == "status":
                         await _maybe_trigger_continuous_round(db, project_id, msg)
 
+    except asyncio.TimeoutError:
+        # 5-minute idle timeout — close the connection
+        logger.info("WS idle timeout: project=%d user=%d", project_id, user_id)
+        try:
+            await websocket.close(code=4008, reason="Idle timeout (5 minutes)")
+        except Exception:
+            pass
+        manager.disconnect(project_id, websocket)
     except WebSocketDisconnect:
         manager.disconnect(project_id, websocket)
         logger.info("WS disconnected: project=%d user=%d", project_id, user_id)

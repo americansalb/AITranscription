@@ -472,7 +472,7 @@ async def test_agent_lifecycle_and_billing_validation(client: AsyncClient, db, m
     import app.api.providers as providers_mod
     async def _noop_reset(db, user):
         pass
-    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
+    monkeypatch.setattr(providers_mod, "maybe_reset_monthly_usage", _noop_reset)
 
     from app.models import WebUser
     from sqlalchemy import update as sql_update

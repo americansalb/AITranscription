@@ -26,8 +26,11 @@ import { MacPermissionWizard, useMacPermissionWizard } from "./components/MacPer
 import {
   VolumeOnIcon, VolumeOffIcon, BookIcon, BarChartIcon, ClockIcon,
   ChatBubbleIcon, MonitorIcon, SunIcon, GearIcon, CompareIcon,
-  RefreshIcon, EditIcon, CopyIcon, CheckIcon, XIcon, DownloadIcon,
+  RefreshIcon, EditIcon, CopyIcon, CheckIcon, XIcon,
 } from "./components/Icons";
+import { RecordingControls } from "./components/RecordingControls";
+import type { ProcessingStep, ProcessingStatus } from "./components/RecordingControls";
+import { SettingsPanel } from "./components/SettingsPanel";
 
 // One-time migration from old "scribe_*" localStorage keys to "vaak_*"
 function migrateLocalStorageKeys() {
@@ -94,40 +97,6 @@ export interface HistoryEntry {
   duration?: number | null;
 }
 
-// Context icons for the dropdown
-const CONTEXT_OPTIONS = [
-  { value: "general", label: "General", icon: "🎯" },
-  { value: "email", label: "Email", icon: "📧" },
-  { value: "slack", label: "Slack / Chat", icon: "💬" },
-  { value: "document", label: "Document", icon: "📄" },
-  { value: "code", label: "Code Comment", icon: "💻" },
-];
-
-// Quick Mode Presets
-interface Preset {
-  id: string;
-  name: string;
-  icon: string;
-  context: string;
-  formality: "casual" | "neutral" | "formal";
-  description: string;
-}
-
-const PRESETS: Preset[] = [
-  { id: "pro-email", name: "Professional Email", icon: "📧", context: "email", formality: "formal", description: "Formal business emails" },
-  { id: "casual-slack", name: "Casual Chat", icon: "💬", context: "slack", formality: "casual", description: "Friendly messages" },
-  { id: "meeting-notes", name: "Meeting Notes", icon: "📝", context: "document", formality: "neutral", description: "Clear documentation" },
-  { id: "code-docs", name: "Code Comments", icon: "💻", context: "code", formality: "neutral", description: "Technical docs" },
-];
-
-// Processing steps for progress indicator
-type ProcessingStep = "recording" | "transcribing" | "polishing" | "done";
-const PROCESSING_STEPS: { key: ProcessingStep; label: string }[] = [
-  { key: "recording", label: "Recording" },
-  { key: "transcribing", label: "Transcribing" },
-  { key: "polishing", label: "Polishing" },
-  { key: "done", label: "Done" },
-];
 
 // LocalStorage keys
 const STORAGE_KEYS = {
@@ -172,14 +141,6 @@ declare global {
       };
     };
   }
-}
-
-type ProcessingStatus = "idle" | "recording" | "processing" | "success" | "error";
-
-function formatDuration(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
 // Load persisted setting from localStorage
@@ -262,9 +223,10 @@ function App() {
     setVoiceEnabled(newEnabled);
     saveVoiceEnabled(newEnabled);
 
-    // If disabling voice, clear pending items from queue
+    // If disabling voice, stop current playback and clear pending items (QUEUE-9)
     if (!newEnabled) {
-      const { clearPending } = await import("./lib/queueStore");
+      const { stopPlayback, clearPending } = await import("./lib/queueStore");
+      stopPlayback();
       await clearPending();
     }
 
@@ -971,13 +933,6 @@ function App() {
     setEditedText("");
   }, []);
 
-  // Apply a preset
-  const handlePresetSelect = useCallback((preset: Preset) => {
-    setContext(preset.context);
-    setFormality(preset.formality);
-    showToast(`Applied "${preset.name}" preset`, "info");
-  }, [showToast]);
-
   // Regenerate with different settings
   const handleRegenerate = useCallback(async (newContext?: string, newFormality?: "casual" | "neutral" | "formal") => {
     if (!rawText) {
@@ -1040,21 +995,6 @@ function App() {
     showToast("Cleared", "info");
   }, [showToast]);
 
-  const getStatusText = () => {
-    switch (status) {
-      case "recording":
-        return `Recording... ${formatDuration(recorder.duration)}`;
-      case "processing":
-        return "Processing...";
-      case "success":
-        return "Ready";
-      case "error":
-        return "Error";
-      default:
-        return "Ready to record";
-    }
-  };
-
   return (
     <div className="app">
       <header className="header">
@@ -1108,20 +1048,26 @@ function App() {
         </div>
       </header>
 
-      {/* macOS in-app recording indicator (replaces floating overlay which steals focus) */}
-      {isMacOS() && (recorder.isRecording || status === "processing") && (
-        <div className="macos-recording-banner" role="alert" aria-live="assertive">
-          <span className="macos-rec-dot" />
-          <span className="macos-rec-label">
-            {status === "processing" ? "Processing..." : `Recording ${Math.floor((recorder.duration || 0) / 60)}:${String(Math.floor((recorder.duration || 0) % 60)).padStart(2, "0")}`}
-          </span>
-          {recorder.isRecording && (
-            <button className="macos-rec-stop" onClick={handleRecordClick} title="Stop recording">
-              Stop
-            </button>
-          )}
-        </div>
-      )}
+      <RecordingControls
+        isRecording={recorder.isRecording}
+        status={status}
+        duration={recorder.duration}
+        backendReady={backendReady}
+        soundEnabled={soundEnabled}
+        processingStep={processingStep}
+        processingElapsed={processingElapsed}
+        hotkeyRegistered={hotkeyRegistered}
+        currentHotkey={currentHotkey}
+        onRecordClick={handleRecordClick}
+        onCancelProcessing={() => {
+          cancelProcessing();
+          setProcessingStep("recording");
+          setStatus("idle");
+          isProcessingRef.current = false;
+        }}
+        onSoundToggle={() => setSoundEnabled(!soundEnabled)}
+        showToast={showToast}
+      />
 
       {error && (
         <div className="error-message">
@@ -1134,150 +1080,15 @@ function App() {
         </div>
       )}
 
-      <div className={`recording-section ${recorder.isRecording ? 'is-recording' : ''}`}>
-        {/* Sound Toggle */}
-        <button
-          className={`sound-toggle ${!soundEnabled ? "muted" : ""}`}
-          onClick={() => setSoundEnabled(!soundEnabled)}
-          title={soundEnabled ? "Mute sounds" : "Unmute sounds"}
-          aria-label={soundEnabled ? "Mute sounds" : "Unmute sounds"}
-        >
-          {soundEnabled ? (
-            <VolumeOnIcon size={16} />
-          ) : (
-            <VolumeOffIcon size={16} />
-          )}
-        </button>
-
-        <button
-          className={`record-btn ${recorder.isRecording ? "recording" : ""}`}
-          onClick={handleRecordClick}
-          disabled={status === "processing" || backendReady === false}
-          title={recorder.isRecording ? "Stop recording" : "Start recording"}
-          aria-label={recorder.isRecording ? "Stop recording" : "Start recording"}
-        >
-          {status === "processing" ? (
-            <div className="spinner" />
-          ) : recorder.isRecording ? (
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          ) : (
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="12" cy="12" r="6" />
-            </svg>
-          )}
-        </button>
-
-        {status === "processing" ? (
-          <div className="progress-steps">
-            {PROCESSING_STEPS.map((step, index) => {
-              const stepIndex = PROCESSING_STEPS.findIndex(s => s.key === processingStep);
-              const isActive = step.key === processingStep;
-              const isComplete = index < stepIndex || processingStep === "done";
-              const isCurrent = isActive && processingStep !== "done";
-
-              return (
-                <div key={step.key} className={`progress-step ${isComplete ? "complete" : ""} ${isCurrent ? "current" : ""}`}>
-                  <div className="progress-step-indicator">
-                    {isComplete ? (
-                      <CheckIcon size={12} strokeWidth={3} />
-                    ) : (
-                      <span>{index + 1}</span>
-                    )}
-                  </div>
-                  <span className="progress-step-label">
-                    {step.label}
-                    {isCurrent && processingElapsed > 0 && ` (${processingElapsed}s)`}
-                  </span>
-                </div>
-              );
-            })}
-            <button
-              className="cancel-processing-btn"
-              onClick={() => {
-                cancelProcessing();
-                setProcessingStep("recording");
-                setStatus("idle");
-                isProcessingRef.current = false;
-                showToast("Transcription cancelled", "warning");
-              }}
-              title="Cancel transcription"
-              aria-label="Cancel transcription"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <div className="status">
-            <span
-              className={`status-dot ${status === "recording" ? "recording" : status === "success" ? "success" : ""}`}
-            />
-            {getStatusText()}
-          </div>
-        )}
-
-        <p className="record-hint">
-          Click to {recorder.isRecording ? "stop" : "start"} • Hold{" "}
-          <span className="hotkey">{formatHotkeyDisplay(currentHotkey)}</span> for push-to-talk
-          <span className={`hotkey-status ${hotkeyRegistered ? "active" : "inactive"}`}>
-            {hotkeyRegistered ? "Ready" : "Restart app to enable"}
-          </span>
-          {" "} • Press <span className="hotkey">?</span> for shortcuts
-        </p>
-      </div>
-
-      {/* Quick Mode Presets */}
-      <div className="presets-section">
-        <span className="presets-label">Quick Modes:</span>
-        <div className="presets-list">
-          {PRESETS.map((preset) => (
-            <button
-              key={preset.id}
-              className={`preset-btn ${context === preset.context && formality === preset.formality ? "active" : ""}`}
-              onClick={() => handlePresetSelect(preset)}
-              title={preset.description}
-            >
-              <span className="preset-icon">{preset.icon}</span>
-              <span className="preset-name">{preset.name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="context-selector">
-        <label>Context:</label>
-        <select value={context} onChange={(e) => setContext(e.target.value)}>
-          {CONTEXT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-
-        <label>Tone:</label>
-        <select
-          value={formality}
-          onChange={(e) =>
-            setFormality(e.target.value as "casual" | "neutral" | "formal")
-          }
-        >
-          <option value="casual">Casual</option>
-          <option value="neutral">Neutral</option>
-          <option value="formal">Formal</option>
-        </select>
-
-        {transcriptHistory.length > 0 && (
-          <button
-            className="export-history-btn"
-            onClick={() => setShowExport(true)}
-            title="Export transcript history"
-          >
-            <DownloadIcon />
-            Export ({transcriptHistory.length})
-          </button>
-        )}
-      </div>
+      <SettingsPanel
+        context={context}
+        formality={formality}
+        historyCount={transcriptHistory.length}
+        onContextChange={setContext}
+        onFormalityChange={setFormality}
+        onExportClick={() => setShowExport(true)}
+        showToast={showToast}
+      />
 
       <div className="result-section">
         <div className="result-header">

@@ -7,13 +7,38 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.api import auth, projects, messages, billing, providers, discussions
 from app.database import init_db
 from app.middleware.rate_limiter import RateLimitMiddleware
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # CSP: allow self + inline styles (needed for some UI frameworks)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self'; connect-src 'self' wss: ws:; "
+            "frame-ancestors 'none'"
+        )
+        # HSTS: only in production (not behind reverse proxy in dev)
+        if not settings.secret_key.startswith("change-me"):
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+        return response
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,8 +57,14 @@ async def lifespan(app: FastAPI):
             "VAAK_WEB_FERNET_KEY not set — BYOK API keys will be stored UNENCRYPTED. "
             "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
-    if settings.secret_key == "change-me-in-production":
-        logger.warning("VAAK_WEB_SECRET_KEY is using the default value — change it in production!")
+    if settings.secret_key == "change-me-in-production" or len(settings.secret_key) < 32:
+        if os.environ.get("VAAK_WEB_TESTING"):
+            logger.warning("VAAK_WEB_SECRET_KEY is insecure — allowed because VAAK_WEB_TESTING=1")
+        else:
+            raise RuntimeError(
+                "VAAK_WEB_SECRET_KEY is insecure (default value or shorter than 32 chars). "
+                "Set a strong secret: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
 
     # Agent runtime limitation: in-memory agent registry is per-process.
     # Running with --workers > 1 causes duplicate agents and billing desync.
@@ -57,16 +88,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Rate limiting (applied first — middleware stack is LIFO, so add before CORS)
+# Middleware stack is LIFO — add in reverse order of desired execution:
+# Request → RateLimit → CORS → SecurityHeaders → handler
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RateLimitMiddleware)
-
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept"],
 )
 
 # Routes

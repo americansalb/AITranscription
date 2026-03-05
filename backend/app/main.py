@@ -1,8 +1,22 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
 
 from app.api import router
 from app.api.admin import router as admin_router
@@ -60,6 +74,9 @@ app = FastAPI(
     docs_url="/docs" if settings.debug else None,   # Only expose docs in debug mode
     redoc_url="/redoc" if settings.debug else None,
 )
+
+# Security headers (innermost middleware — runs last on request, first on response)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # CORS configuration - restricted to Tauri app origins (override via CORS_ORIGINS env var)
 app.add_middleware(

@@ -17,12 +17,27 @@ from app.models.user import User, SubscriptionTier
 from app.services.auth import hash_password, get_user_by_email
 
 
-# Dev accounts - all get unlimited usage; password from env var
-DEV_ACCOUNTS = [
-    {"email": "kenil.thakkar@gmail.com", "name": "Kenil Thakkar"},
-    {"email": "kevin@aalb.org", "name": "Kevin"},
-    {"email": "happy102785@gmail.com", "name": "Happy"},
-]
+# Dev accounts from env var (comma-separated "email:name" pairs)
+# Example: ADMIN_SEED_ACCOUNTS="alice@example.com:Alice,bob@example.com:Bob"
+_accounts_env = os.environ.get("ADMIN_SEED_ACCOUNTS", "")
+if not _accounts_env:
+    print("ERROR: ADMIN_SEED_ACCOUNTS environment variable is not set.")
+    print("Set it before running: export ADMIN_SEED_ACCOUNTS='email1:Name1,email2:Name2'")
+    sys.exit(1)
+
+DEV_ACCOUNTS = []
+for entry in _accounts_env.split(","):
+    entry = entry.strip()
+    if ":" in entry:
+        email, name = entry.split(":", 1)
+        DEV_ACCOUNTS.append({"email": email.strip(), "name": name.strip()})
+    elif entry:
+        DEV_ACCOUNTS.append({"email": entry, "name": entry.split("@")[0]})
+
+if not DEV_ACCOUNTS:
+    print("ERROR: No valid accounts parsed from ADMIN_SEED_ACCOUNTS.")
+    sys.exit(1)
+
 PASSWORD = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD", "")
 if not PASSWORD:
     print("ERROR: ADMIN_BOOTSTRAP_PASSWORD environment variable is not set.")
