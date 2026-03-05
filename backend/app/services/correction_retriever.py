@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +18,13 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 # Global model reference for lifecycle management
-_embedding_model: Optional[SentenceTransformer] = None
+_embedding_model = None
+
+
+def _load_sentence_transformer():
+    """Lazy-load SentenceTransformer to avoid importing torch at startup."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer
 
 
 def get_available_memory_mb() -> float:
@@ -54,6 +59,7 @@ def get_embedding_model():
     # Load model if not already loaded
     if _embedding_model is None:
         logger.info(f"Loading embedding model: {EMBEDDING_MODEL}")
+        SentenceTransformer = _load_sentence_transformer()
         _embedding_model = SentenceTransformer(EMBEDDING_MODEL)
         logger.info(f"Model loaded. Available memory: {get_available_memory_mb():.0f} MB")
 

@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
@@ -83,7 +84,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
@@ -98,6 +99,17 @@ app.include_router(audience_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 
 
+# Mount Vaak Lite sub-app at /vaaklite
+from app.vaaklite.app import vaaklite_app  # noqa: E402
+app.mount("/vaaklite", vaaklite_app)
+
+
+@app.head("/")
+async def root_head():
+    """Respond to HEAD / for Render load-balancer health checks."""
+    return Response(status_code=200)
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API info."""
@@ -106,4 +118,5 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
         "health": "/api/v1/health",
+        "vaaklite": "/vaaklite",
     }
