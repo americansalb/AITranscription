@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
@@ -650,6 +650,7 @@ export function CollabTab() {
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMsgCount, setNewMsgCount] = useState(0);
   const prevMsgCountRef = useRef(0);
+  const savedScrollRef = useRef<number | null>(null);
   const MSG_PAGE_SIZE = 50;
   const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
@@ -2021,15 +2022,25 @@ When multiple instances of this role are active:
     }
   };
 
-  // Smart scroll: only auto-scroll if user is at bottom, otherwise show indicator
+  // Smart scroll: only auto-scroll if user is at bottom or they just sent a message
   useEffect(() => {
-    const currentCount = project?.messages?.length || 0;
+    const messages = project?.messages;
+    const currentCount = messages?.length || 0;
     const prevCount = prevMsgCountRef.current;
     const added = currentCount - prevCount;
     prevMsgCountRef.current = currentCount;
 
     if (added > 0) {
-      if (isAtBottom) {
+      // Grow visible limit so new messages don't shift the slice window
+      setVisibleMsgLimit((prev) => prev + added);
+
+      // Always scroll to bottom if the newest message is from the human (they just sent it)
+      const newestMsg = messages?.[currentCount - 1];
+      const isOwnMessage = newestMsg?.from?.startsWith("human:");
+      if (isAtBottom || isOwnMessage) {
+        // Clear saved scroll so useLayoutEffect doesn't restore a stale position
+        // (race: project-update saves scrollTop before smooth scroll finishes)
+        savedScrollRef.current = null;
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
         setNewMsgCount(0);
       } else {
@@ -2038,12 +2049,20 @@ When multiple instances of this role are active:
     }
   }, [project?.messages?.length, isAtBottom]);
 
+  // Restore scroll position after React commits DOM updates from project refreshes
+  useLayoutEffect(() => {
+    if (savedScrollRef.current !== null && messageTimelineRef.current) {
+      messageTimelineRef.current.scrollTop = savedScrollRef.current;
+      savedScrollRef.current = null;
+    }
+  }, [project]);
+
   // Track scroll position in message timeline
   useEffect(() => {
     const el = messageTimelineRef.current;
     if (!el) return;
     const handleScroll = () => {
-      const threshold = 40;
+      const threshold = 150;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
       setIsAtBottom(atBottom);
       if (atBottom) setNewMsgCount(0);
@@ -2071,6 +2090,7 @@ When multiple instances of this role are active:
         unlistenUpdate = await listen<ParsedProject>(
           "project-update",
           (event) => {
+            savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
             setProject(event.payload);
             if (event.payload?.config?.settings?.message_retention_days != null) {
               setRetentionDays(event.payload.config.settings.message_retention_days);
@@ -2084,6 +2104,7 @@ When multiple instances of this role are active:
             if (!watching) return;
             try {
               const { invoke } = await import("@tauri-apps/api/core");
+              savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
               const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
               if (result) setProject(result);
             } catch { /* ignore */ }
