@@ -665,6 +665,8 @@ export function CollabTab() {
   const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<{ has_key: boolean; key_source: string | null } | null>(null);
   const [setupDismissed, setSetupDismissed] = useState(() => localStorage.getItem("vaak_setup_dismissed") === "true");
+  const [autoSetupRunning, setAutoSetupRunning] = useState(false);
+  const [autoSetupStatus, setAutoSetupStatus] = useState("");
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
@@ -3028,11 +3030,22 @@ When multiple instances of this role are active:
                           return parentActive;
                         });
                         if (modalFiltered.length === 0) return null;
+                        // Sort modal cards: active first, then vacant, alphabetical within each
+                        const modalStatusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
+                        const modalSorted = [...modalFiltered].sort((a, b) => {
+                          const sa = modalStatusOrder[a.status] ?? 2;
+                          const sb = modalStatusOrder[b.status] ?? 2;
+                          if (sa !== sb) return sa - sb;
+                          const oa = ROLE_ORDER[a.slug] ?? 99;
+                          const ob = ROLE_ORDER[b.slug] ?? 99;
+                          if (oa !== ob) return oa - ob;
+                          return a.title.localeCompare(b.title);
+                        });
                         return (
                           <>
                             <div className="roles-modal-roster-label">Active Roster</div>
                             <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
-                              {modalFiltered.map((card) => {
+                              {modalSorted.map((card) => {
                                 const cardKey = `${card.slug}:${card.instance}`;
                                 const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                                 const handleCardClick = () => {
@@ -3107,7 +3120,85 @@ When multiple instances of this role are active:
           <div className="setup-checklist-banner">
             <div className="setup-checklist-header">
               <span className="setup-checklist-title">Setup Required</span>
-              <span className="setup-checklist-subtitle">Complete these steps to launch AI agents</span>
+              <span className="setup-checklist-subtitle">
+                {autoSetupRunning ? autoSetupStatus : "Complete these steps to launch AI agents"}
+              </span>
+              {!autoSetupRunning && (
+                <button
+                  className="setup-action-btn setup-action-primary"
+                  style={{ marginLeft: "auto", marginRight: 8, flexShrink: 0, whiteSpace: "nowrap" }}
+                  onClick={async () => {
+                    if (!window.__TAURI__) return;
+                    setAutoSetupRunning(true);
+                    try {
+                      const { invoke } = await import("@tauri-apps/api/core");
+
+                      // Step 1: Check Node.js
+                      setAutoSetupStatus("Checking Node.js...");
+                      let hasNpm = await invoke<boolean>("check_npm_installed");
+                      setNpmInstalled(hasNpm);
+
+                      if (!hasNpm) {
+                        setAutoSetupStatus("Node.js required — opening download page...");
+                        try { await invoke("open_url_in_browser", { url: "https://nodejs.org" }); } catch {}
+                        // Poll for npm every 5s for up to 5 minutes
+                        setAutoSetupStatus("Install Node.js, then come back — auto-detecting...");
+                        for (let i = 0; i < 60; i++) {
+                          await new Promise(r => setTimeout(r, 5000));
+                          hasNpm = await invoke<boolean>("check_npm_installed");
+                          if (hasNpm) { setNpmInstalled(true); break; }
+                        }
+                        if (!hasNpm) {
+                          setAutoSetupStatus("Node.js not detected after 5 min. Click to retry.");
+                          setAutoSetupRunning(false);
+                          return;
+                        }
+                      }
+
+                      // Step 2: Install Claude CLI
+                      setAutoSetupStatus("Installing Claude Code CLI...");
+                      let hasClaude = await invoke<boolean>("check_claude_installed");
+                      if (!hasClaude) {
+                        try {
+                          await invoke<string>("install_claude_cli");
+                          hasClaude = await invoke<boolean>("check_claude_installed");
+                        } catch (e: any) {
+                          setAutoSetupStatus(`CLI install failed: ${e?.message || e}`);
+                          setAutoSetupRunning(false);
+                          return;
+                        }
+                      }
+                      setClaudeInstalled(hasClaude);
+                      if (!hasClaude) {
+                        setAutoSetupStatus("Claude CLI install failed. Try manually: npm install -g @anthropic-ai/claude-code");
+                        setAutoSetupRunning(false);
+                        return;
+                      }
+
+                      // Step 3: Check API key
+                      setAutoSetupStatus("Checking API key...");
+                      const keyStatus = await invoke<{ has_key: boolean; key_source: string | null }>("check_anthropic_key");
+                      setApiKeyStatus(keyStatus);
+                      if (!keyStatus.has_key) {
+                        setAutoSetupStatus("Opening terminal for login — follow the browser prompt...");
+                        try { await invoke("open_terminal_in_dir", { dir: projectDir || "" }); } catch {}
+                        // Poll for key every 5s for up to 3 minutes
+                        for (let i = 0; i < 36; i++) {
+                          await new Promise(r => setTimeout(r, 5000));
+                          const k = await invoke<{ has_key: boolean; key_source: string | null }>("check_anthropic_key");
+                          if (k.has_key) { setApiKeyStatus(k); break; }
+                        }
+                      }
+
+                      setAutoSetupStatus("Setup complete!");
+                      setTimeout(() => setAutoSetupRunning(false), 2000);
+                    } catch (e) {
+                      setAutoSetupStatus(`Setup error: ${e}`);
+                      setAutoSetupRunning(false);
+                    }
+                  }}
+                >Set Up Automatically</button>
+              )}
               <button
                 className="setup-checklist-dismiss"
                 onClick={() => { setSetupDismissed(true); localStorage.setItem("vaak_setup_dismissed", "true"); }}
@@ -3126,7 +3217,17 @@ When multiple instances of this role are active:
                     <div className="setup-check-actions">
                       <button
                         className="setup-action-btn setup-action-primary"
-                        onClick={() => {
+                        onClick={async () => {
+                          try {
+                            if (window.__TAURI__) {
+                              const { invoke } = await import("@tauri-apps/api/core");
+                              await invoke("open_url_in_browser", { url: "https://nodejs.org" });
+                              return;
+                            }
+                          } catch (e) {
+                            console.error("[CollabTab] Failed to open URL via Tauri:", e);
+                          }
+                          // Fallback: try window.open
                           window.open("https://nodejs.org", "_blank");
                         }}
                       >Download Node.js</button>
@@ -3293,12 +3394,23 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
-          const vacantCount = filteredCards.filter(c => c.status === "vacant").length;
+          // Sort: active/working first, then stale, then vacant. Alphabetical within each group.
+          const statusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
+          const sortedCards = [...filteredCards].sort((a, b) => {
+            const sa = statusOrder[a.status] ?? 2;
+            const sb = statusOrder[b.status] ?? 2;
+            if (sa !== sb) return sa - sb;
+            const oa = ROLE_ORDER[a.slug] ?? 99;
+            const ob = ROLE_ORDER[b.slug] ?? 99;
+            if (oa !== ob) return oa - ob;
+            return a.title.localeCompare(b.title);
+          });
+          const vacantCount = sortedCards.filter(c => c.status === "vacant").length;
           return (
             <>
-              {filteredCards.length > 0 && (
+              {sortedCards.length > 0 && (
                 <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
-                  {filteredCards.map((card) => {
+                  {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                     const handleCardClick = () => {
