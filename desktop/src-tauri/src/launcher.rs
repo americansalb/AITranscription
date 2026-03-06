@@ -1488,6 +1488,104 @@ pub fn install_claude_cli() -> Result<String, String> {
     }
 }
 
+/// Check if Homebrew is installed (macOS only). Returns false on other platforms.
+#[tauri::command]
+pub fn check_homebrew_installed() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let output = Command::new(&shell)
+            .args(["-l", "-c", "which brew"])
+            .output()
+            .map_err(|e| format!("Failed to check for brew: {}", e))?;
+        Ok(output.status.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Install Node.js via the best available method for the platform.
+/// macOS: tries Homebrew first (`brew install node`), falls back to opening nodejs.org.
+/// Windows/Linux: opens nodejs.org download page.
+/// Returns Ok("installed") on success, Ok("browser") if it fell back to opening the browser.
+#[tauri::command]
+pub fn install_nodejs() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Try Homebrew first
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let brew_check = Command::new(&shell)
+            .args(["-l", "-c", "which brew"])
+            .output()
+            .ok();
+
+        if brew_check.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+            // Homebrew is available — install Node.js
+            let timeout = std::time::Duration::from_secs(180);
+            let mut child = Command::new(&shell)
+                .args(["-l", "-c", "brew install node"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to start brew install: {}", e))?;
+
+            let start = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success() {
+                            return Ok("installed".to_string());
+                        } else {
+                            let stderr = child.stderr.take()
+                                .map(|mut s| { let mut buf = String::new(); std::io::Read::read_to_string(&mut s, &mut buf).ok(); buf })
+                                .unwrap_or_default();
+                            return Err(format!("brew install node failed: {}", stderr.trim()));
+                        }
+                    }
+                    Ok(None) => {
+                        if start.elapsed() > timeout {
+                            let _ = child.kill();
+                            return Err("Installation timed out after 180 seconds".to_string());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                    Err(e) => return Err(format!("Failed to check install status: {}", e)),
+                }
+            }
+        }
+
+        // No Homebrew — fall back to opening browser
+        Command::new("open")
+            .arg("https://nodejs.org")
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        return Ok("browser".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("cmd")
+            .args(["/c", "start", "", "https://nodejs.org"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok("browser".to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg("https://nodejs.org")
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok("browser".to_string())
+    }
+}
+
 /// Open a terminal window in the given directory.
 /// macOS: opens Terminal.app; Windows: opens PowerShell; Linux: opens default terminal.
 #[tauri::command]
