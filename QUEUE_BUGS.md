@@ -1,6 +1,6 @@
 # Queue System Bug Tracker
 
-## Status: 11 of 13 Fixed
+## Status: 12 of 13 Fixed
 
 ---
 
@@ -75,7 +75,8 @@
 - **Status**: 🔴 NOT FIXED (Architectural — needs design decision)
 
 ### 12. No SQLite WAL Mode
-- **Status**: 🔴 NOT FIXED (Low priority — single-writer pattern works for current usage)
+- **Status**: ✅ FIXED
+- **Fix**: Added `PRAGMA journal_mode=WAL` in `database.rs` `init_database()` after opening the connection. Improves concurrent read performance.
 
 ### 13. No Text Length Validation
 - **File**: `queueStore.ts` lines 374-378

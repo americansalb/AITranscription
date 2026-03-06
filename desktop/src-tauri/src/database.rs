@@ -41,6 +41,10 @@ pub fn init_database() -> Result<(), String> {
 
     let conn = Connection::open(&db_path).map_err(|e| format!("Failed to open database: {}", e))?;
 
+    // Enable WAL mode for better concurrent read performance
+    conn.execute_batch("PRAGMA journal_mode=WAL;")
+        .map_err(|e| format!("Failed to enable WAL mode: {}", e))?;
+
     // Create queue_items table
     conn.execute(
         "CREATE TABLE IF NOT EXISTS queue_items (
