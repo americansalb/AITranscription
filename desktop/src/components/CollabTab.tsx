@@ -3142,10 +3142,13 @@ When multiple instances of this role are active:
                             if (window.__TAURI__) {
                               const { invoke } = await import("@tauri-apps/api/core");
                               await invoke("open_url_in_browser", { url: "https://nodejs.org" });
+                              return;
                             }
                           } catch (e) {
-                            console.error("[CollabTab] Failed to open URL:", e);
+                            console.error("[CollabTab] Failed to open URL via Tauri:", e);
                           }
+                          // Fallback: try window.open
+                          window.open("https://nodejs.org", "_blank");
                         }}
                       >Download Node.js</button>
                       <button
