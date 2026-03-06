@@ -2036,6 +2036,28 @@ fn set_recording_state(app: tauri::AppHandle, recording: bool, state: Option<Str
                 let _ = window.request_user_attention(Some(UserAttentionType::Informational));
             }
         }
+
+        // Play native system sound as fallback when WebAudio is suspended (background window)
+        // afplay is non-blocking and works even when the webview is not focused
+        if state_str == "recording" {
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("afplay")
+                    .args(["/System/Library/Sounds/Tink.aiff"])
+                    .output();
+            });
+        } else if state_str == "success" {
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("afplay")
+                    .args(["/System/Library/Sounds/Glass.aiff"])
+                    .output();
+            });
+        } else if state_str == "error" {
+            std::thread::spawn(|| {
+                let _ = std::process::Command::new("afplay")
+                    .args(["/System/Library/Sounds/Basso.aiff"])
+                    .output();
+            });
+        }
     }
 
     Ok(())
@@ -3805,6 +3827,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Create tray menu
             let show_item = MenuItemBuilder::with_id("show", "Show Vaak").build(app)?;
