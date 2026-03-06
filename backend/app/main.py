@@ -16,7 +16,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # Allow microphone for vaaklite (transcription web app needs it)
+        if request.url.path.startswith("/vaaklite") or request.url.path.startswith("/api/v1/transcri"):
+            response.headers["Permissions-Policy"] = "camera=(), geolocation=()"
+        else:
+            response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         return response
 
 from app.api import router
