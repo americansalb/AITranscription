@@ -46,6 +46,7 @@ export async function interpret(
   provider: string,
   sourceLang?: string,
   previousTranslation?: string,
+  signal?: AbortSignal,
 ): Promise<InterpretResult> {
   const fd = new FormData();
   const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("wav") ? "wav" : "webm";
@@ -59,7 +60,7 @@ export async function interpret(
     fd.append("previous_translation", previousTranslation);
   }
 
-  const res = await fetch(`${API_BASE}/interpret`, { method: "POST", body: fd });
+  const res = await fetch(`${API_BASE}/interpret`, { method: "POST", body: fd, signal });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
     throw new Error(err.detail || `Interpretation failed (${res.status})`);
@@ -68,13 +69,13 @@ export async function interpret(
 }
 
 /** Transcribe only (no translation). */
-export async function transcribe(blob: Blob, language?: string): Promise<TranscribeResult> {
+export async function transcribe(blob: Blob, language?: string, signal?: AbortSignal): Promise<TranscribeResult> {
   const fd = new FormData();
   const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("wav") ? "wav" : "webm";
   fd.append("audio", blob, `recording.${ext}`);
   if (language && language !== "auto") fd.append("language", language);
 
-  const res = await fetch(`${API_BASE}/transcribe`, { method: "POST", body: fd });
+  const res = await fetch(`${API_BASE}/transcribe`, { method: "POST", body: fd, signal });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
     throw new Error(err.detail || `Transcription failed (${res.status})`);
@@ -88,11 +89,13 @@ export async function translateText(
   sourceLang: string,
   targetLang: string,
   provider: string,
+  signal?: AbortSignal,
 ): Promise<TranslateResult> {
   const res = await fetch(`${API_BASE}/translate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, source_lang: sourceLang, target_lang: targetLang, provider }),
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));

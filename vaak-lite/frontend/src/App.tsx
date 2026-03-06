@@ -4,7 +4,8 @@ import { InterpretationView, type InterpretationEntry, type EntryStatus } from "
 import { RecordButton } from "./components/RecordButton";
 import { AudioVisualizer } from "./components/AudioVisualizer";
 import { useAudioRecorder } from "./hooks/useAudioRecorder";
-import { interpret, transcribe, getProviders, type ProviderInfo } from "./lib/api";
+import { useSpeechSynthesis } from "./hooks/useSpeechSynthesis";
+import { interpret, transcribe, translateText, getProviders, type ProviderInfo } from "./lib/api";
 
 export default function App() {
   const [settings, setSettings] = useState<InterpretationSettings>(DEFAULT_SETTINGS);
@@ -18,10 +19,21 @@ export default function App() {
   const speakerRef = useRef<"A" | "B">("A");
   // Track the in-progress entry for simultaneous mode
   const simultaneousEntryId = useRef<number | null>(null);
-  const lastSimultaneousText = useRef("");
-  const lastSimultaneousTranslation = useRef("");
-  const simultaneousProcessing = useRef(false);
+  // Track the seq of the latest transcription result we accepted
+  const lastAcceptedSeq = useRef(-1);
+  // Debounced translation: abort stale LLM calls, timer for debounce
+  const translateAbort = useRef<AbortController | null>(null);
+  const translateTimer = useRef<number>(0);
+  // Latest source text for the current simultaneous entry (for debounced translation)
+  const latestSourceText = useRef("");
+  const latestSourceLang = useRef("");
   const recorder = useAudioRecorder();
+  const tts = useSpeechSynthesis();
+
+  // TTS: track which entries have been spoken and debounce timer
+  const lastSpokenEntryId = useRef(0);
+  const ttsDebounceTimer = useRef<number>(0);
+  const lastTranslatedText = useRef("");
 
   // Fetch available providers on mount
   useEffect(() => {
@@ -39,6 +51,50 @@ export default function App() {
       speakerRef.current = "A";
     }
   }, [settings.direction]);
+
+  // TTS: auto-read translations after silence delay
+  useEffect(() => {
+    if (!settings.ttsEnabled || settings.mode !== "interpret") return;
+    if (ttsDebounceTimer.current) clearTimeout(ttsDebounceTimer.current);
+
+    // Find the latest entry with translated text
+    const latestWithText = [...entries].reverse().find(
+      (e) => e.translatedText && e.id > lastSpokenEntryId.current,
+    );
+    if (!latestWithText) return;
+
+    // If the text changed, reset the debounce timer
+    if (latestWithText.translatedText !== lastTranslatedText.current) {
+      lastTranslatedText.current = latestWithText.translatedText;
+    }
+
+    // Wait for silence delay, then speak
+    ttsDebounceTimer.current = window.setTimeout(() => {
+      if (!settings.ttsEnabled) return;
+      const textToSpeak = latestWithText.translatedText;
+      if (!textToSpeak) return;
+
+      // Find the selected voice
+      const targetVoices = tts.voicesForLang(settings.targetLang);
+      const selectedVoice = settings.ttsVoice
+        ? targetVoices.find((v) => v.voiceURI === settings.ttsVoice) || null
+        : targetVoices[0] || null;
+
+      tts.speak(textToSpeak, selectedVoice, settings.ttsRate);
+      lastSpokenEntryId.current = latestWithText.id;
+    }, settings.ttsSilenceDelay * 1000);
+
+    return () => {
+      if (ttsDebounceTimer.current) clearTimeout(ttsDebounceTimer.current);
+    };
+  }, [entries, settings.ttsEnabled, settings.ttsSilenceDelay, settings.ttsRate, settings.ttsVoice, settings.targetLang, settings.mode, tts]);
+
+  // Auto-stop TTS when recording starts (don't talk over the mic)
+  useEffect(() => {
+    if (recorder.isRecording && tts.isSpeaking) {
+      tts.stop();
+    }
+  }, [recorder.isRecording, tts]);
 
   const showStatus = useCallback((msg: string, ms = 3000) => {
     setStatusMsg(msg);
@@ -133,40 +189,56 @@ export default function App() {
   );
 
   // ── Process a blob for simultaneous mode ────────────────
-  // Each chunk contains a rolling window of recent audio (~30s max).
-  // The text updates in-place within a single entry. Every ~30 seconds
-  // the entry is finalized and a new one starts, so audio never grows
-  // unbounded. A processing guard prevents requests from piling up.
+  // Transcription (Whisper) runs on every chunk without throttling — it's
+  // fast and each chunk's rolling window supersedes the previous one.
+  // Translation (LLM) is debounced: it only fires 2 seconds after the
+  // source text stops changing, and stale translations are aborted.
 
-  const CHUNKS_PER_ENTRY = 6; // 6 * 5s = 30s before starting a new entry
+  /** Fire a debounced translation for the current source text. */
+  const scheduleTranslation = useCallback(
+    (entryId: number) => {
+      if (translateTimer.current) clearTimeout(translateTimer.current);
+      translateTimer.current = window.setTimeout(async () => {
+        const text = latestSourceText.current;
+        const srcLang = latestSourceLang.current;
+        if (!text.trim() || settings.mode !== "interpret") return;
+
+        // Abort any previous in-flight translation
+        if (translateAbort.current) translateAbort.current.abort();
+        const controller = new AbortController();
+        translateAbort.current = controller;
+
+        try {
+          const result = await translateText(
+            text, srcLang, settings.targetLang, settings.provider, controller.signal,
+          );
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId
+                ? { ...e, translatedText: result.translated_text, provider: result.provider }
+                : e,
+            ),
+          );
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          console.warn("Translation failed:", err);
+        }
+      }, 2000);
+    },
+    [settings],
+  );
 
   const processSimultaneousChunk = useCallback(
     async (blob: Blob, seq: number, speaker?: "A" | "B") => {
-      // Skip if previous chunk is still being processed
-      if (simultaneousProcessing.current) return;
-      simultaneousProcessing.current = true;
-
       const isTranslation = settings.mode === "interpret";
 
-      // Every CHUNKS_PER_ENTRY chunks, finalize the current entry and start fresh.
-      // This keeps each entry bounded to ~30s of audio.
-      if (simultaneousEntryId.current !== null && seq > 0 && seq % CHUNKS_PER_ENTRY === 0) {
-        const prevId = simultaneousEntryId.current;
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === prevId ? { ...e, status: "complete" as EntryStatus } : e,
-          ),
-        );
-        simultaneousEntryId.current = null;
-        // Keep lastSimultaneousTranslation for continuity context
-        lastSimultaneousText.current = "";
-      }
-
-      // Create in-progress entry on first chunk or after rotation
+      // Create the entry on first chunk only
       if (simultaneousEntryId.current === null) {
         const entryId = nextId.current++;
         simultaneousEntryId.current = entryId;
-        lastSimultaneousText.current = "";
+        lastAcceptedSeq.current = -1;
+        latestSourceText.current = "";
+        latestSourceLang.current = "";
         const entry: InterpretationEntry = {
           id: entryId,
           sourceText: "",
@@ -187,82 +259,100 @@ export default function App() {
       const currentEntryId = simultaneousEntryId.current;
 
       try {
+        // Always transcribe — Whisper is fast, don't throttle it
+        const lang = settings.sourceLang !== "auto" ? settings.sourceLang : undefined;
+        const result = await transcribe(blob, lang);
+        if (!result.text.trim()) return;
+
+        // Ignore out-of-order responses
+        if (seq <= lastAcceptedSeq.current) return;
+        lastAcceptedSeq.current = seq;
+
+        // Update source text immediately
+        latestSourceText.current = result.text;
+        latestSourceLang.current = result.language || settings.sourceLang;
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === currentEntryId
+              ? {
+                  ...e,
+                  sourceText: result.text,
+                  sourceLang: result.language || settings.sourceLang,
+                  duration: result.duration,
+                  pending: false,
+                  status: "in_progress",
+                  seq,
+                }
+              : e,
+          ),
+        );
+
+        // Schedule translation (debounced — only fires when text stabilizes)
         if (isTranslation) {
-          const result = await interpret(blob, settings.targetLang, settings.provider, settings.sourceLang, lastSimultaneousTranslation.current);
-          if (!result.source_text.trim()) return;
-
-          if (result.source_text.length >= lastSimultaneousText.current.length) {
-            lastSimultaneousText.current = result.source_text;
-            lastSimultaneousTranslation.current = result.translated_text;
-            setEntries((prev) =>
-              prev.map((e) =>
-                e.id === currentEntryId
-                  ? {
-                      ...e,
-                      sourceText: result.source_text,
-                      translatedText: result.translated_text,
-                      sourceLang: result.source_lang,
-                      targetLang: result.target_lang,
-                      duration: result.duration,
-                      provider: result.provider,
-                      pending: false,
-                      status: "in_progress",
-                      seq,
-                    }
-                  : e,
-              ),
-            );
-          }
-        } else {
-          const lang = settings.sourceLang !== "auto" ? settings.sourceLang : undefined;
-          const result = await transcribe(blob, lang);
-          if (!result.text.trim()) return;
-
-          if (result.text.length >= lastSimultaneousText.current.length) {
-            lastSimultaneousText.current = result.text;
-            setEntries((prev) =>
-              prev.map((e) =>
-                e.id === currentEntryId
-                  ? {
-                      ...e,
-                      sourceText: result.text,
-                      translatedText: "",
-                      sourceLang: result.language || settings.sourceLang,
-                      duration: result.duration,
-                      provider: "",
-                      pending: false,
-                      status: "in_progress",
-                      seq,
-                    }
-                  : e,
-              ),
-            );
-          }
+          scheduleTranslation(currentEntryId);
         }
       } catch (err) {
         console.warn("Simultaneous chunk failed:", err);
-      } finally {
-        simultaneousProcessing.current = false;
       }
     },
-    [settings],
+    [settings, scheduleTranslation],
   );
 
   // Finalize the in-progress simultaneous entry
-  const finalizeSimultaneous = useCallback(() => {
-    const entryId = simultaneousEntryId.current;
-    if (entryId !== null) {
-      setEntries((prev) =>
-        prev.map((e) =>
-          e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
-        ),
-      );
+  const finalizeSimultaneous = useCallback(
+    async () => {
+      // Cancel pending translation timer
+      if (translateTimer.current) {
+        clearTimeout(translateTimer.current);
+        translateTimer.current = 0;
+      }
+
+      const entryId = simultaneousEntryId.current;
+      if (entryId === null) return;
+
+      // If in interpret mode, fire one final translation with the latest text
+      if (settings.mode === "interpret" && latestSourceText.current.trim()) {
+        if (translateAbort.current) translateAbort.current.abort();
+        const controller = new AbortController();
+        translateAbort.current = controller;
+        try {
+          const result = await translateText(
+            latestSourceText.current,
+            latestSourceLang.current,
+            settings.targetLang,
+            settings.provider,
+            controller.signal,
+          );
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId
+                ? { ...e, translatedText: result.translated_text, provider: result.provider, status: "complete" as EntryStatus }
+                : e,
+            ),
+          );
+        } catch {
+          // Even if translation fails, still mark entry complete
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
+            ),
+          );
+        }
+      } else {
+        setEntries((prev) =>
+          prev.map((e) =>
+            e.id === entryId ? { ...e, status: "complete" as EntryStatus } : e,
+          ),
+        );
+      }
+
       simultaneousEntryId.current = null;
-      lastSimultaneousText.current = "";
-      lastSimultaneousTranslation.current = "";
-      simultaneousProcessing.current = false;
-    }
-  }, []);
+      lastAcceptedSeq.current = -1;
+      latestSourceText.current = "";
+      latestSourceLang.current = "";
+    },
+    [settings],
+  );
 
   // ── Recording handlers per mode combination ──────────────
 
@@ -311,9 +401,17 @@ export default function App() {
       );
     } else if (settings.timing === "simultaneous") {
       simultaneousEntryId.current = null;
-      lastSimultaneousText.current = "";
-      lastSimultaneousTranslation.current = "";
-      simultaneousProcessing.current = false;
+      lastAcceptedSeq.current = -1;
+      latestSourceText.current = "";
+      latestSourceLang.current = "";
+      if (translateAbort.current) {
+        translateAbort.current.abort();
+        translateAbort.current = null;
+      }
+      if (translateTimer.current) {
+        clearTimeout(translateTimer.current);
+        translateTimer.current = 0;
+      }
       await recorder.startChunked(5000, async (chunk, seq) => {
         const speaker = useBidirectional ? speakerRef.current : undefined;
         processSimultaneousChunk(chunk, seq, speaker);
@@ -383,6 +481,7 @@ export default function App() {
           settings={settings}
           onChange={setSettings}
           availableProviders={providers}
+          ttsVoices={tts.voicesForLang(settings.targetLang)}
           disabled={recorder.isRecording}
         />
       )}
@@ -403,6 +502,26 @@ export default function App() {
           hint={recordHint}
         />
       </div>
+
+      {tts.isSpeaking && (
+        <div className="tts-bar">
+          <span className="tts-label">{tts.isPaused ? "Paused" : "Speaking..."}</span>
+          <button
+            className="tts-btn"
+            onClick={() => tts.isPaused ? tts.resume() : tts.pause()}
+            aria-label={tts.isPaused ? "Resume speech" : "Pause speech"}
+          >
+            {tts.isPaused ? "Resume" : "Pause"}
+          </button>
+          <button
+            className="tts-btn tts-stop"
+            onClick={() => tts.stop()}
+            aria-label="Stop speech"
+          >
+            Stop
+          </button>
+        </div>
+      )}
 
       <footer className="app-footer">
         {recorder.isRecording && <span className="stat">{formatDuration(recorder.duration)}</span>}
