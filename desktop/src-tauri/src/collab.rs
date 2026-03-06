@@ -1856,6 +1856,90 @@ fn global_templates_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".vaak").join("role-templates"))
 }
 
+/// Import missing global role templates into a project.
+/// Reads ~/.vaak/role-templates/*.json and adds any roles not already in project.json.
+/// Also copies matching .md briefings to .vaak/roles/ if not present.
+/// Idempotent — safe to call on every project open.
+pub fn grandfather_global_templates(dir: &str) -> Result<u32, String> {
+    let templates_dir = global_templates_dir()?;
+    if !templates_dir.exists() {
+        return Ok(0);
+    }
+
+    let config_path = Path::new(dir).join(".vaak").join("project.json");
+    if !config_path.exists() {
+        return Ok(0);
+    }
+
+    let config_content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&config_content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    let roles = match config.get_mut("roles").and_then(|r| r.as_object_mut()) {
+        Some(r) => r,
+        None => return Ok(0),
+    };
+
+    let mut added: u32 = 0;
+
+    let entries = std::fs::read_dir(&templates_dir)
+        .map_err(|e| format!("Failed to read role-templates: {}", e))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let slug = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        if slug.is_empty() || roles.contains_key(&slug) {
+            continue;
+        }
+
+        let template_content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let template: serde_json::Value = match serde_json::from_str(&template_content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let mut role_def = template.clone();
+        if let Some(obj) = role_def.as_object_mut() {
+            obj.insert("created_at".to_string(), serde_json::json!(iso_now()));
+        }
+
+        eprintln!("[collab] Grandfathering role template '{}' into project", slug);
+        roles.insert(slug.clone(), role_def);
+        added += 1;
+
+        // Copy briefing .md if it exists and project doesn't have one
+        let briefing_template = templates_dir.join(format!("{}.md", slug));
+        if briefing_template.exists() {
+            let roles_dir = Path::new(dir).join(".vaak").join("roles");
+            let _ = std::fs::create_dir_all(&roles_dir);
+            let dest = roles_dir.join(format!("{}.md", slug));
+            if !dest.exists() {
+                if let Err(e) = std::fs::copy(&briefing_template, &dest) {
+                    eprintln!("[collab] Failed to copy briefing for '{}': {}", slug, e);
+                }
+            }
+        }
+    }
+
+    if added > 0 {
+        config["updated_at"] = serde_json::Value::String(iso_now());
+        let updated = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+        atomic_write(&config_path, updated.as_bytes())
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+        eprintln!("[collab] Grandfathered {} role template(s) into project", added);
+    }
+
+    Ok(added)
+}
+
 /// Save a role from a project as a global template.
 /// Copies the role definition to ~/.vaak/role-templates/{slug}.json
 /// and the briefing to ~/.vaak/role-templates/{slug}.md

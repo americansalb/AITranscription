@@ -2077,6 +2077,13 @@ fn watch_project_dir(dir: String) -> Result<serde_json::Value, String> {
         Err(e) => eprintln!("[collab] Board compaction failed (non-fatal): {}", e),
     }
 
+    // Import any missing global role templates into this project
+    match collab::grandfather_global_templates(&effective_dir) {
+        Ok(n) if n > 0 => eprintln!("[main] Imported {} global role template(s) into project", n),
+        Err(e) => eprintln!("[main] Global template import failed (non-fatal): {}", e),
+        _ => {}
+    }
+
     // Read and parse full project state
     let parsed = collab::parse_project_dir(&effective_dir);
 
