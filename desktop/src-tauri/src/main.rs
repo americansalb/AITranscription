@@ -3347,7 +3347,13 @@ fn delete_role(project_dir: String, slug: String) -> Result<(), String> {
 fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<collab::RoleGroup, String> {
     let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::save_role_group(&project_dir, group);
-    if result.is_ok() { notify_collab_change(); }
+    if result.is_ok() {
+        notify_collab_change();
+        // Auto-save all role_groups to global ~/.vaak/role-groups.json
+        if let Err(e) = sync_role_groups_to_global(&project_dir) {
+            eprintln!("[main] Auto-sync role groups to global failed: {}", e);
+        }
+    }
     result
 }
 
@@ -3355,8 +3361,35 @@ fn save_role_group(project_dir: String, group: collab::RoleGroup) -> Result<coll
 fn delete_role_group(project_dir: String, slug: String) -> Result<(), String> {
     let project_dir = validate_project_dir(&project_dir)?;
     let result = collab::delete_role_group(&project_dir, &slug);
-    if result.is_ok() { notify_collab_change(); }
+    if result.is_ok() {
+        notify_collab_change();
+        if let Err(e) = sync_role_groups_to_global(&project_dir) {
+            eprintln!("[main] Auto-sync role groups to global failed: {}", e);
+        }
+    }
     result
+}
+
+/// Sync role_groups from project.json to ~/.vaak/role-groups.json
+fn sync_role_groups_to_global(project_dir: &str) -> Result<(), String> {
+    let config_path = std::path::Path::new(project_dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    let groups = config.get("role_groups")
+        .ok_or("No role_groups in project.json")?;
+
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or("Cannot determine home directory")?;
+    let global_path = std::path::Path::new(&home).join(".vaak").join("role-groups.json");
+    let json = serde_json::to_string_pretty(groups)
+        .map_err(|e| format!("Failed to serialize role groups: {}", e))?;
+    std::fs::write(&global_path, json)
+        .map_err(|e| format!("Failed to write global role-groups.json: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -4417,6 +4450,7 @@ fn main() {
             launcher::buzz_agent_terminal,
             launcher::check_macos_permissions,
             launcher::open_macos_settings,
+            launcher::open_url_in_browser,
             launcher::open_terminal_in_dir,
             launcher::check_npm_installed,
             launcher::install_claude_cli,

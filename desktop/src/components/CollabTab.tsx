@@ -3137,8 +3137,15 @@ When multiple instances of this role are active:
                     <div className="setup-check-actions">
                       <button
                         className="setup-action-btn setup-action-primary"
-                        onClick={() => {
-                          window.open("https://nodejs.org", "_blank");
+                        onClick={async () => {
+                          try {
+                            if (window.__TAURI__) {
+                              const { invoke } = await import("@tauri-apps/api/core");
+                              await invoke("open_url_in_browser", { url: "https://nodejs.org" });
+                            }
+                          } catch (e) {
+                            console.error("[CollabTab] Failed to open URL:", e);
+                          }
                         }}
                       >Download Node.js</button>
                       <button

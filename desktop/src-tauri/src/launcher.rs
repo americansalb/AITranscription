@@ -1344,6 +1344,40 @@ pub fn open_macos_settings(pane_url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Open a URL in the system's default browser.
+/// Only allows https:// URLs to prevent arbitrary command execution.
+#[tauri::command]
+pub fn open_url_in_browser(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("Only https:// URLs are allowed".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to open URL: {}", e))?;
+    }
+    Ok(())
+}
+
 /// Check if npm is available on the system PATH.
 /// On macOS, uses a login shell to pick up nvm/fnm/homebrew paths.
 #[tauri::command]
