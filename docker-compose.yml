@@ -1,16 +1,25 @@
+  # REQUIRED: Create a .env file with these variables before running:
+  #   POSTGRES_PASSWORD=<strong-random-password>
+  #   VAAK_WEB_SECRET_KEY=<random-64-char-string>
+  #   VAAK_WEB_FERNET_KEY=<fernet-key>
+  #
+  # Generate secrets:
+  #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+  #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
 services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: vaak
-      POSTGRES_PASSWORD: vaak_dev_password
-      POSTGRES_DB: vaak_web
+      POSTGRES_USER: ${POSTGRES_USER:-vaak}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-vaak_web}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vaak"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vaak}"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -32,8 +41,8 @@ services:
       retries: 10
       start_period: 30s
     environment:
-      VAAK_WEB_DATABASE_URL: postgresql+asyncpg://vaak:vaak_dev_password@db:5432/vaak_web
-      VAAK_WEB_SECRET_KEY: ${VAAK_WEB_SECRET_KEY:-change-me-in-production}
+      VAAK_WEB_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vaak}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vaak_web}
+      VAAK_WEB_SECRET_KEY: ${VAAK_WEB_SECRET_KEY:?Set VAAK_WEB_SECRET_KEY in .env}
       VAAK_WEB_FERNET_KEY: ${VAAK_WEB_FERNET_KEY:-}
       VAAK_WEB_ANTHROPIC_API_KEY: ${VAAK_WEB_ANTHROPIC_API_KEY:-}
       VAAK_WEB_OPENAI_API_KEY: ${VAAK_WEB_OPENAI_API_KEY:-}

@@ -39,7 +39,8 @@ export function QueueApp() {
     setVoiceEnabled(next);
     saveVoiceEnabled(next);
     if (!next) {
-      const { clearPending } = await import("./lib/queueStore");
+      const { stopPlayback, clearPending } = await import("./lib/queueStore");
+      stopPlayback(); // QUEUE-9: Stop currently playing item immediately
       await clearPending();
     }
     if (window.__TAURI__) {

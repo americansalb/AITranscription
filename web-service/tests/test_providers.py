@@ -174,7 +174,7 @@ async def test_completion_usage_limit_exceeded(client: AsyncClient, db, monkeypa
 
     async def _noop_reset(db, user):
         pass
-    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
+    monkeypatch.setattr(providers_mod, "maybe_reset_monthly_usage", _noop_reset)
 
     token, pid, headers = await _setup_project_with_role(client, "comp-limit@test.com")
 
@@ -234,7 +234,7 @@ async def test_completion_byok_missing_key(client: AsyncClient, db, monkeypatch)
 
     async def _noop_reset(db, user):
         pass
-    monkeypatch.setattr(providers_mod, "_maybe_reset_monthly_usage", _noop_reset)
+    monkeypatch.setattr(providers_mod, "maybe_reset_monthly_usage", _noop_reset)
 
     token, pid, headers = await _setup_project_with_role(client, "comp-byok@test.com")
 

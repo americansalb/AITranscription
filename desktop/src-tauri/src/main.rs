@@ -319,6 +319,21 @@ fn get_auto_collab() -> bool {
     load_voice_settings().auto_collab
 }
 
+/// Check if the vaak-mcp sidecar binary is accessible
+#[tauri::command]
+fn check_sidecar_status() -> serde_json::Value {
+    match get_sidecar_path() {
+        Some(path) => serde_json::json!({
+            "found": true,
+            "path": path.to_string_lossy().to_string()
+        }),
+        None => serde_json::json!({
+            "found": false,
+            "path": null
+        }),
+    }
+}
+
 /// Tauri command to toggle human-in-loop mode
 #[tauri::command]
 fn set_human_in_loop(enabled: bool) -> Result<(), String> {
@@ -837,7 +852,8 @@ fn setup_claude_code_integration() {
         }
         None => {
             // Fallback to vaak-speak if pip-installed (for backwards compatibility)
-            log_error("Sidecar not found, falling back to vaak-speak in PATH");
+            log_error("WARNING: vaak-mcp sidecar binary not found! Claude Code collab will not work.");
+            log_error("Expected locations checked: binaries/ dir, macOS Resources, dev paths");
             "vaak-speak".to_string()
         }
     };
@@ -904,6 +920,12 @@ fn setup_claude_code_integration() {
     let stop_hook_command;
     #[cfg(windows)]
     {
+        // Validate sidecar_path doesn't contain cmd injection characters
+        if sidecar_path.chars().any(|c| matches!(c, '"' | '&' | '|' | '>' | '<' | '^')) {
+            log_error(&format!("SECURITY: sidecar path contains dangerous characters, skipping hook setup: {}", sidecar_path));
+            return;
+        }
+
         // Write a .cmd wrapper for UserPromptSubmit hook
         let cmd_path = hooks_dir.join("vaak-hook.cmd");
         let cmd_content = format!("@echo off\n\"{}\" --hook\n", sidecar_path.replace('/', "\\"));
@@ -970,7 +992,7 @@ fn setup_claude_code_integration() {
                             hooks.iter().any(|hook| {
                                 hook.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map(|c| c == command || c.contains("vaak-hook") || c.contains("vaak-stop-hook"))
+                                    .map(|c| c == command)
                                     .unwrap_or(false)
                             })
                         })
@@ -1287,7 +1309,7 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
             }).to_string();
             // CORS: only allow localhost origins (Tauri WebView + local dev)
             let origin = request.headers().iter()
-                .find(|h| h.field.as_str().eq_ignore_ascii_case("origin"))
+                .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("origin"))
                 .map(|h| h.value.as_str().to_string())
                 .unwrap_or_default();
             let cors_origin = if origin.starts_with("http://localhost")
@@ -3813,6 +3835,23 @@ fn main() {
             // Set up Claude Code integration (auto-configure MCP)
             setup_claude_code_integration();
 
+            // Ensure voice-settings.json exists with defaults on first launch
+            // (required for MCP hook to read auto_collab, blind_mode, etc.)
+            if let Some(settings_path) = get_voice_settings_path() {
+                if !settings_path.exists() {
+                    log_error("[setup] voice-settings.json not found — creating with defaults");
+                    let defaults = VoiceSettings::default();
+                    if let Some(parent) = settings_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    if let Ok(json) = serde_json::to_string_pretty(&defaults) {
+                        if let Err(e) = fs::write(&settings_path, json) {
+                            log_error(&format!("[setup] Failed to create voice-settings.json: {}", e));
+                        }
+                    }
+                }
+            }
+
             // Start the speak server for Claude Code integration
             start_speak_server(app.handle().clone());
 
@@ -4298,6 +4337,7 @@ fn main() {
             save_voice_settings_cmd,
             set_auto_collab,
             get_auto_collab,
+            check_sidecar_status,
             set_human_in_loop,
             get_human_in_loop,
             save_screen_reader_settings,
@@ -4358,6 +4398,7 @@ fn main() {
             remove_global_role_template,
             // Team launcher commands
             launcher::check_claude_installed,
+            launcher::check_anthropic_key,
             launcher::launch_team_member,
             launcher::launch_team,
             launcher::kill_team_member,
@@ -4457,5 +4498,185 @@ fn show_error_dialog(message: &str) {
                 .args(["Vaak Error", message])
                 .output();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_project_dir ───────────────────────────────────────────
+
+    #[test]
+    fn test_validate_project_dir_path_traversal_rejected() {
+        let result = validate_project_dir("/tmp/../etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_validate_project_dir_nonexistent() {
+        let result = validate_project_dir("/tmp/nonexistent-vaak-proj-99999");
+        assert!(result.is_err(), "non-existent directory should fail");
+    }
+
+    #[test]
+    fn test_validate_project_dir_no_vaak_subdir() {
+        let tmp = std::env::temp_dir().join("vaak-test-validate-no-vaak");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let result = validate_project_dir(tmp.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Not a Vaak project"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_project_dir_valid() {
+        let tmp = std::env::temp_dir().join("vaak-test-validate-ok");
+        let _ = std::fs::create_dir_all(tmp.join(".vaak"));
+
+        let result = validate_project_dir(tmp.to_str().unwrap());
+        assert!(result.is_ok(), "valid project dir should succeed: {:?}", result);
+        let canonical = result.unwrap();
+        assert!(!canonical.starts_with("\\\\?\\"), "should strip Windows extended-length prefix");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── initialize_project ─────────────────────────────────────────────
+
+    #[test]
+    fn test_initialize_project_creates_structure() {
+        let tmp = std::env::temp_dir().join("vaak-test-init-struct");
+        let _ = std::fs::remove_dir_all(&tmp); // clean slate
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config = serde_json::json!({
+            "project_id": "test-001",
+            "name": "Test Project",
+            "roles": {
+                "architect": {"title": "Architect"},
+                "developer": {"title": "Developer"}
+            },
+            "settings": {
+                "heartbeat_timeout_seconds": 300
+            }
+        });
+
+        let result = initialize_project(
+            tmp.to_str().unwrap().to_string(),
+            config.to_string(),
+        );
+        assert!(result.is_ok(), "initialize_project should succeed: {:?}", result);
+
+        // Verify directory structure
+        assert!(tmp.join(".vaak").is_dir(), ".vaak/ should exist");
+        assert!(tmp.join(".vaak/roles").is_dir(), ".vaak/roles/ should exist");
+        assert!(tmp.join(".vaak/last-seen").is_dir(), ".vaak/last-seen/ should exist");
+        assert!(tmp.join(".vaak/sections").is_dir(), ".vaak/sections/ should exist");
+
+        // Verify project.json was written with pretty formatting
+        let pj = std::fs::read_to_string(tmp.join(".vaak/project.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pj).unwrap();
+        assert_eq!(parsed["project_id"].as_str().unwrap(), "test-001");
+        assert!(pj.contains('\n'), "project.json should be pretty-printed");
+
+        // Verify sessions.json
+        let sj = std::fs::read_to_string(tmp.join(".vaak/sessions.json")).unwrap();
+        let sessions: serde_json::Value = serde_json::from_str(&sj).unwrap();
+        assert!(sessions["bindings"].as_array().unwrap().is_empty());
+
+        // Verify board.jsonl exists (empty)
+        let board = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        assert!(board.is_empty(), "board.jsonl should be empty initially");
+
+        // Verify role briefings
+        assert!(tmp.join(".vaak/roles/architect.md").exists());
+        assert!(tmp.join(".vaak/roles/manager.md").exists());
+        assert!(tmp.join(".vaak/roles/developer.md").exists());
+        assert!(tmp.join(".vaak/roles/tester.md").exists());
+
+        // Verify briefing content has reasonable structure
+        let arch_brief = std::fs::read_to_string(tmp.join(".vaak/roles/architect.md")).unwrap();
+        assert!(arch_brief.starts_with("# Architect"), "architect briefing should start with header");
+        assert!(arch_brief.contains("project_send"), "briefing should mention project_send");
+        assert!(arch_brief.contains("Workflow Types"), "briefing should contain workflow section");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_initialize_project_path_traversal_rejected() {
+        let result = initialize_project(
+            "/tmp/../etc".to_string(),
+            "{}".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_initialize_project_invalid_json() {
+        let tmp = std::env::temp_dir().join("vaak-test-init-badjson");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let result = initialize_project(
+            tmp.to_str().unwrap().to_string(),
+            "not valid json!!!".to_string(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid config JSON"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_initialize_project_nonexistent_dir() {
+        let result = initialize_project(
+            "/tmp/nonexistent-vaak-init-99999".to_string(),
+            "{}".to_string(),
+        );
+        assert!(result.is_err(), "non-existent dir should fail");
+    }
+
+    #[test]
+    fn test_initialize_project_idempotent() {
+        // Running initialize_project twice should succeed (overwrite existing files)
+        let tmp = std::env::temp_dir().join("vaak-test-init-idempotent");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let config = serde_json::json!({"project_id": "v1", "name": "First"});
+        initialize_project(tmp.to_str().unwrap().to_string(), config.to_string()).unwrap();
+
+        let config2 = serde_json::json!({"project_id": "v2", "name": "Second"});
+        let result = initialize_project(tmp.to_str().unwrap().to_string(), config2.to_string());
+        assert!(result.is_ok(), "second init should succeed");
+
+        // Verify the second config overwrote the first
+        let pj = std::fs::read_to_string(tmp.join(".vaak/project.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pj).unwrap();
+        assert_eq!(parsed["project_id"].as_str().unwrap(), "v2");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── get_sidecar_path ───────────────────────────────────────────────
+
+    #[test]
+    fn test_get_sidecar_path_returns_option() {
+        // We can't guarantee the sidecar exists in test environment,
+        // but we can verify the function doesn't panic
+        let result = get_sidecar_path();
+        // In dev environment, sidecar usually exists; in CI it might not
+        if let Some(path) = result {
+            assert!(path.exists(), "if returned, sidecar path should exist");
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(name.contains("vaak-mcp"), "sidecar should contain 'vaak-mcp' in name");
+        }
+        // If None, that's also valid — sidecar may not be built
     }
 }

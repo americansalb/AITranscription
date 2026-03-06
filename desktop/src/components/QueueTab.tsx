@@ -104,9 +104,41 @@ function NowPlayingCard({
     return () => clearInterval(interval);
   }, [isPlaying, isPaused]);
 
-  const displayDuration = duration > 0
-    ? duration
-    : (item.durationMs || (item.text.split(/\s+/).length / 150) * 60 * 1000);
+  // QUEUE-5: Smoothly transition from estimated to real duration to prevent progress bar jump
+  const estimatedDuration = item.durationMs || (item.text.split(/\s+/).length / 150) * 60 * 1000;
+  const [smoothDuration, setSmoothDuration] = useState(estimatedDuration);
+  const smoothDurationRef = React.useRef(estimatedDuration);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+    let cancelled = false;
+    if (duration > 0 && Math.abs(duration - smoothDurationRef.current) > 500) {
+      // Real duration arrived and differs significantly — interpolate over 500ms
+      const startVal = smoothDurationRef.current;
+      const endVal = duration;
+      const startTime = performance.now();
+      const TRANSITION_MS = 500;
+      const animate = (now: number) => {
+        if (cancelled) return; // Guard against unmounted component
+        const elapsed = now - startTime;
+        const t = Math.min(elapsed / TRANSITION_MS, 1);
+        const val = startVal + (endVal - startVal) * t;
+        smoothDurationRef.current = val;
+        setSmoothDuration(val);
+        if (t < 1) rafId = requestAnimationFrame(animate);
+      };
+      rafId = requestAnimationFrame(animate);
+    } else if (duration > 0) {
+      smoothDurationRef.current = duration;
+      setSmoothDuration(duration);
+    }
+    return () => {
+      cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [duration]);
+
+  const displayDuration = smoothDuration > 0 ? smoothDuration : estimatedDuration;
   const progress = displayDuration > 0 ? Math.min((currentTime / displayDuration) * 100, 100) : 0;
 
   return (
@@ -473,11 +505,15 @@ export function QueueTab() {
 
       const currentDragging = draggingIndexRef.current;
       const currentDropTarget = dropTargetIndexRef.current;
-      const items = pendingItemsRef.current;
 
       if (currentDragging !== null && currentDropTarget !== null && currentDragging !== currentDropTarget) {
-        const sourceItem = items[currentDragging];
-        const targetItem = items[currentDropTarget];
+        // QUEUE-6: Reload fresh items from DB to avoid stale positions
+        await queueStore.loadItems();
+        const freshPending = queueStore.getState().items
+          .filter(i => i.status === "pending")
+          .sort((a, b) => a.position - b.position);
+        const sourceItem = freshPending[currentDragging];
+        const targetItem = freshPending[currentDropTarget];
         if (sourceItem && targetItem) {
           try {
             await queueStore.reorderItem(sourceItem.uuid, targetItem.position);

@@ -15,9 +15,8 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +117,7 @@ async def _meter_agent_completion(
 ) -> "ProxyResult":
     """Metered agent completion — enforces the same billing rules as REST /completion.
 
+    Uses the shared metering service (app.services.metering) for all billing logic:
     1. Load user from DB
     2. Lazy-reset monthly counters if in a new month
     3. Check usage against plan limits (raises UsageLimitExceeded if over)
@@ -127,9 +127,16 @@ async def _meter_agent_completion(
 
     This ensures agent completions are fully visible to billing and subject to limits.
     """
-    from app.config import settings
     from app.database import async_session
-    from app.models import SubscriptionTier, UsageRecord, WebUser
+    from app.models import SubscriptionTier, WebUser
+    from app.services.metering import (
+        BillingLimitExceeded,
+        check_billing_limits,
+        get_byok_key,
+        infer_provider_from_model,
+        maybe_reset_monthly_usage,
+        record_usage,
+    )
     from app.services.provider_proxy import proxy_completion
 
     async with async_session() as db:
@@ -141,79 +148,21 @@ async def _meter_agent_completion(
         if not user.is_active:
             raise ValueError(f"User {user_id} is inactive")
 
-        # 2. Lazy monthly reset (same logic as providers.py:_maybe_reset_monthly_usage)
-        now = datetime.now(timezone.utc)
-        if user.usage_reset_at is None or (
-            user.usage_reset_at.year != now.year or user.usage_reset_at.month != now.month
-        ):
-            await db.execute(
-                update(WebUser)
-                .where(WebUser.id == user.id)
-                .values(monthly_tokens_used=0, monthly_cost_usd=0.0, usage_reset_at=now)
-            )
-            await db.commit()
-            await db.refresh(user)
+        # 2. Lazy monthly reset
+        await maybe_reset_monthly_usage(db, user)
 
-        # 3. Check usage limits
-        if user.tier == SubscriptionTier.FREE:
-            monthly_limit = settings.free_tier_monthly_tokens
-        elif user.tier == SubscriptionTier.PRO:
-            monthly_limit = settings.pro_tier_monthly_tokens
-        elif user.tier == SubscriptionTier.BYOK:
-            monthly_limit = 999_999_999
-        else:
-            monthly_limit = settings.free_tier_monthly_tokens
+        # 3. Check billing limits (monthly + session budget)
+        try:
+            await check_billing_limits(db, user, project_id)
+        except BillingLimitExceeded as e:
+            raise UsageLimitExceeded(str(e))
 
-        if user.monthly_tokens_used >= monthly_limit:
-            raise UsageLimitExceeded(
-                f"Monthly token limit ({monthly_limit:,}) reached for user {user_id}"
-            )
-
-        # 3b. Per-session budget (project cost in last 24h)
-        from sqlalchemy import func as sa_func
-        cutoff = now - timedelta(hours=24)
-        session_result = await db.execute(
-            select(sa_func.coalesce(sa_func.sum(UsageRecord.marked_up_cost_usd), 0.0))
-            .where(
-                UsageRecord.user_id == user_id,
-                UsageRecord.project_id == project_id,
-                UsageRecord.created_at >= cutoff,
-            )
-        )
-        session_cost = float(session_result.scalar())
-        if session_cost >= settings.max_cost_per_session:
-            raise UsageLimitExceeded(
-                f"Project session budget (${settings.max_cost_per_session:.2f}/day) "
-                f"exceeded for project {project_id} (current: ${session_cost:.2f})"
-            )
-
-        # 4. BYOK key lookup (decrypt from DB, auto-encrypt legacy plaintext)
-        from app.services.key_encryption import decrypt_key, encrypt_key, is_encrypted
-
+        # 4. BYOK key lookup
         byok_key = None
         if user.tier == SubscriptionTier.BYOK:
-            stored = None
-            attr_name = None
-            if "claude" in model:
-                stored = user.byok_anthropic_key
-                attr_name = "byok_anthropic_key"
-            elif "gpt" in model or model.startswith("o"):
-                stored = user.byok_openai_key
-                attr_name = "byok_openai_key"
-            elif "gemini" in model:
-                stored = user.byok_google_key
-                attr_name = "byok_google_key"
-
-            if stored:
-                byok_key = decrypt_key(stored)
-                # Auto-encrypt legacy plaintext keys on first read
-                if attr_name and not is_encrypted(stored):
-                    encrypted_value = encrypt_key(byok_key)
-                    if encrypted_value != stored:
-                        setattr(user, attr_name, encrypted_value)
-                        await db.commit()
-                        logger.info("Auto-encrypted legacy BYOK key for user %d", user_id)
-
+            provider = infer_provider_from_model(model)
+            if provider:
+                byok_key = await get_byok_key(user, provider, db)
             if not byok_key:
                 raise ValueError(
                     f"BYOK user {user_id} has no API key for model {model}"
@@ -233,31 +182,8 @@ async def _meter_agent_completion(
     )
 
     # 6. Record usage (new DB session for the write)
-    total_tokens = proxy_result.input_tokens + proxy_result.output_tokens
-
     async with async_session() as db:
-        record = UsageRecord(
-            user_id=user_id,
-            project_id=project_id,
-            model=proxy_result.model,
-            provider=proxy_result.provider,
-            input_tokens=proxy_result.input_tokens,
-            output_tokens=proxy_result.output_tokens,
-            raw_cost_usd=proxy_result.raw_cost_usd,
-            marked_up_cost_usd=proxy_result.marked_up_cost_usd,
-        )
-        db.add(record)
-
-        # Atomic counter update (same pattern as providers.py)
-        await db.execute(
-            update(WebUser)
-            .where(WebUser.id == user_id)
-            .values(
-                monthly_tokens_used=WebUser.monthly_tokens_used + total_tokens,
-                monthly_cost_usd=WebUser.monthly_cost_usd + proxy_result.marked_up_cost_usd,
-            )
-        )
-        await db.commit()
+        total_tokens = await record_usage(db, user_id, project_id, proxy_result)
 
     logger.info(
         "Agent metered: user=%d model=%s tokens=%d cost=$%.4f",

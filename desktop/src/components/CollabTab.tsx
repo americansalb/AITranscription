@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
@@ -650,16 +650,21 @@ export function CollabTab() {
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMsgCount, setNewMsgCount] = useState(0);
   const prevMsgCountRef = useRef(0);
+  const savedScrollRef = useRef<number | null>(null);
+  const scrollingToBottomRef = useRef(false);
   const MSG_PAGE_SIZE = 50;
   const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
+  const [npmInstalled, setNpmInstalled] = useState<boolean | null>(null);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [installingCli, setInstallingCli] = useState(false);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
   const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
+  const [apiKeyStatus, setApiKeyStatus] = useState<{ has_key: boolean; key_source: string | null } | null>(null);
+  const [setupDismissed, setSetupDismissed] = useState(() => localStorage.getItem("vaak_setup_dismissed") === "true");
 
   // Role CRUD state
   const AVAILABLE_PERMISSIONS = ["broadcast", "review", "assign_tasks", "status", "question", "handoff", "moderation"];
@@ -1361,6 +1366,18 @@ When multiple instances of this role are active:
     })();
   }, []);
 
+  // Check if Node.js/npm is installed
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const installed = await invoke<boolean>("check_npm_installed");
+        setNpmInstalled(installed);
+      } catch { setNpmInstalled(false); }
+    })();
+  }, []);
+
   // Check if Claude CLI is installed
   useEffect(() => {
     if (!window.__TAURI__) return;
@@ -1372,6 +1389,21 @@ When multiple instances of this role are active:
       } catch { setClaudeInstalled(false); }
     })();
   }, []);
+
+  // Check if ANTHROPIC_API_KEY is set
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const status = await invoke<{ has_key: boolean; key_source: string | null }>("check_anthropic_key");
+        setApiKeyStatus(status);
+      } catch { setApiKeyStatus({ has_key: false, key_source: null }); }
+    })();
+  }, []);
+
+  // MCP sidecar is auto-configured on app startup (setup_claude_code_integration in main.rs).
+  // No user action needed — the setup runs before the window opens.
 
   // Check macOS permissions on connect (not deferred — users need to see permission
   // issues immediately, especially since the launch button depends on permissions)
@@ -1991,29 +2023,50 @@ When multiple instances of this role are active:
     }
   };
 
-  // Smart scroll: only auto-scroll if user is at bottom, otherwise show indicator
+  // Smart scroll: only auto-scroll if user is at bottom or they just sent a message
   useEffect(() => {
-    const currentCount = project?.messages?.length || 0;
+    const messages = project?.messages;
+    const currentCount = messages?.length || 0;
     const prevCount = prevMsgCountRef.current;
     const added = currentCount - prevCount;
     prevMsgCountRef.current = currentCount;
 
     if (added > 0) {
-      if (isAtBottom) {
+      // Grow visible limit so new messages don't shift the slice window
+      setVisibleMsgLimit((prev) => prev + added);
+
+      // Always scroll to bottom if the newest message is from the human (they just sent it)
+      const newestMsg = messages?.[currentCount - 1];
+      const isOwnMessage = newestMsg?.from?.startsWith("human:");
+      if (isAtBottom || isOwnMessage) {
+        // Suppress scroll-position saves until scroll completes
+        // (race: project-update saves scrollTop before smooth scroll finishes,
+        //  then useLayoutEffect restores mid-conversation position)
+        scrollingToBottomRef.current = true;
+        savedScrollRef.current = null;
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
         setNewMsgCount(0);
+        setTimeout(() => { scrollingToBottomRef.current = false; }, 500);
       } else {
         setNewMsgCount((prev) => prev + added);
       }
     }
   }, [project?.messages?.length, isAtBottom]);
 
+  // Restore scroll position after React commits DOM updates from project refreshes
+  useLayoutEffect(() => {
+    if (savedScrollRef.current !== null && messageTimelineRef.current) {
+      messageTimelineRef.current.scrollTop = savedScrollRef.current;
+      savedScrollRef.current = null;
+    }
+  }, [project]);
+
   // Track scroll position in message timeline
   useEffect(() => {
     const el = messageTimelineRef.current;
     if (!el) return;
     const handleScroll = () => {
-      const threshold = 40;
+      const threshold = 150;
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
       setIsAtBottom(atBottom);
       if (atBottom) setNewMsgCount(0);
@@ -2023,8 +2076,11 @@ When multiple instances of this role are active:
   }, [watching]);
 
   const scrollToBottom = () => {
+    scrollingToBottomRef.current = true;
+    savedScrollRef.current = null;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     setNewMsgCount(0);
+    setTimeout(() => { scrollingToBottomRef.current = false; }, 500);
   };
 
   // Listen for project file change events from backend
@@ -2041,6 +2097,9 @@ When multiple instances of this role are active:
         unlistenUpdate = await listen<ParsedProject>(
           "project-update",
           (event) => {
+            if (!scrollingToBottomRef.current) {
+              savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+            }
             setProject(event.payload);
             if (event.payload?.config?.settings?.message_retention_days != null) {
               setRetentionDays(event.payload.config.settings.message_retention_days);
@@ -2054,6 +2113,9 @@ When multiple instances of this role are active:
             if (!watching) return;
             try {
               const { invoke } = await import("@tauri-apps/api/core");
+              if (!scrollingToBottomRef.current) {
+                savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+              }
               const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
               if (result) setProject(result);
             } catch { /* ignore */ }
@@ -3040,6 +3102,166 @@ When multiple instances of this role are active:
           </div>
         )}
 
+        {/* Setup Checklist — guides new users through prerequisites */}
+        {project && !setupDismissed && (npmInstalled === false || claudeInstalled === false || apiKeyStatus?.has_key === false) && (
+          <div className="setup-checklist-banner">
+            <div className="setup-checklist-header">
+              <span className="setup-checklist-title">Setup Required</span>
+              <span className="setup-checklist-subtitle">Complete these steps to launch AI agents</span>
+              <button
+                className="setup-checklist-dismiss"
+                onClick={() => { setSetupDismissed(true); localStorage.setItem("vaak_setup_dismissed", "true"); }}
+                title="Dismiss (you can still launch manually)"
+              >&times;</button>
+            </div>
+            <div className="setup-checklist-items">
+              {/* Step 1: Node.js / npm */}
+              <div className={`setup-checklist-item${npmInstalled === true ? " setup-done" : npmInstalled === false ? " setup-needed" : " setup-checking"}`}>
+                <span className="setup-check-icon">{npmInstalled === true ? "\u2713" : npmInstalled === false ? "1" : "\u22EF"}</span>
+                <div className="setup-check-content">
+                  <div className="setup-check-label">Install Node.js</div>
+                  {npmInstalled === true ? (
+                    <div className="setup-check-status">Installed</div>
+                  ) : npmInstalled === false ? (
+                    <div className="setup-check-actions">
+                      <button
+                        className="setup-action-btn setup-action-primary"
+                        onClick={() => {
+                          window.open("https://nodejs.org", "_blank");
+                        }}
+                      >Download Node.js</button>
+                      <button
+                        className="setup-action-btn"
+                        onClick={async () => {
+                          try {
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            const installed = await invoke<boolean>("check_npm_installed");
+                            setNpmInstalled(installed);
+                            if (!installed) {
+                              alert("Node.js/npm not detected yet. Install Node.js, then click Re-check.");
+                            }
+                          } catch { /* ignore */ }
+                        }}
+                      >Re-check</button>
+                      <span className="setup-check-hint">Required for Claude Code CLI installation</span>
+                    </div>
+                  ) : (
+                    <div className="setup-check-status">Checking...</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Step 2: Claude Code CLI */}
+              <div className={`setup-checklist-item${claudeInstalled === true ? " setup-done" : claudeInstalled === false ? " setup-needed" : " setup-checking"}`}>
+                <span className="setup-check-icon">{claudeInstalled === true ? "\u2713" : claudeInstalled === false ? "2" : "\u22EF"}</span>
+                <div className="setup-check-content">
+                  <div className="setup-check-label">Install Claude Code CLI</div>
+                  {claudeInstalled === true ? (
+                    <div className="setup-check-status">Installed</div>
+                  ) : claudeInstalled === false ? (
+                    <div className="setup-check-actions">
+                      <button
+                        className="setup-action-btn setup-action-primary"
+                        disabled={installingCli || npmInstalled === false}
+                        onClick={async () => {
+                          setInstallingCli(true);
+                          try {
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            const npmOk = await invoke<boolean>("check_npm_installed");
+                            if (!npmOk) {
+                              setInstallingCli(false);
+                              setNpmInstalled(false);
+                              alert("Node.js/npm is not installed. Complete Step 1 first.");
+                              return;
+                            }
+                            await invoke<string>("install_claude_cli");
+                            const installed = await invoke<boolean>("check_claude_installed");
+                            if (installed) {
+                              setClaudeInstalled(true);
+                            } else {
+                              setInstallingCli(false);
+                              alert("Installation completed but Claude CLI was not found. Try restarting the app.");
+                            }
+                          } catch (e: any) {
+                            setInstallingCli(false);
+                            alert(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`);
+                          }
+                        }}
+                      >{installingCli ? "Installing..." : "Express Install"}</button>
+                      <button
+                        className="setup-action-btn"
+                        onClick={async () => {
+                          try {
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            await invoke("open_terminal_in_dir", { dir: projectDir || "" });
+                          } catch { /* ignore */ }
+                        }}
+                      >Open Terminal</button>
+                      {npmInstalled === false && <span className="setup-check-hint" style={{ color: "#e8912d" }}>Complete Step 1 first</span>}
+                    </div>
+                  ) : (
+                    <div className="setup-check-status">Checking...</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Step 3: API Key */}
+              <div className={`setup-checklist-item${apiKeyStatus?.has_key ? " setup-done" : apiKeyStatus?.has_key === false ? " setup-needed" : " setup-checking"}`}>
+                <span className="setup-check-icon">{apiKeyStatus?.has_key ? "\u2713" : apiKeyStatus?.has_key === false ? "3" : "\u22EF"}</span>
+                <div className="setup-check-content">
+                  <div className="setup-check-label">Set Anthropic API Key</div>
+                  {apiKeyStatus?.has_key ? (
+                    <div className="setup-check-status">Found ({apiKeyStatus.key_source})</div>
+                  ) : apiKeyStatus?.has_key === false ? (
+                    <div className="setup-check-actions">
+                      <div className="setup-check-hint">
+                        <strong>Option A (easiest):</strong> Run <code>claude</code> in a terminal — it will prompt you to log in via browser.
+                        <br/>
+                        <strong>Option B:</strong> Set <code>ANTHROPIC_API_KEY</code> environment variable:
+                        <br/>
+                        <span style={{ opacity: 0.7, fontSize: "0.9em" }}>
+                          Windows: <code>setx ANTHROPIC_API_KEY "sk-ant-..."</code> &nbsp;|&nbsp;
+                          Mac/Linux: <code>export ANTHROPIC_API_KEY="sk-ant-..."</code> in shell profile
+                        </span>
+                      </div>
+                      <button
+                        className="setup-action-btn setup-action-primary"
+                        disabled={claudeInstalled === false}
+                        onClick={async () => {
+                          try {
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            await invoke("open_terminal_in_dir", { dir: projectDir || "" });
+                          } catch { /* ignore */ }
+                        }}
+                      >{claudeInstalled === false ? "Install CLI First" : "Open Terminal to Log In"}</button>
+                      <button
+                        className="setup-action-btn"
+                        onClick={async () => {
+                          try {
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            const status = await invoke<{ has_key: boolean; key_source: string | null }>("check_anthropic_key");
+                            setApiKeyStatus(status);
+                            if (!status.has_key) {
+                              alert("API key not detected in environment variables. If you logged in via OAuth, you may still be able to launch agents — try launching one to test.");
+                            }
+                          } catch { /* ignore */ }
+                        }}
+                      >Re-check</button>
+                    </div>
+                  ) : (
+                    <div className="setup-check-status">Checking...</div>
+                  )}
+                </div>
+              </div>
+
+              {/* MCP configuration is automatic on app startup — no user action needed */}
+            </div>
+            {npmInstalled === true && claudeInstalled === true && apiKeyStatus?.has_key && (
+              <div className="setup-checklist-complete">All set! You can now launch agents from the roster below.</div>
+            )}
+          </div>
+        )}
+
         {/* Team Roster — shows all roster slots with status */}
         {project && (() => {
           const timeoutSecs = project.config?.settings?.heartbeat_timeout_seconds || 300;
@@ -3346,68 +3568,7 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        {/* Claude CLI not found banner */}
-        {claudeInstalled === false && (
-          <div className="project-hint-banner" style={{ borderColor: "#e8935a", background: "rgba(232,147,90,0.08)" }}>
-            <div className="project-hint-title" style={{ color: "#e8935a" }}>Claude CLI Not Found</div>
-            <div className="project-hint-body">
-              The Claude CLI is required to launch agents.
-              {window.__TAURI__ && (
-                <>
-                  <br/><br/>
-                  <button
-                    className="role-card-launch-btn"
-                    style={{ display: "inline-block", marginTop: 4, marginRight: 8 }}
-                    disabled={installingCli}
-                    onClick={async () => {
-                      setInstallingCli(true);
-                      try {
-                        const { invoke } = await import("@tauri-apps/api/core");
-                        const npmOk = await invoke<boolean>("check_npm_installed");
-                        if (!npmOk) {
-                          setInstallingCli(false);
-                          alert("Node.js/npm is not installed. Please install Node.js from https://nodejs.org first, then try again.");
-                          return;
-                        }
-                        await invoke<string>("install_claude_cli");
-                        const installed = await invoke<boolean>("check_claude_installed");
-                        if (installed) {
-                          setClaudeInstalled(true);
-                        } else {
-                          setInstallingCli(false);
-                          alert("Installation completed but Claude CLI was not found. Try restarting the app.");
-                        }
-                      } catch (e: any) {
-                        console.error("[CollabTab] Express install failed:", e);
-                        setInstallingCli(false);
-                        alert(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`);
-                      }
-                    }}
-                    title="Automatically install Claude Code CLI via npm"
-                  >{installingCli ? "Installing..." : "Express Install"}</button>
-                  <button
-                    className="role-card-launch-btn"
-                    style={{ display: "inline-block", marginTop: 4, opacity: 0.7 }}
-                    onClick={async () => {
-                      try {
-                        const { invoke } = await import("@tauri-apps/api/core");
-                        await invoke("open_terminal_in_dir", { dir: projectDir || "" });
-                      } catch (e) {
-                        console.error("[CollabTab] Failed to open terminal:", e);
-                      }
-                    }}
-                    title="Open a terminal to install manually"
-                  >Open Terminal</button>
-                  <br/><br/>
-                  <span style={{ fontSize: "0.85em", opacity: 0.7 }}>
-                    Requires <a href="https://nodejs.org" target="_blank" rel="noreferrer" style={{ color: "#e8935a" }}>Node.js</a> to be installed.
-                    Or install manually: <code style={{ background: "rgba(255,255,255,0.1)", padding: "2px 6px", borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
-                  </span>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+        {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
 
         {/* Contextual hint when no sessions */}
         {hasNoSessions && (

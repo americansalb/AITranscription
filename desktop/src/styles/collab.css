@@ -25,6 +25,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
   width: 100%;
   padding: 16px;
   gap: 12px;
@@ -292,6 +293,8 @@
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
   padding-right: 4px;
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 /* Smooth scrollbar for roles grid */
@@ -1732,6 +1735,197 @@
 }
 
 /* ==================== Hint Banner ==================== */
+
+/* ==================== Setup Checklist Banner ==================== */
+
+.setup-checklist-banner {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(139, 92, 246, 0.06) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 4px;
+}
+
+.setup-checklist-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.setup-checklist-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--collab-accent);
+}
+
+.setup-checklist-subtitle {
+  font-size: 12px;
+  color: var(--collab-text-muted);
+  flex: 1;
+}
+
+.setup-checklist-dismiss {
+  background: none;
+  border: none;
+  color: var(--collab-text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.setup-checklist-dismiss:hover {
+  opacity: 1;
+}
+
+.setup-checklist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.setup-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.setup-checklist-item.setup-done {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.setup-checklist-item.setup-needed {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.setup-check-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.setup-done .setup-check-icon {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+
+.setup-needed .setup-check-icon {
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+}
+
+.setup-checking .setup-check-icon {
+  background: rgba(161, 161, 170, 0.15);
+  color: var(--collab-text-muted);
+}
+
+.setup-check-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.setup-check-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--collab-text-primary);
+  margin-bottom: 4px;
+}
+
+.setup-check-status {
+  font-size: 12px;
+  color: var(--collab-text-muted);
+}
+
+.setup-done .setup-check-status {
+  color: #22c55e;
+}
+
+.setup-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.setup-action-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--collab-text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.setup-action-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.setup-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.setup-action-btn.setup-action-primary {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
+}
+.setup-action-btn.setup-action-primary:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.3);
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+.setup-check-hint {
+  font-size: 11px;
+  color: var(--collab-text-muted);
+  line-height: 1.4;
+}
+
+.setup-check-hint a {
+  color: var(--collab-accent);
+  text-decoration: underline;
+}
+
+.setup-check-hint code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.setup-checklist-complete {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #22c55e;
+  font-weight: 500;
+  text-align: center;
+}
+
+/* ==================== Project Hint Banner ==================== */
 
 .project-hint-banner {
   background: rgba(29, 161, 242, 0.08);

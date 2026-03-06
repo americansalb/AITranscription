@@ -65,6 +65,33 @@ pub fn check_claude_installed() -> Result<bool, String> {
     }
 }
 
+/// Check if an ANTHROPIC_API_KEY (or CLAUDE_API_KEY) environment variable is set.
+/// Returns a struct with `has_key` bool and `key_source` string (which env var was found).
+#[tauri::command]
+pub fn check_anthropic_key() -> Result<serde_json::Value, String> {
+    // Check the two common env var names Claude Code looks for
+    if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
+        if !val.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "has_key": true,
+                "key_source": "ANTHROPIC_API_KEY"
+            }));
+        }
+    }
+    if let Ok(val) = std::env::var("CLAUDE_API_KEY") {
+        if !val.trim().is_empty() {
+            return Ok(serde_json::json!({
+                "has_key": true,
+                "key_source": "CLAUDE_API_KEY"
+            }));
+        }
+    }
+    Ok(serde_json::json!({
+        "has_key": false,
+        "key_source": null
+    }))
+}
+
 /// Build the join prompt for a given role
 fn build_join_prompt(role: &str) -> String {
     format!(
@@ -1480,4 +1507,399 @@ pub fn open_terminal_in_dir(dir: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── build_join_prompt ──────────────────────────────────────────────
+
+    #[test]
+    fn test_build_join_prompt_contains_role() {
+        let prompt = build_join_prompt("developer");
+        assert!(prompt.contains("developer"), "prompt should contain role name");
+        assert!(prompt.contains("project_join"), "prompt should mention project_join");
+        assert!(prompt.contains("project_wait"), "prompt should mention project_wait");
+    }
+
+    #[test]
+    fn test_build_join_prompt_different_roles() {
+        let architect = build_join_prompt("architect");
+        let tester = build_join_prompt("tester");
+        assert!(architect.contains("architect"));
+        assert!(tester.contains("tester"));
+        assert_ne!(architect, tester, "different roles should produce different prompts");
+    }
+
+    #[test]
+    fn test_build_join_prompt_special_chars_in_role() {
+        let prompt = build_join_prompt("evil-architect");
+        assert!(prompt.contains("evil-architect"));
+    }
+
+    // ── LauncherState ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_launcher_state_default() {
+        let state = LauncherState::default();
+        assert!(state.spawned.lock().is_empty(), "spawned list should start empty");
+        assert!(state.project_dir.lock().is_none(), "project_dir should start as None");
+    }
+
+    #[test]
+    fn test_launcher_state_push_agent() {
+        let state = LauncherState::default();
+        let mut spawned = state.spawned.lock();
+        spawned.push(SpawnedAgent {
+            pid: 12345,
+            role: "developer".to_string(),
+            instance: 0,
+            spawned_at: "2026-03-04T00:00:00Z".to_string(),
+        });
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].pid, 12345);
+        assert_eq!(spawned[0].role, "developer");
+        assert_eq!(spawned[0].instance, 0);
+    }
+
+    #[test]
+    fn test_launcher_state_multiple_agents() {
+        let state = LauncherState::default();
+        let mut spawned = state.spawned.lock();
+        for i in 0..3 {
+            spawned.push(SpawnedAgent {
+                pid: 100 + i,
+                role: "developer".to_string(),
+                instance: i as i32,
+                spawned_at: "2026-03-04T00:00:00Z".to_string(),
+            });
+        }
+        assert_eq!(spawned.len(), 3);
+        assert_eq!(spawned.iter().filter(|a| a.role == "developer").count(), 3);
+    }
+
+    // ── get_companions ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_companions_missing_project_json() {
+        let result = get_companions("/tmp/nonexistent-vaak-test-dir-12345", "moderator");
+        assert!(result.is_empty(), "missing project.json should return empty");
+    }
+
+    #[test]
+    fn test_get_companions_no_companions_key() {
+        let tmp = std::env::temp_dir().join("vaak-test-companions-no-key");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+        let config = serde_json::json!({
+            "roles": {
+                "developer": {
+                    "title": "Developer"
+                }
+            }
+        });
+        std::fs::write(vaak_dir.join("project.json"), config.to_string()).unwrap();
+
+        let result = get_companions(tmp.to_str().unwrap(), "developer");
+        assert!(result.is_empty(), "role without companions should return empty");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_get_companions_string_format() {
+        let tmp = std::env::temp_dir().join("vaak-test-companions-str");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+        let config = serde_json::json!({
+            "roles": {
+                "moderator": {
+                    "title": "Moderator",
+                    "companions": ["audience"]
+                }
+            }
+        });
+        std::fs::write(vaak_dir.join("project.json"), config.to_string()).unwrap();
+
+        let result = get_companions(tmp.to_str().unwrap(), "moderator");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "audience");
+        assert_eq!(result[0].1, true, "string format should default to enabled");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_get_companions_object_format() {
+        let tmp = std::env::temp_dir().join("vaak-test-companions-obj");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+        let config = serde_json::json!({
+            "roles": {
+                "moderator": {
+                    "title": "Moderator",
+                    "companions": [
+                        {"role": "audience", "optional": true, "default_enabled": false},
+                        {"role": "stats-auditor", "optional": false, "default_enabled": true}
+                    ]
+                }
+            }
+        });
+        std::fs::write(vaak_dir.join("project.json"), config.to_string()).unwrap();
+
+        let result = get_companions(tmp.to_str().unwrap(), "moderator");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "audience");
+        assert_eq!(result[0].1, false, "audience should be disabled");
+        assert_eq!(result[1].0, "stats-auditor");
+        assert_eq!(result[1].1, true, "stats-auditor should be enabled");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_get_companions_nonexistent_role() {
+        let tmp = std::env::temp_dir().join("vaak-test-companions-norol");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+        let config = serde_json::json!({
+            "roles": {
+                "developer": { "title": "Developer" }
+            }
+        });
+        std::fs::write(vaak_dir.join("project.json"), config.to_string()).unwrap();
+
+        let result = get_companions(tmp.to_str().unwrap(), "nonexistent-role");
+        assert!(result.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── save/load spawned to disk ──────────────────────────────────────
+
+    #[test]
+    fn test_save_and_load_spawned_roundtrip() {
+        let tmp = std::env::temp_dir().join("vaak-test-spawned-rt");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let agents = vec![
+            SpawnedAgent {
+                pid: 111,
+                role: "developer".to_string(),
+                instance: 0,
+                spawned_at: "2026-03-04T10:00:00Z".to_string(),
+            },
+            SpawnedAgent {
+                pid: 222,
+                role: "tester".to_string(),
+                instance: 0,
+                spawned_at: "2026-03-04T10:01:00Z".to_string(),
+            },
+        ];
+
+        save_spawned_to_disk(tmp.to_str().unwrap(), &agents);
+        let loaded = load_spawned_from_disk(tmp.to_str().unwrap());
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].pid, 111);
+        assert_eq!(loaded[0].role, "developer");
+        assert_eq!(loaded[1].pid, 222);
+        assert_eq!(loaded[1].role, "tester");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_spawned_missing_file() {
+        let result = load_spawned_from_disk("/tmp/nonexistent-vaak-test-99999");
+        assert!(result.is_empty(), "missing file should return empty vec");
+    }
+
+    #[test]
+    fn test_save_spawned_empty_list() {
+        let tmp = std::env::temp_dir().join("vaak-test-spawned-empty");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        save_spawned_to_disk(tmp.to_str().unwrap(), &[]);
+        let loaded = load_spawned_from_disk(tmp.to_str().unwrap());
+        assert!(loaded.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_spawned_overwrites_previous() {
+        let tmp = std::env::temp_dir().join("vaak-test-spawned-overwrite");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let agents1 = vec![SpawnedAgent {
+            pid: 111,
+            role: "developer".to_string(),
+            instance: 0,
+            spawned_at: "2026-03-04T10:00:00Z".to_string(),
+        }];
+        save_spawned_to_disk(tmp.to_str().unwrap(), &agents1);
+
+        let agents2 = vec![SpawnedAgent {
+            pid: 999,
+            role: "architect".to_string(),
+            instance: 0,
+            spawned_at: "2026-03-04T11:00:00Z".to_string(),
+        }];
+        save_spawned_to_disk(tmp.to_str().unwrap(), &agents2);
+
+        let loaded = load_spawned_from_disk(tmp.to_str().unwrap());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pid, 999);
+        assert_eq!(loaded[0].role, "architect");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── revoke_session ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_revoke_session_removes_target() {
+        let tmp = std::env::temp_dir().join("vaak-test-revoke-1");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let sessions = serde_json::json!({
+            "bindings": [
+                {"session_id": "s1", "role": "developer", "instance": 0},
+                {"session_id": "s2", "role": "tester", "instance": 0},
+                {"session_id": "s3", "role": "developer", "instance": 1}
+            ]
+        });
+        std::fs::write(vaak_dir.join("sessions.json"), sessions.to_string()).unwrap();
+
+        revoke_session(tmp.to_str().unwrap(), "developer", 0).unwrap();
+
+        let content = std::fs::read_to_string(vaak_dir.join("sessions.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let bindings = result["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 2, "should have removed developer:0");
+        assert_eq!(bindings[0]["role"].as_str().unwrap(), "tester");
+        assert_eq!(bindings[1]["role"].as_str().unwrap(), "developer");
+        assert_eq!(bindings[1]["instance"].as_i64().unwrap(), 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_revoke_session_no_match() {
+        let tmp = std::env::temp_dir().join("vaak-test-revoke-nomatch");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let sessions = serde_json::json!({
+            "bindings": [
+                {"session_id": "s1", "role": "developer", "instance": 0}
+            ]
+        });
+        std::fs::write(vaak_dir.join("sessions.json"), sessions.to_string()).unwrap();
+
+        revoke_session(tmp.to_str().unwrap(), "architect", 0).unwrap();
+
+        let content = std::fs::read_to_string(vaak_dir.join("sessions.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(result["bindings"].as_array().unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_revoke_session_missing_file() {
+        let result = revoke_session("/tmp/nonexistent-vaak-test-99999", "developer", 0);
+        assert!(result.is_err(), "missing sessions.json should return error");
+    }
+
+    // ── revoke_all_sessions ────────────────────────────────────────────
+
+    #[test]
+    fn test_revoke_all_sessions_keeps_human() {
+        let tmp = std::env::temp_dir().join("vaak-test-revoke-all");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let sessions = serde_json::json!({
+            "bindings": [
+                {"session_id": "s1", "role": "human", "instance": 0},
+                {"session_id": "s2", "role": "developer", "instance": 0},
+                {"session_id": "s3", "role": "architect", "instance": 0},
+                {"session_id": "s4", "role": "tester", "instance": 0}
+            ]
+        });
+        std::fs::write(vaak_dir.join("sessions.json"), sessions.to_string()).unwrap();
+
+        revoke_all_sessions(tmp.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(vaak_dir.join("sessions.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let bindings = result["bindings"].as_array().unwrap();
+        assert_eq!(bindings.len(), 1, "only human should remain");
+        assert_eq!(bindings[0]["role"].as_str().unwrap(), "human");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_revoke_all_sessions_empty_bindings() {
+        let tmp = std::env::temp_dir().join("vaak-test-revoke-all-empty");
+        let vaak_dir = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak_dir);
+
+        let sessions = serde_json::json!({"bindings": []});
+        std::fs::write(vaak_dir.join("sessions.json"), sessions.to_string()).unwrap();
+
+        revoke_all_sessions(tmp.to_str().unwrap()).unwrap();
+
+        let content = std::fs::read_to_string(vaak_dir.join("sessions.json")).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(result["bindings"].as_array().unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── kill_tracked_agent ─────────────────────────────────────────────
+
+    #[test]
+    fn test_kill_tracked_agent_not_found() {
+        let state = LauncherState::default();
+        let result = kill_tracked_agent("nonexistent", 0, &state);
+        assert!(!result, "should return false when no matching agent");
+    }
+
+    // ── SpawnedAgent serialization ─────────────────────────────────────
+
+    #[test]
+    fn test_spawned_agent_json_roundtrip() {
+        let agent = SpawnedAgent {
+            pid: 42,
+            role: "evil-architect".to_string(),
+            instance: 1,
+            spawned_at: "2026-03-04T12:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&agent).unwrap();
+        let deserialized: SpawnedAgent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.pid, 42);
+        assert_eq!(deserialized.role, "evil-architect");
+        assert_eq!(deserialized.instance, 1);
+        assert_eq!(deserialized.spawned_at, "2026-03-04T12:00:00Z");
+    }
+
+    #[test]
+    fn test_spawned_agent_vec_serialization() {
+        let agents = vec![
+            SpawnedAgent { pid: 1, role: "a".into(), instance: 0, spawned_at: "t1".into() },
+            SpawnedAgent { pid: 2, role: "b".into(), instance: 1, spawned_at: "t2".into() },
+        ];
+        let json = serde_json::to_string_pretty(&agents).unwrap();
+        let loaded: Vec<SpawnedAgent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.len(), 2);
+    }
 }

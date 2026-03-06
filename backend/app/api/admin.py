@@ -1,8 +1,11 @@
 """Admin API routes for user management and statistics."""
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -233,6 +236,11 @@ async def create_user_admin(
     await db.commit()
     await db.refresh(user)
 
+    logger.info(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=create_user target_id=%d target_email=%s tier=%s",
+        admin.id, admin.email, user.id, user.email, user.tier.value,
+    )
+
     return UserDetailResponse(
         id=user.id,
         email=user.email,
@@ -289,8 +297,18 @@ async def update_user(
     if request.password is not None:
         user.hashed_password = hash_password(request.password)
 
+    # Build list of changed fields for audit trail
+    changed = [f for f in ("email", "full_name", "tier", "is_active", "is_admin",
+                           "daily_transcription_limit", "password")
+               if getattr(request, f, None) is not None]
+
     await db.commit()
     await db.refresh(user)
+
+    logger.info(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=update_user target_id=%d target_email=%s changed=%s",
+        admin.id, admin.email, user.id, user.email, ",".join(changed),
+    )
 
     return UserDetailResponse(
         id=user.id,
@@ -326,6 +344,11 @@ async def delete_user(
 
     if user.is_admin:
         raise HTTPException(status_code=400, detail="Cannot delete admin users")
+
+    logger.warning(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=delete_user target_id=%d target_email=%s",
+        admin.id, admin.email, user.id, user.email,
+    )
 
     await db.delete(user)
     await db.commit()
@@ -504,6 +527,11 @@ async def make_user_admin(
     user.is_admin = True
     await db.commit()
 
+    logger.warning(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=make_admin target_id=%d target_email=%s",
+        admin.id, admin.email, user.id, user.email,
+    )
+
     return {"message": f"User {user.email} is now an admin"}
 
 
@@ -543,6 +571,11 @@ async def reset_all_user_stats(
         reset_count += 1
 
     await db.commit()
+
+    logger.warning(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=reset_all_stats users_affected=%d",
+        admin.id, admin.email, reset_count,
+    )
 
     return {
         "message": f"Reset stats for {reset_count} users based on actual transcript history",
@@ -585,6 +618,11 @@ async def reset_single_user_stats(
     user.daily_transcriptions_used = 0
 
     await db.commit()
+
+    logger.info(
+        "ADMIN_AUDIT: admin_id=%d admin_email=%s action=reset_user_stats target_id=%d target_email=%s",
+        admin.id, admin.email, user.id, user.email,
+    )
 
     return {
         "message": f"Reset stats for {user.email}",
@@ -639,6 +677,11 @@ async def bootstrap_admin(
     user.daily_transcription_limit = 0  # 0 = unlimited
     await db.commit()
 
+    logger.warning(
+        "ADMIN_AUDIT: action=bootstrap_admin target_id=%d target_email=%s ip=%s",
+        user.id, user.email, client_ip,
+    )
+
     return {
         "message": f"User {user.email} is now an admin with developer tier",
         "user_id": user.id,
@@ -688,11 +731,21 @@ async def seed_admin_accounts(
             detail=f"Bootstrap password too weak: {e}",
         )
 
-    admin_accounts = [
-        {"email": "iris@aalb.org", "password": admin_password},
-        {"email": "kenil.thakkar@gmail.com", "password": admin_password},
-        {"email": "happy102785@gmail.com", "password": admin_password},
-    ]
+    # Admin accounts from env var (comma-separated emails)
+    # Example: ADMIN_SEED_ACCOUNTS="alice@example.com:Alice,bob@example.com:Bob"
+    accounts_env = os.environ.get("ADMIN_SEED_ACCOUNTS", "")
+    if not accounts_env:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ADMIN_SEED_ACCOUNTS environment variable not set",
+        )
+
+    admin_accounts = []
+    for entry in accounts_env.split(","):
+        entry = entry.strip()
+        email = entry.split(":")[0].strip() if ":" in entry else entry
+        if email:
+            admin_accounts.append({"email": email, "password": admin_password})
 
     created = []
     skipped = []
@@ -724,6 +777,12 @@ async def seed_admin_accounts(
         created.append(account["email"])
 
     await db.commit()
+
+    logger.warning(
+        "ADMIN_AUDIT: action=seed_admins ip=%s created=%s skipped=%s",
+        client_ip, ",".join(created) if created else "none",
+        ",".join(skipped) if skipped else "none",
+    )
 
     return {
         "message": "Admin accounts seeded",

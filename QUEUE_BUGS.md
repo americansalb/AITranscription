@@ -1,81 +1,87 @@
 # Queue System Bug Tracker
 
-## Status: In Progress
+## Status: 12 of 13 Fixed
 
 ---
 
 ## Critical Issues
 
 ### 1. Race Condition - Playback Mutex Released Too Early
-- **File**: `desktop/src/lib/queueStore.ts` around line 269
-- **Status**: 🔴 NOT FIXED
-- **Problem**: The `isStartingPlayback` mutex is released BEFORE the async TTS API call (`fetch` to `http://127.0.0.1:19836/api/v1/tts`) completes. This means `playNext()` can be called again while the first TTS request is still in flight, causing two items to play simultaneously.
-- **Flow**: update DB → update state → release mutex → call TTS API (too late!)
-- **Fix**: Move `isStartingPlayback = false` into the audio event callbacks (`oncanplay`/`onerror`) or after the fetch response is received and audio element is created. Only release the mutex once we know playback has actually started or definitively failed.
+- **File**: `desktop/src/lib/queueStore.ts` line 457
+- **Status**: ✅ FIXED
+- **Fix**: Mutex released in `oncanplay` callback (line 457), `onerror` (line 506), with 10s safety timeout (line 467) and `play()` safety net (line 547).
 
 ### 2. Missing Error Handling After DB Updates
-- **File**: `desktop/src/lib/queueStore.ts` lines 253-267
-- **Status**: 🔴 NOT FIXED
-- **Problem**: After calling `db.updateQueueItemStatus(uuid, "playing")`, local state is updated regardless of whether the DB call succeeded. If DB throws, UI shows "playing" but DB still has "pending", causing divergence.
-- **Fix**: Wrap DB calls in try-catch and only update local state on success. On failure, revert or skip.
+- **File**: `desktop/src/lib/queueStore.ts` lines 350-359
+- **Status**: ✅ FIXED
+- **Fix**: DB update wrapped in try-catch; local state only updated after DB success. On DB failure, playback aborted and mutex released.
 
 ---
 
 ## High Issues
 
 ### 3. Pause Position Uses Wall Clock
-- **File**: `desktop/src/lib/queueStore.ts` line 488
-- **Status**: 🔴 NOT FIXED
-- **Problem**: `const position = (Date.now() - audioStartTime)` uses wall clock instead of `currentAudio.currentTime * 1000`. Inaccurate if audio start was delayed.
-- **Fix**: Use `currentAudio.currentTime * 1000`
+- **File**: `desktop/src/lib/queueStore.ts` line 675
+- **Status**: ✅ FIXED
+- **Fix**: Uses `currentAudio.currentTime * 1000` instead of wall clock.
 
 ### 4. Resume Time Calculation Incorrect
-- **File**: `desktop/src/lib/queueStore.ts` line 501
-- **Status**: 🔴 NOT FIXED
-- **Problem**: `audioStartTime = Date.now() - state.currentPosition` recalculates wall clock offset. Breaks after long pauses or with non-1.0 playback speed.
-- **Fix**: Use `currentAudio.currentTime` directly, don't recalculate audioStartTime.
+- **File**: `desktop/src/lib/queueStore.ts` line 700
+- **Status**: ✅ FIXED
+- **Fix**: `resume()` calls `currentAudio.play()` directly without recalculating `audioStartTime`.
 
 ---
 
 ## Medium Issues
 
 ### 5. Duration Estimate Unreliable
-- **File**: `queueStore.ts` line 90, `QueueTab.tsx` line 90
-- **Status**: 🔴 NOT FIXED
-- **Problem**: Falls back to 150 words/min estimate. Progress bar jumps when real duration loads.
+- **File**: `QueueTab.tsx` NowPlayingCard component
+- **Status**: ✅ FIXED
+- **Problem**: Falls back to 150 words/min estimate. Progress bar jumped when real duration loaded.
+- **Fix**: Smooth 500ms interpolation from estimated to real duration using `requestAnimationFrame`, preventing jarring progress bar jumps.
 
 ### 6. Drag-and-Drop Uses Stale Positions
-- **File**: `QueueTab.tsx` lines 425-434
-- **Status**: 🔴 NOT FIXED
-- **Problem**: `targetItem.position` may be stale if items were reordered concurrently.
+- **File**: `QueueTab.tsx` handleMouseUp handler
+- **Status**: ✅ FIXED
+- **Problem**: `targetItem.position` was stale if items were reordered concurrently.
+- **Fix**: Reload fresh items from DB via `queueStore.loadItems()` before computing target position in the mouseUp handler.
 
 ### 7. finalizedItems Set Memory Leak
-- **File**: `queueStore.ts` lines 415-426
-- **Status**: 🔴 NOT FIXED
-- **Problem**: `finalizedItems` Set grows indefinitely. Never cleaned up.
+- **File**: `queueStore.ts` lines 579-592
+- **Status**: ✅ FIXED
+- **Fix**: `cleanupFinalizedItems()` caps at 500 entries, deleting oldest half when exceeded. Called after every finalization.
 
 ### 8. Session Cache Never Invalidates
-- **File**: `queueStore.ts` lines 752-758
-- **Status**: 🔴 NOT FIXED
-- **Problem**: No mechanism to update stale session name/color/voiceId.
+- **File**: `queueStore.ts` line 1078
+- **Status**: ✅ FIXED
+- **Fix**: 5-minute TTL on session cache entries. `enrichWithSessionInfo()` skips stale entries.
 
 ### 9. Voice Disable Doesn't Clear Pending Queue
-- **File**: `speak.ts` lines 237-241
-- **Status**: 🔴 NOT FIXED
-- **Problem**: Disabling voice drops new messages but existing queued items still play.
+- **File**: `App.tsx` line 266, `QueueApp.tsx` line 41
+- **Status**: ✅ FIXED
+- **Problem**: Disabling voice cleared pending items but currently playing item continued.
+- **Fix**: Added `stopPlayback()` call before `clearPending()` in both App.tsx and QueueApp.tsx voice toggle handlers. Now disabling voice immediately stops audio and clears all pending items.
 
 ### 10. Listener Notification Unsafe During Modification
-- **File**: `queueStore.ts` lines 66-70
-- **Status**: 🔴 NOT FIXED
-- **Problem**: Iterating `listeners` Set while a listener might modify it.
+- **File**: `queueStore.ts` line 108
+- **Status**: ✅ FIXED
+- **Fix**: `notify()` clones the listeners Set to an array snapshot before iterating, preventing concurrent modification issues.
 
 ---
 
 ## Low / Architectural Issues
 
 ### 11. No Multi-Instance Conflict Resolution
+- **Status**: 🔴 NOT FIXED (Architectural — needs design decision)
+
 ### 12. No SQLite WAL Mode
+- **Status**: ✅ FIXED
+- **Fix**: Added `PRAGMA journal_mode=WAL` in `database.rs` `init_database()` after opening the connection. Improves concurrent read performance.
+
 ### 13. No Text Length Validation
+- **File**: `queueStore.ts` lines 374-378
+- **Status**: ✅ FIXED
+- **Fix**: TTS text truncated at 5000 characters with "... (truncated)" suffix before sending to API.
 
 ---
 
@@ -89,11 +95,11 @@
 ### TypeScript (Frontend)
 - `desktop/src/lib/queueTypes.ts` - Type definitions
 - `desktop/src/lib/queueDatabase.ts` - Tauri command wrappers
-- `desktop/src/lib/queueStore.ts` - Central state management (775 lines)
+- `desktop/src/lib/queueStore.ts` - Central state management (~1127 lines)
 - `desktop/src/lib/queueSync.ts` - Cross-window BroadcastChannel sync
 - `desktop/src/lib/speak.ts` - Speak event listener and TTS entry point
 - `desktop/src/lib/messageBatcher.ts` - Message grouping with debounce
-- `desktop/src/components/QueueTab.tsx` - Main queue UI (563 lines)
+- `desktop/src/components/QueueTab.tsx` - Main queue UI (~617 lines)
 - `desktop/src/components/QueueItem.tsx` - Legacy item component
 - `desktop/src/components/QueueControls.tsx` - Playback controls
 - `desktop/src/components/NowPlaying.tsx` - Legacy now-playing display
