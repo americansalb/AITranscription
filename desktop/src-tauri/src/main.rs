@@ -3827,7 +3827,6 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Create tray menu
             let show_item = MenuItemBuilder::with_id("show", "Show Vaak").build(app)?;
@@ -4476,6 +4475,8 @@ fn main() {
             launcher::open_url_in_browser,
             launcher::open_terminal_in_dir,
             launcher::check_npm_installed,
+            launcher::check_homebrew_installed,
+            launcher::install_nodejs,
             launcher::install_claude_cli,
         ]);
 
