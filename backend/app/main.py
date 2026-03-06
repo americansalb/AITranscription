@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 from app.api import router
 from app.api.admin import router as admin_router
@@ -70,6 +72,15 @@ app.add_middleware(
     allow_methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
 )
+
+# Allow microphone access on Render (overrides platform-level Permissions-Policy)
+class PermissionsPolicyMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Permissions-Policy"] = "microphone=(self)"
+        return response
+
+app.add_middleware(PermissionsPolicyMiddleware)
 
 # Include API routes
 app.include_router(router, prefix="/api/v1")
