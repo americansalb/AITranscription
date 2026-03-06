@@ -3028,11 +3028,22 @@ When multiple instances of this role are active:
                           return parentActive;
                         });
                         if (modalFiltered.length === 0) return null;
+                        // Sort modal cards: active first, then vacant, alphabetical within each
+                        const modalStatusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
+                        const modalSorted = [...modalFiltered].sort((a, b) => {
+                          const sa = modalStatusOrder[a.status] ?? 2;
+                          const sb = modalStatusOrder[b.status] ?? 2;
+                          if (sa !== sb) return sa - sb;
+                          const oa = ROLE_ORDER[a.slug] ?? 99;
+                          const ob = ROLE_ORDER[b.slug] ?? 99;
+                          if (oa !== ob) return oa - ob;
+                          return a.title.localeCompare(b.title);
+                        });
                         return (
                           <>
                             <div className="roles-modal-roster-label">Active Roster</div>
                             <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
-                              {modalFiltered.map((card) => {
+                              {modalSorted.map((card) => {
                                 const cardKey = `${card.slug}:${card.instance}`;
                                 const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                                 const handleCardClick = () => {
@@ -3293,12 +3304,23 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
-          const vacantCount = filteredCards.filter(c => c.status === "vacant").length;
+          // Sort: active/working first, then stale, then vacant. Alphabetical within each group.
+          const statusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
+          const sortedCards = [...filteredCards].sort((a, b) => {
+            const sa = statusOrder[a.status] ?? 2;
+            const sb = statusOrder[b.status] ?? 2;
+            if (sa !== sb) return sa - sb;
+            const oa = ROLE_ORDER[a.slug] ?? 99;
+            const ob = ROLE_ORDER[b.slug] ?? 99;
+            if (oa !== ob) return oa - ob;
+            return a.title.localeCompare(b.title);
+          });
+          const vacantCount = sortedCards.filter(c => c.status === "vacant").length;
           return (
             <>
-              {filteredCards.length > 0 && (
+              {sortedCards.length > 0 && (
                 <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
-                  {filteredCards.map((card) => {
+                  {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                     const handleCardClick = () => {
