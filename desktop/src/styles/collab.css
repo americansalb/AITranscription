@@ -25,6 +25,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
   width: 100%;
   padding: 16px;
   gap: 12px;
@@ -292,6 +293,8 @@
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
   padding-right: 4px;
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 /* Smooth scrollbar for roles grid */

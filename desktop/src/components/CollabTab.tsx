@@ -651,6 +651,7 @@ export function CollabTab() {
   const [newMsgCount, setNewMsgCount] = useState(0);
   const prevMsgCountRef = useRef(0);
   const savedScrollRef = useRef<number | null>(null);
+  const scrollingToBottomRef = useRef(false);
   const MSG_PAGE_SIZE = 50;
   const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
@@ -2038,11 +2039,14 @@ When multiple instances of this role are active:
       const newestMsg = messages?.[currentCount - 1];
       const isOwnMessage = newestMsg?.from?.startsWith("human:");
       if (isAtBottom || isOwnMessage) {
-        // Clear saved scroll so useLayoutEffect doesn't restore a stale position
-        // (race: project-update saves scrollTop before smooth scroll finishes)
+        // Suppress scroll-position saves until scroll completes
+        // (race: project-update saves scrollTop before smooth scroll finishes,
+        //  then useLayoutEffect restores mid-conversation position)
+        scrollingToBottomRef.current = true;
         savedScrollRef.current = null;
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
         setNewMsgCount(0);
+        setTimeout(() => { scrollingToBottomRef.current = false; }, 500);
       } else {
         setNewMsgCount((prev) => prev + added);
       }
@@ -2072,8 +2076,11 @@ When multiple instances of this role are active:
   }, [watching]);
 
   const scrollToBottom = () => {
+    scrollingToBottomRef.current = true;
+    savedScrollRef.current = null;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     setNewMsgCount(0);
+    setTimeout(() => { scrollingToBottomRef.current = false; }, 500);
   };
 
   // Listen for project file change events from backend
@@ -2090,7 +2097,9 @@ When multiple instances of this role are active:
         unlistenUpdate = await listen<ParsedProject>(
           "project-update",
           (event) => {
-            savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+            if (!scrollingToBottomRef.current) {
+              savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+            }
             setProject(event.payload);
             if (event.payload?.config?.settings?.message_retention_days != null) {
               setRetentionDays(event.payload.config.settings.message_retention_days);
@@ -2104,7 +2113,9 @@ When multiple instances of this role are active:
             if (!watching) return;
             try {
               const { invoke } = await import("@tauri-apps/api/core");
-              savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+              if (!scrollingToBottomRef.current) {
+                savedScrollRef.current = messageTimelineRef.current?.scrollTop ?? null;
+              }
               const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
               if (result) setProject(result);
             } catch { /* ignore */ }
