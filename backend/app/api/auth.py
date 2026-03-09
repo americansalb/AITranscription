@@ -490,91 +490,72 @@ async def get_my_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get the current user's statistics."""
-    import logging
-    import sys
-    import traceback
+    """Get the current user's statistics computed from transcript records."""
     from datetime import timezone
 
-    logger = logging.getLogger(__name__)
+    now = datetime.now(timezone.utc)
+    last_24_hours = now - timedelta(hours=24)
 
-    try:
-        now = datetime.now(timezone.utc)
-        last_24_hours = now - timedelta(hours=24)
+    # Get today's INPUT transcripts only (last 24 hours)
+    query = select(Transcript).where(
+        Transcript.user_id == current_user.id,
+        Transcript.created_at >= last_24_hours,
+        Transcript.transcript_type == "input",
+    )
+    result = await db.execute(query)
+    today_transcripts = result.scalars().all()
 
-        # Get today's INPUT transcripts only (last 24 hours)
-        query = select(Transcript).where(
-            Transcript.user_id == current_user.id,
-            Transcript.created_at >= last_24_hours,
-            Transcript.transcript_type == "input",
-        )
-        result = await db.execute(query)
-        today_transcripts = result.scalars().all()
+    # Get ALL INPUT transcripts (exclude Claude output transcripts)
+    all_transcripts_query = select(Transcript).where(
+        Transcript.user_id == current_user.id,
+        Transcript.transcript_type == "input",
+    )
+    result = await db.execute(all_transcripts_query)
+    all_transcripts = result.scalars().all()
 
-        # Get ALL INPUT transcripts (exclude Claude output transcripts)
-        all_transcripts_query = select(Transcript).where(
-            Transcript.user_id == current_user.id,
-            Transcript.transcript_type == "input",
-        )
-        result = await db.execute(all_transcripts_query)
-        all_transcripts = result.scalars().all()
+    transcriptions_today = len(today_transcripts)
+    words_today = sum(t.word_count or 0 for t in today_transcripts)
 
-        transcriptions_today = len(today_transcripts)
-        words_today = sum(t.word_count or 0 for t in today_transcripts)
+    # Compute totals from actual transcript data (authoritative source)
+    actual_total_words = sum(t.word_count or 0 for t in all_transcripts)
+    actual_total_transcriptions = len(all_transcripts)
+    actual_total_audio = sum(t.audio_duration_seconds or 0 for t in all_transcripts)
 
-        # Compute totals from actual transcript data (authoritative source)
-        actual_total_words = sum(t.word_count or 0 for t in all_transcripts)
-        actual_total_transcriptions = len(all_transcripts)
-        actual_total_audio = sum(t.audio_duration_seconds or 0 for t in all_transcripts)
+    # Sync user model counters if they've drifted
+    if (current_user.total_words != actual_total_words
+            or current_user.total_transcriptions != actual_total_transcriptions):
+        current_user.total_words = actual_total_words
+        current_user.total_transcriptions = actual_total_transcriptions
+        current_user.total_audio_seconds = int(actual_total_audio)
+        await db.flush()
 
-        # Sync user model counters if they've drifted
-        if (current_user.total_words != actual_total_words
-                or current_user.total_transcriptions != actual_total_transcriptions):
-            current_user.total_words = actual_total_words
-            current_user.total_transcriptions = actual_total_transcriptions
-            current_user.total_audio_seconds = int(actual_total_audio)
-            await db.flush()
+    # Calculate averages
+    avg_words = (
+        actual_total_words / actual_total_transcriptions
+        if actual_total_transcriptions > 0
+        else 0
+    )
 
-        # Calculate averages
-        avg_words = (
-            actual_total_words / actual_total_transcriptions
-            if actual_total_transcriptions > 0
-            else 0
-        )
+    # Filter out short recordings to avoid inflated WPM
+    valid_wpm_transcripts = [
+        t for t in all_transcripts
+        if (t.words_per_minute or 0) > 0
+        and (t.audio_duration_seconds or 0) >= 5
+        and (t.word_count or 0) >= 10
+    ]
+    total_wpm = sum(t.words_per_minute for t in valid_wpm_transcripts)
+    avg_wpm = total_wpm / len(valid_wpm_transcripts) if valid_wpm_transcripts else 0
 
-        # Filter out short recordings to avoid inflated WPM (match gamification service)
-        valid_wpm_transcripts = [
-            t for t in all_transcripts
-            if (t.words_per_minute or 0) > 0
-            and (t.audio_duration_seconds or 0) >= 5
-            and (t.word_count or 0) >= 10
-        ]
-        total_wpm = sum(t.words_per_minute for t in valid_wpm_transcripts)
-        avg_wpm = total_wpm / len(valid_wpm_transcripts) if valid_wpm_transcripts else 0
-
-        return UserStatsResponse(
-            total_transcriptions=actual_total_transcriptions,
-            total_words=actual_total_words,
-            total_audio_seconds=int(actual_total_audio),
-            transcriptions_today=transcriptions_today,
-            words_today=words_today,
-            average_words_per_transcription=round(avg_words, 1),
-            average_words_per_minute=round(avg_wpm, 1),
-            typing_wpm=current_user.typing_wpm,
-        )
-    except Exception as e:
-        logger.exception("Stats retrieval failed: %s", type(e).__name__)
-        # Graceful degradation: return zeroed-out stats instead of 500
-        return UserStatsResponse(
-            total_transcriptions=0,
-            total_words=0,
-            total_audio_seconds=0,
-            transcriptions_today=0,
-            words_today=0,
-            average_words_per_transcription=0,
-            average_words_per_minute=0,
-            typing_wpm=current_user.typing_wpm if current_user else 40,
-        )
+    return UserStatsResponse(
+        total_transcriptions=actual_total_transcriptions,
+        total_words=actual_total_words,
+        total_audio_seconds=int(actual_total_audio),
+        transcriptions_today=transcriptions_today,
+        words_today=words_today,
+        average_words_per_transcription=round(avg_words, 1),
+        average_words_per_minute=round(avg_wpm, 1),
+        typing_wpm=current_user.typing_wpm,
+    )
 
 
 class UpdateTypingWpmRequest(BaseModel):
@@ -617,9 +598,10 @@ async def get_detailed_stats(
     two_months_ago = now - timedelta(days=60)
     year_ago = now - timedelta(days=365)
 
-    # Get all user transcripts
+    # Get all user INPUT transcripts (exclude Claude TTS output transcripts)
     all_transcripts_query = select(Transcript).where(
-        Transcript.user_id == current_user.id
+        Transcript.user_id == current_user.id,
+        Transcript.transcript_type == "input",
     ).order_by(Transcript.created_at.desc())
     result = await db.execute(all_transcripts_query)
     all_transcripts = result.scalars().all()
