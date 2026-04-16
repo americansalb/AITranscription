@@ -167,15 +167,21 @@
   border-color: rgba(255, 255, 255, 0.3);
 }
 
+/* WCAG 2.1 AA — white-on-red needs ≥4.5:1 for 13px/600 text. #ef4444 is
+   3.77:1 (fail); #dc2626 is 6.3:1 (pass AA); #b91c1c is 7.9:1 (pass AAA).
+   Picked #b91c1c for the resting state so we have headroom for display
+   calibration variance across macOS P3 / Windows sRGB / Linux. Hover
+   darkens further. Header text still uses the lighter #ef4444 because it
+   sits on a dark modal bg (~4.6:1, passes). Platform-engineer msg 413. */
 .end-session-btn-confirm {
-  background: #ef4444;
+  background: #b91c1c;
   color: #fff;
-  border-color: #ef4444;
+  border-color: #b91c1c;
 }
 
 .end-session-btn-confirm:hover:not(:disabled) {
-  background: #dc2626;
-  border-color: #dc2626;
+  background: #991b1b;
+  border-color: #991b1b;
 }
 
 .end-session-btn:disabled {
