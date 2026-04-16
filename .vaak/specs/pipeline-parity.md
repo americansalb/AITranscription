@@ -110,7 +110,7 @@ Queryability: both substrates must support filtering messages by `moderator_acti
 |---|---|---|---|
 | `deadline_at_server` in turn notifications | Computed from `std::time::Instant` + `SystemTime` | Computed from `time.monotonic()` + `datetime.utcnow()` | Both emit wall-clock ISO-8601 UTC in the message; internally use monotonic for deadline math. Clients may drift up to NTP sync interval; display includes staleness marker (vision / UX spec). |
 | Pipeline advance monotonicity | `Instant::now()` never regresses | `time.monotonic()` never regresses | Both substrates reject a session_id's `completed_stages` going backwards. |
-| Suspend handling | Laptop-sleep pauses `Instant` on Windows/macOS | Server doesn't suspend; web-service deadline fires on schedule | **Divergence accepted.** Desktop must document pause-on-suspend semantics; web-service doesn't need them. Test matrices differ here. |
+| Suspend handling | `Instant` continues counting through suspend on all three desktop targets (`QueryPerformanceCounter` on Windows, `mach_absolute_time` on macOS, `CLOCK_MONOTONIC` on Linux). Deadlines fire on schedule even mid-sleep, which can surprise users expecting a "paused" timer. | Server doesn't suspend; web-service deadline fires on schedule. | **Divergence accepted.** Desktop test matrix covers "deadline fires during/after laptop sleep"; web-service doesn't need to. If user-visible pause-on-suspend is desired, build it on `CLOCK_BOOTTIME` (Linux) or app-level sleep-event hooks — not on `Instant`. |
 
 ---
 
