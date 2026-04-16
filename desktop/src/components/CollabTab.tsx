@@ -12,6 +12,18 @@ import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import "../styles/collab.css";
 
+// pr-reason-params: contract shared with the Rust validator
+// (validate_action_reason in main.rs) — must stay ≥3 chars to match the
+// backend's audit-trail requirement on end/pause/resume_discussion.
+export const MODERATOR_REASON_MIN_CHARS = 3;
+
+// pr-reason-params: default reasons for moderator actions invoked outside
+// a typed-confirm modal (slash commands, toggle button). Must satisfy
+// MODERATOR_REASON_MIN_CHARS so the backend accepts them.
+export const DEFAULT_END_REASON = "Ended via moderator action";
+export const DEFAULT_PAUSE_REASON = "Paused by moderator";
+export const DEFAULT_RESUME_REASON = "Resumed by moderator";
+
 const ROLE_COLORS: Record<string, string> = {
   manager: "#9b59b6",
   architect: "#1da1f2",
@@ -2174,33 +2186,18 @@ When multiple instances of this role are active:
     }
   };
 
-  // PR H3 v2: extracted core end flow so both the slash-command path and the
-  // modal-confirm path share one implementation. `reason` is pre-broadcast to
-  // the board as a moderation-type message before the destructive call so the
-  // moderator's rationale is recorded durably even if end_discussion completes
-  // or fails afterwards.
+  // PR H3 v2 / pr-reason-params: reason now flows as a Tauri command argument
+  // straight into the announcement metadata (was a separate pre-broadcast
+  // workaround until end_discussion gained the param). Default reason is used
+  // by callers without an explicit modal flow (slash-command path).
   const doEndDiscussion = async (reason?: string) => {
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-
-        if (reason && reason.trim().length > 0 && projectDir) {
-          try {
-            await invoke("send_team_message", {
-              dir: projectDir,
-              to: "all",
-              subject: "End Session requested",
-              body: reason.trim(),
-              msgType: "moderation",
-            });
-          } catch (broadcastErr) {
-            // Non-blocking: if the reason broadcast fails we still want to end
-            // the session (the user already confirmed). Log for diagnostics.
-            console.error("[CollabTab] Failed to broadcast end-session reason:", broadcastErr);
-          }
-        }
-
-        await invoke("end_discussion", { dir: projectDir });
+        const effectiveReason = (reason && reason.trim().length >= MODERATOR_REASON_MIN_CHARS)
+          ? reason.trim()
+          : DEFAULT_END_REASON;
+        await invoke("end_discussion", { dir: projectDir, reason: effectiveReason });
         setDiscussionState(null);
         setEndSessionAnnouncement("Session ended.");
 
@@ -2240,10 +2237,14 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
+        // pr-reason-params: backend now requires a ≥3-char reason for audit.
+        // Toggle button has no reason-input UX yet — placeholder reason is the
+        // minimal contract-satisfying value. Future PR can add a prompt modal
+        // (similar to EndSessionConfirmModal) for moderator-supplied reasons.
         if (discussionState?.paused_at) {
-          await invoke("resume_discussion", { dir: projectDir });
+          await invoke("resume_discussion", { dir: projectDir, reason: DEFAULT_RESUME_REASON });
         } else {
-          await invoke("pause_discussion", { dir: projectDir });
+          await invoke("pause_discussion", { dir: projectDir, reason: DEFAULT_PAUSE_REASON });
         }
         const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
         if (state) setDiscussionState(state);
@@ -2855,7 +2856,10 @@ When multiple instances of this role are active:
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("end_discussion", { dir: projectDir });
+            await invoke("end_discussion", { dir: projectDir, reason: "Ended via /end-discussion command" });
+            // Note: this slash-command path uses an inline-literal reason
+            // (not DEFAULT_END_REASON) because it conveys the invocation
+            // source — useful audit signal distinct from the modal flow.
             setMsgBody("");
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);

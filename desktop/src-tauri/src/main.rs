@@ -3232,9 +3232,28 @@ fn open_next_round(dir: String) -> Result<u32, String> {
     result
 }
 
+/// Validate a moderator-action reason: must be ≥3 chars after trim.
+///
+/// Why: tech-leader msg 423 + architect msg 412 — `end_discussion`,
+/// `pause_discussion`, `resume_discussion` Tauri commands now require a
+/// structured reason for the audit trail (matches the contract UX's
+/// EndSessionConfirmModal already enforces). Centralized so all three
+/// commands share one validation rule.
+fn validate_action_reason(reason: &str) -> Result<String, String> {
+    let trimmed = reason.trim();
+    if trimmed.len() < 3 {
+        return Err(format!(
+            "Reason must be at least 3 characters after trim (got {} chars). Provide a brief justification for the moderator action.",
+            trimmed.len()
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 #[tauri::command]
-fn end_discussion(dir: String) -> Result<(), String> {
+fn end_discussion(dir: String, reason: String) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
+    let reason = validate_action_reason(&reason)?;
     // Wrap in board lock to prevent race with MCP sidecar
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
@@ -3269,10 +3288,11 @@ fn end_discussion(dir: String) -> Result<(), String> {
             "type": "moderation",
             "timestamp": now,
             "subject": format!("Discussion ended: {}", topic),
-            "body": format!("The discussion on \"{}\" has concluded after {} round(s).", topic, round_num),
+            "body": format!("The discussion on \"{}\" has concluded after {} round(s). Reason: {}", topic, round_num, reason),
             "metadata": {
                 "discussion_action": "end",
-                "final_round": round_num
+                "final_round": round_num,
+                "reason": reason
             }
         });
         if let Ok(line) = serde_json::to_string(&announcement) {
@@ -3289,8 +3309,9 @@ fn end_discussion(dir: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pause_discussion(dir: String) -> Result<(), String> {
+fn pause_discussion(dir: String, reason: String) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
+    let reason = validate_action_reason(&reason)?;
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
@@ -3317,8 +3338,8 @@ fn pause_discussion(dir: String) -> Result<(), String> {
             "id": msg_id, "from": "system", "to": "all", "type": "system",
             "timestamp": now,
             "subject": "Discussion paused",
-            "body": "The discussion has been paused by the human.",
-            "metadata": {"discussion_action": "pause"}
+            "body": format!("The discussion has been paused by the human. Reason: {}", reason),
+            "metadata": {"discussion_action": "pause", "reason": reason}
         });
         if let Ok(line) = serde_json::to_string(&announcement) {
             use std::io::Write;
@@ -3333,8 +3354,9 @@ fn pause_discussion(dir: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn resume_discussion(dir: String) -> Result<(), String> {
+fn resume_discussion(dir: String, reason: String) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
+    let reason = validate_action_reason(&reason)?;
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
@@ -3361,8 +3383,8 @@ fn resume_discussion(dir: String) -> Result<(), String> {
             "id": msg_id, "from": "system", "to": "all", "type": "system",
             "timestamp": now,
             "subject": "Discussion resumed",
-            "body": "The discussion has been resumed by the human.",
-            "metadata": {"discussion_action": "resume"}
+            "body": format!("The discussion has been resumed by the human. Reason: {}", reason),
+            "metadata": {"discussion_action": "resume", "reason": reason}
         });
         if let Ok(line) = serde_json::to_string(&announcement) {
             use std::io::Write;
@@ -5341,6 +5363,50 @@ fn show_error_dialog(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── validate_action_reason (pr-reason-params) ──────────────────────
+    // Locks the contract that end/pause/resume_discussion enforce on the
+    // moderator-reason argument. Matches UX EndSessionConfirmModal's
+    // ≥3-char trim rule so frontend and backend can't drift.
+
+    #[test]
+    fn validate_action_reason_accepts_minimum_three_chars() {
+        let result = validate_action_reason("end");
+        assert!(result.is_ok(), "exactly 3 chars after trim must pass");
+        assert_eq!(result.unwrap(), "end");
+    }
+
+    #[test]
+    fn validate_action_reason_trims_whitespace_before_length_check() {
+        let result = validate_action_reason("  end  ");
+        assert!(result.is_ok(), "trim before length check");
+        assert_eq!(result.unwrap(), "end", "returned reason is the trimmed form");
+    }
+
+    #[test]
+    fn validate_action_reason_rejects_under_three_chars_after_trim() {
+        let result = validate_action_reason("ab");
+        assert!(result.is_err(), "2 chars must fail");
+        assert!(result.unwrap_err().contains("at least 3"));
+    }
+
+    #[test]
+    fn validate_action_reason_rejects_only_whitespace() {
+        let result = validate_action_reason("   ");
+        assert!(result.is_err(), "whitespace-only must fail (trims to empty)");
+    }
+
+    #[test]
+    fn validate_action_reason_rejects_empty_string() {
+        let result = validate_action_reason("");
+        assert!(result.is_err(), "empty string must fail");
+    }
+
+    #[test]
+    fn validate_action_reason_error_message_includes_actual_length() {
+        let err = validate_action_reason("ab").unwrap_err();
+        assert!(err.contains("got 2 chars"), "error must report actual length: {}", err);
+    }
 
     // ── validate_project_dir ───────────────────────────────────────────
 
