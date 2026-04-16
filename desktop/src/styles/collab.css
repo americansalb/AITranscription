@@ -1792,6 +1792,45 @@
   }
 }
 
+/* PR H2: unread-count badge — small pill next to the tab label.
+   Why: the only at-a-glance signal of "something new for me" without
+   forcing the user to switch tabs. Sized to match standard chip badges. */
+.inbox-tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  color: #fff;
+  background: var(--collab-accent, #6366f1);
+  border-radius: 9px;
+  vertical-align: middle;
+}
+
+.inbox-tab-active .inbox-tab-badge {
+  /* Active tab never shows a badge (unread count is 0 for active tab),
+     but defensively style in case the computation lags a render. */
+  background: var(--collab-text-muted, #71717a);
+}
+
+/* PR H2: privileged role card (moderator, manager) — gold accent + crown.
+   Why: these roles hold out-of-turn speech and pipeline-override capabilities;
+   the crown provides visual parity with the moderator toolbar in PR H3. */
+.role-card-privileged {
+  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.35), 0 0 8px rgba(234, 179, 8, 0.12);
+}
+
+.role-card-crown {
+  color: #eab308;
+  font-size: 12px;
+  margin-right: 2px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
 /* ==================== Message Timeline ==================== */
 
 .message-timeline {

@@ -740,10 +740,42 @@ export function CollabTab() {
     } catch { /* ignore */ }
     return "all";
   });
+  // PR H2: last-seen timestamps per tab drive unread-count badges. Persisted so
+  // the badges survive reloads — otherwise every reopen would show zero unread.
+  // Why: tab badges are the only at-a-glance signal of "something new for me" —
+  // without persistence they reset on every app restart and lose their value.
+  const [tabLastSeen, setTabLastSeen] = useState<Record<InboxTab, number>>(() => {
+    try {
+      const saved = localStorage.getItem("vaak_inbox_last_seen");
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore */ }
+    return { human: 0, pipeline: 0, all: 0 };
+  });
   const changeInboxTab = (tab: InboxTab) => {
     setInboxTab(tab);
     try { localStorage.setItem("vaak_inbox_tab", tab); } catch { /* ignore */ }
+    // Mark this tab as seen — clears its unread badge.
+    setTabLastSeen(prev => {
+      const next = { ...prev, [tab]: Date.now() };
+      try { localStorage.setItem("vaak_inbox_last_seen", JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
   };
+
+  // PR H2: Ctrl+1 / Ctrl+2 / Ctrl+3 switch tabs. Cmd+digit on macOS.
+  // Why: power users asked for keyboard access during active pipelines where
+  // the mouse pulls focus away from urgent work — a single keystroke should
+  // surface "what's for me" without losing keyboard context.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+      if (e.key === "1") { e.preventDefault(); changeInboxTab("human"); }
+      else if (e.key === "2") { e.preventDefault(); changeInboxTab("pipeline"); }
+      else if (e.key === "3") { e.preventDefault(); changeInboxTab("all"); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
@@ -3976,19 +4008,29 @@ When multiple instances of this role are active:
                       );
                     }
 
+                    // PR H2: privileged-role visual distinction.
+                    // Why: moderator and manager hold out-of-turn speech and
+                    // pipeline-override capabilities (per msg 200); users need
+                    // to see at a glance which seats carry that authority.
+                    const isPrivilegedRole = card.slug === "moderator" || card.slug === "manager";
                     return (
                       <div
                         key={cardKey}
-                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${pipelineTurn === "on-turn" ? " pipeline-on-turn" : ""}${pipelineTurn === "completed" ? " pipeline-completed" : ""}${pipelineTurn === "waiting" ? " pipeline-waiting" : ""}`}
+                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${pipelineTurn === "on-turn" ? " pipeline-on-turn" : ""}${pipelineTurn === "completed" ? " pipeline-completed" : ""}${pipelineTurn === "waiting" ? " pipeline-waiting" : ""}${isPrivilegedRole ? " role-card-privileged" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}${pipelineTurn === "on-turn" ? ", currently on turn" : pipelineTurn === "completed" ? ", turn completed" : pipelineTurn === "waiting" ? `, queue position ${pipelineQueuePos}` : ""}. Click to view details.`}
+                        aria-label={`${card.title}${isPrivilegedRole ? " (privileged role — out-of-turn speech allowed)" : ""}, status: ${getStatusLabel(card.status)}${pipelineTurn === "on-turn" ? ", currently on turn" : pipelineTurn === "completed" ? ", turn completed" : pipelineTurn === "waiting" ? `, queue position ${pipelineQueuePos}` : ""}. Click to view details.`}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
                         <div className="role-card-header">
                           <span className={getStatusDotClass(card.status)} />
+                          {isPrivilegedRole && (
+                            <span className="role-card-crown" title={`${card.title} — privileged role, can speak out of turn`} aria-hidden="true">
+                              {"\u265B"}
+                            </span>
+                          )}
                           <span className="role-card-title" style={{ color: card.roleColor }}>
                             {card.title}
                           </span>
@@ -4252,39 +4294,87 @@ When multiple instances of this role are active:
 
         {/* PR H: Inbox tabs — separates human-directed messages from team chatter.
             Why: the board was one big stream; users asked for a clean view of "what's
-            addressed to me" without scrolling past 30+ role-to-role turns per pipeline. */}
-        <div className="inbox-tabs" role="tablist" aria-label="Message inbox views">
-          <button
-            role="tab"
-            id="inbox-tab-human"
-            aria-selected={inboxTab === "human"}
-            aria-controls="inbox-panel"
-            className={`inbox-tab${inboxTab === "human" ? " inbox-tab-active" : ""}`}
-            onClick={() => changeInboxTab("human")}
-          >
-            You &amp; Moderator
-          </button>
-          <button
-            role="tab"
-            id="inbox-tab-pipeline"
-            aria-selected={inboxTab === "pipeline"}
-            aria-controls="inbox-panel"
-            className={`inbox-tab${inboxTab === "pipeline" ? " inbox-tab-active" : ""}`}
-            onClick={() => changeInboxTab("pipeline")}
-          >
-            Active Pipeline
-          </button>
-          <button
-            role="tab"
-            id="inbox-tab-all"
-            aria-selected={inboxTab === "all"}
-            aria-controls="inbox-panel"
-            className={`inbox-tab${inboxTab === "all" ? " inbox-tab-active" : ""}`}
-            onClick={() => changeInboxTab("all")}
-          >
-            All Activity
-          </button>
-        </div>
+            addressed to me" without scrolling past 30+ role-to-role turns per pipeline.
+            PR H2: added unread-count badges + Ctrl+1/2/3 keyboard shortcuts. */}
+        {(() => {
+          // PR H2: compute unread count per tab. Each tab counts messages newer
+          // than its last-seen timestamp, using the same filter predicates the
+          // timeline uses. Active tab is never marked unread — seeing it counts.
+          const msgs = project?.messages ?? [];
+          const countUnread = (tab: InboxTab): number => {
+            if (tab === inboxTab) return 0;
+            const since = tabLastSeen[tab] || 0;
+            return msgs.reduce((n, m) => {
+              const ts = new Date(m.timestamp).getTime();
+              if (isNaN(ts) || ts <= since) return n;
+              if (tab === "all") return n + 1;
+              if (tab === "human") {
+                if (m.to === "human"
+                  || m.from.startsWith("human:")
+                  || m.from.startsWith("manager:")
+                  || m.from.startsWith("moderator:")) return n + 1;
+                return n;
+              }
+              if (tab === "pipeline") {
+                const meta = m.metadata as Record<string, unknown> | undefined;
+                if (m.type === "moderation"
+                  || !!meta?.pipeline_notification
+                  || !!meta?.discussion_turn
+                  || !!meta?.pipeline_position) return n + 1;
+                return n;
+              }
+              return n;
+            }, 0);
+          };
+          const humanUnread = countUnread("human");
+          const pipelineUnread = countUnread("pipeline");
+          const allUnread = countUnread("all");
+          const renderBadge = (count: number) => count > 0 ? (
+            <span className="inbox-tab-badge" aria-label={`${count} unread`}>
+              {count > 99 ? "99+" : count}
+            </span>
+          ) : null;
+          return (
+            <div className="inbox-tabs" role="tablist" aria-label="Message inbox views">
+              <button
+                role="tab"
+                id="inbox-tab-human"
+                aria-selected={inboxTab === "human"}
+                aria-controls="inbox-panel"
+                className={`inbox-tab${inboxTab === "human" ? " inbox-tab-active" : ""}`}
+                onClick={() => changeInboxTab("human")}
+                title="You &amp; Moderator (Ctrl+1)"
+              >
+                You &amp; Moderator
+                {renderBadge(humanUnread)}
+              </button>
+              <button
+                role="tab"
+                id="inbox-tab-pipeline"
+                aria-selected={inboxTab === "pipeline"}
+                aria-controls="inbox-panel"
+                className={`inbox-tab${inboxTab === "pipeline" ? " inbox-tab-active" : ""}`}
+                onClick={() => changeInboxTab("pipeline")}
+                title="Active Pipeline (Ctrl+2)"
+              >
+                Active Pipeline
+                {renderBadge(pipelineUnread)}
+              </button>
+              <button
+                role="tab"
+                id="inbox-tab-all"
+                aria-selected={inboxTab === "all"}
+                aria-controls="inbox-panel"
+                className={`inbox-tab${inboxTab === "all" ? " inbox-tab-active" : ""}`}
+                onClick={() => changeInboxTab("all")}
+                title="All Activity (Ctrl+3)"
+              >
+                All Activity
+                {renderBadge(allUnread)}
+              </button>
+            </div>
+          );
+        })()}
 
         {/* Message Timeline */}
         <div className="message-timeline" id="inbox-panel" role="tabpanel" aria-labelledby={`inbox-tab-${inboxTab}`} ref={messageTimelineRef}>
