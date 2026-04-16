@@ -7,7 +7,6 @@ import { RoleBriefingModal } from "./RoleBriefingModal";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
-// AudiencePanel removed — audience config is now inline in Start Discussion dialog
 import { DiscussionPanel } from "./DiscussionPanel";
 import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
@@ -1239,7 +1238,6 @@ When multiple instances of this role are active:
     member_count: number;
     providers: string[];
   }
-  const [audiencePanelOpen, setAudiencePanelOpen] = useState(false);
   const [audiencePersonas, setAudiencePersonas] = useState<AudiencePersona[]>([]);
   const [audiencePools, setAudiencePools] = useState<AudiencePool[]>([]);
   const [audienceVoting, setAudienceVoting] = useState(false);
@@ -3659,11 +3657,7 @@ When multiple instances of this role are active:
                                 const cardKey = `${card.slug}:${card.instance}`;
                                 const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                                 const handleCardClick = () => {
-                                  if (card.slug === "audience") {
-                                    setAudiencePanelOpen(true);
-                                  } else {
-                                    matchingRole && setSelectedRole(matchingRole);
-                                  }
+                                  matchingRole && setSelectedRole(matchingRole);
                                 };
                                 if (rosterViewMode === "chip") {
                                   return (
@@ -4042,12 +4036,7 @@ When multiple instances of this role are active:
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                     const handleCardClick = () => {
-                      if (card.slug === "audience") {
-                        setAudiencePanelOpen(true);
-                        if (audiencePersonas.length === 0) { fetchAudiencePersonas(); fetchAudiencePools(); }
-                      } else {
-                        matchingRole && setSelectedRole(matchingRole);
-                      }
+                      matchingRole && setSelectedRole(matchingRole);
                     };
                     const handleCardKeyDown = (e: React.KeyboardEvent) => {
                       if (e.key === "Enter" || e.key === " ") {
