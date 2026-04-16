@@ -8025,6 +8025,31 @@ mod tests {
         unimplemented!("waiting on audit metadata on auto-advance");
     }
 
+    /// pr-t6 addition (architect msg 352, dev-challenger msg 358, tech-leader msg 368):
+    /// Drift guard for the Rust ↔ TypeScript enum mirror. When developer ships
+    /// `pr-4-frontend-types`, the `ModeratorError` variants in
+    /// `desktop/src/lib/collabTypes.ts` must match the Rust source 1:1. Without
+    /// this test, a Rust variant add/rename silently diverges the two sides and
+    /// UX's pattern-matching loses coverage.
+    ///
+    /// Unignore when:
+    ///   (a) `ModeratorError` has been promoted to a real Rust enum (currently
+    ///       string-prefixed error codes per developer msg 343 format-gating)
+    ///   (b) `pr-4-frontend-types` has landed with a mirrored TS discriminated union
+    #[test]
+    #[ignore = "gated on pr-4-frontend-types + enum promotion; unignore when both exist"]
+    fn test_ts_types_match_rust_enum_variants() {
+        // Assertion shape:
+        //   1. read desktop/src/lib/collabTypes.ts
+        //   2. extract the discriminated-union tag values for ModeratorError
+        //   3. read collab.rs (or wherever the Rust enum lands)
+        //   4. extract the Rust enum variant names
+        //   5. assert the two sets are equal; fail with the diff if not
+        // Implementation note: std::fs::read_to_string against relative paths
+        // from CARGO_MANIFEST_DIR so the test runs from any cwd.
+        unimplemented!("drift guard — waiting on pr-4-frontend-types + enum promotion");
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // PR 4 helper tests (pure predicates, no I/O).
     // These tests cover helpers the PR 4 code relies on; the moderator-gate
