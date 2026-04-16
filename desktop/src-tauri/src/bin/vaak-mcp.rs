@@ -2227,6 +2227,28 @@ fn validate_moderator_reason(action: &str, reason: Option<&str>) -> Result<(), S
     Ok(())
 }
 
+/// True if the sessions snapshot contains an active (or idle) `manager:N` binding.
+///
+/// Why: tester msg 181 flagged that `human:0`'s implicit moderator-capability bypass
+/// needs an off-switch — specifically, the bypass should only apply when no dedicated
+/// manager is present. This helper reads a sessions-shaped JSON (pure, testable)
+/// so callsites can gate human fallback on manager presence.
+///
+/// Semantics: returns true iff any binding has `role == "manager"` and `status` in
+/// {"active", "idle"}. Vacant or disconnected manager sessions don't count.
+fn has_active_manager_in_sessions(sessions: &serde_json::Value) -> bool {
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter().any(|b| {
+                let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                role == "manager" && (status == "active" || status == "idle")
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Validate a decision record for the `record_decision` action.
 ///
 /// Why: tech-leader msg 279 routed the `decisions` primitive into PR 4. A decision
@@ -2282,8 +2304,16 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         "toggle_pipeline_mode", "update_settings", "record_decision",
     ];
     if moderator_only_actions.contains(&action) {
-        // Human always bypasses role gates
-        if state.role != "human" {
+        // Human-yields-to-manager refinement (tester msg 181, tech-leader msg 292).
+        // Why: before this fix, human:0 carried an unconditional bypass on moderator
+        // gates. If a dedicated manager session was claimed, human bypass remained
+        // active — there was no off-switch. Now human bypass is CONDITIONAL on
+        // no-active-manager. When a real manager joins, they become authoritative
+        // and human must route through them (or answer-type replies, which remain
+        // permitted everywhere per vaak-mcp.rs:3533+).
+        let human_bypass_ok = state.role == "human"
+            && !has_active_manager_in_sessions(&read_sessions(&state.project_dir));
+        if !human_bypass_ok {
             let discussion = read_discussion_state(&state.project_dir);
             let moderator = discussion.get("moderator")
                 .and_then(|m| m.as_str())
@@ -7771,5 +7801,64 @@ mod tests {
         //   4. assert `stage_auto_advanced` event emitted
         //   5. assert current_stage == N + 1
         unimplemented!("waiting on stage-deadline+auto-advance");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // pr-t2: additional placeholder tests per tech-leader msg 293 — splits
+    // merged placeholders and adds complementary coverage for PR 4's scope.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Split of test 2 (tech-leader msg 293): isolate the consensus-defers-while-paused
+    /// behavior from the auto-pause-on-moderator-exit behavior. Two mechanisms,
+    /// two tests. PR 4's moderator-exit handler sets `paused_at`; PR A's
+    /// consensus check must honor it. These can fail independently.
+    #[test]
+    #[ignore = "feature not implemented — unignore when round_reached_consensus honors paused_at"]
+    fn test_consensus_check_defers_while_paused() {
+        // Assertion shape:
+        //   1. set discussion.paused_at = Some(iso_timestamp)
+        //   2. call round_reached_consensus with all-accept votes
+        //   3. expect false — paused suppresses consensus-triggered terminate
+        //      regardless of vote state
+        unimplemented!("waiting on paused_at honoring in round_reached_consensus");
+    }
+
+    /// Complement of test 3 (tech-leader msg 293): when a claimed manager
+    /// session ends, human:0 must regain its implicit moderator bypass.
+    /// Otherwise a manager crash leaves the session without any moderator,
+    /// which is the exact vacancy failure mode the fallback was designed to
+    /// prevent.
+    #[test]
+    #[ignore = "feature not implemented — unignore when human bypass becomes re-enabled on manager exit"]
+    fn test_human_regains_moderator_on_manager_exit() {
+        // Assertion shape:
+        //   1. set discussion.moderator = "manager:0" (human bypass suppressed)
+        //   2. simulate manager:0 session_terminated event
+        //   3. expect discussion.moderator cleared OR bypass predicate re-enabled
+        //   4. call from human:0 to moderator_only_action
+        //   5. expect Ok — human bypass re-active
+        unimplemented!("waiting on bypass re-enable on manager exit");
+    }
+
+    /// Complement of test 5 (tech-leader msg 293): when the silent-turn
+    /// auto-advance fires, it must emit the same moderator_action audit
+    /// metadata {action, reason, timestamp, actor, affected_role} that
+    /// human-invoked actions produce. Otherwise auto-advances become
+    /// invisible in the audit trail, which breaks the postmortem-evidence
+    /// principle from architect msg 190.
+    #[test]
+    #[ignore = "feature not implemented — unignore when auto-advance emits audit metadata"]
+    fn test_silent_turn_emits_moderator_action_audit() {
+        // Assertion shape:
+        //   1. set stage_deadline_secs = 5, advance to stage N, wait 6s
+        //   2. assert the emitted stage_auto_advanced board message carries:
+        //        metadata.moderator_action = {
+        //          action: "auto_advance",
+        //          reason: "stage timeout",
+        //          timestamp: iso_str,
+        //          actor: "system:auto",
+        //          affected_role: "<skipped-role-instance>"
+        //        }
+        unimplemented!("waiting on audit metadata on auto-advance");
     }
 }
