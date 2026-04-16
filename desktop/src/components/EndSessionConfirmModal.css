@@ -1,0 +1,216 @@
+/* PR H3 v2 — End Session typed-confirm modal.
+   Spec: .vaak/specs/pr-h3-moderator-toolbar.md § "End session".
+   Self-contained stylesheet imported by EndSessionConfirmModal.tsx so the
+   component's CSS surface travels with the TS file. */
+
+.end-session-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  animation: end-session-fade-in 120ms ease-out;
+}
+
+.end-session-modal {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 85vh;
+  background: var(--collab-bg-primary, #17181c);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(239, 68, 68, 0.08);
+  animation: end-session-slide-in 160ms ease-out;
+}
+
+.end-session-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.end-session-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #ef4444;
+  letter-spacing: 0.01em;
+}
+
+.end-session-body {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.end-session-warning {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.end-session-warning strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.end-session-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.75);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.end-session-label code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: none;
+}
+
+.end-session-required {
+  color: #ef4444;
+  margin-left: 2px;
+}
+
+.end-session-reason,
+.end-session-typed {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--collab-bg-secondary, #0f1014);
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.end-session-reason {
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 64px;
+}
+
+.end-session-typed {
+  font-size: 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.end-session-reason:focus,
+.end-session-typed:focus {
+  outline: 2px solid #ef4444;
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.end-session-reason[aria-invalid="true"],
+.end-session-typed[aria-invalid="true"] {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.end-session-field-err {
+  font-size: 12px;
+  color: #ef4444;
+  margin-top: -4px;
+}
+
+.end-session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.end-session-btn {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.end-session-btn:focus-visible {
+  outline: 2px solid var(--collab-accent, #6366f1);
+  outline-offset: 2px;
+}
+
+.end-session-btn-cancel {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.end-session-btn-cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.end-session-btn-confirm {
+  background: #ef4444;
+  color: #fff;
+  border-color: #ef4444;
+}
+
+.end-session-btn-confirm:hover:not(:disabled) {
+  background: #dc2626;
+  border-color: #dc2626;
+}
+
+.end-session-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.end-session-sr-only,
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes end-session-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes end-session-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* WCAG 2.1 AA — respect user's motion preference. Remove the translate on
+   the modal; the fade remains since opacity-only transitions are permitted. */
+@media (prefers-reduced-motion: reduce) {
+  .end-session-overlay,
+  .end-session-modal {
+    animation: end-session-fade-in 60ms linear;
+  }
+}

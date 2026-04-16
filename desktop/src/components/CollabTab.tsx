@@ -9,6 +9,7 @@ import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type R
 import { trimVoiceAssignments } from "../lib/storageManager";
 // AudiencePanel removed — audience config is now inline in Start Discussion dialog
 import { DiscussionPanel } from "./DiscussionPanel";
+import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import "../styles/collab.css";
 
@@ -748,6 +749,24 @@ export function CollabTab() {
   // failures only logged to console — invisible to the user. Now they surface
   // as a dismissible toast with a human-friendly rendering of each ModeratorErrorCode.
   const [modErrorToast, setModErrorToast] = useState<string | null>(null);
+  // PR H3 v2: End Session confirmation modal state.
+  // Why: the red End button on DiscussionPanel previously called the destructive
+  // end_discussion command on a single click with no friction. Per spec
+  // .vaak/specs/pr-h3-moderator-toolbar.md § "End session", a typed-confirm with
+  // mandatory reason is the guardrail. Reason is broadcast to the board before
+  // the end call so the moderator's rationale is durably recorded even though
+  // the Tauri command signature has not yet gained a `reason` parameter
+  // (developer msg 374 — deferred item).
+  const [endConfirmOpen, setEndConfirmOpen] = useState(false);
+  const [endSessionAnnouncement, setEndSessionAnnouncement] = useState<string | null>(null);
+  // Clear the polite-region announcement after screen readers have had time
+  // to read it (≈3s). Leaving the text in the DOM would prevent re-announcing
+  // the same message on a subsequent end.
+  useEffect(() => {
+    if (!endSessionAnnouncement) return;
+    const t = window.setTimeout(() => setEndSessionAnnouncement(null), 3000);
+    return () => window.clearTimeout(t);
+  }, [endSessionAnnouncement]);
   const showModeratorError = (raw: string) => {
     const parsed = parseModeratorError(raw);
     if (!parsed) {
@@ -2157,12 +2176,35 @@ When multiple instances of this role are active:
     }
   };
 
-  const handleEndDiscussion = async () => {
+  // PR H3 v2: extracted core end flow so both the slash-command path and the
+  // modal-confirm path share one implementation. `reason` is pre-broadcast to
+  // the board as a moderation-type message before the destructive call so the
+  // moderator's rationale is recorded durably even if end_discussion completes
+  // or fails afterwards.
+  const doEndDiscussion = async (reason?: string) => {
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
+
+        if (reason && reason.trim().length > 0 && projectDir) {
+          try {
+            await invoke("send_team_message", {
+              dir: projectDir,
+              to: "all",
+              subject: "End Session requested",
+              body: reason.trim(),
+              msgType: "moderation",
+            });
+          } catch (broadcastErr) {
+            // Non-blocking: if the reason broadcast fails we still want to end
+            // the session (the user already confirmed). Log for diagnostics.
+            console.error("[CollabTab] Failed to broadcast end-session reason:", broadcastErr);
+          }
+        }
+
         await invoke("end_discussion", { dir: projectDir });
         setDiscussionState(null);
+        setEndSessionAnnouncement("Session ended.");
 
         // Auto-stop discussion-bound agents (moderator + audience)
         for (const slug of DISCUSSION_BOUND_AGENTS) {
@@ -2182,6 +2224,18 @@ When multiple instances of this role are active:
       console.error("[CollabTab] Failed to end discussion:", e);
       showModeratorError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  // Red End button on DiscussionPanel. Opens the typed-confirm modal instead
+  // of calling end_discussion directly; the modal's onConfirm is what actually
+  // invokes doEndDiscussion.
+  const handleEndDiscussion = () => {
+    setEndConfirmOpen(true);
+  };
+
+  const handleConfirmEndSession = async (reason: string) => {
+    setEndConfirmOpen(false);
+    await doEndDiscussion(reason);
   };
 
   const handleTogglePause = async () => {
@@ -4693,6 +4747,26 @@ When multiple instances of this role are active:
             >
               {"\u00D7"}
             </button>
+          </div>
+        )}
+
+        {/* PR H3 v2: End Session typed-confirm modal. Rendered here (rather than
+            inside DiscussionPanel) so the parent owns the state and the MCP
+            invoke lives alongside the other moderator handlers. Backdrop click,
+            Escape, and Cancel all route to onCancel; onConfirm receives the
+            validated reason string. */}
+        <EndSessionConfirmModal
+          open={endConfirmOpen}
+          topic={discussionState?.topic ?? undefined}
+          onConfirm={handleConfirmEndSession}
+          onCancel={() => setEndConfirmOpen(false)}
+        />
+
+        {/* Live-region announcer for moderator-action confirmations (separate
+            from the error toast so assistive-tech users hear both). */}
+        {endSessionAnnouncement && (
+          <div className="sr-only" role="status" aria-live="polite">
+            {endSessionAnnouncement}
           </div>
         )}
 
