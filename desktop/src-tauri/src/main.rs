@@ -5,6 +5,7 @@ mod a11y;
 mod audio;
 mod collab;
 mod database;
+mod ethereal;
 mod keyboard_hook;
 mod launcher;
 mod queue;
@@ -830,8 +831,8 @@ fn setup_claude_code_integration() {
     use std::path::PathBuf;
 
     // Get home directory
-    let home = match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        Ok(h) => PathBuf::from(h),
+    let home = match collab::vaak_home_dir() {
+        Ok(h) => h,
         Err(_) => {
             log_error("Could not determine home directory for Claude Code setup");
             return;
@@ -2582,6 +2583,78 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     Ok(())
 }
 
+#[tauri::command]
+fn get_turn_state(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let turn_path = std::path::Path::new(&dir).join(".vaak").join("turn_state.json");
+    match std::fs::read_to_string(&turn_path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse turn_state.json: {}", e)),
+        Err(_) => Ok(serde_json::json!({"completed": true})),
+    }
+}
+
+#[tauri::command]
+fn set_work_mode(dir: String, work_mode: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    if work_mode != "simultaneous" && work_mode != "consecutive" {
+        return Err(format!("Invalid work mode '{}'. Must be 'simultaneous' or 'consecutive'.", work_mode));
+    }
+
+    let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if let Some(settings) = config.get_mut("settings") {
+        settings["work_mode"] = serde_json::Value::String(work_mode.clone());
+    }
+
+    let now = {
+        let dur = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = dur.as_secs();
+        let hours = (secs % 86400) / 3600;
+        let mins = (secs % 3600) / 60;
+        let s = secs % 60;
+        let days = secs / 86400;
+        let mut y = 1970u64;
+        let mut remaining = days;
+        loop {
+            let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+            if remaining < diy { break; }
+            remaining -= diy;
+            y += 1;
+        }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0u64;
+        for i in 0..12 {
+            if remaining < month_days[i] { break; }
+            remaining -= month_days[i];
+            m = i as u64 + 1;
+        }
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
+    };
+    config["updated_at"] = serde_json::Value::String(now);
+
+    let pretty = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    collab::atomic_write(&config_path, pretty.as_bytes())
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    // Clear stale turn state when switching to simultaneous
+    if work_mode == "simultaneous" {
+        let turn_state_path = std::path::Path::new(&dir).join(".vaak").join("turn_state.json");
+        let _ = std::fs::remove_file(&turn_state_path);
+    }
+
+    notify_collab_change();
+    Ok(())
+}
+
 /// Dedicated channel for collab change notifications. Uses a single background
 /// thread instead of spawning a new OS thread per call (25+ call sites).
 /// Notifications are coalesced: rapid successive calls result in a single HTTP request.
@@ -2632,8 +2705,15 @@ fn start_discussion(
     topic: String,
     moderator: Option<String>,
     participants: Vec<String>,
+    rounds: Option<u32>,
+    pipeline_mode: Option<String>,
 ) -> Result<(), String> {
-    let valid_modes = ["delphi", "oxford", "red_team", "continuous"];
+    // DIAGNOSTIC: Write immediately at function entry to prove this code runs
+    let diag_path = std::path::Path::new(&dir).join(".vaak").join("start_discussion_debug.log");
+    let _ = std::fs::write(&diag_path, format!("ENTRY: mode={} topic={} dir={}\n", mode, topic, dir));
+    eprintln!("[start_discussion] DIAGNOSTIC: function entered, mode={}, topic={}", mode, topic);
+
+    let valid_modes = ["delphi", "oxford", "red_team", "continuous", "pipeline"];
     if !valid_modes.contains(&mode.as_str()) {
         return Err(format!("Invalid discussion mode '{}'. Must be one of: {}", mode, valid_modes.join(", ")));
     }
@@ -2644,14 +2724,61 @@ fn start_discussion(
         return Err("At least one participant is required.".to_string());
     }
 
+    // Auto-detect moderator: if not explicitly provided, check if a "moderator"
+    // role exists in the roster. Discussion-bound roles auto-start when discussions
+    // begin, so the moderator may not have an active session yet.
+    let moderator = moderator.or_else(|| {
+        let project_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+        let project_data = std::fs::read_to_string(&project_path).ok()?;
+        let project: serde_json::Value = serde_json::from_str(&project_data).ok()?;
+        // Check if "moderator" role exists in the roster
+        let has_moderator = project.get("roles")
+            .and_then(|r| r.get("moderator"))
+            .is_some();
+        if !has_moderator {
+            return None;
+        }
+        // Check for an active session first
+        let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+        if let Some(sessions) = std::fs::read_to_string(&sessions_path).ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        {
+            if let Some(instance) = sessions.get("bindings")
+                .and_then(|b| b.as_array())
+                .and_then(|bindings| {
+                    bindings.iter().find(|b| {
+                        let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                        let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                        role == "moderator" && (status == "active" || status == "idle")
+                    })
+                })
+                .and_then(|b| b.get("instance").and_then(|i| i.as_u64()))
+            {
+                return Some(format!("moderator:{}", instance));
+            }
+        }
+        // Role exists but no active session — use moderator:0 (will auto-start)
+        Some("moderator:0".to_string())
+    });
+
+    // Validate: warn if moderator is vacant (but don't block — auto mode is the fallback)
+    // This log helps diagnose "absent moderator" issues in discussions
+    if moderator.is_none() {
+        eprintln!("[start_discussion] WARNING: No moderator available. Discussion will run unmoderated.");
+    }
+
     let now = iso_now();
     let is_continuous = mode == "continuous";
+    let is_pipeline = mode == "pipeline";
 
     // Continuous mode starts in "reviewing" phase with no rounds —
     // rounds are auto-created when developers post status messages.
+    // Pipeline mode starts at stage 0, phase "pipeline_active", no rounds.
     // "reviewing" = ready for next auto-trigger (consistent with post-close phase).
     let (initial_round, initial_phase, initial_rounds) = if is_continuous {
         (0, "reviewing".to_string(), Vec::new())
+    } else if is_pipeline {
+        (0, "pipeline_active".to_string(), Vec::new())
     } else {
         (1, "submitting".to_string(), vec![collab::DiscussionRound {
             number: 1,
@@ -2672,7 +2799,25 @@ fn start_discussion(
     if is_continuous {
         settings.max_rounds = 999;
         settings.auto_close_timeout_seconds = 60;
+    } else if is_pipeline {
+        // Use rounds parameter if provided, otherwise default to unlimited
+        if let Some(r) = rounds {
+            settings.max_rounds = r;
+            settings.termination = Some(collab::TerminationStrategy::FixedRounds { rounds: r });
+        } else {
+            settings.max_rounds = 999;
+            settings.termination = Some(collab::TerminationStrategy::Unlimited);
+        }
+        settings.auto_close_timeout_seconds = 30;
+        settings.automation = Some(collab::AutomationLevel::Auto);
     }
+
+    // For pipeline mode, use intelligent topic-based ordering (shared with MCP sidecar)
+    let pipeline_order = if is_pipeline {
+        Some(collab::build_pipeline_order(&dir, &topic, &participants))
+    } else {
+        None
+    };
 
     let state = collab::DiscussionState {
         active: true,
@@ -2688,46 +2833,133 @@ fn start_discussion(
         previous_phase: None,
         rounds: initial_rounds,
         settings,
+        audience_state: "listening".to_string(),
+        audience_enabled: false,
+        pipeline_order,
+        pipeline_stage: if is_pipeline { Some(0) } else { None },
+        pipeline_outputs: if is_pipeline { Some(Vec::new()) } else { None },
+        oxford_teams: None,
+        oxford_votes: None,
+        oxford_motion: None,
+        attack_chains: None,
+        severity_summary: None,
+        unaddressed_count: None,
+        micro_rounds: None,
+        decision_stream: None,
+        pipeline_mode: if is_pipeline { Some(pipeline_mode.unwrap_or_else(|| "discussion".to_string())) } else { None },
+        stagnant_rounds: 0,
     };
 
+    // Step 1: Write discussion.json directly (no board lock needed — uses its own lock)
     if !collab::write_discussion(&dir, &state) {
         return Err("Failed to write discussion.json".to_string());
     }
 
-    // Post announcement to board.jsonl so agents see the discussion started
-    let board_path = collab::active_board_path(&dir);
-    let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
-    let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
-    let mode_ref = state.mode.as_deref().unwrap_or("unknown");
-    let topic_ref = &state.topic;
-    let mod_ref = state.moderator.as_deref().unwrap_or("none");
-    let parts_ref = state.participants.join(", ");
-    let announcement_body = if is_continuous {
-        format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
-            topic_ref, mod_ref, parts_ref)
-    } else {
-        format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
-            mode_ref, topic_ref, mod_ref, parts_ref)
-    };
-    let announcement = serde_json::json!({
-        "id": msg_id,
-        "from": "system",
-        "to": "all",
-        "type": "moderation",
-        "timestamp": state.started_at,
-        "subject": format!("{} discussion started: {}", mode_ref, topic_ref),
-        "body": announcement_body,
-        "metadata": {
-            "discussion_action": "start",
-            "mode": mode_ref,
-            "round": 1
+    // Step 2: Post announcement to board file (inside file lock for atomic ID + write).
+    // Diagnostic: log before attempting board lock
+    {
+        let diag_path = std::path::Path::new(&dir).join(".vaak").join("start_discussion_debug.log");
+        let _ = std::fs::write(&diag_path, format!(
+            "ENTRY: mode={} topic={} dir={}\nSTEP2: About to call with_board_lock\nactive_board_path: {:?}\nactive_lock_path: {:?}\n",
+            state.mode.as_deref().unwrap_or("?"), state.topic, dir,
+            collab::active_board_path(&dir), collab::active_lock_path(&dir)
+        ));
+    }
+    {
+        let mode_ref = state.mode.as_deref().unwrap_or("unknown");
+        let topic_ref = state.topic.clone();
+        let mod_ref = state.moderator.as_deref().unwrap_or("none").to_string();
+        let parts_ref = state.participants.join(", ");
+        let pipeline_order = state.pipeline_order.clone();
+        let started_at = state.started_at.clone();
+        let dir_clone = dir.clone();
+        let dir_for_log = dir.clone();
+
+        let board_result = collab::with_board_lock(&dir, move || {
+            let board_path = collab::active_board_path(&dir_clone);
+            let log_path = std::path::Path::new(&dir_clone).join(".vaak").join("start_discussion_debug.log");
+            let mut log_entries = vec![format!("[{}] Board path: {}", started_at.as_deref().unwrap_or("?"), board_path.display())];
+
+            let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+            let line_count = board_content.lines().filter(|l| !l.trim().is_empty()).count();
+            log_entries.push(format!("Board has {} lines", line_count));
+
+            let msg_id: u64 = board_content.lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+                .max()
+                .unwrap_or(0) + 1;
+            log_entries.push(format!("Computed msg_id: {}", msg_id));
+
+            let announcement_body = if mode_ref == "continuous" {
+                format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
+                    topic_ref, mod_ref, parts_ref)
+            } else if mode_ref == "pipeline" {
+                let order_display = pipeline_order.as_ref().map(|o| o.iter().enumerate()
+                    .map(|(i, a)| if i == 0 { format!("▶ {}", a) } else { a.clone() })
+                    .collect::<Vec<_>>().join(" → ")).unwrap_or_default();
+                format!("A pipeline discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Pipeline Order:** {}\n\nAgents will process sequentially. Each agent sees all previous stage outputs.",
+                    topic_ref, mod_ref, order_display)
+            } else {
+                format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
+                    mode_ref, topic_ref, mod_ref, parts_ref)
+            };
+            let announcement = serde_json::json!({
+                "id": msg_id,
+                "from": "system",
+                "to": "all",
+                "type": "moderation",
+                "timestamp": started_at,
+                "subject": format!("{} discussion started: {}", mode_ref, topic_ref),
+                "body": announcement_body,
+                "metadata": {
+                    "discussion_action": "start",
+                    "mode": mode_ref,
+                    "round": 1
+                }
+            });
+            let line = serde_json::to_string(&announcement)
+                .map_err(|e| format!("Failed to serialize announcement: {}", e))?;
+            log_entries.push(format!("Serialized OK, length: {}", line.len()));
+
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&board_path)
+                .map_err(|e| {
+                    log_entries.push(format!("OPEN FAILED: {}", e));
+                    let _ = std::fs::write(&log_path, log_entries.join("\n"));
+                    format!("[start_discussion] Board open failed: {} (path: {})", e, board_path.display())
+                })?;
+            match writeln!(f, "{}", line) {
+                Ok(()) => {
+                    log_entries.push(format!("WRITE OK — id={}", msg_id));
+                    let _ = std::fs::write(&log_path, log_entries.join("\n"));
+                }
+                Err(e) => {
+                    log_entries.push(format!("WRITE FAILED: {}", e));
+                    let _ = std::fs::write(&log_path, log_entries.join("\n"));
+                    return Err(format!("[start_discussion] Board write failed: {}", e));
+                }
+            }
+            eprintln!("[start_discussion] Board announcement written successfully (id={})", msg_id);
+            Ok(())
+        });
+
+        // Diagnostic: log result of with_board_lock
+        let diag_path2 = std::path::Path::new(&dir_for_log).join(".vaak").join("start_discussion_debug.log");
+        match &board_result {
+            Ok(()) => {
+                eprintln!("[start_discussion] with_board_lock succeeded");
+                let prev = std::fs::read_to_string(&diag_path2).unwrap_or_default();
+                let _ = std::fs::write(&diag_path2, format!("{}\nBOARD_RESULT: OK — announcement written", prev));
+            }
+            Err(e) => {
+                eprintln!("[start_discussion] with_board_lock FAILED: {}", e);
+                let prev = std::fs::read_to_string(&diag_path2).unwrap_or_default();
+                let _ = std::fs::write(&diag_path2, format!("{}\nBOARD_RESULT: FAILED — {}", prev, e));
+            }
         }
-    });
-    if let Ok(line) = serde_json::to_string(&announcement) {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
-            let _ = writeln!(f, "{}", line);
-        }
+        board_result.map_err(|e| format!("Board announcement failed: {}", e))?;
     }
 
     notify_collab_change();
@@ -2882,7 +3114,12 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
 
         // Write aggregate as moderation message to board.jsonl
         // (board.lock is already held by with_board_lock — write directly)
-        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
         let aggregate_msg = serde_json::json!({
             "id": msg_id,
             "from": "system",
@@ -2963,7 +3200,12 @@ fn open_next_round(dir: String) -> Result<u32, String> {
         // Post round-open announcement to board.jsonl (lock already held)
         let board_path = collab::active_board_path(&dir);
         let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
-        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
         let announcement = serde_json::json!({
             "id": msg_id,
             "from": "system",
@@ -3014,7 +3256,12 @@ fn end_discussion(dir: String) -> Result<(), String> {
         // Post end announcement to board.jsonl (lock already held)
         let board_path = collab::active_board_path(&dir);
         let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
-        let msg_id = board_content.lines().filter(|l| !l.trim().is_empty()).count() as u64 + 1;
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
         let announcement = serde_json::json!({
             "id": msg_id,
             "from": "system",
@@ -3035,6 +3282,114 @@ fn end_discussion(dir: String) -> Result<(), String> {
             }
         }
 
+        Ok(())
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
+}
+
+#[tauri::command]
+fn pause_discussion(dir: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let result = collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+        if state.paused_at.is_some() {
+            return Err("Discussion is already paused.".to_string());
+        }
+        let now = iso_now();
+        state.paused_at = Some(now.clone());
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
+        // Post pause announcement
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
+        let announcement = serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "system",
+            "timestamp": now,
+            "subject": "Discussion paused",
+            "body": "The discussion has been paused by the human.",
+            "metadata": {"discussion_action": "pause"}
+        });
+        if let Ok(line) = serde_json::to_string(&announcement) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+        Ok(())
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
+}
+
+#[tauri::command]
+fn resume_discussion(dir: String) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let result = collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+        if state.paused_at.is_none() {
+            return Err("Discussion is not paused.".to_string());
+        }
+        let now = iso_now();
+        state.paused_at = None;
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
+        // Post resume announcement
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
+        let announcement = serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "system",
+            "timestamp": now,
+            "subject": "Discussion resumed",
+            "body": "The discussion has been resumed by the human.",
+            "metadata": {"discussion_action": "resume"}
+        });
+        if let Ok(line) = serde_json::to_string(&announcement) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+        Ok(())
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
+}
+
+#[tauri::command]
+fn update_discussion_settings(dir: String, max_rounds: Option<u32>) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let result = collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active discussion.".to_string());
+        }
+        if let Some(rounds) = max_rounds {
+            state.settings.max_rounds = rounds;
+        }
+        if !collab::write_discussion_unlocked(&dir, &state) {
+            return Err("Failed to write discussion.json".to_string());
+        }
         Ok(())
     });
     if result.is_ok() { notify_collab_change(); }
@@ -3169,71 +3524,76 @@ fn iso_now() -> String {
 #[tauri::command]
 fn send_team_message(dir: String, to: String, subject: String, body: String, msg_type: Option<String>, metadata: Option<serde_json::Value>) -> Result<u64, String> {
     let dir = validate_project_dir(&dir)?;
-    let board_path = collab::active_board_path(&dir);
-
-    // Read existing board to determine next message ID
-    let existing = std::fs::read_to_string(&board_path).unwrap_or_default();
-    let max_id: u64 = existing.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
-        .max()
-        .unwrap_or(0);
-
-    let msg_id = max_id + 1;
-
-    // Generate UTC ISO timestamp without chrono dependency
-    let now = {
-        let dur = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = dur.as_secs();
-        let hours = (secs % 86400) / 3600;
-        let mins = (secs % 3600) / 60;
-        let s = secs % 60;
-        let days = secs / 86400;
-        let mut y = 1970u64;
-        let mut remaining = days;
-        loop {
-            let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-            if remaining < diy { break; }
-            remaining -= diy;
-            y += 1;
-        }
-        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-        let mut m = 0u64;
-        for md in &month_days {
-            if remaining < *md { break; }
-            remaining -= *md;
-            m += 1;
-        }
-        format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
-    };
 
     let effective_type = msg_type.unwrap_or_else(|| "directive".to_string());
     let effective_metadata = metadata.unwrap_or(serde_json::json!({}));
 
-    let message = serde_json::json!({
-        "id": msg_id,
-        "from": "human:0",
-        "to": to,
-        "type": effective_type,
-        "timestamp": now,
-        "subject": subject,
-        "body": body,
-        "metadata": effective_metadata
-    });
+    let msg_id = collab::with_board_lock(&dir, || {
+        let board_path = collab::active_board_path(&dir);
 
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&board_path)
-        .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+        // Read existing board to determine next message ID (inside lock to prevent races)
+        let existing = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let max_id: u64 = existing.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0);
 
-    writeln!(file, "{}", message.to_string())
-        .map_err(|e| format!("Failed to write message: {}", e))?;
+        let msg_id = max_id + 1;
+
+        // Generate UTC ISO timestamp without chrono dependency
+        let now = {
+            let dur = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = dur.as_secs();
+            let hours = (secs % 86400) / 3600;
+            let mins = (secs % 3600) / 60;
+            let s = secs % 60;
+            let days = secs / 86400;
+            let mut y = 1970u64;
+            let mut remaining = days;
+            loop {
+                let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+                if remaining < diy { break; }
+                remaining -= diy;
+                y += 1;
+            }
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            let mut m = 0u64;
+            for md in &month_days {
+                if remaining < *md { break; }
+                remaining -= *md;
+                m += 1;
+            }
+            format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
+        };
+
+        let message = serde_json::json!({
+            "id": msg_id,
+            "from": "human:0",
+            "to": to,
+            "type": effective_type,
+            "timestamp": now,
+            "subject": subject,
+            "body": body,
+            "metadata": effective_metadata
+        });
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&board_path)
+            .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+
+        writeln!(file, "{}", message.to_string())
+            .map_err(|e| format!("Failed to write message: {}", e))?;
+
+        Ok(msg_id)
+    })?;
 
     notify_collab_change();
     Ok(msg_id)
@@ -3403,10 +3763,8 @@ fn sync_role_groups_to_global(project_dir: &str) -> Result<(), String> {
     let groups = config.get("role_groups")
         .ok_or("No role_groups in project.json")?;
 
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or("Cannot determine home directory")?;
-    let global_path = std::path::Path::new(&home).join(".vaak").join("role-groups.json");
+    let home = collab::vaak_home_dir()?;
+    let global_path = home.join(".vaak").join("role-groups.json");
     let json = serde_json::to_string_pretty(groups)
         .map_err(|e| format!("Failed to serialize role groups: {}", e))?;
     std::fs::write(&global_path, json)
@@ -3814,6 +4172,403 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
             }
         }
     });
+}
+
+// ==================== Ethereal Agent Commands ====================
+
+/// Try to read ANTHROPIC_API_KEY from .env files (backend/.env, .env)
+fn resolve_api_key_from_dotenv(project_dir: &str) -> Option<String> {
+    let project = std::path::Path::new(project_dir);
+    // Walk up to find the repo root (where backend/.env lives)
+    let mut dir = project.to_path_buf();
+    loop {
+        // Check backend/.env
+        let backend_env = dir.join("backend").join(".env");
+        if let Some(key) = read_dotenv_key(&backend_env, "ANTHROPIC_API_KEY") {
+            return Some(key);
+        }
+        // Check .env at root
+        let root_env = dir.join(".env");
+        if let Some(key) = read_dotenv_key(&root_env, "ANTHROPIC_API_KEY") {
+            return Some(key);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn read_dotenv_key(path: &std::path::Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let prefix = format!("{}=", key);
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&prefix) {
+            let val = trimmed[prefix.len()..].trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ==================== Role Designer (Anthropic API) ====================
+
+const ROLE_DESIGNER_SYSTEM: &str = r#"You are a Role Designer — an expert at creating team roles for AI agent collaboration systems. Your job is to interview the user about the role they want to create, then produce a complete role configuration.
+
+## How You Work
+
+1. **Interview phase**: Ask the user 3-5 focused questions to understand the role they need. Ask one question at a time. Be conversational but efficient.
+2. **Design phase**: When you have enough information, generate the complete role configuration.
+
+## Interview Guidelines
+
+- Start by asking what kind of work they need help with
+- Ask about boundaries — what should this role NOT do?
+- Ask about team fit — how does this relate to their existing roles?
+- Ask about authority — should this role direct others, or be directed?
+- Don't ask more than 5 questions total. If you have enough after 3, proceed to design.
+
+## Available Capabilities (tags)
+
+implementation, code-review, testing, architecture, moderation, security, compliance, analysis, coordination, red-team, documentation, debugging
+
+## Available Permissions
+
+broadcast, review, assign_tasks, status, question, handoff, moderation
+
+## When You're Ready to Generate
+
+When you have enough information, output a friendly summary of the role you'll create, followed by the configuration in this exact format:
+
+|||ROLE_CONFIG|||
+{
+  "title": "Role Title",
+  "slug": "role-slug",
+  "description": "One-sentence description of this role",
+  "tags": ["tag1", "tag2"],
+  "permissions": ["perm1", "perm2"],
+  "max_instances": 1,
+  "briefing": "Full markdown briefing content..."
+}
+|||END_CONFIG|||
+
+The briefing should be a complete markdown document with sections: Identity, Primary Function, Anti-patterns, Peer Relationships, Action Boundary, Onboarding.
+
+## Important Rules
+
+- The slug must be lowercase alphanumeric with hyphens only
+- Always include "status" in permissions
+- max_instances should be 1 for specialized roles, 2-3 for implementation roles
+- The briefing should reference the specific team context the user described
+- Be opinionated — recommend what you think is best
+- If the user's request closely matches an existing role on their team, point that out
+"#;
+
+#[tauri::command]
+fn design_role_turn(dir: String, messages: Vec<serde_json::Value>, api_key: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let resolved_key = if !api_key.is_empty() {
+        api_key
+    } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        key
+    } else {
+        resolve_api_key_from_dotenv(&dir)
+            .ok_or_else(|| format!("No API key found. Set ANTHROPIC_API_KEY environment variable, enter it in Collab > Ethereal Settings, or add it to backend/.env (searched from: {})", dir))?
+    };
+
+    // Build team context from project.json
+    let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let team_context = if let Ok(content) = std::fs::read_to_string(&config_path) {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(roles) = config.get("roles").and_then(|r| r.as_object()) {
+                let mut ctx = String::from("\n\n## Current Team Context\n\nExisting roles:\n");
+                for (slug, role) in roles {
+                    let title = role.get("title").and_then(|t| t.as_str()).unwrap_or(slug);
+                    let desc = role.get("description").and_then(|d| d.as_str()).unwrap_or("No description");
+                    ctx.push_str(&format!("- **{}** ({}): {}\n", title, slug, desc));
+                }
+                ctx
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let system_prompt = format!("{}{}", ROLE_DESIGNER_SYSTEM, team_context);
+
+    // Build API messages
+    let api_messages: Vec<serde_json::Value> = messages.iter()
+        .filter(|m| {
+            let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            role == "user" || role == "assistant"
+        })
+        .cloned()
+        .collect();
+
+    if api_messages.is_empty() {
+        return Err("At least one message is required".to_string());
+    }
+
+    let body = serde_json::json!({
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": api_messages,
+    });
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(90))
+        .timeout_write(std::time::Duration::from_secs(30))
+        .build();
+
+    let resp = agent.post("https://api.anthropic.com/v1/messages")
+        .set("x-api-key", &resolved_key)
+        .set("anthropic-version", "2023-06-01")
+        .set("content-type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("Anthropic API error: {}", e))?;
+
+    let resp_str = resp.into_string()
+        .map_err(|e| format!("Failed to read API response: {}", e))?;
+    let resp_body: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| format!("Failed to parse API response: {}", e))?;
+
+    let content = resp_body.get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|block| block.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Parse role config from |||ROLE_CONFIG||| delimiters
+    let role_config = {
+        let start_marker = "|||ROLE_CONFIG|||";
+        let end_marker = "|||END_CONFIG|||";
+        if let (Some(start), Some(end)) = (content.find(start_marker), content.find(end_marker)) {
+            let json_str = &content[start + start_marker.len()..end].trim();
+            serde_json::from_str::<serde_json::Value>(json_str).ok()
+        } else {
+            None
+        }
+    };
+
+    // Extract reply (content without the config block)
+    let reply = if content.contains("|||ROLE_CONFIG|||") {
+        let before = content.split("|||ROLE_CONFIG|||").next().unwrap_or("").trim();
+        let after = content.split("|||END_CONFIG|||").last().unwrap_or("").trim();
+        let combined = format!("{}\n{}", before, after).trim().to_string();
+        if combined.is_empty() { content.clone() } else { combined }
+    } else {
+        content
+    };
+
+    Ok(serde_json::json!({
+        "reply": reply,
+        "role_config": role_config,
+    }))
+}
+
+#[tauri::command]
+fn start_ethereal_agent(
+    dir: String,
+    slug: String,
+    api_key: String,
+    groq_key: Option<String>,
+    openai_key: Option<String>,
+) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+
+    // Resolve Anthropic key from parameter > env > dotenv
+    let anthropic_key = if !api_key.is_empty() {
+        Some(api_key)
+    } else if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        Some(key)
+    } else {
+        resolve_api_key_from_dotenv(&dir)
+    };
+
+    // Resolve Groq key from parameter > env
+    let groq = groq_key
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("GROQ_API_KEY").ok());
+
+    // Resolve OpenAI key from parameter > env
+    let openai = openai_key
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+
+    let keys = ethereal::ProviderKeys {
+        anthropic: anthropic_key,
+        groq,
+        openai,
+    };
+
+    let configs = ethereal::default_configs();
+    let config = configs.into_iter()
+        .find(|c| c.slug == slug)
+        .ok_or_else(|| format!("Unknown ethereal agent: {}", slug))?;
+    ethereal::start_agent_multi_provider(&dir, config, keys)
+}
+
+#[tauri::command]
+fn check_anthropic_env_key() -> bool {
+    std::env::var("ANTHROPIC_API_KEY").is_ok()
+}
+
+#[tauri::command]
+fn stop_ethereal_agent(slug: String) -> Result<(), String> {
+    ethereal::stop_agent(&slug)
+}
+
+#[tauri::command]
+fn get_ethereal_statuses() -> Vec<ethereal::EtherealStatus> {
+    ethereal::agent_statuses()
+}
+
+// ==================== Audience Pool Management ====================
+
+/// Get the audiences directory path (~/.vaak/audiences/).
+fn audiences_dir() -> Result<std::path::PathBuf, String> {
+    Ok(collab::vaak_home_dir()?.join(".vaak").join("audiences"))
+}
+
+#[tauri::command]
+fn list_audience_pools(project_dir: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    let _ = project_dir; // Pools are global (~/.vaak/audiences/), project_dir reserved for future per-project pools
+    let dir = audiences_dir()?;
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut pools = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("Read dir error: {}", e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                let personas = data.get("personas").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0);
+                let providers: Vec<String> = data.get("personas")
+                    .and_then(|p| p.as_array())
+                    .map(|arr| {
+                        let mut provs: Vec<String> = arr.iter()
+                            .filter_map(|p| p.get("provider").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                            .collect::<std::collections::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        provs.sort();
+                        provs
+                    })
+                    .unwrap_or_default();
+                pools.push(serde_json::json!({
+                    "id": data.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "name": data.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    "description": data.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "builtin": data.get("builtin").and_then(|v| v.as_bool()).unwrap_or(false),
+                    "persona_count": personas,
+                    "member_count": personas, // backward compat
+                    "providers": providers,
+                }));
+            }
+        }
+    }
+    pools.sort_by(|a, b| {
+        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+    Ok(pools)
+}
+
+#[tauri::command]
+fn get_audience_pool(pool_id: String, project_dir: Option<String>) -> Result<serde_json::Value, String> {
+    let _ = project_dir;
+    let pool_id = pool_id.to_ascii_lowercase();
+    if pool_id.is_empty() || !pool_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid pool ID: must be lowercase alphanumeric with hyphens".to_string());
+    }
+    let path = audiences_dir()?.join(format!("{}.json", pool_id));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| format!("Pool '{}' not found", pool_id))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse pool: {}", e))
+}
+
+#[tauri::command]
+fn save_audience_pool(pool_id: String, pool: String, project_dir: Option<String>) -> Result<(), String> {
+    let _ = project_dir;
+    let pool_id = pool_id.to_ascii_lowercase();
+    if pool_id.is_empty() || !pool_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid pool ID: must be lowercase alphanumeric with hyphens".to_string());
+    }
+    // Parse the JSON string to validate it
+    let pool_data: serde_json::Value = serde_json::from_str(&pool)
+        .map_err(|e| format!("Invalid pool JSON: {}", e))?;
+    let dir = audiences_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create audiences dir: {}", e))?;
+    let path = dir.join(format!("{}.json", pool_id));
+    let content = serde_json::to_string_pretty(&pool_data)
+        .map_err(|e| format!("Failed to serialize pool: {}", e))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write pool: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_audience_pool(pool_id: String, project_dir: Option<String>) -> Result<bool, String> {
+    let _ = project_dir;
+    let pool_id = pool_id.to_ascii_lowercase();
+    if pool_id.is_empty() || !pool_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid pool ID".to_string());
+    }
+    let path = audiences_dir()?.join(format!("{}.json", pool_id));
+    if !path.exists() {
+        return Ok(false);
+    }
+    // Refuse to delete builtin pools
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+            if data.get("builtin").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("Cannot delete builtin pool".to_string());
+            }
+        }
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to delete pool: {}", e))?;
+    Ok(true)
+}
+
+const MAX_AUDIENCE_SIZE: usize = 10;
+
+#[tauri::command]
+fn set_audience_size(dir: String, size: usize) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let capped = size.min(MAX_AUDIENCE_SIZE);
+    let path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut data: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    // Ensure settings object exists
+    if data.get("settings").is_none() {
+        data["settings"] = serde_json::json!({});
+    }
+    data["settings"]["audience_size"] = serde_json::json!(capped);
+
+    let output = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
+    collab::atomic_write(std::path::Path::new(&path), output.as_bytes())
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    Ok(())
 }
 
 fn main() {
@@ -4427,10 +5182,15 @@ fn main() {
             send_team_message,
             set_workflow_type,
             set_discussion_mode,
+            set_work_mode,
+            get_turn_state,
             start_discussion,
             close_discussion_round,
             open_next_round,
             end_discussion,
+            pause_discussion,
+            resume_discussion,
+            update_discussion_settings,
             get_discussion_state,
             set_continuous_timeout,
             delete_message,
@@ -4478,6 +5238,18 @@ fn main() {
             launcher::check_homebrew_installed,
             launcher::install_nodejs,
             launcher::install_claude_cli,
+            // Role designer command
+            design_role_turn,
+            // Ethereal agent commands
+            start_ethereal_agent,
+            stop_ethereal_agent,
+            get_ethereal_statuses,
+            check_anthropic_env_key,
+            list_audience_pools,
+            get_audience_pool,
+            save_audience_pool,
+            delete_audience_pool,
+            set_audience_size,
         ]);
 
     match builder.build(tauri::generate_context!()) {

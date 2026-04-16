@@ -6,6 +6,9 @@ import { RoleBriefingModal } from "./RoleBriefingModal";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
+// AudiencePanel removed — audience config is now inline in Start Discussion dialog
+import { DiscussionPanel } from "./DiscussionPanel";
+import { QuickLaunchBar } from "./QuickLaunchBar";
 import "../styles/collab.css";
 
 const ROLE_COLORS: Record<string, string> = {
@@ -64,12 +67,28 @@ const WORKFLOW_TYPES: Record<string, { label: string; color: string; desc: strin
   bugfix: { label: "Bug Fix", color: "#f5a623", desc: "Focused diagnosis and fix, minimal review" },
 };
 
+const ETHEREAL_ROLES: readonly { slug: string; label: string }[] = [];
+
+// Discussion-bound agents: auto-start when a discussion begins, auto-stop when it ends
+const DISCUSSION_BOUND_AGENTS = ["moderator", "audience"] as const;
+
 function getWorkflowDisplay(type?: string, customColors?: Record<string, string>): { label: string; color: string } {
   if (type && WORKFLOW_TYPES[type]) {
     const color = customColors?.[type] || WORKFLOW_TYPES[type].color;
     return { label: WORKFLOW_TYPES[type].label, color };
   }
   return { label: "No Workflow", color: "#657786" };
+}
+
+/** Format a message sender, showing persona name for audience messages */
+function formatSender(msg: { from: string; metadata?: Record<string, any> }): string {
+  const persona = msg.metadata?.persona;
+  if (persona && msg.from.startsWith("audience:")) {
+    // Capitalize first letter of persona name
+    const label = typeof persona === "string" ? persona.charAt(0).toUpperCase() + persona.slice(1) : persona;
+    return `${msg.from} (${label})`;
+  }
+  return msg.from;
 }
 
 interface VoteTally {
@@ -350,7 +369,7 @@ function QuestionCard({
       <div className="message-card-header">
         <span className="message-card-id">#{msg.id}</span>
         <span className="message-card-from" style={{ color: getRoleColor(fromRole) }}>
-          {msg.from}
+          {formatSender(msg)}
         </span>
         <span className="message-card-arrow">&rarr;</span>
         <span className="message-card-to" style={{ color: "#e1e8ed" }}>you</span>
@@ -588,16 +607,43 @@ export function CollabTab() {
     localStorage.setItem("vaak_compose_draft", capped);
   };
   const [sending, setSending] = useState(false);
+
+  /** Click a sender name to auto-fill compose bar as a DM reply */
+  const handleReplyTo = (senderIdentity: string) => {
+    if (senderIdentity === "system" || senderIdentity === "system:0") return;
+    const slug = senderIdentity.split(":")[0];
+    // Check if this role has multiple instances — if so use full identity, else just slug
+    const roleStatus = project?.role_statuses.find((r: RoleStatus) => r.slug === slug);
+    const target = roleStatus && roleStatus.active_instances > 1 ? senderIdentity : slug;
+    setMsgTo(target);
+    composeInputRef.current?.focus();
+  };
+
   const [workflowDropdownOpen, setWorkflowDropdownOpen] = useState(false);
   const [discussionModeOpen, setDiscussionModeOpen] = useState(false);
+  const [workModeOpen, setWorkModeOpen] = useState(false);
+  const [turnState, setTurnState] = useState<{
+    relevance_order?: string[];
+    current_index?: number;
+    responded?: string[];
+    passed?: string[];
+    completed?: boolean;
+  } | null>(null);
   const [discussionState, setDiscussionState] = useState<DiscussionState | null>(null);
   const [closingRound, setClosingRound] = useState(false);
   const [continuousTimeout, setContinuousTimeout] = useState(60);
   const [startDiscussionOpen, setStartDiscussionOpen] = useState(false);
-  const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous">("delphi");
+  const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous" | "pipeline">("delphi");
   const [sdTopic, setSdTopic] = useState("");
   const [sdParticipants, setSdParticipants] = useState<Record<string, boolean>>({});
   const [sdStarting, setSdStarting] = useState(false);
+  const [sdModeratorEnabled, setSdModeratorEnabled] = useState(true);
+  const [sdAudienceEnabled, setSdAudienceEnabled] = useState(false);
+  const [sdPipelineRounds, setSdPipelineRounds] = useState<string>("5");
+  const [sdPipelineMode, setSdPipelineMode] = useState<"discussion" | "action">("discussion");
+  const [sdAudiencePool, setSdAudiencePool] = useState("");
+  const [sdAudienceSize, setSdAudienceSize] = useState(5);
+  const [tauriPools, setTauriPools] = useState<Array<{ id: string; name: string; persona_count: number; providers: string[] }>>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
@@ -644,7 +690,34 @@ export function CollabTab() {
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
   const [projectSections, setProjectSections] = useState<Record<string, Section[]>>({});
   const workflowDropdownRef = useRef<HTMLDivElement>(null);
+  const sectionDropdownRef = useRef<HTMLDivElement>(null);
+  const [sectionDropdownOpen, setSectionDropdownOpen] = useState(false);
+  const [supervisionOpen, setSupervisionOpen] = useState(false);
+  const [etherealSettings, setEtherealSettings] = useState<Record<string, boolean>>(() => {
+    const saved: Record<string, boolean> = {};
+    for (const role of ETHEREAL_ROLES) {
+      const val = localStorage.getItem(`vaak_ethereal_${role.slug}`);
+      if (val !== null) saved[role.slug] = val === "true";
+    }
+    return saved;
+  });
+  const [audienceCount, setAudienceCount] = useState<number>(() => {
+    const saved = localStorage.getItem("vaak_audience_count");
+    return saved ? parseInt(saved, 10) || 3 : 3;
+  });
+  const [audienceProviders, setAudienceProviders] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("vaak_audience_providers");
+      return saved ? JSON.parse(saved) : ["Claude", "GPT-4o"];
+    } catch { return ["Claude", "GPT-4o"]; }
+  });
+  const [etherealApiKey, setEtherealApiKey] = useState(() =>
+    localStorage.getItem("vaak_anthropic_key") || ""
+  );
+  const [hasEnvKey, setHasEnvKey] = useState(false);
+  const [etherealStatuses, setEtherealStatuses] = useState<Record<string, { running: boolean; last_error: string | null; messages_sent: number; last_poll: string | null }>>({});
   const discussionModeRef = useRef<HTMLDivElement>(null);
+  const workModeRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageTimelineRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -655,11 +728,29 @@ export function CollabTab() {
   const MSG_PAGE_SIZE = 50;
   const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
+  // PR H: Human-channel separation tabs
+  // Why: the board mixes team-to-team chatter with human-directed messages; users asked
+  // for a clean separated view so they can see "what's for me" without scrolling past
+  // dozens of role-to-role turns. Filter is client-side only — no backend changes.
+  type InboxTab = "human" | "pipeline" | "all";
+  const [inboxTab, setInboxTab] = useState<InboxTab>(() => {
+    try {
+      const saved = localStorage.getItem("vaak_inbox_tab");
+      if (saved === "human" || saved === "pipeline" || saved === "all") return saved;
+    } catch { /* ignore */ }
+    return "all";
+  });
+  const changeInboxTab = (tab: InboxTab) => {
+    setInboxTab(tab);
+    try { localStorage.setItem("vaak_inbox_tab", tab); } catch { /* ignore */ }
+  };
+
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
   const [npmInstalled, setNpmInstalled] = useState<boolean | null>(null);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [installingCli, setInstallingCli] = useState(false);
+  const [installingNode, setInstallingNode] = useState(false);
   const [spawnConsented, setSpawnConsented] = useState(false);
   const [launchCooldown, setLaunchCooldown] = useState(false);
   const [macPermissions, setMacPermissions] = useState<{ automation: boolean; accessibility: boolean; screen_recording: boolean; platform: string } | null>(null);
@@ -728,6 +819,7 @@ export function CollabTab() {
     permissions: string[]; max_instances: number; briefing: string;
   } | null>(null);
   const interviewChatRef = useRef<HTMLDivElement>(null);
+  const composeInputRef = useRef<HTMLInputElement>(null);
 
   const WIZARD_STEPS = roleFormEditing
     ? ["Name", "Description", "Capabilities", "Permissions", "Instances", "Briefing"]
@@ -746,6 +838,7 @@ export function CollabTab() {
       if (tag === "security" || tag === "red-team") { perms.add("status"); perms.add("review"); }
     }
     if (perms.size === 0) { perms.add("status"); perms.add("question"); }
+    perms.add("broadcast"); // All roles can broadcast by default
     return Array.from(perms);
   };
 
@@ -951,6 +1044,7 @@ export function CollabTab() {
     setInterviewMessages(newMessages);
     setInterviewLoading(true);
     try {
+      const { invoke } = await import("@tauri-apps/api/core");
       const projectContext = project ? {
         roles: Object.fromEntries(
           Object.entries(project.config.roles).map(([slug, role]) => [slug, {
@@ -959,14 +1053,12 @@ export function CollabTab() {
           }])
         ),
       } : { roles: {} };
-      const apiUrl = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:19836";
-      const res = await fetch(`${apiUrl}/api/v1/roles/design`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newMessages, project_context: projectContext }),
+      const apiKey = localStorage.getItem("vaak_anthropic_key") || localStorage.getItem("vaak_api_key") || "";
+      const data = await invoke<{ reply: string; role_config: any }>("design_role_turn", {
+        dir: projectDir,
+        messages: newMessages,
+        apiKey,
       });
-      if (!res.ok) throw new Error(`Server error: ${res.status}`);
-      const data = await res.json();
       setInterviewMessages([...newMessages, { role: "assistant", content: data.reply }]);
       if (data.role_config) {
         setInterviewConfig(data.role_config);
@@ -1225,6 +1317,25 @@ When multiple instances of this role are active:
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [workflowDropdownOpen]);
 
+  // Close section dropdown on click outside
+  useEffect(() => {
+    if (!sectionDropdownOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sectionDropdownRef.current && !sectionDropdownRef.current.contains(e.target as Node)) {
+        setSectionDropdownOpen(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSectionDropdownOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [sectionDropdownOpen]);
+
   // Close discussion mode dropdown on click outside
   useEffect(() => {
     if (!discussionModeOpen) return;
@@ -1236,6 +1347,18 @@ When multiple instances of this role are active:
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [discussionModeOpen]);
+
+  // Close work mode dropdown on click outside
+  useEffect(() => {
+    if (!workModeOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (workModeRef.current && !workModeRef.current.contains(e.target as Node)) {
+        setWorkModeOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [workModeOpen]);
 
   // Poll sections list
   useEffect(() => {
@@ -1299,6 +1422,120 @@ When multiple instances of this role are active:
     } finally {
       setSectionLoading(false);
     }
+  };
+
+  const handleEtherealToggle = async (slug: string) => {
+    const newValue = !etherealSettings[slug];
+    setEtherealSettings(prev => ({ ...prev, [slug]: newValue }));
+    localStorage.setItem(`vaak_ethereal_${slug}`, String(newValue));
+
+    if (newValue && projectDir) {
+      // Starting agent — pass manual key or empty string (backend falls back to env var)
+      const key = etherealApiKey || "";
+      const groqKey = localStorage.getItem("vaak_groq_key") || undefined;
+      const openaiKey = localStorage.getItem("vaak_openai_key") || undefined;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("start_ethereal_agent", {
+          dir: projectDir,
+          slug,
+          apiKey: key,
+          groqKey: slug === "audience" ? groqKey : undefined,
+          openaiKey: slug === "audience" ? openaiKey : undefined,
+        });
+      } catch (e: any) {
+        const errMsg = typeof e === "string" ? e : e?.message || JSON.stringify(e);
+        console.error("[CollabTab] Failed to start ethereal agent:", errMsg);
+        alert(`Failed to start ${slug}: ${errMsg}`);
+        setEtherealSettings(prev => ({ ...prev, [slug]: false }));
+        localStorage.setItem(`vaak_ethereal_${slug}`, "false");
+      }
+    } else if (!newValue) {
+      // Stopping agent
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("stop_ethereal_agent", { slug });
+      } catch (e) {
+        console.error("[CollabTab] Failed to stop ethereal agent:", e);
+      }
+    }
+  };
+
+  const handleApiKeyChange = (key: string) => {
+    setEtherealApiKey(key);
+    localStorage.setItem("vaak_anthropic_key", key);
+  };
+
+  const etherealActiveCount = ETHEREAL_ROLES.filter(r => etherealSettings[r.slug]).length;
+
+  // Poll ethereal agent statuses when any are enabled
+  useEffect(() => {
+    if (etherealActiveCount === 0) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const statuses = await invoke<Array<{ slug: string; running: boolean; last_error: string | null; messages_sent: number; last_poll: string | null }>>("get_ethereal_statuses");
+        if (!cancelled) {
+          const map: Record<string, { running: boolean; last_error: string | null; messages_sent: number; last_poll: string | null }> = {};
+          for (const s of statuses) {
+            map[s.slug] = { running: s.running, last_error: s.last_error, messages_sent: s.messages_sent, last_poll: s.last_poll };
+          }
+          setEtherealStatuses(map);
+        }
+      } catch (e) {
+        console.error("[CollabTab] Failed to poll ethereal statuses:", e);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [etherealActiveCount]);
+
+  // Poll turn state when in consecutive mode
+  useEffect(() => {
+    const currentWorkMode = project?.config?.settings?.work_mode || "simultaneous";
+    if (currentWorkMode !== "consecutive" || !projectDir) {
+      setTurnState(null);
+      return;
+    }
+    let cancelled = false;
+    const pollTurn = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const state = await invoke<Record<string, unknown>>("get_turn_state", { dir: projectDir });
+        if (!cancelled) setTurnState(state as typeof turnState);
+      } catch {
+        if (!cancelled) setTurnState(null);
+      }
+    };
+    pollTurn();
+    const interval = setInterval(pollTurn, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [project?.config?.settings?.work_mode, projectDir]);
+
+  // Check if ANTHROPIC_API_KEY is set in environment
+  useEffect(() => {
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const hasKey = await invoke<boolean>("check_anthropic_env_key");
+        setHasEnvKey(hasKey);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const handleAudienceCountChange = (count: number) => {
+    setAudienceCount(count);
+    localStorage.setItem("vaak_audience_count", String(count));
+  };
+
+  const handleAudienceProviderToggle = (provider: string) => {
+    setAudienceProviders(prev => {
+      const next = prev.includes(provider) ? prev.filter(p => p !== provider) : [...prev, provider];
+      localStorage.setItem("vaak_audience_providers", JSON.stringify(next));
+      return next;
+    });
   };
 
   // Poll discussion state (independent of communication mode)
@@ -1831,6 +2068,23 @@ When multiple instances of this role are active:
     }
   };
 
+  const handleSetWorkMode = async (mode: string) => {
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("set_work_mode", {
+          dir: projectDir,
+          workMode: mode,
+        });
+        setWorkModeOpen(false);
+        const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
+        if (result) setProject(result);
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to set work mode:", e);
+    }
+  };
+
   const handleCloseRound = async () => {
     setClosingRound(true);
     try {
@@ -1853,13 +2107,59 @@ When multiple instances of this role are active:
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("end_discussion", { dir: projectDir });
         setDiscussionState(null);
+
+        // Auto-stop discussion-bound agents (moderator + audience)
+        for (const slug of DISCUSSION_BOUND_AGENTS) {
+          if (etherealSettings[slug]) {
+            try {
+              await invoke("stop_ethereal_agent", { slug });
+              setEtherealSettings(prev => ({ ...prev, [slug]: false }));
+              localStorage.setItem(`vaak_ethereal_${slug}`, "false");
+            } catch (e) {
+              console.error(`[CollabTab] Auto-stop ${slug} failed (non-blocking):`, e);
+            }
+          }
+        }
       }
     } catch (e) {
       console.error("[CollabTab] Failed to end discussion:", e);
     }
   };
 
-  const handleOpenStartDiscussion = () => {
+  const handleTogglePause = async () => {
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        if (discussionState?.paused_at) {
+          await invoke("resume_discussion", { dir: projectDir });
+        } else {
+          await invoke("pause_discussion", { dir: projectDir });
+        }
+        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        if (state) setDiscussionState(state);
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to toggle pause:", e);
+    }
+  };
+
+  const handleSetMaxRounds = async (rounds: number | null) => {
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("update_discussion_settings", {
+          dir: projectDir,
+          maxRounds: rounds ?? 999,
+        });
+        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        if (state) setDiscussionState(state);
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to set max rounds:", e);
+    }
+  };
+
+  const handleOpenStartDiscussion = async () => {
     const activeSessions = project?.sessions?.filter(s => s.status === "active") || [];
     const participantMap: Record<string, boolean> = {};
     activeSessions.forEach(s => { participantMap[`${s.role}:${s.instance}`] = true; });
@@ -1867,11 +2167,28 @@ When multiple instances of this role are active:
     setSdFormat("delphi");
     setSdTopic("");
     setSdStarting(false);
+    setSdModeratorEnabled(true);
+    setSdAudienceEnabled(false);
+    setSdAudiencePool("");
+    setSdAudienceSize(5);
     setStartDiscussionOpen(true);
+    // Load audience pools from Tauri
+    if (window.__TAURI__) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const pools = await invoke("list_audience_pools", {}) as Array<{ id: string; name: string; persona_count: number; providers: string[] }>;
+        setTauriPools(pools);
+        if (pools.length > 0 && !sdAudiencePool) setSdAudiencePool(pools[0].id);
+      } catch (e) { console.error("Failed to load audience pools:", e); }
+    }
   };
 
   const handleStartDiscussion = async () => {
-    if (!sdTopic.trim() && sdFormat !== "continuous") return;
+    console.log("[handleStartDiscussion] Called. sdFormat:", sdFormat, "sdTopic:", sdTopic, "window.__TAURI__:", !!window.__TAURI__);
+    if (!sdTopic.trim() && sdFormat !== "continuous") {
+      console.warn("[handleStartDiscussion] Aborted: empty topic for non-continuous mode");
+      return;
+    }
     setSdStarting(true);
     try {
       if (window.__TAURI__) {
@@ -1880,26 +2197,128 @@ When multiple instances of this role are active:
         const topic = sdFormat === "continuous"
           ? "Continuous review — auto-triggered micro-rounds"
           : sdTopic.trim();
-        const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
-        const mgrSession = project?.sessions?.find(s => s.role === "manager" && s.status === "active");
+        const modSession = sdModeratorEnabled
+          ? project?.sessions?.find(s => s.role === "moderator" && s.status === "active")
+          : null;
         const moderator = modSession
           ? `moderator:${modSession.instance}`
-          : mgrSession
-            ? `manager:${mgrSession.instance}`
-            : participants[0] || "human:0";
-        await invoke("start_discussion", {
-          dir: projectDir,
-          mode: sdFormat,
-          topic,
-          moderator,
-          participants,
-        });
+          : undefined;  // let backend auto-detect from roster (or no moderator if disabled)
+        console.log("[handleStartDiscussion] Invoking start_discussion:", { dir: projectDir, mode: sdFormat, topic, moderator, participants });
+        let startDiscussionError: string | null = null;
+        try {
+          await invoke("start_discussion", {
+            dir: projectDir,
+            mode: sdFormat,
+            topic,
+            moderator,
+            participants,
+            rounds: sdFormat === "pipeline" && sdPipelineRounds !== "unlimited" ? parseInt(sdPipelineRounds) : null,
+            pipelineMode: sdFormat === "pipeline" ? sdPipelineMode : null,
+          });
+          console.log("[handleStartDiscussion] invoke succeeded");
+        } catch (sdErr) {
+          // start_discussion may partially succeed (writes discussion.json but fails on board announcement)
+          // We continue to post the announcement via send_team_message as a fallback
+          startDiscussionError = String(sdErr);
+          console.warn("[handleStartDiscussion] start_discussion returned error (will post announcement via fallback):", sdErr);
+        }
+
+        // === OPTIMISTIC UI UPDATE ===
+        // Immediately show the announcement in the board, regardless of whether
+        // the file write succeeds. This fixes the UX bug where the user clicks
+        // "Start Discussion" and sees nothing happen due to board lock contention.
+        // Read back the actual pipeline order from the discussion state (scored by build_pipeline_order)
+        // instead of using the raw participant list which has a different order.
+        let pipelineOrder = "";
+        if (sdFormat === "pipeline") {
+          try {
+            const discState = await invoke<Record<string, unknown> | null>("get_discussion_state", { dir: projectDir });
+            const scoredOrder = discState?.pipeline_order as string[] | undefined;
+            pipelineOrder = scoredOrder ? scoredOrder.join(" \u2192 ") : participants.join(" \u2192 ");
+          } catch {
+            pipelineOrder = participants.join(" \u2192 ");
+          }
+        }
+        const annBody = sdFormat === "continuous"
+          ? `Continuous Review mode activated.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}`
+          : sdFormat === "pipeline"
+          ? `A pipeline discussion has been started.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nPipeline Order: ${pipelineOrder}`
+          : `A ${sdFormat} discussion has been started.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}\nRound: 1`;
+
+        const optimisticId = (project?.messages?.length ? Math.max(...project.messages.map(m => m.id)) : 0) + 1;
+        const optimisticMsg: BoardMessage = {
+          id: optimisticId,
+          from: "system",
+          to: "all",
+          type: "moderation",
+          timestamp: new Date().toISOString(),
+          subject: `${sdFormat} discussion started: ${topic}`,
+          body: annBody,
+          metadata: { discussion_action: "start", mode: sdFormat, round: 1 },
+        };
+        setProject(prev => prev ? { ...prev, messages: [...prev.messages, optimisticMsg] } : prev);
+
+        // Write board announcement via send_team_message (the Rust-side board write in
+        // start_discussion is unreliable). This goes through the working MCP sidecar path.
+        try {
+          await invoke("send_team_message", {
+            dir: projectDir,
+            to: "all",
+            subject: `${sdFormat} discussion started: ${topic}`,
+            body: annBody,
+            msgType: "moderation",
+            metadata: { discussion_action: "start", mode: sdFormat, round: 1 },
+          });
+        } catch (boardErr) {
+          console.warn("[CollabTab] Board announcement write failed (optimistic UI already shown):", boardErr);
+        }
         const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
         if (state) setDiscussionState(state);
         setStartDiscussionOpen(false);
+
+        // Auto-start discussion-bound agents (moderator + audience) — skip if disabled
+        const key = etherealApiKey || "";
+        const groqKey = localStorage.getItem("vaak_groq_key") || undefined;
+        const openaiKey = localStorage.getItem("vaak_openai_key") || undefined;
+        for (const slug of DISCUSSION_BOUND_AGENTS) {
+          if (slug === "moderator" && !sdModeratorEnabled) continue;
+          if (slug === "audience" && !sdAudienceEnabled) continue;
+          if (!etherealSettings[slug]) {
+            try {
+              await invoke("start_ethereal_agent", {
+                dir: projectDir,
+                slug,
+                apiKey: key,
+                groqKey: slug === "audience" ? groqKey : undefined,
+                openaiKey: slug === "audience" ? openaiKey : undefined,
+              });
+              setEtherealSettings(prev => ({ ...prev, [slug]: true }));
+              localStorage.setItem(`vaak_ethereal_${slug}`, "true");
+            } catch (e) {
+              console.error(`[CollabTab] Auto-start ${slug} failed (non-blocking):`, e);
+            }
+          }
+        }
+      } else {
+        console.error("[handleStartDiscussion] window.__TAURI__ is falsy — Tauri runtime not available. Running in browser-only mode?");
+        alert("Cannot start discussion: Tauri runtime not available. Make sure you're running the desktop app (npm run tauri dev), not just the web server.");
       }
     } catch (e) {
       console.error("[CollabTab] Failed to start discussion:", e);
+      const errMsg = `Failed to start discussion: ${e}`;
+      setError(errMsg);
+      // Write error to board so we can see it even in screen reader mode
+      try {
+        const { invoke: inv } = await import("@tauri-apps/api/core");
+        await inv("send_team_message", {
+          dir: projectDir,
+          to: "all",
+          subject: "DEBUG: start_discussion FAILED",
+          body: `Error: ${String(e)}\n\nThis means invoke("start_discussion") threw an exception. The Tauri command either didn't run or returned an error.`,
+          msgType: "status",
+          metadata: { debug: true },
+        });
+      } catch { /* ignore send failure */ }
     } finally {
       setSdStarting(false);
     }
@@ -2312,6 +2731,7 @@ When multiple instances of this role are active:
           }
         } catch (e) {
           console.error("[CollabTab] Failed to start discussion:", e);
+          setError(`Failed to start discussion: ${e}`);
         } finally {
           setSending(false);
         }
@@ -2327,6 +2747,19 @@ When multiple instances of this role are active:
             setMsgBody("");
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);
+
+            // Auto-stop discussion-bound agents (moderator + audience)
+            for (const slug of DISCUSSION_BOUND_AGENTS) {
+              if (etherealSettings[slug]) {
+                try {
+                  await invoke("stop_ethereal_agent", { slug });
+                  setEtherealSettings(prev => ({ ...prev, [slug]: false }));
+                  localStorage.setItem(`vaak_ethereal_${slug}`, "false");
+                } catch (e) {
+                  console.error(`[CollabTab] Auto-stop ${slug} failed (non-blocking):`, e);
+                }
+              }
+            }
           }
         } catch (e) {
           console.error("[CollabTab] Failed to end discussion:", e);
@@ -2448,24 +2881,28 @@ When multiple instances of this role are active:
               <span className="project-header-desc">{project.config.description}</span>
             )}
           </div>
-          <label className="auto-collab-toggle" title="When enabled, agents autonomously check messages, act on directives, and communicate without manual prompting">
+          <label className="auto-collab-toggle" title="When enabled, agents autonomously check messages, act on directives, and communicate without manual prompting" aria-label="Auto mode: agents act autonomously on messages and directives">
             <input
               type="checkbox"
               checked={autoCollab}
               onChange={toggleAutoCollab}
+              aria-describedby="auto-collab-desc"
             />
             <span className="auto-collab-label">Auto</span>
+            <span className="auto-collab-desc" id="auto-collab-desc">Agents act on their own</span>
           </label>
-          <label className="auto-collab-toggle human-in-loop-toggle" title="When enabled, you become a checkpoint in the review chain — agents ask for your approval at key stages">
+          <label className="auto-collab-toggle human-in-loop-toggle" title="When enabled, you become a checkpoint in the review chain — agents ask for your approval at key stages" aria-label="Review mode: agents ask for your approval at key stages">
             <input
               type="checkbox"
               checked={humanInLoop}
               onChange={toggleHumanInLoop}
+              aria-describedby="review-collab-desc"
             />
             <span className="auto-collab-label">Review</span>
+            <span className="auto-collab-desc" id="review-collab-desc">You approve key decisions</span>
           </label>
-          {/* Visibility Mode Selector */}
-          {(() => {
+          {/* Visibility Mode + Work Mode Selectors — hidden during active discussions to avoid contradictory labels */}
+          {!discussionState?.active && (() => {
             const currentMode = project?.config?.settings?.discussion_mode || "directed";
             const modes: Record<string, { label: string; color: string; desc: string }> = {
               directed: { label: "Directed", color: "#1da1f2", desc: "Agents only see messages addressed to them" },
@@ -2483,8 +2920,11 @@ When multiple instances of this role are active:
                   }}
                   onClick={() => setDiscussionModeOpen(!discussionModeOpen)}
                   title="Visibility — controls whether agents see all messages or only ones addressed to them"
+                  role="button"
+                  aria-label={`Message visibility: ${active.label} — ${active.desc}. Click to change.`}
                 >
                   {active.label}
+                  <span className="discussion-mode-desc">{active.desc}</span>
                 </span>
                 {discussionModeOpen && (
                   <div className="discussion-mode-dropdown">
@@ -2506,6 +2946,69 @@ When multiple instances of this role are active:
               </div>
             );
           })()}
+          {/* Work Mode Selector — also hidden during active discussions */}
+          {!discussionState?.active && (() => {
+            const currentWorkMode = project?.config?.settings?.work_mode || "simultaneous";
+            const workModes: Record<string, { label: string; color: string; desc: string }> = {
+              simultaneous: { label: "Simultaneous", color: "#17bf63", desc: "All agents work in parallel" },
+              consecutive: { label: "Consecutive", color: "#e74c3c", desc: "Agents take turns in relevance order" },
+            };
+            const activeWM = workModes[currentWorkMode] || workModes.simultaneous;
+            return (
+              <div className="discussion-mode-wrapper" ref={workModeRef}>
+                <span
+                  className="discussion-mode-badge"
+                  style={{
+                    background: `${activeWM.color}22`,
+                    color: activeWM.color,
+                    borderColor: `${activeWM.color}55`,
+                  }}
+                  onClick={() => setWorkModeOpen(!workModeOpen)}
+                  title="Work mode — controls whether agents work in parallel or take turns"
+                  role="button"
+                  aria-label={`Work mode: ${activeWM.label} — ${activeWM.desc}. Click to change.`}
+                >
+                  {activeWM.label}
+                  <span className="discussion-mode-desc">{activeWM.desc}</span>
+                </span>
+                {workModeOpen && (
+                  <div className="discussion-mode-dropdown">
+                    {Object.entries(workModes).map(([id, m]) => (
+                      <div
+                        key={id}
+                        className={`discussion-mode-dropdown-item${currentWorkMode === id ? " discussion-mode-active" : ""}`}
+                        onClick={() => handleSetWorkMode(id)}
+                      >
+                        <span className="discussion-mode-dropdown-dot" style={{ background: m.color }} />
+                        <div className="discussion-mode-dropdown-info">
+                          <span className="discussion-mode-dropdown-label">{m.label}</span>
+                          <span className="discussion-mode-dropdown-desc">{m.desc}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          {/* Turn Indicator — visible only in consecutive mode */}
+          {turnState && !turnState.completed && turnState.relevance_order && turnState.current_index != null && (
+            <span
+              className="turn-indicator"
+              title={`Turn order: ${turnState.relevance_order.join(" → ")}`}
+              aria-label={`Current turn: ${turnState.relevance_order[turnState.current_index] || "unknown"}. Position ${turnState.current_index + 1} of ${turnState.relevance_order.length}. ${(turnState.responded?.length || 0) + (turnState.passed?.length || 0)} have responded.`}
+            >
+              <span className="turn-indicator-arrow">&#9654;</span>
+              <span className="turn-indicator-name">{turnState.relevance_order[turnState.current_index] || "?"}</span>
+              <span className="turn-indicator-pos">({turnState.current_index + 1}/{turnState.relevance_order.length})</span>
+            </span>
+          )}
+          {turnState?.completed && (project?.config?.settings?.work_mode === "consecutive") && (
+            <span className="turn-indicator turn-indicator-done" aria-label="Turn round complete — all agents have responded">
+              <span className="turn-indicator-check">&#10003;</span>
+              <span className="turn-indicator-name">Round complete</span>
+            </span>
+          )}
           {!discussionState?.active && (
             <button
               className="start-discussion-btn"
@@ -2570,28 +3073,52 @@ When multiple instances of this role are active:
           <code>{projectDir}/.vaak/</code>
         </div>
 
-        {/* Section Tabs */}
-        <div className="section-tabs">
-          {sections.map(s => (
+        {/* Section Dropdown */}
+        <div className="section-selector">
+          <div className="section-dropdown" ref={sectionDropdownRef}>
             <button
-              key={s.slug}
-              className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}${sectionLoading ? " section-tab-loading" : ""}`}
-              onClick={() => handleSwitchSection(s.slug)}
+              className="section-dropdown-trigger"
+              onClick={() => setSectionDropdownOpen(!sectionDropdownOpen)}
+              aria-expanded={sectionDropdownOpen}
+              aria-label="Switch section"
+              aria-haspopup="listbox"
               disabled={sectionLoading}
             >
-              <span className="section-tab-hash">#</span>
-              <span className="section-tab-name">{s.name}</span>
-              {s.message_count > 0 && (
-                <span className="section-tab-count">{s.message_count}</span>
-              )}
+              <span className="section-dropdown-hash">#</span>
+              <span className="section-dropdown-name">{sections.find(s => s.slug === activeSection)?.name || activeSection}</span>
+              <span className="section-dropdown-chevron">{sectionDropdownOpen ? "▴" : "▾"}</span>
             </button>
-          ))}
+            {sectionDropdownOpen && (
+              <div className="section-dropdown-menu" role="listbox" aria-label="Sections">
+                {sections.map(s => (
+                  <div
+                    key={s.slug}
+                    className={`section-dropdown-item${s.slug === activeSection ? " section-dropdown-item-active" : ""}`}
+                    role="option"
+                    aria-selected={s.slug === activeSection}
+                    onClick={() => {
+                      if (s.slug !== activeSection) handleSwitchSection(s.slug);
+                      setSectionDropdownOpen(false);
+                    }}
+                  >
+                    <span className="section-dropdown-item-label">
+                      <span className="section-dropdown-hash">#</span>
+                      {s.name}
+                    </span>
+                    {s.message_count > 0 && (
+                      <span className="section-dropdown-item-count">{s.message_count}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           {creatingSectionMode ? (
-            <div className="section-tab-create">
+            <div className="section-create-inline">
               <input
-                className="section-tab-create-input"
+                className="section-create-input"
                 type="text"
-                placeholder="Name..."
+                placeholder="Section name..."
                 value={newSectionName}
                 onChange={e => setNewSectionName(e.target.value)}
                 onKeyDown={e => {
@@ -2600,11 +3127,11 @@ When multiple instances of this role are active:
                 }}
                 autoFocus
               />
-              <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "+"}</button>
-              <button className="section-tab-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
+              <button className="section-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "\u2713"}</button>
+              <button className="section-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
             </div>
           ) : (
-            <button className="section-tab section-tab-new" onClick={() => setCreatingSectionMode(true)}>
+            <button className="section-new-btn" onClick={() => setCreatingSectionMode(true)}>
               + New
             </button>
           )}
@@ -2617,111 +3144,80 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        {/* Discussion Status Panel — rich display when active */}
+        {/* Audience config moved to Start Discussion dialog */}
+
+        {/* QuickLaunchBar — inline discussion starter (visible when no discussion active) */}
+        <QuickLaunchBar
+          discussionActive={!!discussionState?.active}
+          launching={sdStarting}
+          onLaunch={async (format, topic) => {
+            // Quick-launch: auto-include all active participants, then start directly
+            setSdStarting(true);
+            try {
+              if (window.__TAURI__) {
+                const { invoke } = await import("@tauri-apps/api/core");
+                const activeSessions = project?.sessions?.filter(s => s.status === "active") || [];
+                const participants = activeSessions.map(s => `${s.role}:${s.instance}`);
+                const effectiveTopic = format === "continuous"
+                  ? "Continuous review — auto-triggered micro-rounds"
+                  : topic;
+                const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
+                const moderator = modSession ? `moderator:${modSession.instance}` : undefined;
+                try {
+                  await invoke("start_discussion", { dir: projectDir, mode: format, topic: effectiveTopic, moderator, participants });
+                } catch (e) {
+                  console.warn("[QuickLaunch] start_discussion error (will post announcement):", e);
+                }
+                // Post announcement to board — read actual scored pipeline order from discussion state
+                let pipelineOrder = "";
+                if (format === "pipeline") {
+                  try {
+                    const discState = await invoke<Record<string, unknown> | null>("get_discussion_state", { dir: projectDir });
+                    const scoredOrder = discState?.pipeline_order as string[] | undefined;
+                    pipelineOrder = scoredOrder ? scoredOrder.join(" → ") : participants.join(" → ");
+                  } catch {
+                    pipelineOrder = participants.join(" → ");
+                  }
+                }
+                const annBody = format === "continuous"
+                  ? `Continuous Review mode activated.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}`
+                  : format === "pipeline"
+                  ? `A pipeline discussion has been started.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nPipeline Order: ${pipelineOrder}`
+                  : `A ${format} discussion has been started.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}\nRound: 1`;
+                try {
+                  await invoke("send_team_message", {
+                    dir: projectDir, to: "all",
+                    subject: `${format} discussion started: ${effectiveTopic}`,
+                    body: annBody, msgType: "moderation",
+                    metadata: { discussion_action: "start", mode: format, round: 1 },
+                  });
+                } catch { /* ignore send failure — optimistic UI */ }
+                const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+                if (state) setDiscussionState(state);
+              }
+            } catch (e) {
+              console.error("[QuickLaunch] Failed:", e);
+            } finally {
+              setSdStarting(false);
+            }
+          }}
+          onOpenAdvanced={handleOpenStartDiscussion}
+        />
+
+        {/* Discussion Status Panel — extracted to DiscussionPanel component */}
         {discussionState?.active ? (
-          <div className="discussion-status-panel" role="region" aria-label="Active discussion status">
-            {/* Row 1: Mode + Phase + Round + Actions */}
-            <div className="discussion-status-header">
-              <div className="discussion-status-left">
-                <span className="discussion-status-mode">
-                  {(discussionState.mode || "Discussion").charAt(0).toUpperCase() + (discussionState.mode || "").slice(1)}
-                </span>
-                <span className="discussion-status-phase-badge" aria-label={`Phase: ${
-                  closingRound ? "aggregating" :
-                  discussionState.phase === "submitting" ? "accepting submissions" :
-                  discussionState.phase === "reviewing" ? "reviewing aggregate" :
-                  discussionState.phase === "complete" ? "complete" :
-                  discussionState.phase || "unknown"
-                }`}>
-                  {closingRound ? "Aggregating..." :
-                   discussionState.phase === "submitting" ? "Submitting" :
-                   discussionState.phase === "aggregating" ? "Aggregating" :
-                   discussionState.phase === "reviewing" ? "Reviewing" :
-                   discussionState.phase === "paused" ? "Paused" :
-                   discussionState.phase === "complete" ? "Complete" :
-                   discussionState.phase || ""}
-                </span>
-                <span className="discussion-status-round-counter" aria-label={`Round ${discussionState.current_round} of ${discussionState.settings?.max_rounds || "?"}`}>
-                  Round {discussionState.current_round}
-                  {discussionState.settings?.max_rounds ? ` / ${discussionState.settings.max_rounds}` : ""}
-                </span>
-                {discussionState.moderator && (
-                  <span className="discussion-status-mod">
-                    Mod: <span style={{ color: getRoleColor(discussionState.moderator.split(":")[0]) }}>{discussionState.moderator}</span>
-                  </span>
-                )}
-                {discussionState.mode === "continuous" && (
-                  <select
-                    className="discussion-controls-timeout"
-                    value={continuousTimeout}
-                    onChange={(e) => handleSetContinuousTimeout(Number(e.target.value))}
-                    aria-label="Auto-close timeout"
-                  >
-                    <option value={30}>30s</option>
-                    <option value={60}>60s</option>
-                    <option value={120}>2m</option>
-                    <option value={300}>5m</option>
-                  </select>
-                )}
-              </div>
-              <div className="discussion-controls-actions">
-                {discussionState.phase === "submitting" && discussionState.mode !== "continuous" && (
-                  <button className="discussion-controls-btn" onClick={handleCloseRound} disabled={closingRound}>
-                    {closingRound ? "Closing..." : "Close Round"}
-                  </button>
-                )}
-                <button className="discussion-controls-btn discussion-controls-end" onClick={handleEndDiscussion}>
-                  End
-                </button>
-              </div>
-            </div>
-
-            {/* Row 2: Topic */}
-            {discussionState.topic && (
-              <div className="discussion-status-topic" title={discussionState.topic}>
-                {discussionState.topic}
-              </div>
-            )}
-
-            {/* Row 3: Participant submission tracker */}
-            {discussionState.phase === "submitting" && discussionState.rounds.length > 0 && (() => {
-              const currentRound = discussionState.rounds[discussionState.rounds.length - 1];
-              const submittedBy = new Set((currentRound?.submissions || []).map(s => s.from));
-              const eligible = (discussionState.participants || []).filter(p => p !== discussionState.moderator);
-              if (eligible.length === 0) return null;
-              return (
-                <div className="discussion-status-submissions" aria-label={`${submittedBy.size} of ${eligible.length} submitted`}>
-                  {eligible.map(pid => {
-                    const [role] = pid.split(":");
-                    const didSubmit = submittedBy.has(pid);
-                    return (
-                      <span
-                        key={pid}
-                        className={`discussion-status-participant${didSubmit ? " ds-submitted" : ""}`}
-                        title={`${pid}${didSubmit ? " — submitted" : " — waiting"}`}
-                      >
-                        <span className="ds-check" aria-hidden="true">{didSubmit ? "\u2713" : "\u2022"}</span>
-                        <span style={{ color: getRoleColor(role) }}>{pid}</span>
-                      </span>
-                    );
-                  })}
-                </div>
-              );
-            })()}
-
-            {/* Round history mini-bar */}
-            {discussionState.rounds.length > 1 && (
-              <div className="discussion-status-rounds-bar" aria-label="Round history">
-                {discussionState.rounds.map((round, i) => (
-                  <span
-                    key={i}
-                    className={`ds-round-pip${round.closed_at ? " ds-round-closed" : " ds-round-open"}`}
-                    title={`Round ${round.number}: ${round.closed_at ? "closed" : "open"} — ${round.submissions?.length || 0} submissions`}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
+          <DiscussionPanel
+            discussionState={discussionState}
+            messages={project?.messages || []}
+            closingRound={closingRound}
+            continuousTimeout={continuousTimeout}
+            autoModActive={!!etherealSettings["moderator"]}
+            onCloseRound={handleCloseRound}
+            onEndDiscussion={handleEndDiscussion}
+            onSetContinuousTimeout={handleSetContinuousTimeout}
+            onTogglePause={handleTogglePause}
+            onSetMaxRounds={handleSetMaxRounds}
+          />
         ) : null}
 
         {/* Add to Team — collapsible section, collapsed by default to maximize conversation space */}
@@ -3217,20 +3713,38 @@ When multiple instances of this role are active:
                     <div className="setup-check-actions">
                       <button
                         className="setup-action-btn setup-action-primary"
+                        disabled={installingNode}
                         onClick={async () => {
+                          setInstallingNode(true);
                           try {
-                            if (window.__TAURI__) {
-                              const { invoke } = await import("@tauri-apps/api/core");
-                              await invoke("open_url_in_browser", { url: "https://nodejs.org" });
-                              return;
+                            const { invoke } = await import("@tauri-apps/api/core");
+                            const result = await invoke<string>("install_nodejs");
+                            if (result === "installed") {
+                              const installed = await invoke<boolean>("check_npm_installed");
+                              setNpmInstalled(installed);
+                              if (installed) {
+                                // Auto-advance: install Claude Code too
+                                setInstallingCli(true);
+                                try {
+                                  await invoke<string>("install_claude_cli");
+                                  const claudeOk = await invoke<boolean>("check_claude_installed");
+                                  setClaudeInstalled(claudeOk);
+                                } catch (e: any) {
+                                  alert(`Claude Code install failed: ${e?.message || e}`);
+                                } finally {
+                                  setInstallingCli(false);
+                                }
+                              }
+                            } else {
+                              alert("Node.js download page opened in your browser. Install it, then click Re-check.");
                             }
-                          } catch (e) {
-                            console.error("[CollabTab] Failed to open URL via Tauri:", e);
+                          } catch (e: any) {
+                            alert(`Install failed: ${e?.message || e}`);
+                          } finally {
+                            setInstallingNode(false);
                           }
-                          // Fallback: try window.open
-                          window.open("https://nodejs.org", "_blank");
                         }}
-                      >Download Node.js</button>
+                      >{installingNode ? "Installing..." : "Install Node.js"}</button>
                       <button
                         className="setup-action-btn"
                         onClick={async () => {
@@ -3244,7 +3758,7 @@ When multiple instances of this role are active:
                           } catch { /* ignore */ }
                         }}
                       >Re-check</button>
-                      <span className="setup-check-hint">Required for Claude Code CLI installation</span>
+                      <span className="setup-check-hint">Auto-installs via Homebrew on Mac, or opens download page</span>
                     </div>
                   ) : (
                     <div className="setup-check-status">Checking...</div>
@@ -3428,12 +3942,25 @@ When multiple instances of this role are active:
                       }
                     };
 
+                    // Pipeline turn state for this card
+                    const pipelineOrder = discussionState?.active && discussionState?.mode === "pipeline" ? discussionState.pipeline_order : undefined;
+                    const pipelineStage = discussionState?.pipeline_stage ?? 0;
+                    const pipelineIdx = pipelineOrder ? pipelineOrder.indexOf(cardKey) : -1;
+                    const isPipelineActive = pipelineOrder && pipelineOrder.length > 0;
+                    const pipelineTurn: "on-turn" | "completed" | "waiting" | null =
+                      isPipelineActive && pipelineIdx >= 0
+                        ? pipelineIdx < pipelineStage ? "completed"
+                        : pipelineIdx === pipelineStage ? "on-turn"
+                        : "waiting"
+                        : null;
+                    const pipelineQueuePos = pipelineTurn === "waiting" ? pipelineIdx - pipelineStage : 0;
+
                     // Compact chip view
                     if (rosterViewMode === "chip") {
                       return (
                         <button
                           key={cardKey}
-                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${pipelineTurn === "on-turn" ? " pipeline-on-turn" : ""}${pipelineTurn === "completed" ? " pipeline-completed" : ""}${pipelineTurn === "waiting" ? " pipeline-waiting" : ""}`}
                           style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
                           onClick={handleCardClick}
                           title={`${card.title} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
@@ -3441,7 +3968,10 @@ When multiple instances of this role are active:
                         >
                           <span className={getStatusDotClass(card.status)} />
                           <span className="role-chip-name">{card.title}</span>
-                          <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
+                          {pipelineTurn === "on-turn" && <span className="pipeline-badge pipeline-badge-active" aria-label="Currently on turn">ON TURN</span>}
+                          {pipelineTurn === "completed" && <span className="pipeline-badge pipeline-badge-done" aria-label="Turn completed">{"\u2713"}</span>}
+                          {pipelineTurn === "waiting" && <span className="pipeline-badge pipeline-badge-queue" aria-label={`Queue position ${pipelineQueuePos}`}>#{pipelineQueuePos}</span>}
+                          {!pipelineTurn && <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>}
                         </button>
                       );
                     }
@@ -3449,11 +3979,11 @@ When multiple instances of this role are active:
                     return (
                       <div
                         key={cardKey}
-                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}`}
+                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${pipelineTurn === "on-turn" ? " pipeline-on-turn" : ""}${pipelineTurn === "completed" ? " pipeline-completed" : ""}${pipelineTurn === "waiting" ? " pipeline-waiting" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}. Click to view details.`}
+                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}${pipelineTurn === "on-turn" ? ", currently on turn" : pipelineTurn === "completed" ? ", turn completed" : pipelineTurn === "waiting" ? `, queue position ${pipelineQueuePos}` : ""}. Click to view details.`}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
@@ -3471,9 +4001,17 @@ When multiple instances of this role are active:
                         </div>
                         <div className="role-card-meta">
                           <span className="role-card-slug">{card.slug}</span>
-                          <span className={`role-card-status role-card-status-${card.status}`}>
-                            {getStatusLabel(card.status)}
-                          </span>
+                          {pipelineTurn === "on-turn" ? (
+                            <span className="pipeline-badge pipeline-badge-active">ON TURN</span>
+                          ) : pipelineTurn === "completed" ? (
+                            <span className="pipeline-badge pipeline-badge-done">{"\u2713"} Done</span>
+                          ) : pipelineTurn === "waiting" ? (
+                            <span className="pipeline-badge pipeline-badge-queue">#{pipelineQueuePos} in queue</span>
+                          ) : (
+                            <span className={`role-card-status role-card-status-${card.status}`}>
+                              {getStatusLabel(card.status)}
+                            </span>
+                          )}
                         </div>
                         {/* Companion badge — show if this role is a companion of another role */}
                         {(() => {
@@ -3712,8 +4250,44 @@ When multiple instances of this role are active:
           </div>
         )}
 
+        {/* PR H: Inbox tabs — separates human-directed messages from team chatter.
+            Why: the board was one big stream; users asked for a clean view of "what's
+            addressed to me" without scrolling past 30+ role-to-role turns per pipeline. */}
+        <div className="inbox-tabs" role="tablist" aria-label="Message inbox views">
+          <button
+            role="tab"
+            id="inbox-tab-human"
+            aria-selected={inboxTab === "human"}
+            aria-controls="inbox-panel"
+            className={`inbox-tab${inboxTab === "human" ? " inbox-tab-active" : ""}`}
+            onClick={() => changeInboxTab("human")}
+          >
+            You &amp; Moderator
+          </button>
+          <button
+            role="tab"
+            id="inbox-tab-pipeline"
+            aria-selected={inboxTab === "pipeline"}
+            aria-controls="inbox-panel"
+            className={`inbox-tab${inboxTab === "pipeline" ? " inbox-tab-active" : ""}`}
+            onClick={() => changeInboxTab("pipeline")}
+          >
+            Active Pipeline
+          </button>
+          <button
+            role="tab"
+            id="inbox-tab-all"
+            aria-selected={inboxTab === "all"}
+            aria-controls="inbox-panel"
+            className={`inbox-tab${inboxTab === "all" ? " inbox-tab-active" : ""}`}
+            onClick={() => changeInboxTab("all")}
+          >
+            All Activity
+          </button>
+        </div>
+
         {/* Message Timeline */}
-        <div className="message-timeline" ref={messageTimelineRef}>
+        <div className="message-timeline" id="inbox-panel" role="tabpanel" aria-labelledby={`inbox-tab-${inboxTab}`} ref={messageTimelineRef}>
           {hasNoMessages ? (
             <div className="message-timeline-empty" role="status">
               {hasNoSessions
@@ -3734,7 +4308,36 @@ When multiple instances of this role are active:
                   .map((m) => m.id)
               );
 
-              const allMessages = project!.messages;
+              // PR H: filter predicates key on from/to only, not body text —
+              // `@human` as a mention in a broadcast body is formatting, not a
+              // capability flag, so body-text matches would leak team chatter into
+              // the human tab.
+              const rawMessages = project!.messages;
+              const allMessages = inboxTab === "all"
+                ? rawMessages
+                : rawMessages.filter((m: BoardMessage) => {
+                    if (inboxTab === "human") {
+                      // Human tab: directed to/from the user, plus both leadership roles'
+                      // broadcasts. Moderator and manager are distinct privileged roles
+                      // (per tech-leader msg 200 retraction): moderator runs the format,
+                      // manager coordinates the project and owns @human direct-message.
+                      return m.to === "human"
+                        || m.from.startsWith("human:")
+                        || m.from.startsWith("manager:")
+                        || m.from.startsWith("moderator:");
+                    }
+                    if (inboxTab === "pipeline") {
+                      // Pipeline tab: active session turns and system stage-advance events,
+                      // not free-form directives or role→role status messages unrelated to
+                      // the current pipeline.
+                      const meta = m.metadata as Record<string, unknown> | undefined;
+                      return m.type === "moderation"
+                        || !!meta?.pipeline_notification
+                        || !!meta?.discussion_turn
+                        || !!meta?.pipeline_position;
+                    }
+                    return true;
+                  });
               const totalCount = allMessages.length;
               const hasHiddenMessages = totalCount > visibleMsgLimit;
               const visibleMessages = hasHiddenMessages
@@ -3794,6 +4397,15 @@ When multiple instances of this role are active:
                 );
               }
 
+              // System messages (turn changes) render as compact centered lines
+              if (msg.type === "system") {
+                return (
+                  <div key={msg.id} className="message-system" role="status" aria-label={msg.body}>
+                    {msg.body}
+                  </div>
+                );
+              }
+
               // Submissions render with a distinct visual style
               if (msg.type === "submission") {
                 const fromRole = msg.from.split(":")[0];
@@ -3801,7 +4413,7 @@ When multiple instances of this role are active:
                   <div key={msg.id} className="submission-card" style={{ borderLeftColor: getRoleColor(fromRole) }}>
                     <div className="message-card-header">
                       <span className="message-card-id">#{msg.id}</span>
-                      <span className="message-card-from" style={{ color: getRoleColor(fromRole) }}>{msg.from}</span>
+                      <span className="message-card-from message-card-from-clickable" style={{ color: getRoleColor(fromRole) }} onClick={(e) => { e.stopPropagation(); handleReplyTo(msg.from); }} title={`Reply to ${msg.from}`}>{formatSender(msg)}</span>
                       <span className="message-card-arrow">&rarr;</span>
                       <span className="message-card-to" style={{ color: getRoleColor(msg.to) }}>{msg.to}</span>
                       <span className="message-type-badge badge-submission">submission</span>
@@ -3840,8 +4452,8 @@ When multiple instances of this role are active:
                 >
                   <div className="message-card-header">
                     <span className="message-card-id">#{msg.id}</span>
-                    <span className="message-card-from" style={{ color: getRoleColor(fromRole) }}>
-                      {msg.from}
+                    <span className="message-card-from message-card-from-clickable" style={{ color: getRoleColor(fromRole) }} onClick={(e) => { e.stopPropagation(); handleReplyTo(msg.from); }} title={`Reply to ${msg.from}`}>
+                      {formatSender(msg)}
                     </span>
                     <span className="message-card-arrow">&rarr;</span>
                     <span className="message-card-to" style={{ color: getRoleColor(msg.to) }}>
@@ -3919,6 +4531,25 @@ When multiple instances of this role are active:
             })}</>);
             })()
           )}
+          {/* Pipeline: "Waiting for response" inline indicator */}
+          {discussionState?.active && discussionState.mode === "pipeline" && discussionState.phase === "pipeline_active" && discussionState.pipeline_order && (() => {
+            const currentAgent = discussionState.pipeline_order[discussionState.pipeline_stage ?? 0];
+            if (!currentAgent) return null;
+            const [role] = currentAgent.split(":");
+            const roleColor = ROLE_COLORS[role] || HASH_PALETTE[hashSlug(role) % HASH_PALETTE.length];
+            // Check if the current agent has already posted in the latest messages
+            const msgs = project?.messages || [];
+            const lastFew = msgs.slice(-5);
+            const hasPosted = lastFew.some(m => m.from === currentAgent && m.type !== "system");
+            if (hasPosted) return null;
+            return (
+              <div className="pipeline-inline-waiting" style={{ borderLeftColor: roleColor }}>
+                <span className="pipeline-inline-waiting-dot" style={{ background: roleColor }} />
+                <span style={{ color: roleColor, fontWeight: 600 }}>{currentAgent}</span>
+                <span style={{ color: "#8899a6", marginLeft: 6 }}>is composing a response...</span>
+              </div>
+            );
+          })()}
           <div ref={messagesEndRef} />
         </div>
 
@@ -3937,6 +4568,7 @@ When multiple instances of this role are active:
             onChange={(e) => setMsgTo(e.target.value)}
           >
             <option value="all">@ Everyone</option>
+            <option value="human">@ Human</option>
             {project?.role_statuses.map((role: RoleStatus) => (
               <option key={role.slug} value={role.slug}>
                 @ {role.title}{role.active_instances > 1 ? " (all)" : ""}
@@ -3958,6 +4590,7 @@ When multiple instances of this role are active:
               })}
           </select>
           <input
+            ref={composeInputRef}
             className="compose-input"
             type="text"
             value={msgBody}
@@ -3986,223 +4619,10 @@ When multiple instances of this role are active:
           />
         )}
 
-        {/* Audience Panel Modal */}
-        {audiencePanelOpen && (
-          <div className="confirm-dialog" onClick={() => setAudiencePanelOpen(false)}>
-            <div className="audience-panel" onClick={(e) => e.stopPropagation()}>
-              <div className="audience-panel-header">
-                <span className="audience-panel-title">Audience Panel</span>
-                <span className="audience-panel-subtitle">
-                  {audiencePools.length > 0
-                    ? audiencePools.map(p => `${p.member_count} ${p.name}`).join(" + ")
-                    : "36 AI Jurors \u00b7 3 Models"}
-                </span>
-                <button className="audience-panel-close" onClick={() => setAudiencePanelOpen(false)} aria-label="Close audience panel">&times;</button>
-              </div>
+        {/* Audience Panel Modal — REMOVED: audience config is now in Start Discussion dialog */}
 
-              {/* Vote Controls */}
-              <div className="audience-vote-controls">
-                <input
-                  className="audience-topic-input"
-                  type="text"
-                  value={audienceTopic}
-                  onChange={(e) => setAudienceTopic(e.target.value)}
-                  placeholder="Debate topic / proposition..."
-                />
-                <textarea
-                  className="audience-args-input"
-                  value={audienceArguments}
-                  onChange={(e) => setAudienceArguments(e.target.value)}
-                  placeholder="Paste debate arguments here (leave empty for pre-vote)..."
-                  rows={4}
-                />
-                <div className="audience-vote-actions">
-                  <select
-                    className="audience-pool-select"
-                    value={audiencePool}
-                    onChange={(e) => { setAudiencePool(e.target.value); fetchAudiencePersonas(e.target.value || undefined); }}
-                  >
-                    <option value="">All Pools</option>
-                    {audiencePools.map(p => (
-                      <option key={p.id} value={p.id}>{p.name} ({p.member_count})</option>
-                    ))}
-                  </select>
-                  <select
-                    className="audience-phase-select"
-                    value={audiencePhase}
-                    onChange={(e) => setAudiencePhase(e.target.value as "pre" | "post")}
-                  >
-                    <option value="pre">Pre-Vote (topic only)</option>
-                    <option value="post">Post-Vote (with arguments)</option>
-                  </select>
-                  <button
-                    className="audience-vote-btn"
-                    onClick={triggerAudienceVote}
-                    disabled={audienceVoting || !audienceTopic.trim()}
-                  >
-                    {audienceVoting ? "Collecting votes..." : "Collect Votes"}
-                  </button>
-                </div>
-              </div>
 
-              {/* Error display */}
-              {audienceError && (
-                <div style={{ padding: "12px 20px", color: "#e0245e", fontSize: "13px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
-                  {audienceError}
-                </div>
-              )}
 
-              {/* Results */}
-              {audienceResults && (
-                <div className="audience-results">
-                  <div className="audience-tally">
-                    <div className="audience-tally-header">
-                      {audienceResults.phase === "pre" ? "PRE-VOTE" : "POST-VOTE"} TALLY
-                      <span className="audience-tally-time">{audienceResults.total_latency_ms}ms</span>
-                    </div>
-                    <div className="audience-tally-bars">
-                      <div className="audience-tally-for">
-                        <span className="audience-tally-label">FOR</span>
-                        <div className="audience-tally-bar" style={{ width: `${audienceResults.total_voters ? (audienceResults.tally.FOR / audienceResults.total_voters) * 100 : 0}%`, background: "#17bf63" }} />
-                        <span className="audience-tally-count">{audienceResults.tally.FOR}</span>
-                      </div>
-                      <div className="audience-tally-against">
-                        <span className="audience-tally-label">AGAINST</span>
-                        <div className="audience-tally-bar" style={{ width: `${audienceResults.total_voters ? (audienceResults.tally.AGAINST / audienceResults.total_voters) * 100 : 0}%`, background: "#e0245e" }} />
-                        <span className="audience-tally-count">{audienceResults.tally.AGAINST}</span>
-                      </div>
-                      {(audienceResults.tally.ABSTAIN > 0 || audienceResults.tally.ERROR > 0) && (
-                        <div style={{ display: "flex", gap: "12px", marginTop: "4px", fontSize: "11px", color: "#8899a6" }}>
-                          {audienceResults.tally.ABSTAIN > 0 && <span>Abstain: {audienceResults.tally.ABSTAIN}</span>}
-                          {audienceResults.tally.ERROR > 0 && <span style={{ color: "#f5a623" }}>Errors: {audienceResults.tally.ERROR}</span>}
-                        </div>
-                      )}
-                    </div>
-                    {/* By provider breakdown */}
-                    <div className="audience-tally-providers">
-                      {Object.entries(audienceResults.tally_by_provider).map(([prov, counts]) => (
-                        <div key={prov} className="audience-provider-row">
-                          <span className="audience-provider-name">{prov === "groq" ? "Llama" : prov === "openai" ? "GPT-5m" : "Haiku"}</span>
-                          <span className="audience-provider-tally">
-                            <span style={{ color: "#17bf63" }}>{counts.FOR}F</span>
-                            {" / "}
-                            <span style={{ color: "#e0245e" }}>{counts.AGAINST}A</span>
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                    {/* By pool breakdown (when viewing all pools) */}
-                    {audienceResults.tally_by_pool && Object.keys(audienceResults.tally_by_pool).length > 1 && (
-                      <div className="audience-tally-providers" style={{ marginTop: "8px" }}>
-                        {Object.entries(audienceResults.tally_by_pool).map(([poolId, counts]) => (
-                          <div key={poolId} className="audience-provider-row">
-                            <span className="audience-provider-name">{poolId === "general" ? "General" : poolId === "expert" ? "Expert" : poolId}</span>
-                            <span className="audience-provider-tally">
-                              <span style={{ color: "#17bf63" }}>{counts.FOR}F</span>
-                              {" / "}
-                              <span style={{ color: "#e0245e" }}>{counts.AGAINST}A</span>
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Individual votes — 3-column grid by provider */}
-                  <div className="audience-grid">
-                    {(["groq", "openai", "anthropic"] as const).map(prov => {
-                      const provVotes = audienceResults.votes.filter(v => v.provider === prov);
-                      if (provVotes.length === 0) return null;
-                      const provLabel = prov === "groq" ? "Llama" : prov === "openai" ? "GPT-5m" : "Haiku";
-                      const provTally = audienceResults.tally_by_provider?.[prov];
-                      return (
-                        <div key={prov} className="audience-grid-column">
-                          <div className="audience-grid-col-header">
-                            <span className="audience-grid-col-title">{provLabel}</span>
-                            {provTally && (
-                              <span className="audience-grid-col-tally">
-                                <span style={{ color: "#17bf63" }}>{provTally.FOR}</span>
-                                {"/"}
-                                <span style={{ color: "#e0245e" }}>{provTally.AGAINST}</span>
-                                {"/"}
-                                <span style={{ color: "#8899a6" }}>{provTally.ABSTAIN || 0}</span>
-                              </span>
-                            )}
-                          </div>
-                          {provVotes.map((v, i) => {
-                            const seatKey = `${v.provider}-${v.persona}`;
-                            const isExpanded = expandedPersona === seatKey;
-                            const dotColor = v.vote === "FOR" ? "#17bf63" : v.vote === "AGAINST" ? "#e0245e" : v.vote === "ERROR" ? "#f5a623" : "#8899a6";
-                            return (
-                              <div
-                                key={i}
-                                className={`audience-seat${isExpanded ? " audience-seat-expanded" : ""}`}
-                                onClick={() => setExpandedPersona(isExpanded ? null : seatKey)}
-                                role="button"
-                                tabIndex={0}
-                                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpandedPersona(isExpanded ? null : seatKey); }}}
-                                aria-expanded={isExpanded}
-                                aria-label={`${v.persona}: ${v.vote}`}
-                              >
-                                <div className="audience-seat-summary">
-                                  <span className="audience-seat-dot" style={{ background: dotColor }} />
-                                  <span className="audience-seat-name">{(v.persona || "").split(" ")[0]}</span>
-                                  <span className={`audience-seat-badge audience-seat-badge-${v.vote.toLowerCase()}`}>{v.vote}</span>
-                                </div>
-                                {isExpanded && (
-                                  <div className="audience-seat-detail">
-                                    <div className="audience-seat-fullname">{v.persona}</div>
-                                    <div className="audience-seat-bg">{v.background}</div>
-                                    <div className="audience-seat-rationale">{v.rationale}</div>
-                                    {v.latency_ms > 0 && <div className="audience-seat-meta">{v.latency_ms}ms</div>}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Persona List — grouped by pool, then provider */}
-              {!audienceResults && audiencePersonas.length > 0 && (
-                <div className="audience-personas">
-                  {(audiencePool ? [audiencePool] : [...new Set(audiencePersonas.map(p => p.pool || "general"))]).map(poolId => (
-                    <div key={poolId}>
-                      {!audiencePool && (
-                        <div className="audience-pool-header">
-                          {poolId === "general" ? "General Assembly" : poolId === "expert" ? "Expert Panel" : poolId}
-                          <span className="audience-pool-count">({audiencePersonas.filter(p => (p.pool || "general") === poolId).length})</span>
-                        </div>
-                      )}
-                      {["groq", "openai", "anthropic"].map(prov => {
-                        const personas = audiencePersonas.filter(p => p.provider === prov && (p.pool || "general") === poolId);
-                        if (personas.length === 0) return null;
-                        return (
-                          <div key={prov} className="audience-provider-group">
-                            <div className="audience-provider-header">
-                              {prov === "groq" ? "Llama 4 Scout (Groq)" : prov === "openai" ? "GPT-5 Mini (OpenAI)" : "Claude Haiku 4.5 (Anthropic)"}
-                            </div>
-                            {personas.map((p, i) => (
-                              <div key={i} className="audience-persona-card">
-                                <div className="audience-persona-name">{p.name}</div>
-                                <div className="audience-persona-bg">{p.background}</div>
-                                <div className="audience-persona-values">Values: {p.values}</div>
-                              </div>
-                            ))}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
 
         {/* Role Create/Edit Form Modal */}
         {roleFormOpen && (
@@ -4716,6 +5136,7 @@ When multiple instances of this role are active:
                   ["oxford", "Oxford", "Public adversarial debate with FOR/AGAINST teams. Best for stress-testing ideas."],
                   ["red_team", "Red Team", "All participants attack a proposal. Best for finding weaknesses."],
                   ["continuous", "Continuous", "Auto-triggered micro-reviews from status messages. Best for ongoing code review."],
+                  ["pipeline", "Pipeline", "Sequential processing — each agent builds on the previous output. Best for assembly-line workflows."],
                 ] as const).map(([id, label, desc]) => (
                   <button
                     key={id}
@@ -4767,6 +5188,115 @@ When multiple instances of this role are active:
                 })}
                 {Object.keys(sdParticipants).length === 0 && (
                   <span className="sd-no-participants">No active team members. Launch agents first.</span>
+                )}
+              </div>
+
+              {/* Pipeline Settings — rounds + mode (only for pipeline format) */}
+              {sdFormat === "pipeline" && (
+                <>
+                  <div className="sd-section-label">Pipeline Settings</div>
+                  <div className="sd-pipeline-settings">
+                    <label className="sd-setting-row">
+                      <span className="sd-setting-label">Rounds</span>
+                      <select
+                        className="sd-setting-select"
+                        value={sdPipelineRounds}
+                        onChange={(e) => setSdPipelineRounds(e.target.value)}
+                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "4px", color: "#fafafa", padding: "4px 8px", fontSize: "12px" }}
+                      >
+                        <option value="1">1 round</option>
+                        <option value="3">3 rounds</option>
+                        <option value="5">5 rounds</option>
+                        <option value="10">10 rounds</option>
+                        <option value="unlimited">Unlimited (until ended)</option>
+                      </select>
+                    </label>
+                    <label className="sd-setting-row">
+                      <span className="sd-setting-label">Mode</span>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <button
+                          type="button"
+                          className="sd-mode-pill"
+                          onClick={() => setSdPipelineMode("discussion")}
+                          style={{ background: sdPipelineMode === "discussion" ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.04)", color: sdPipelineMode === "discussion" ? "#818cf8" : "#a1a1aa", border: `1px solid ${sdPipelineMode === "discussion" ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: 600, cursor: "pointer" }}
+                        >
+                          Discussion
+                        </button>
+                        <button
+                          type="button"
+                          className="sd-mode-pill"
+                          onClick={() => setSdPipelineMode("action")}
+                          style={{ background: sdPipelineMode === "action" ? "rgba(249,115,22,0.15)" : "rgba(255,255,255,0.04)", color: sdPipelineMode === "action" ? "#fdba74" : "#a1a1aa", border: `1px solid ${sdPipelineMode === "action" ? "rgba(249,115,22,0.4)" : "rgba(255,255,255,0.08)"}`, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: 600, cursor: "pointer" }}
+                        >
+                          Action
+                        </button>
+                      </div>
+                    </label>
+                  </div>
+                </>
+              )}
+
+              {/* Background Agents — auto-start with discussion */}
+              <div className="sd-section-label">Background Agents (auto-start with discussion)</div>
+              <div className="sd-agents-config">
+                <div className="sd-agent-row">
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={sdModeratorEnabled}
+                      onChange={(e) => setSdModeratorEnabled(e.target.checked)}
+                    />
+                    <span className="sd-agent-dot" style={{ background: sdModeratorEnabled ? "#9b59b6" : "#657786" }} />
+                    <div className="sd-agent-info">
+                      <span className="sd-agent-name">Discussion Moderator</span>
+                      <span className="sd-agent-desc">{sdModeratorEnabled
+                        ? "Guides conversation, manages rounds, enforces turn order, and produces decision records."
+                        : "Disabled — discussion will run without moderation. No stall detection, no synthesis, no round management."
+                      }</span>
+                    </div>
+                  </label>
+                  <span className="sd-agent-badge" style={{ opacity: sdModeratorEnabled ? 1 : 0.4 }}>{sdModeratorEnabled ? "Auto" : "Off"}</span>
+                </div>
+                <div className="sd-agent-row">
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={sdAudienceEnabled}
+                      onChange={(e) => setSdAudienceEnabled(e.target.checked)}
+                    />
+                    <span className="sd-agent-dot" style={{ background: sdAudienceEnabled ? "#17bf63" : "#657786" }} />
+                    <div className="sd-agent-info">
+                      <span className="sd-agent-name">Audience Pool</span>
+                      <span className="sd-agent-desc">Panel of AI personas that independently react to the discussion. Off by default.</span>
+                    </div>
+                  </label>
+                </div>
+                {sdAudienceEnabled && tauriPools.length > 0 && (
+                  <div className="sd-audience-inline-config">
+                    <label className="sd-audience-config-label">
+                      Pool:
+                      <select
+                        value={sdAudiencePool}
+                        onChange={e => setSdAudiencePool(e.target.value)}
+                        className="sd-audience-select"
+                      >
+                        {tauriPools.map(p => (
+                          <option key={p.id} value={p.id}>{p.name} ({p.persona_count} personas)</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="sd-audience-config-label">
+                      Active per round: {sdAudienceSize}
+                      <input
+                        type="range"
+                        min={1}
+                        max={10}
+                        value={sdAudienceSize}
+                        onChange={e => setSdAudienceSize(parseInt(e.target.value, 10))}
+                        style={{ width: "120px" }}
+                      />
+                    </label>
+                  </div>
                 )}
               </div>
 

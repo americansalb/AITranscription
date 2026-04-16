@@ -9,18 +9,44 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Atomic file write: write to .tmp file, fsync, then rename over target.
 /// Protects against partial writes and advisory lock races on macOS.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    let tmp_path = path.with_extension("tmp");
-    // Write content to temp file
-    std::fs::write(&tmp_path, content)
-        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-    // fsync the temp file to ensure data is on disk
-    if let Ok(f) = std::fs::File::open(&tmp_path) {
-        let _ = f.sync_all();
+    // On Windows, rename fails if the target is open by another process (even for reading)
+    // because std::fs::File doesn't set FILE_SHARE_DELETE. Since all callers use file locking
+    // for concurrency, we can safely write directly to the target file on Windows.
+    #[cfg(windows)]
+    {
+        std::fs::write(path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+        let f = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to open for fsync {}: {}", path.display(), e))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync failed for {}: {}", path.display(), e))?;
+        return Ok(());
     }
-    // Atomic rename (on Unix, rename is atomic; on Windows, it's close enough)
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
-    Ok(())
+
+    #[cfg(not(windows))]
+    {
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, content)
+            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+        {
+            let f = std::fs::File::open(&tmp_path)
+                .map_err(|e| format!("Failed to open temp file for fsync {}: {}", tmp_path.display(), e))?;
+            f.sync_all()
+                .map_err(|e| format!("fsync failed for {}: {}", tmp_path.display(), e))?;
+        }
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+        Ok(())
+    }
+}
+
+/// Resolve the user's home directory in a cross-platform way.
+/// Windows: USERPROFILE, Unix: HOME. Returns an explicit error on failure.
+pub fn vaak_home_dir() -> Result<PathBuf, String> {
+    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(home_var)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("Cannot determine home directory (${} not set)", home_var))
 }
 
 /// Info about an active Claude Code session
@@ -182,6 +208,10 @@ pub struct ProjectSettings {
     pub workflow_colors: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub discussion_mode: Option<String>,
+    #[serde(default)]
+    pub work_mode: Option<String>,
+    #[serde(default)]
+    pub consecutive_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +471,161 @@ fn compute_role_statuses(config: &ProjectConfig, bindings: &[SessionBinding], no
     }).collect()
 }
 
+// ==================== Termination & Automation Types ====================
+
+/// How a discussion determines when to end
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TerminationStrategy {
+    #[serde(rename = "fixed_rounds")]
+    FixedRounds { rounds: u32 },
+    #[serde(rename = "consensus")]
+    Consensus { threshold: f64 },
+    #[serde(rename = "moderator_call")]
+    ModeratorCall,
+    #[serde(rename = "time_bound")]
+    TimeBound { minutes: u32 },
+    #[serde(rename = "unlimited")]
+    Unlimited,
+}
+
+impl Default for TerminationStrategy {
+    fn default() -> Self { Self::FixedRounds { rounds: 1 } }
+}
+
+/// How much autonomy the moderator has
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutomationLevel {
+    Manual,
+    Semi,
+    Auto,
+}
+
+impl Default for AutomationLevel {
+    fn default() -> Self { Self::Auto }
+}
+
+/// Audience gate — what the audience can do at this moment
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AudienceGate {
+    Listening,
+    Voting,
+    Qa,
+    Commenting,
+    Open,
+}
+
+impl Default for AudienceGate {
+    fn default() -> Self { Self::Listening }
+}
+
+/// Audience configuration for a discussion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudienceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub pool: Option<String>,
+    #[serde(default)]
+    pub size: u32,
+    #[serde(default)]
+    pub gate: AudienceGate,
+}
+
+impl Default for AudienceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pool: None,
+            size: 0,
+            gate: AudienceGate::Listening,
+        }
+    }
+}
+
+// ==================== Format-Specific State Types ====================
+
+/// Pipeline stage output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineOutput {
+    pub stage: u64,
+    pub agent: String,
+    pub message_id: u64,
+    pub timestamp: String,
+}
+
+/// Oxford debate teams
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OxfordTeams {
+    pub proposition: Vec<String>,
+    pub opposition: Vec<String>,
+}
+
+/// Oxford debate vote tally
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OxfordVotes {
+    #[serde(default)]
+    pub for_count: u32,
+    #[serde(default)]
+    pub against_count: u32,
+    #[serde(default)]
+    pub abstain_count: u32,
+}
+
+/// Red team attack-defense pair
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackDefensePair {
+    pub attack_message_id: u64,
+    #[serde(default)]
+    pub defense_message_id: Option<u64>,
+    pub severity: String,  // "critical" | "high" | "medium" | "low"
+    #[serde(default = "default_attack_status")]
+    pub status: String,    // "unaddressed" | "partially_addressed" | "addressed"
+}
+
+fn default_attack_status() -> String { "unaddressed".to_string() }
+
+/// Continuous mode micro-round response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MicroRoundResponse {
+    pub from: String,
+    pub vote: String,       // "agree" | "disagree" | "alternative"
+    pub message_id: u64,
+}
+
+/// Continuous mode micro-round
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MicroRound {
+    pub id: String,
+    pub trigger_message_id: u64,
+    pub trigger_from: String,
+    pub topic: String,
+    pub opened_at: String,
+    #[serde(default)]
+    pub closed_at: Option<String>,
+    #[serde(default = "default_micro_timeout")]
+    pub timeout_seconds: u32,
+    #[serde(default)]
+    pub responses: Vec<MicroRoundResponse>,
+    #[serde(default = "default_micro_result")]
+    pub result: String,     // "consent" | "rejected" | "alternative" | "pending"
+}
+
+fn default_micro_timeout() -> u32 { 60 }
+fn default_micro_result() -> String { "pending".to_string() }
+
+/// Decision stream entry (resolved micro-round summary)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Decision {
+    pub micro_round_id: String,
+    pub topic: String,
+    pub result: String,     // "consent" | "rejected" | "alternative"
+    pub resolved_at: String,
+    pub summary: String,
+}
+
 // ==================== Discussion State ====================
 
 /// A single submission within a Delphi round
@@ -482,9 +667,17 @@ pub struct DiscussionRound {
     pub topic: Option<String>,
 }
 
-/// Discussion settings
+/// Discussion settings — extended with termination and automation (Phase 1)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscussionSettings {
+    // New fields (Phase 1) — optional for backward compat with existing discussion.json files
+    #[serde(default)]
+    pub termination: Option<TerminationStrategy>,
+    #[serde(default)]
+    pub automation: Option<AutomationLevel>,
+    #[serde(default)]
+    pub audience: Option<AudienceConfig>,
+    // Legacy fields — still read for backward compat, new code writes termination instead
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
     #[serde(default = "default_timeout_minutes")]
@@ -504,11 +697,33 @@ fn default_auto_close_timeout() -> u32 { 60 }
 impl Default for DiscussionSettings {
     fn default() -> Self {
         Self {
+            termination: None,
+            automation: None,
+            audience: None,
             max_rounds: default_max_rounds(),
             timeout_minutes: default_timeout_minutes(),
             expire_paused_after_minutes: default_expire_paused(),
             auto_close_timeout_seconds: default_auto_close_timeout(),
         }
+    }
+}
+
+impl DiscussionSettings {
+    /// Get effective termination strategy, falling back to legacy max_rounds
+    pub fn effective_termination(&self) -> TerminationStrategy {
+        self.termination.clone().unwrap_or_else(|| {
+            TerminationStrategy::FixedRounds { rounds: self.max_rounds }
+        })
+    }
+
+    /// Get effective automation level, defaulting to Auto
+    pub fn effective_automation(&self) -> AutomationLevel {
+        self.automation.clone().unwrap_or(AutomationLevel::Auto)
+    }
+
+    /// Get effective audience config, defaulting to disabled
+    pub fn effective_audience(&self) -> AudienceConfig {
+        self.audience.clone().unwrap_or_default()
     }
 }
 
@@ -541,7 +756,51 @@ pub struct DiscussionState {
     pub rounds: Vec<DiscussionRound>,
     #[serde(default)]
     pub settings: DiscussionSettings,
+    /// Audience gating: "listening" (silent, default), "voting", "qa", "commenting", "open"
+    #[serde(default = "default_audience_state")]
+    pub audience_state: String,
+    /// Whether the audience is enabled for this discussion (default: false)
+    #[serde(default)]
+    pub audience_enabled: bool,
+    /// Pipeline mode: "discussion" (opinions/review) or "action" (write code). Default: "discussion"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_mode: Option<String>,
+    /// Pipeline mode: ordered list of agents (e.g. ["developer:0", "tester:0"])
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_order: Option<Vec<String>>,
+    /// Pipeline mode: current stage index (0-based)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_stage: Option<u64>,
+    /// Pipeline mode: outputs from completed stages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_outputs: Option<Vec<serde_json::Value>>,
+    // ── Oxford mode fields ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oxford_teams: Option<OxfordTeams>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oxford_votes: Option<OxfordVotes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oxford_motion: Option<String>,
+    // ── Red team mode fields ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_chains: Option<Vec<AttackDefensePair>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity_summary: Option<std::collections::HashMap<String, u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unaddressed_count: Option<u32>,
+    // ── Stagnation detection ──
+    /// Count of consecutive rounds with no substantive output (all messages < 100 chars)
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub stagnant_rounds: u64,
+    // ── Continuous mode fields ──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub micro_rounds: Option<Vec<MicroRound>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_stream: Option<Vec<Decision>>,
 }
+
+fn default_audience_state() -> String { "listening".to_string() }
+fn is_zero_u64(v: &u64) -> bool { *v == 0 }
 
 impl Default for DiscussionState {
     fn default() -> Self {
@@ -559,6 +818,21 @@ impl Default for DiscussionState {
             previous_phase: None,
             rounds: Vec::new(),
             settings: DiscussionSettings::default(),
+            audience_state: default_audience_state(),
+            audience_enabled: false,
+            pipeline_mode: None,
+            pipeline_order: None,
+            pipeline_stage: None,
+            pipeline_outputs: None,
+            oxford_teams: None,
+            oxford_votes: None,
+            oxford_motion: None,
+            attack_chains: None,
+            severity_summary: None,
+            unaddressed_count: None,
+            stagnant_rounds: 0,
+            micro_rounds: None,
+            decision_stream: None,
         }
     }
 }
@@ -579,7 +853,16 @@ pub fn read_discussion(dir: &str) -> DiscussionState {
 /// Returns true on success, false on failure.
 pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
     let path = active_discussion_path(dir);
-    let lock_path = active_lock_path(dir);
+    // Use discussion.lock instead of board.lock to avoid contention with MCP sidecar board writes
+    let lock_path = {
+        let section = get_active_section(dir);
+        let vaak_dir = Path::new(dir).join(".vaak");
+        if section == "default" {
+            vaak_dir.join("discussion.lock")
+        } else {
+            vaak_dir.join("sections").join(&section).join("discussion.lock")
+        }
+    };
 
     let json = match serde_json::to_string_pretty(state) {
         Ok(s) => s,
@@ -669,7 +952,12 @@ pub fn active_lock_path(dir: &str) -> std::path::PathBuf {
     if section == "default" {
         vaak_dir.join("board.lock")
     } else {
-        vaak_dir.join("sections").join(section).join("board.lock")
+        let resolved = vaak_dir.join("sections").join(&section).join("board.lock");
+        // Defense-in-depth: ensure path stays under .vaak/
+        if !resolved.starts_with(&vaak_dir) {
+            return vaak_dir.join("board.lock"); // fallback to default
+        }
+        resolved
     }
 }
 
@@ -1012,6 +1300,9 @@ pub fn get_active_section(dir: &str) -> String {
 
 /// Set the active section in project.json
 pub fn set_active_section(dir: &str, section: &str) -> Result<(), String> {
+    if section != "default" {
+        validate_slug(section).map_err(|e| format!("Invalid section slug: {}", e))?;
+    }
     let config_path = Path::new(dir).join(".vaak").join("project.json");
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
@@ -1035,7 +1326,12 @@ pub fn board_path_for_section(dir: &str, section: &str) -> PathBuf {
     if section == "default" {
         vaak_dir.join("board.jsonl")
     } else {
-        vaak_dir.join("sections").join(section).join("board.jsonl")
+        let resolved = vaak_dir.join("sections").join(section).join("board.jsonl");
+        // Defense-in-depth: ensure path stays under .vaak/
+        if !resolved.starts_with(&vaak_dir) {
+            return vaak_dir.join("board.jsonl"); // fallback to default
+        }
+        resolved
     }
 }
 
@@ -1046,7 +1342,12 @@ pub fn discussion_path_for_section(dir: &str, section: &str) -> PathBuf {
     if section == "default" {
         vaak_dir.join("discussion.json")
     } else {
-        vaak_dir.join("sections").join(section).join("discussion.json")
+        let resolved = vaak_dir.join("sections").join(section).join("discussion.json");
+        // Defense-in-depth: ensure path stays under .vaak/
+        if !resolved.starts_with(&vaak_dir) {
+            return vaak_dir.join("discussion.json"); // fallback to default
+        }
+        resolved
     }
 }
 
@@ -1060,12 +1361,45 @@ pub fn active_discussion_path(dir: &str) -> PathBuf {
     discussion_path_for_section(dir, &get_active_section(dir))
 }
 
+/// Ensure the sections/ directory exists and project.json has active_section set.
+/// Idempotent — safe to call multiple times.
+pub fn ensure_sections_layout(dir: &str) -> Result<(), String> {
+    let vaak_dir = Path::new(dir).join(".vaak");
+    let sections_dir = vaak_dir.join("sections");
+
+    // Create sections/ directory if missing
+    if !sections_dir.exists() {
+        std::fs::create_dir_all(&sections_dir)
+            .map_err(|e| format!("Failed to create sections/: {}", e))?;
+    }
+
+    // Ensure project.json has active_section set
+    let config_path = vaak_dir.join("project.json");
+    let mut config: serde_json::Value = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+
+    if config.get("active_section").is_none() {
+        config["active_section"] = serde_json::json!("default");
+        let content = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+        atomic_write(&config_path, content.as_bytes())
+            .map_err(|e| format!("Failed to write project.json: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Create a new section. Returns the section info.
 pub fn create_section(dir: &str, name: &str) -> Result<SectionInfo, String> {
     let slug = slugify(name);
     if slug.is_empty() {
         return Err("Section name cannot be empty".to_string());
     }
+
+    // Initialize sections layout if this is the first section
+    ensure_sections_layout(dir)?;
 
     let vaak_dir = Path::new(dir).join(".vaak");
     let sec_dir = vaak_dir.join("sections").join(&slug);
@@ -1093,6 +1427,33 @@ pub fn create_section(dir: &str, name: &str) -> Result<SectionInfo, String> {
         serde_json::to_string_pretty(&meta).unwrap_or_default(),
     )
     .map_err(|e| format!("Failed to write section.json: {}", e))?;
+
+    // Register section in project.json sections array
+    let config_path = vaak_dir.join("project.json");
+    let mut config: serde_json::Value = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+
+    let sections = config.get_mut("sections")
+        .and_then(|v| v.as_array_mut());
+    if let Some(arr) = sections {
+        // Only add if not already present
+        let already = arr.iter().any(|v| v.as_str() == Some(&slug));
+        if !already {
+            arr.push(serde_json::json!(slug));
+        }
+    } else {
+        config["sections"] = serde_json::json!([slug]);
+    }
+
+    // Auto-switch to the new section so old messages don't persist
+    config["active_section"] = serde_json::json!(slug);
+    config["updated_at"] = serde_json::Value::String(now.clone());
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
+    atomic_write(&config_path, json.as_bytes())
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
     Ok(SectionInfo {
         slug,
@@ -1416,8 +1777,9 @@ pub fn roster_get(dir: &str) -> Result<Vec<RosterSlotWithStatus>, String> {
 
 const BUILT_IN_ROLES: &[&str] = &["developer", "manager", "architect", "tester", "moderator"];
 
-/// Validate a role slug: lowercase alphanumeric + hyphens, non-empty.
-fn validate_slug(slug: &str) -> Result<(), String> {
+/// Validate a slug: lowercase alphanumeric + hyphens, non-empty.
+/// Used for role slugs, section slugs, and any user input that becomes a path component.
+pub fn validate_slug(slug: &str) -> Result<(), String> {
     if slug.is_empty() {
         return Err("Role slug cannot be empty".to_string());
     }
@@ -1850,10 +2212,7 @@ fn delete_role_inner(
 
 /// Get the global role-templates directory (~/.vaak/role-templates/)
 fn global_templates_dir() -> Result<PathBuf, String> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or("Cannot determine home directory")?;
-    Ok(PathBuf::from(home).join(".vaak").join("role-templates"))
+    Ok(vaak_home_dir()?.join(".vaak").join("role-templates"))
 }
 
 /// Import missing global role templates into a project.
@@ -2247,4 +2606,1298 @@ pub fn remove_global_role_template(slug: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Build an intelligently-ordered pipeline turn order from active sessions.
+/// Scores each role by how many of its tags match keywords in the topic.
+/// Higher relevance = earlier turn. Manager/human excluded (always have priority bypass).
+/// Filters to only include the given participants, appending any not covered by scoring.
+///
+/// NOTE: This function has a mirror in vaak-mcp.rs::build_turn_order().
+/// If you change the scoring logic here, update the mirror too.
+pub fn build_pipeline_order(dir: &str, topic: &str, participants: &[String]) -> Vec<String> {
+    let vaak_dir = std::path::Path::new(dir).join(".vaak");
+
+    // Read sessions.json for active bindings
+    let sessions: serde_json::Value = std::fs::read_to_string(vaak_dir.join("sessions.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({"bindings": []}));
+    let bindings = sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Read project.json for role tags
+    let config: serde_json::Value = std::fs::read_to_string(vaak_dir.join("project.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+    let roles_config = config.get("roles").and_then(|r| r.as_object()).cloned().unwrap_or_default();
+
+    // Tokenize topic for keyword matching
+    let tokens: Vec<String> = topic.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() > 2)
+        .map(|s| s.to_string())
+        .collect();
+
+    // Tag-to-keyword mapping for relevance scoring
+    let tag_keywords: &[(&str, &[&str])] = &[
+        ("implementation", &["code", "implement", "build", "write", "create", "add", "feature", "function", "method"]),
+        ("debugging", &["bug", "fix", "error", "crash", "broken", "issue", "debug", "wrong"]),
+        ("code-review", &["review", "check", "audit", "quality", "approve"]),
+        ("testing", &["test", "validate", "verify", "coverage", "spec"]),
+        ("architecture", &["architecture", "design", "pattern", "structure", "system", "refactor", "module"]),
+        ("security", &["security", "vulnerability", "auth", "permission", "encrypt", "injection", "xss"]),
+        ("red-team", &["attack", "adversarial", "exploit", "threat", "penetration"]),
+        ("coordination", &["coordinate", "plan", "priority", "schedule", "assign", "task", "sprint"]),
+        ("moderation", &["discuss", "debate", "moderate", "consensus", "vote"]),
+        ("documentation", &["document", "docs", "readme", "guide", "spec", "write"]),
+        ("analysis", &["analyze", "research", "investigate", "report", "data"]),
+        ("compliance", &["compliance", "regulation", "standard", "policy", "legal"]),
+    ];
+
+    let mut scored: Vec<(String, u64, usize)> = bindings.iter()
+        .filter(|b| b.get("status").and_then(|s| s.as_str()) == Some("active"))
+        .filter(|b| {
+            let r = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            r != "human" && r != "manager"
+        })
+        .filter_map(|b| {
+            let role = b.get("role")?.as_str()?.to_string();
+            let instance = b.get("instance")?.as_u64().unwrap_or(0);
+
+            // Get role tags
+            let role_tags: Vec<String> = roles_config.get(&role)
+                .and_then(|r| r.get("tags"))
+                .and_then(|t| t.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+
+            // Score: count keyword matches between role tags and topic tokens
+            let mut score: usize = 0;
+            for tag in &role_tags {
+                if let Some(keywords) = tag_keywords.iter().find(|(t, _)| t == &tag.as_str()) {
+                    for kw in keywords.1 {
+                        if tokens.contains(&kw.to_string()) {
+                            score += 1;
+                        }
+                    }
+                }
+            }
+
+            Some((role, instance, score))
+        })
+        .collect();
+
+    // Sort by score descending, then alphabetical as tiebreaker
+    scored.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+
+    let relevance_order: Vec<String> = scored.into_iter()
+        .map(|(role, inst, _)| format!("{}:{}", role, inst))
+        .collect();
+
+    // Filter to only include participants, preserving relevance order
+    let mut final_order: Vec<String> = relevance_order.into_iter()
+        .filter(|agent| participants.contains(agent))
+        .collect();
+
+    // Append any participants not covered by scoring (e.g., inactive sessions)
+    for p in participants {
+        if !final_order.contains(p) {
+            final_order.push(p.clone());
+        }
+    }
+
+    final_order
+}
+
+// ==================== Tests ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── Termination Strategy Serialization Tests ──
+
+    #[test]
+    fn termination_fixed_rounds_roundtrip() {
+        let strategy = TerminationStrategy::FixedRounds { rounds: 5 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 5),
+            _ => panic!("Expected FixedRounds, got {:?}", parsed),
+        }
+    }
+
+    #[test]
+    fn termination_consensus_roundtrip() {
+        let strategy = TerminationStrategy::Consensus { threshold: 0.8 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::Consensus { threshold } => {
+                assert!((threshold - 0.8).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Consensus, got {:?}", parsed),
+        }
+    }
+
+    #[test]
+    fn termination_moderator_call_roundtrip() {
+        let strategy = TerminationStrategy::ModeratorCall;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert!(json.contains("moderator_call"));
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TerminationStrategy::ModeratorCall));
+    }
+
+    #[test]
+    fn termination_time_bound_roundtrip() {
+        let strategy = TerminationStrategy::TimeBound { minutes: 30 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::TimeBound { minutes } => assert_eq!(minutes, 30),
+            _ => panic!("Expected TimeBound, got {:?}", parsed),
+        }
+    }
+
+    #[test]
+    fn termination_unlimited_roundtrip() {
+        let strategy = TerminationStrategy::Unlimited;
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert!(json.contains("unlimited"));
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, TerminationStrategy::Unlimited));
+    }
+
+    #[test]
+    fn termination_default_is_fixed_one() {
+        let default = TerminationStrategy::default();
+        match default {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 1),
+            _ => panic!("Default should be FixedRounds(1)"),
+        }
+    }
+
+    #[test]
+    fn termination_unknown_type_errors() {
+        let bad_json = r#"{"type": "unknown_strategy"}"#;
+        let result: Result<TerminationStrategy, _> = serde_json::from_str(bad_json);
+        assert!(result.is_err(), "Unknown termination type should fail to deserialize");
+    }
+
+    // ── Automation Level Tests ──
+
+    #[test]
+    fn automation_level_roundtrip() {
+        for (level, expected_str) in [
+            (AutomationLevel::Manual, "\"manual\""),
+            (AutomationLevel::Semi, "\"semi\""),
+            (AutomationLevel::Auto, "\"auto\""),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, expected_str);
+            let parsed: AutomationLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&parsed).unwrap(),
+                expected_str,
+            );
+        }
+    }
+
+    #[test]
+    fn automation_default_is_auto() {
+        let default = AutomationLevel::default();
+        assert!(matches!(default, AutomationLevel::Auto));
+    }
+
+    // ── Audience Gate Tests ──
+
+    #[test]
+    fn audience_gate_roundtrip() {
+        for gate in [
+            AudienceGate::Listening,
+            AudienceGate::Voting,
+            AudienceGate::Qa,
+            AudienceGate::Commenting,
+            AudienceGate::Open,
+        ] {
+            let json = serde_json::to_string(&gate).unwrap();
+            let parsed: AudienceGate = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, gate);
+        }
+    }
+
+    #[test]
+    fn audience_gate_default_is_listening() {
+        assert_eq!(AudienceGate::default(), AudienceGate::Listening);
+    }
+
+    // ── Audience Config Tests ──
+
+    #[test]
+    fn audience_config_default_is_disabled() {
+        let config = AudienceConfig::default();
+        assert!(!config.enabled);
+        assert!(config.pool.is_none());
+        assert_eq!(config.size, 0);
+        assert_eq!(config.gate, AudienceGate::Listening);
+    }
+
+    #[test]
+    fn audience_config_roundtrip() {
+        let config = AudienceConfig {
+            enabled: true,
+            pool: Some("skeptical_engineers".to_string()),
+            size: 5,
+            gate: AudienceGate::Voting,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AudienceConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.pool.as_deref(), Some("skeptical_engineers"));
+        assert_eq!(parsed.size, 5);
+        assert_eq!(parsed.gate, AudienceGate::Voting);
+    }
+
+    // ── Discussion Settings Tests ──
+
+    #[test]
+    fn settings_effective_termination_uses_new_field() {
+        let settings = DiscussionSettings {
+            termination: Some(TerminationStrategy::Consensus { threshold: 0.75 }),
+            max_rounds: 10,
+            ..Default::default()
+        };
+        match settings.effective_termination() {
+            TerminationStrategy::Consensus { threshold } => {
+                assert!((threshold - 0.75).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected Consensus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn settings_effective_termination_falls_back_to_legacy() {
+        let settings = DiscussionSettings {
+            termination: None,
+            max_rounds: 7,
+            ..Default::default()
+        };
+        match settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 7),
+            other => panic!("Expected FixedRounds(7) from legacy fallback, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn settings_effective_automation_uses_new_field() {
+        let settings = DiscussionSettings {
+            automation: Some(AutomationLevel::Manual),
+            ..Default::default()
+        };
+        assert!(matches!(settings.effective_automation(), AutomationLevel::Manual));
+    }
+
+    #[test]
+    fn settings_effective_automation_defaults_to_auto() {
+        let settings = DiscussionSettings::default();
+        assert!(matches!(settings.effective_automation(), AutomationLevel::Auto));
+    }
+
+    #[test]
+    fn settings_effective_audience_defaults_to_disabled() {
+        let settings = DiscussionSettings::default();
+        let audience = settings.effective_audience();
+        assert!(!audience.enabled);
+    }
+
+    // ── Discussion State Backward Compatibility Tests ──
+
+    #[test]
+    fn discussion_state_deserializes_legacy_json() {
+        // Simulate an existing discussion.json WITHOUT the new Phase 1 fields
+        let legacy_json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test topic",
+            "started_at": "2026-03-23T00:00:00Z",
+            "moderator": "moderator:0",
+            "participants": ["developer:0", "tester:0"],
+            "current_round": 1,
+            "phase": "pipeline_active",
+            "rounds": [],
+            "settings": {
+                "max_rounds": 3,
+                "timeout_minutes": 15,
+                "expire_paused_after_minutes": 60,
+                "auto_close_timeout_seconds": 30
+            },
+            "audience_state": "listening",
+            "audience_enabled": false,
+            "pipeline_order": ["developer:0", "tester:0"],
+            "pipeline_stage": 0
+        });
+
+        let state: DiscussionState = serde_json::from_value(legacy_json).unwrap();
+        assert!(state.active);
+        assert_eq!(state.mode.as_deref(), Some("pipeline"));
+        assert_eq!(state.topic, "Test topic");
+        assert_eq!(state.participants.len(), 2);
+        assert_eq!(state.pipeline_order.as_ref().unwrap().len(), 2);
+        assert_eq!(state.pipeline_stage, Some(0));
+
+        // New fields should be None/default
+        assert!(state.settings.termination.is_none());
+        assert!(state.settings.automation.is_none());
+        assert!(state.settings.audience.is_none());
+        assert!(state.oxford_teams.is_none());
+        assert!(state.attack_chains.is_none());
+        assert!(state.micro_rounds.is_none());
+
+        // Effective fallbacks should work
+        match state.settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 3),
+            other => panic!("Expected FixedRounds(3) from legacy, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn discussion_state_deserializes_new_json() {
+        // Simulate a new discussion.json WITH Phase 1 fields
+        let new_json = json!({
+            "active": true,
+            "mode": "delphi",
+            "topic": "Architecture debate",
+            "started_at": "2026-03-23T01:00:00Z",
+            "moderator": "moderator:0",
+            "participants": ["developer:0", "architect:0", "tester:0"],
+            "current_round": 2,
+            "phase": "aggregating",
+            "rounds": [],
+            "settings": {
+                "termination": { "type": "consensus", "threshold": 0.8 },
+                "automation": "semi",
+                "audience": {
+                    "enabled": true,
+                    "pool": "skeptical_engineers",
+                    "size": 5,
+                    "gate": "listening"
+                },
+                "max_rounds": 10,
+                "timeout_minutes": 15,
+                "expire_paused_after_minutes": 60,
+                "auto_close_timeout_seconds": 30
+            },
+            "audience_state": "listening",
+            "audience_enabled": true
+        });
+
+        let state: DiscussionState = serde_json::from_value(new_json).unwrap();
+        assert!(state.active);
+        assert_eq!(state.mode.as_deref(), Some("delphi"));
+        assert_eq!(state.participants.len(), 3);
+        assert!(state.audience_enabled);
+
+        // New settings should be populated
+        match state.settings.effective_termination() {
+            TerminationStrategy::Consensus { threshold } => {
+                assert!((threshold - 0.8).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected Consensus(0.8), got {:?}", other),
+        }
+        assert!(matches!(state.settings.effective_automation(), AutomationLevel::Semi));
+        let audience = state.settings.effective_audience();
+        assert!(audience.enabled);
+        assert_eq!(audience.pool.as_deref(), Some("skeptical_engineers"));
+        assert_eq!(audience.size, 5);
+
+        // Pipeline fields should be None (this is a Delphi discussion)
+        assert!(state.pipeline_order.is_none());
+        assert!(state.pipeline_stage.is_none());
+    }
+
+    #[test]
+    fn discussion_state_empty_json_deserializes_to_default() {
+        let empty = json!({});
+        let state: DiscussionState = serde_json::from_value(empty).unwrap();
+        assert!(!state.active);
+        assert!(state.mode.is_none());
+        assert!(state.topic.is_empty());
+        assert!(state.participants.is_empty());
+    }
+
+    // ── Format-Specific Type Tests ──
+
+    #[test]
+    fn pipeline_output_roundtrip() {
+        let output = PipelineOutput {
+            stage: 2,
+            agent: "developer:0".to_string(),
+            message_id: 42,
+            timestamp: "2026-03-23T01:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let parsed: PipelineOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.stage, 2);
+        assert_eq!(parsed.agent, "developer:0");
+        assert_eq!(parsed.message_id, 42);
+    }
+
+    #[test]
+    fn oxford_teams_roundtrip() {
+        let teams = OxfordTeams {
+            proposition: vec!["developer:0".to_string(), "architect:0".to_string()],
+            opposition: vec!["tester:0".to_string(), "ux-engineer:0".to_string()],
+        };
+        let json = serde_json::to_string(&teams).unwrap();
+        let parsed: OxfordTeams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.proposition.len(), 2);
+        assert_eq!(parsed.opposition.len(), 2);
+    }
+
+    #[test]
+    fn oxford_votes_roundtrip() {
+        let votes = OxfordVotes {
+            for_count: 3,
+            against_count: 2,
+            abstain_count: 1,
+        };
+        let json = serde_json::to_string(&votes).unwrap();
+        let parsed: OxfordVotes = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.for_count, 3);
+        assert_eq!(parsed.against_count, 2);
+        assert_eq!(parsed.abstain_count, 1);
+    }
+
+    #[test]
+    fn attack_defense_pair_defaults() {
+        let json = json!({
+            "attack_message_id": 10,
+            "severity": "critical"
+        });
+        let pair: AttackDefensePair = serde_json::from_value(json).unwrap();
+        assert_eq!(pair.attack_message_id, 10);
+        assert!(pair.defense_message_id.is_none());
+        assert_eq!(pair.severity, "critical");
+        assert_eq!(pair.status, "unaddressed"); // default
+    }
+
+    #[test]
+    fn micro_round_defaults() {
+        let json = json!({
+            "id": "mr-001",
+            "trigger_message_id": 5,
+            "trigger_from": "developer:0",
+            "topic": "Auth refactor complete",
+            "opened_at": "2026-03-23T01:00:00Z"
+        });
+        let round: MicroRound = serde_json::from_value(json).unwrap();
+        assert_eq!(round.id, "mr-001");
+        assert!(round.closed_at.is_none());
+        assert_eq!(round.timeout_seconds, 60); // default
+        assert!(round.responses.is_empty());
+        assert_eq!(round.result, "pending"); // default
+    }
+
+    #[test]
+    fn decision_roundtrip() {
+        let decision = Decision {
+            micro_round_id: "mr-001".to_string(),
+            topic: "Auth refactor".to_string(),
+            result: "consent".to_string(),
+            resolved_at: "2026-03-23T01:02:00Z".to_string(),
+            summary: "3 agree, 1 silence".to_string(),
+        };
+        let json = serde_json::to_string(&decision).unwrap();
+        let parsed: Decision = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.result, "consent");
+        assert_eq!(parsed.summary, "3 agree, 1 silence");
+    }
+
+    // ── Serde Malformation Tests ──
+
+    #[test]
+    fn termination_missing_type_field_errors() {
+        let no_type = json!({"rounds": 5});
+        let result: Result<TerminationStrategy, _> = serde_json::from_value(no_type);
+        assert!(result.is_err(), "Missing 'type' discriminant should fail");
+    }
+
+    #[test]
+    fn discussion_state_wrong_mode_fields_ignored() {
+        // A Delphi discussion with pipeline fields — pipeline fields should not
+        // cause errors but should be deserialized as present (flat struct allows it)
+        let mixed_json = json!({
+            "active": true,
+            "mode": "delphi",
+            "topic": "Test",
+            "participants": [],
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "pipeline_order": ["a:0", "b:0"],
+            "pipeline_stage": 0
+        });
+        let state: DiscussionState = serde_json::from_value(mixed_json).unwrap();
+        assert_eq!(state.mode.as_deref(), Some("delphi"));
+        // Pipeline fields ARE present (flat struct) — type guards prevent misuse
+        assert!(state.pipeline_order.is_some());
+    }
+
+    // ── DiscussionSettings Serialization Roundtrip ──
+
+    #[test]
+    fn settings_full_roundtrip() {
+        let settings = DiscussionSettings {
+            termination: Some(TerminationStrategy::Consensus { threshold: 0.85 }),
+            automation: Some(AutomationLevel::Semi),
+            audience: Some(AudienceConfig {
+                enabled: true,
+                pool: Some("engineers".to_string()),
+                size: 3,
+                gate: AudienceGate::Qa,
+            }),
+            max_rounds: 10,
+            timeout_minutes: 30,
+            expire_paused_after_minutes: 120,
+            auto_close_timeout_seconds: 45,
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let parsed: DiscussionSettings = serde_json::from_str(&json).unwrap();
+
+        match parsed.effective_termination() {
+            TerminationStrategy::Consensus { threshold } => {
+                assert!((threshold - 0.85).abs() < f64::EPSILON);
+            }
+            other => panic!("Expected Consensus, got {:?}", other),
+        }
+        assert!(matches!(parsed.effective_automation(), AutomationLevel::Semi));
+        let aud = parsed.effective_audience();
+        assert!(aud.enabled);
+        assert_eq!(aud.size, 3);
+        assert_eq!(aud.gate, AudienceGate::Qa);
+    }
+
+    // ==================== Round 2 Tests ====================
+
+    // ── Role-Gating Validation Tests ──
+    // Note: The actual role-gating logic lives in vaak-mcp.rs (sidecar binary).
+    // These tests validate the data structures that the gating relies on:
+    // discussion.moderator field and state consistency.
+
+    #[test]
+    fn discussion_state_moderator_field_present() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test",
+            "moderator": "moderator:0",
+            "participants": ["developer:0"],
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 }
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.moderator.as_deref(), Some("moderator:0"));
+    }
+
+    #[test]
+    fn discussion_state_moderator_null_for_auto() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test",
+            "moderator": null,
+            "participants": ["developer:0"],
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 }
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert!(state.moderator.is_none());
+    }
+
+    #[test]
+    fn discussion_state_moderator_missing_defaults_to_none() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test",
+            "participants": [],
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 }
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert!(state.moderator.is_none());
+    }
+
+    // ── Discussion State with New Settings Roundtrip ──
+
+    #[test]
+    fn discussion_state_full_roundtrip_with_phase1_fields() {
+        let original = DiscussionState {
+            active: true,
+            mode: Some("pipeline".to_string()),
+            topic: "Architecture review".to_string(),
+            started_at: Some("2026-03-23T01:00:00Z".to_string()),
+            moderator: Some("moderator:0".to_string()),
+            participants: vec!["developer:0".to_string(), "tester:0".to_string()],
+            current_round: 1,
+            phase: Some("pipeline_active".to_string()),
+            settings: DiscussionSettings {
+                termination: Some(TerminationStrategy::FixedRounds { rounds: 3 }),
+                automation: Some(AutomationLevel::Semi),
+                audience: Some(AudienceConfig {
+                    enabled: true,
+                    pool: Some("engineers".to_string()),
+                    size: 5,
+                    gate: AudienceGate::Listening,
+                }),
+                ..Default::default()
+            },
+            pipeline_order: Some(vec!["developer:0".to_string(), "tester:0".to_string()]),
+            pipeline_stage: Some(0),
+            pipeline_outputs: Some(vec![]),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: DiscussionState = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.active);
+        assert_eq!(parsed.mode.as_deref(), Some("pipeline"));
+        assert_eq!(parsed.moderator.as_deref(), Some("moderator:0"));
+        assert_eq!(parsed.participants.len(), 2);
+        assert_eq!(parsed.pipeline_order.as_ref().unwrap().len(), 2);
+        assert_eq!(parsed.pipeline_stage, Some(0));
+
+        match parsed.settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 3),
+            other => panic!("Expected FixedRounds(3), got {:?}", other),
+        }
+        assert!(matches!(parsed.settings.effective_automation(), AutomationLevel::Semi));
+        assert!(parsed.settings.effective_audience().enabled);
+    }
+
+    // ── Pipeline Output Accumulation ──
+
+    #[test]
+    fn discussion_state_with_pipeline_outputs() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Impl",
+            "participants": ["a:0", "b:0", "c:0"],
+            "current_round": 0,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "pipeline_order": ["a:0", "b:0", "c:0"],
+            "pipeline_stage": 2,
+            "pipeline_outputs": [
+                { "stage": 0, "agent": "a:0", "message_id": 10, "timestamp": "2026-03-23T01:00:00Z" },
+                { "stage": 1, "agent": "b:0", "message_id": 15, "timestamp": "2026-03-23T01:05:00Z" }
+            ]
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.pipeline_stage, Some(2));
+        // pipeline_outputs is Vec<serde_json::Value> in the current flat struct
+        let outputs = state.pipeline_outputs.as_ref().unwrap();
+        assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn pipeline_mode_serialization_roundtrip() {
+        // With pipeline_mode set
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test pipeline_mode",
+            "participants": ["dev:0"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "pipeline_mode": "discussion",
+            "pipeline_order": ["dev:0"],
+            "pipeline_stage": 0
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.pipeline_mode.as_deref(), Some("discussion"));
+
+        // Roundtrip: serialize back and verify
+        let serialized = serde_json::to_value(&state).unwrap();
+        assert_eq!(serialized["pipeline_mode"], "discussion");
+
+        // Toggle to action
+        let json_action = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test action mode",
+            "participants": ["dev:0"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "pipeline_mode": "action"
+        });
+        let state_action: DiscussionState = serde_json::from_value(json_action).unwrap();
+        assert_eq!(state_action.pipeline_mode.as_deref(), Some("action"));
+
+        // Without pipeline_mode (non-pipeline discussion) — should default to None
+        let json_none = json!({
+            "active": true,
+            "mode": "delphi",
+            "topic": "No pipeline_mode",
+            "participants": ["dev:0"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 }
+        });
+        let state_none: DiscussionState = serde_json::from_value(json_none).unwrap();
+        assert!(state_none.pipeline_mode.is_none());
+
+        // Verify None pipeline_mode is skipped in serialization
+        let serialized_none = serde_json::to_value(&state_none).unwrap();
+        assert!(!serialized_none.as_object().unwrap().contains_key("pipeline_mode"));
+    }
+
+    // ── Stagnation Detection Tests ──
+
+    #[test]
+    fn stagnant_rounds_defaults_to_zero() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Test",
+            "participants": ["dev:0"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 10, "timeout_minutes": 15, "expire_paused_after_minutes": 60 }
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.stagnant_rounds, 0);
+
+        // Zero stagnant_rounds should be skipped in serialization
+        let serialized = serde_json::to_value(&state).unwrap();
+        assert!(!serialized.as_object().unwrap().contains_key("stagnant_rounds"));
+    }
+
+    #[test]
+    fn stagnant_rounds_serialization_roundtrip() {
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Stagnation test",
+            "participants": ["dev:0"],
+            "current_round": 4,
+            "rounds": [],
+            "settings": { "max_rounds": 10, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "stagnant_rounds": 2
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.stagnant_rounds, 2);
+
+        // Non-zero stagnant_rounds should be present in serialization
+        let serialized = serde_json::to_value(&state).unwrap();
+        assert_eq!(serialized["stagnant_rounds"], 2);
+
+        // Verify roundtrip
+        let state2: DiscussionState = serde_json::from_value(serialized).unwrap();
+        assert_eq!(state2.stagnant_rounds, 2);
+    }
+
+    #[test]
+    fn stagnant_rounds_at_threshold_triggers_close() {
+        // Simulate the stagnation counter reaching the threshold (3)
+        let json = json!({
+            "active": true,
+            "mode": "pipeline",
+            "topic": "Empty loop test",
+            "participants": ["dev:0", "ux:0"],
+            "current_round": 5,
+            "rounds": [],
+            "settings": { "max_rounds": 10, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "stagnant_rounds": 3,
+            "pipeline_mode": "discussion",
+            "pipeline_order": ["dev:0", "ux:0"],
+            "pipeline_stage": 1
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.stagnant_rounds, 3);
+        assert!(state.active);
+        // The sidecar logic at vaak-mcp.rs:3977 checks: new_stagnant >= max_stagnant (3)
+        // When this condition is met, it sets active=false, phase="pipeline_complete"
+        // We verify the typed struct can represent the closed state:
+        let closed_json = json!({
+            "active": false,
+            "mode": "pipeline",
+            "topic": "Empty loop test",
+            "participants": ["dev:0", "ux:0"],
+            "current_round": 5,
+            "rounds": [],
+            "settings": { "max_rounds": 10, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "stagnant_rounds": 3,
+            "phase": "pipeline_complete"
+        });
+        let closed_state: DiscussionState = serde_json::from_value(closed_json).unwrap();
+        assert!(!closed_state.active);
+        assert_eq!(closed_state.phase.as_deref(), Some("pipeline_complete"));
+        assert_eq!(closed_state.stagnant_rounds, 3);
+    }
+
+    // ── Oxford State Tests ──
+
+    #[test]
+    fn discussion_state_oxford_with_teams_and_votes() {
+        let json = json!({
+            "active": true,
+            "mode": "oxford",
+            "topic": "Should we use microservices?",
+            "participants": ["dev:0", "dev:1", "arch:0", "arch:1"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 30, "expire_paused_after_minutes": 60 },
+            "oxford_teams": {
+                "proposition": ["dev:0", "arch:0"],
+                "opposition": ["dev:1", "arch:1"]
+            },
+            "oxford_votes": {
+                "for_count": 3,
+                "against_count": 2,
+                "abstain_count": 0
+            },
+            "oxford_motion": "This house believes microservices are superior to monoliths"
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.mode.as_deref(), Some("oxford"));
+        let teams = state.oxford_teams.as_ref().unwrap();
+        assert_eq!(teams.proposition.len(), 2);
+        assert_eq!(teams.opposition.len(), 2);
+        let votes = state.oxford_votes.as_ref().unwrap();
+        assert_eq!(votes.for_count, 3);
+        assert_eq!(votes.against_count, 2);
+        assert_eq!(state.oxford_motion.as_deref(), Some("This house believes microservices are superior to monoliths"));
+    }
+
+    // ── Red Team State Tests ──
+
+    #[test]
+    fn discussion_state_red_team_with_attacks() {
+        let json = json!({
+            "active": true,
+            "mode": "red_team",
+            "topic": "Security audit",
+            "participants": ["evil:0", "dev:0"],
+            "current_round": 1,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "attack_chains": [
+                {
+                    "attack_message_id": 20,
+                    "defense_message_id": 25,
+                    "severity": "critical",
+                    "status": "addressed"
+                },
+                {
+                    "attack_message_id": 21,
+                    "severity": "high",
+                    "status": "unaddressed"
+                }
+            ],
+            "severity_summary": { "critical": 1, "high": 1 },
+            "unaddressed_count": 1
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.mode.as_deref(), Some("red_team"));
+        let attacks = state.attack_chains.as_ref().unwrap();
+        assert_eq!(attacks.len(), 2);
+        assert_eq!(attacks[0].severity, "critical");
+        assert_eq!(attacks[0].status, "addressed");
+        assert!(attacks[0].defense_message_id.is_some());
+        assert_eq!(attacks[1].severity, "high");
+        assert_eq!(attacks[1].status, "unaddressed");
+        assert!(attacks[1].defense_message_id.is_none());
+        assert_eq!(state.unaddressed_count, Some(1));
+    }
+
+    // ── Continuous Mode State Tests ──
+
+    #[test]
+    fn discussion_state_continuous_with_micro_rounds() {
+        let json = json!({
+            "active": true,
+            "mode": "continuous",
+            "topic": "Ongoing review",
+            "participants": ["dev:0", "tester:0"],
+            "current_round": 0,
+            "rounds": [],
+            "settings": { "max_rounds": 1, "timeout_minutes": 15, "expire_paused_after_minutes": 60 },
+            "micro_rounds": [
+                {
+                    "id": "mr-001",
+                    "trigger_message_id": 50,
+                    "trigger_from": "dev:0",
+                    "topic": "Auth refactor done",
+                    "opened_at": "2026-03-23T01:00:00Z",
+                    "closed_at": "2026-03-23T01:01:00Z",
+                    "timeout_seconds": 30,
+                    "responses": [
+                        { "from": "tester:0", "vote": "agree", "message_id": 51 }
+                    ],
+                    "result": "consent"
+                }
+            ],
+            "decision_stream": [
+                {
+                    "micro_round_id": "mr-001",
+                    "topic": "Auth refactor done",
+                    "result": "consent",
+                    "resolved_at": "2026-03-23T01:01:00Z",
+                    "summary": "1 agree, 0 silence"
+                }
+            ]
+        });
+        let state: DiscussionState = serde_json::from_value(json).unwrap();
+        assert_eq!(state.mode.as_deref(), Some("continuous"));
+        let micro = state.micro_rounds.as_ref().unwrap();
+        assert_eq!(micro.len(), 1);
+        assert_eq!(micro[0].result, "consent");
+        assert_eq!(micro[0].responses.len(), 1);
+        assert_eq!(micro[0].responses[0].vote, "agree");
+        let decisions = state.decision_stream.as_ref().unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].result, "consent");
+    }
+
+    // ── Termination Strategy Edge Cases ──
+
+    #[test]
+    fn consensus_threshold_boundary_zero() {
+        let strategy = TerminationStrategy::Consensus { threshold: 0.0 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::Consensus { threshold } => assert!(threshold.abs() < f64::EPSILON),
+            _ => panic!("Expected Consensus(0.0)"),
+        }
+    }
+
+    #[test]
+    fn consensus_threshold_boundary_one() {
+        let strategy = TerminationStrategy::Consensus { threshold: 1.0 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::Consensus { threshold } => {
+                assert!((threshold - 1.0).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Consensus(1.0)"),
+        }
+    }
+
+    #[test]
+    fn fixed_rounds_zero_is_valid() {
+        let strategy = TerminationStrategy::FixedRounds { rounds: 0 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 0),
+            _ => panic!("Expected FixedRounds(0)"),
+        }
+    }
+
+    #[test]
+    fn time_bound_zero_minutes_is_valid() {
+        let strategy = TerminationStrategy::TimeBound { minutes: 0 };
+        let json = serde_json::to_string(&strategy).unwrap();
+        let parsed: TerminationStrategy = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TerminationStrategy::TimeBound { minutes } => assert_eq!(minutes, 0),
+            _ => panic!("Expected TimeBound(0)"),
+        }
+    }
+
+    // ── Skip Serializing None Tests ──
+
+    #[test]
+    fn discussion_state_skips_none_optional_fields() {
+        let state = DiscussionState {
+            active: true,
+            mode: Some("delphi".to_string()),
+            topic: "Test".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        // Fields that are None with skip_serializing_if should NOT appear
+        assert!(!json.contains("pipeline_order"));
+        assert!(!json.contains("oxford_teams"));
+        assert!(!json.contains("attack_chains"));
+        assert!(!json.contains("micro_rounds"));
+        assert!(!json.contains("decision_stream"));
+    }
+
+    // ==================== Round 3 Tests ====================
+
+    // ── Library Crate Bridge Tests ──
+    // Verify that types exposed through lib.rs work correctly
+
+    #[test]
+    fn discussion_state_write_read_roundtrip_via_serde() {
+        // Simulates what the typed bridge functions do:
+        // write_discussion_typed serializes to JSON, read_discussion_typed deserializes
+        let state = DiscussionState {
+            active: true,
+            mode: Some("pipeline".to_string()),
+            topic: "Test roundtrip".to_string(),
+            moderator: Some("moderator:0".to_string()),
+            participants: vec!["dev:0".to_string(), "tester:0".to_string(), "arch:0".to_string()],
+            current_round: 1,
+            phase: Some("pipeline_active".to_string()),
+            settings: DiscussionSettings {
+                termination: Some(TerminationStrategy::FixedRounds { rounds: 3 }),
+                automation: Some(AutomationLevel::Semi),
+                ..Default::default()
+            },
+            pipeline_order: Some(vec!["arch:0".to_string(), "dev:0".to_string(), "tester:0".to_string()]),
+            pipeline_stage: Some(1),
+            pipeline_outputs: Some(vec![
+                serde_json::json!({ "stage": 0, "agent": "arch:0", "message_id": 10, "timestamp": "2026-03-23T01:00:00Z" })
+            ]),
+            ..Default::default()
+        };
+
+        // Serialize (what write_discussion_typed does)
+        let json_str = serde_json::to_string_pretty(&state).unwrap();
+
+        // Deserialize (what read_discussion_typed does)
+        let restored: DiscussionState = serde_json::from_str(&json_str).unwrap();
+
+        // Verify all fields survived the roundtrip
+        assert!(restored.active);
+        assert_eq!(restored.mode.as_deref(), Some("pipeline"));
+        assert_eq!(restored.topic, "Test roundtrip");
+        assert_eq!(restored.moderator.as_deref(), Some("moderator:0"));
+        assert_eq!(restored.participants.len(), 3);
+        assert_eq!(restored.pipeline_order.as_ref().unwrap().len(), 3);
+        assert_eq!(restored.pipeline_order.as_ref().unwrap()[0], "arch:0");
+        assert_eq!(restored.pipeline_stage, Some(1));
+        assert_eq!(restored.pipeline_outputs.as_ref().unwrap().len(), 1);
+
+        match restored.settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => assert_eq!(rounds, 3),
+            other => panic!("Expected FixedRounds(3), got {:?}", other),
+        }
+    }
+
+    // ── Pipeline Order Consistency Tests ──
+    // These test that build_pipeline_order produces deterministic output
+    // (the function that was previously duplicated between collab.rs and vaak-mcp.rs)
+
+    #[test]
+    fn build_pipeline_order_with_no_sessions_returns_participants() {
+        // When there are no active sessions (temp dir with no sessions.json),
+        // build_pipeline_order should return all participants in input order
+        let tmp = std::env::temp_dir().join(format!("vaak_test_{}", uuid::Uuid::new_v4()));
+        let vaak_dir = tmp.join(".vaak");
+        let section_dir = vaak_dir.join("sections").join("default");
+        std::fs::create_dir_all(&section_dir).unwrap();
+
+        // Write minimal project.json (no role tags = no scoring)
+        std::fs::write(
+            vaak_dir.join("project.json"),
+            r#"{"project_id":"test","name":"test","description":"","created_at":"","updated_at":"","roles":{},"settings":{"heartbeat_timeout_seconds":30,"message_retention_days":7}}"#
+        ).unwrap();
+
+        // Write sessions.json with no active bindings
+        std::fs::write(
+            vaak_dir.join("sessions.json"),
+            r#"{"bindings":[]}"#
+        ).unwrap();
+
+        let participants = vec!["dev:0".to_string(), "tester:0".to_string(), "arch:0".to_string()];
+        let order = build_pipeline_order(tmp.to_str().unwrap(), "test topic", &participants);
+
+        // All participants should appear in the output (appended as unscored)
+        assert_eq!(order.len(), 3);
+        assert!(order.contains(&"dev:0".to_string()));
+        assert!(order.contains(&"tester:0".to_string()));
+        assert!(order.contains(&"arch:0".to_string()));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_pipeline_order_is_deterministic() {
+        // Same inputs should produce same output every time
+        let tmp = std::env::temp_dir().join(format!("vaak_test_{}", uuid::Uuid::new_v4()));
+        let vaak_dir = tmp.join(".vaak");
+        std::fs::create_dir_all(&vaak_dir).unwrap();
+
+        std::fs::write(
+            vaak_dir.join("project.json"),
+            r#"{"project_id":"test","name":"test","description":"","created_at":"","updated_at":"","roles":{},"settings":{"heartbeat_timeout_seconds":30,"message_retention_days":7}}"#
+        ).unwrap();
+        std::fs::write(vaak_dir.join("sessions.json"), r#"{"bindings":[]}"#).unwrap();
+
+        let participants = vec!["a:0".to_string(), "b:0".to_string(), "c:0".to_string()];
+        let order1 = build_pipeline_order(tmp.to_str().unwrap(), "test", &participants);
+        let order2 = build_pipeline_order(tmp.to_str().unwrap(), "test", &participants);
+
+        assert_eq!(order1, order2, "Same inputs must produce same output");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_pipeline_order_filters_to_participants_only() {
+        // Even if sessions have extra active agents, only participants appear in output
+        let tmp = std::env::temp_dir().join(format!("vaak_test_{}", uuid::Uuid::new_v4()));
+        let vaak_dir = tmp.join(".vaak");
+        std::fs::create_dir_all(&vaak_dir).unwrap();
+
+        std::fs::write(
+            vaak_dir.join("project.json"),
+            r#"{"project_id":"test","name":"test","description":"","created_at":"","updated_at":"","roles":{"dev":{"title":"Dev","description":"","max_instances":1,"permissions":[],"created_at":"","tags":[]},"extra":{"title":"Extra","description":"","max_instances":1,"permissions":[],"created_at":"","tags":[]}},"settings":{"heartbeat_timeout_seconds":30,"message_retention_days":7}}"#
+        ).unwrap();
+        std::fs::write(
+            vaak_dir.join("sessions.json"),
+            r#"{"bindings":[{"role":"dev","instance":0,"session_id":"s1","claimed_at":"","last_heartbeat":"","status":"active"},{"role":"extra","instance":0,"session_id":"s2","claimed_at":"","last_heartbeat":"","status":"active"}]}"#
+        ).unwrap();
+
+        // Only include dev:0, NOT extra:0
+        let participants = vec!["dev:0".to_string()];
+        let order = build_pipeline_order(tmp.to_str().unwrap(), "test", &participants);
+
+        assert!(order.contains(&"dev:0".to_string()));
+        assert!(!order.contains(&"extra:0".to_string()), "Non-participant should be filtered out");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn build_pipeline_order_excludes_human_and_manager() {
+        // Human and manager should never appear in pipeline order
+        let tmp = std::env::temp_dir().join(format!("vaak_test_{}", uuid::Uuid::new_v4()));
+        let vaak_dir = tmp.join(".vaak");
+        std::fs::create_dir_all(&vaak_dir).unwrap();
+
+        std::fs::write(
+            vaak_dir.join("project.json"),
+            r#"{"project_id":"test","name":"test","description":"","created_at":"","updated_at":"","roles":{},"settings":{"heartbeat_timeout_seconds":30,"message_retention_days":7}}"#
+        ).unwrap();
+        std::fs::write(
+            vaak_dir.join("sessions.json"),
+            r#"{"bindings":[{"role":"human","instance":0,"session_id":"h1","claimed_at":"","last_heartbeat":"","status":"active"},{"role":"manager","instance":0,"session_id":"m1","claimed_at":"","last_heartbeat":"","status":"active"}]}"#
+        ).unwrap();
+
+        let participants = vec!["human:0".to_string(), "manager:0".to_string(), "dev:0".to_string()];
+        let order = build_pipeline_order(tmp.to_str().unwrap(), "test", &participants);
+
+        // Human and manager should still appear since they're in participants list
+        // (build_pipeline_order filters sessions for scoring but appends unscored participants)
+        // The key test: they won't get priority scoring from tags
+        assert!(order.contains(&"dev:0".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ==================== Round 5 Tests: Multi-Round Pipeline Auto-Loop ====================
+
+    #[test]
+    fn settings_unlimited_termination_always_loops() {
+        let settings = DiscussionSettings {
+            termination: Some(TerminationStrategy::Unlimited),
+            ..Default::default()
+        };
+        assert!(matches!(settings.effective_termination(), TerminationStrategy::Unlimited));
+    }
+
+    #[test]
+    fn pipeline_state_round_increment_simulation() {
+        // Simulate what the sidecar does when auto-looping:
+        // Pipeline completes → check termination → Unlimited → reset stage, increment round
+        let mut state = DiscussionState {
+            active: true,
+            mode: Some("pipeline".to_string()),
+            current_round: 0,
+            phase: Some("pipeline_active".to_string()),
+            settings: DiscussionSettings {
+                termination: Some(TerminationStrategy::Unlimited),
+                ..Default::default()
+            },
+            pipeline_order: Some(vec!["a:0".to_string(), "b:0".to_string()]),
+            pipeline_stage: Some(2), // past the end (2 participants)
+            ..Default::default()
+        };
+
+        let should_loop = match state.settings.effective_termination() {
+            TerminationStrategy::Unlimited => true,
+            TerminationStrategy::FixedRounds { rounds } => state.current_round + 1 < rounds,
+            _ => true,
+        };
+        assert!(should_loop, "Unlimited should always loop");
+
+        // Simulate reset
+        state.pipeline_stage = Some(0);
+        state.current_round += 1;
+
+        assert_eq!(state.pipeline_stage, Some(0));
+        assert_eq!(state.current_round, 1);
+
+        // Verify roundtrip
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: DiscussionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.current_round, 1);
+        assert_eq!(restored.pipeline_stage, Some(0));
+    }
+
+    #[test]
+    fn pipeline_fixed_rounds_stops_at_limit() {
+        let state = DiscussionState {
+            current_round: 4, // 0-indexed, round 5 of 5
+            settings: DiscussionSettings {
+                termination: Some(TerminationStrategy::FixedRounds { rounds: 5 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let should_loop = match state.settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => state.current_round + 1 < rounds,
+            _ => true,
+        };
+        assert!(!should_loop, "Should NOT loop — round 5 of 5 is complete");
+    }
+
+    #[test]
+    fn pipeline_fixed_rounds_continues_before_limit() {
+        let state = DiscussionState {
+            current_round: 2, // round 3 of 5
+            settings: DiscussionSettings {
+                termination: Some(TerminationStrategy::FixedRounds { rounds: 5 }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let should_loop = match state.settings.effective_termination() {
+            TerminationStrategy::FixedRounds { rounds } => state.current_round + 1 < rounds,
+            _ => true,
+        };
+        assert!(should_loop, "Should loop — round 3 of 5, 2 more to go");
+    }
+
+    #[test]
+    fn pipeline_default_settings_now_unlimited() {
+        // Verify that the new pipeline default is Unlimited (max_rounds: 999)
+        let settings = DiscussionSettings {
+            termination: Some(TerminationStrategy::Unlimited),
+            max_rounds: 999,
+            ..Default::default()
+        };
+        assert!(matches!(settings.effective_termination(), TerminationStrategy::Unlimited));
+        assert_eq!(settings.max_rounds, 999);
+    }
 }

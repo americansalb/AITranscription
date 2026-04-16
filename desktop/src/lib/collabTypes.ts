@@ -32,6 +32,7 @@ export interface ProjectConfig {
     auto_collab?: boolean;
     human_in_loop?: boolean;
     discussion_mode?: string;
+    work_mode?: string;
   };
 }
 
@@ -118,7 +119,7 @@ export interface Section {
 // ==================== Discussion Mode Types ====================
 
 /** Valid discussion modes */
-export type DiscussionMode = "open" | "directed" | "delphi" | "oxford" | "continuous";
+export type DiscussionMode = "open" | "directed" | "delphi" | "oxford" | "continuous" | "pipeline" | "red_team";
 
 /** Valid message types including the new "submission" type */
 export type MessageType =
@@ -152,15 +153,125 @@ export interface DiscussionRound {
   topic?: string;                // Per-round topic (continuous mode: the status message that triggered it)
 }
 
-/** Discussion settings */
+// ==================== Termination & Automation Types ====================
+
+/** How a discussion determines when to end */
+export type TerminationStrategy =
+  | { type: "fixed_rounds"; rounds: number }    // Stop after exactly N rounds
+  | { type: "consensus"; threshold: number }     // Stop when convergence >= threshold (0.0-1.0)
+  | { type: "moderator_call" }                   // Moderator decides when to close
+  | { type: "time_bound"; minutes: number }      // Stop after N minutes
+  | { type: "unlimited" };                       // Run until human/moderator explicitly closes
+
+/** How much autonomy the moderator has */
+export type AutomationLevel = "manual" | "semi" | "auto";
+
+/** Audience gate — what the audience can do at this moment */
+export type AudienceGate = "listening" | "voting" | "qa" | "commenting" | "open";
+
+/** Audience configuration for a discussion */
+export interface AudienceConfig {
+  enabled: boolean;
+  pool: string | null;           // pool name/ID
+  size: number;                  // number of personas
+  gate: AudienceGate;            // current permission level
+}
+
+/** Discussion settings — extended with termination and automation */
 export interface DiscussionSettings {
+  // New fields (Phase 1)
+  termination?: TerminationStrategy;   // Optional for backward compat — defaults to FixedRounds(max_rounds)
+  automation?: AutomationLevel;        // Optional for backward compat — defaults to "auto"
+  audience?: AudienceConfig;           // Optional for backward compat — defaults to disabled
+  // Legacy fields (still read for backward compat)
   max_rounds: number;
   timeout_minutes: number;
   expire_paused_after_minutes: number;
   auto_close_timeout_seconds?: number;  // Continuous mode: seconds before silence = consent (default 60)
 }
 
-/** Active discussion state — stored in .vaak/discussion.json */
+// ==================== Format-Specific State Types ====================
+
+/** Pipeline stage output */
+export interface PipelineOutput {
+  stage: number;
+  agent: string;
+  message_id: number;
+  timestamp: string;
+}
+
+/** Pipeline-specific state */
+export interface PipelineState {
+  order: string[];             // Ordered list of role:instance IDs
+  current_stage: number;       // 0-based index into order
+  outputs: PipelineOutput[];   // Accumulated outputs from completed stages
+}
+
+/** Oxford debate teams */
+export interface OxfordTeams {
+  proposition: string[];       // role:instance IDs for the proposition team
+  opposition: string[];        // role:instance IDs for the opposition team
+}
+
+/** Oxford debate vote tally */
+export interface OxfordVotes {
+  for_count: number;
+  against_count: number;
+  abstain_count: number;
+}
+
+/** Red team attack-defense pair */
+export interface AttackDefensePair {
+  attack_message_id: number;
+  defense_message_id: number | null;
+  severity: "critical" | "high" | "medium" | "low";
+  status: "unaddressed" | "partially_addressed" | "addressed";
+}
+
+/** Continuous mode micro-round */
+export interface MicroRound {
+  id: string;
+  trigger_message_id: number;
+  trigger_from: string;
+  topic: string;
+  opened_at: string;
+  closed_at: string | null;
+  timeout_seconds: number;
+  responses: Array<{
+    from: string;
+    vote: "agree" | "disagree" | "alternative";
+    message_id: number;
+  }>;
+  result: "consent" | "rejected" | "alternative" | "pending";
+}
+
+/** Decision stream entry (resolved micro-round summary) */
+export interface Decision {
+  micro_round_id: string;
+  topic: string;
+  result: "consent" | "rejected" | "alternative";
+  resolved_at: string;
+  summary: string;
+}
+
+/** Discussion phase — shared across formats for now, will become per-format enums in Phase 2 */
+export type DiscussionPhase =
+  | "submitting" | "aggregating" | "reviewing"   // Delphi phases
+  | "paused" | "complete"                         // Shared phases
+  | "pipeline_active" | "pipeline_complete"       // Pipeline phases
+  | "oxford_opening" | "oxford_rebuttal" | "oxford_closing" | "oxford_vote" | "oxford_declaration"  // Oxford phases
+  | "red_team_attacking" | "red_team_defending" | "red_team_assessment"  // Red team phases
+  | "continuous_active"                           // Continuous phase
+  | null;
+
+/** Active discussion state — stored in .vaak/discussion.json
+ *
+ * MIGRATION NOTE: This interface currently uses a flat structure with optional
+ * mode-specific fields for backward compatibility. The target architecture is a
+ * discriminated union (see DiscussionStateV2 below). During migration, both
+ * formats are supported — new code should use the type guards (isPipelineDiscussion,
+ * isDelphiDiscussion, etc.) to narrow the type safely.
+ */
 export interface DiscussionState {
   active: boolean;
   mode: DiscussionMode | null;
@@ -169,12 +280,95 @@ export interface DiscussionState {
   moderator: string | null;      // role:instance
   participants: string[];        // role:instance IDs
   current_round: number;
-  phase: "submitting" | "aggregating" | "reviewing" | "paused" | "complete" | null;
+  phase: DiscussionPhase;
   paused_at: string | null;
   expire_at: string | null;
   previous_phase: string | null;
   rounds: DiscussionRound[];
   settings: DiscussionSettings;
+  // Pipeline mode fields (only present when mode === "pipeline")
+  pipeline_mode?: "discussion" | "action";
+  pipeline_order?: string[];
+  pipeline_stage?: number;
+  pipeline_outputs?: PipelineOutput[];
+  // Oxford mode fields (only present when mode === "oxford")
+  oxford_teams?: OxfordTeams;
+  oxford_votes?: OxfordVotes;
+  oxford_motion?: string;
+  // Red team mode fields (only present when mode === "red_team")
+  attack_chains?: AttackDefensePair[];
+  severity_summary?: Record<string, number>;
+  unaddressed_count?: number;
+  // Continuous mode fields (only present when mode === "continuous")
+  micro_rounds?: MicroRound[];
+  decision_stream?: Decision[];
+  // Audience fields
+  audience_state?: AudienceGate;
+  audience_enabled?: boolean;
+  // Stagnation detection
+  stagnant_rounds?: number;
+}
+
+// ==================== Discussion Type Guards ====================
+
+/** Narrow DiscussionState to pipeline mode */
+export function isPipelineDiscussion(d: DiscussionState): d is DiscussionState & {
+  mode: "pipeline";
+  pipeline_order: string[];
+  pipeline_stage: number;
+  pipeline_outputs: PipelineOutput[];
+} {
+  return d.mode === "pipeline" && Array.isArray(d.pipeline_order);
+}
+
+/** Narrow DiscussionState to Delphi mode */
+export function isDelphiDiscussion(d: DiscussionState): d is DiscussionState & {
+  mode: "delphi";
+} {
+  return d.mode === "delphi";
+}
+
+/** Narrow DiscussionState to Oxford debate mode */
+export function isOxfordDiscussion(d: DiscussionState): d is DiscussionState & {
+  mode: "oxford";
+  oxford_teams: OxfordTeams;
+  oxford_votes: OxfordVotes;
+  oxford_motion: string;
+} {
+  return d.mode === "oxford" && d.oxford_teams != null;
+}
+
+/** Narrow DiscussionState to Red Team mode */
+export function isRedTeamDiscussion(d: DiscussionState): d is DiscussionState & {
+  mode: "red_team";
+  attack_chains: AttackDefensePair[];
+} {
+  return d.mode === "red_team" && Array.isArray(d.attack_chains);
+}
+
+/** Narrow DiscussionState to Continuous mode */
+export function isContinuousDiscussion(d: DiscussionState): d is DiscussionState & {
+  mode: "continuous";
+  micro_rounds: MicroRound[];
+  decision_stream: Decision[];
+} {
+  return d.mode === "continuous" && Array.isArray(d.micro_rounds);
+}
+
+/** Get the effective termination strategy, falling back to legacy max_rounds */
+export function getTerminationStrategy(settings: DiscussionSettings): TerminationStrategy {
+  if (settings.termination) return settings.termination;
+  return { type: "fixed_rounds", rounds: settings.max_rounds };
+}
+
+/** Get the effective automation level, defaulting to "auto" */
+export function getAutomationLevel(settings: DiscussionSettings): AutomationLevel {
+  return settings.automation ?? "auto";
+}
+
+/** Get the effective audience config, defaulting to disabled */
+export function getAudienceConfig(settings: DiscussionSettings): AudienceConfig {
+  return settings.audience ?? { enabled: false, pool: null, size: 0, gate: "listening" };
 }
 
 // ==================== Team Roster Types ====================

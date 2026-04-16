@@ -110,6 +110,63 @@ function generateAntiPatterns(tags: string[], permissions: string[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Boundaries generator (YOU DO / YOU DO NOT / RULES)
+// ---------------------------------------------------------------------------
+
+function generateBoundaries(tags: string[], permissions: string[]): string {
+  const youDo: string[] = [];
+  const youDoNot: string[] = [];
+  const rules: string[] = [];
+
+  // YOU DO — derived from tags
+  if (tags.includes("implementation")) youDo.push("- Write code, fix bugs, implement assigned features");
+  if (tags.includes("debugging")) youDo.push("- Diagnose and resolve reported bugs");
+  if (tags.includes("code-review")) youDo.push("- Review code quality and correctness when assigned");
+  if (tags.includes("testing")) youDo.push("- Write and run tests, validate implementations");
+  if (tags.includes("architecture")) youDo.push("- Design system structure and make architecture decisions");
+  if (tags.includes("security")) youDo.push("- Analyze code for security vulnerabilities");
+  if (tags.includes("red-team")) youDo.push("- Perform adversarial testing and attack simulation");
+  if (tags.includes("coordination")) youDo.push("- Coordinate tasks and manage team priorities");
+  if (tags.includes("moderation")) youDo.push("- Facilitate structured discussions and enforce rules");
+  if (tags.includes("documentation")) youDo.push("- Write documentation and technical guides");
+  if (tags.includes("analysis")) youDo.push("- Research topics and produce analytical reports");
+  if (tags.includes("compliance")) youDo.push("- Validate regulatory and policy compliance");
+  youDo.push("- Report status on assigned tasks");
+
+  // YOU DO NOT — inverse of tags (things outside your scope)
+  if (!tags.includes("architecture") && !tags.includes("coordination")) {
+    youDoNot.push("- Make architecture decisions — send proposals to Architect");
+  }
+  if (!permissions.includes("assign_tasks")) {
+    youDoNot.push("- Assign tasks to other roles — that's the Manager's job");
+  }
+  if (!permissions.includes("review")) {
+    youDoNot.push("- Review other roles' work without being asked");
+  }
+  if (!tags.includes("moderation")) {
+    youDoNot.push("- Moderate discussions or express opinions on debate topics");
+  }
+  if (!tags.includes("implementation") && !tags.includes("debugging")) {
+    youDoNot.push("- Modify code directly — hand off code changes to a Developer");
+  }
+
+  // RULES — universal
+  rules.push("- When unsure if something is in your scope, ask the Manager before acting");
+  rules.push("- Default to silence — if you have nothing assigned, say nothing");
+  rules.push("- Never send acknowledgment-only messages (\"Got it\", \"Will do\", \"Okay\")");
+  rules.push("- Only the Manager messages the human directly — route through the Manager");
+
+  return `**YOU DO:**
+${youDo.join("\n")}
+
+**YOU DO NOT:**
+${youDoNot.join("\n")}
+
+**RULES:**
+${rules.join("\n")}`;
+}
+
+// ---------------------------------------------------------------------------
 // Peer relationship generator
 // ---------------------------------------------------------------------------
 
@@ -172,7 +229,10 @@ export function generateBriefing(input: BriefingInput): string {
   // Section 1: Identity
   const identity = `You are the ${title}. ${description}`;
 
-  // Section 2: Primary function (from tags)
+  // Section 2: Boundaries (YOU DO / YOU DO NOT / RULES)
+  const boundaries = generateBoundaries(tags, permissions);
+
+  // Section 3: Primary function (from tags)
   const functions = tags
     .map((t) => TAG_FUNCTIONS[t])
     .filter(Boolean);
@@ -181,15 +241,22 @@ export function generateBriefing(input: BriefingInput): string {
       ? functions.join("\n")
       : "Your responsibilities are defined by the team lead.";
 
-  // Section 3: Anti-patterns
+  // Section 4: Anti-patterns
   const antiPatterns = generateAntiPatterns(tags, permissions);
 
-  // Section 4: Peer relationships
+  // Section 5: Peer relationships
   const peerRelationships = generatePeerRelationships(tags, peers);
 
-  // Section 5: Multi-instance coordination (only for roles with max_instances > 1)
+  // Section 6: Communication Protocol (universal)
+  const communicationProtocol = `1. **Direct messaging only.** Send to the specific role that needs your message. Never broadcast unless announcing a standard that affects everyone.
+2. **Human is not your audience.** Only message human:0 for: decisions requiring their judgment, answers to their direct questions, or milestone completions. Everything else goes role-to-role.
+3. **One response per directive.** If a broadcast arrives and another role is better suited to respond, stay silent. Check if someone already answered before replying.
+4. **Know your team.** On join, read the roster. Understand who does what. Route your questions to the right role — don't spray them to all.
+5. **No acknowledgment-only messages.** "Got it" and "Will do" are noise. Either do the work and report completion, or ask a clarifying question.`;
+
+  // Section 7: Multi-instance coordination (only for roles with max_instances > 1)
   const multiInstanceSection = (maxInstances ?? 1) > 1
-    ? `\n## 5. Multi-Instance Coordination
+    ? `\n## 7. Multi-Instance Coordination
 
 When multiple instances of this role are active:
 1. ALWAYS check \`project_claims\` before starting ANY file work
@@ -200,7 +267,7 @@ When multiple instances of this role are active:
 `
     : "";
 
-  // Section 6 (or 5 if no multi-instance): Action boundary (from permissions)
+  // Action boundary section (from permissions)
   const actionLines = permissions
     .map((p) => PERMISSION_DESCRIPTIONS[p])
     .filter(Boolean)
@@ -218,26 +285,32 @@ When multiple instances of this role are active:
     "4. Report completion via `project_send` when done",
   ].join("\n");
 
-  const sectionNum = (maxInstances ?? 1) > 1 ? 6 : 5;
+  const actionNum = (maxInstances ?? 1) > 1 ? 8 : 7;
 
   return `# ${title}
 
 ## 1. Identity
 ${identity}
 
-## 2. Primary Function
+## 2. Boundaries
+${boundaries}
+
+## 3. Primary Function
 ${primaryFunction}
 
-## 3. Anti-patterns
+## 4. Anti-patterns
 ${antiPatterns}
 
-## 4. Peer Relationships
+## 5. Peer Relationships
 ${peerRelationships}
+
+## 6. Communication Protocol
+${communicationProtocol}
 ${multiInstanceSection}
-## ${sectionNum}. Action Boundary
+## ${actionNum}. Action Boundary
 ${actionBoundary}
 
-## ${sectionNum + 1}. Onboarding
+## ${actionNum + 1}. Onboarding
 ${onboarding}
 `;
 }
@@ -261,7 +334,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "Researcher",
     description: "Gathers information, investigates topics, and produces analytical reports",
     tags: ["analysis", "documentation"],
-    permissions: ["status", "question"],
+    permissions: ["status", "question", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -269,7 +342,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "Security Auditor",
     description: "Analyzes code and systems for security vulnerabilities, performs threat modeling",
     tags: ["security", "red-team", "code-review"],
-    permissions: ["status", "review"],
+    permissions: ["status", "review", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -277,7 +350,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "DevOps Engineer",
     description: "Manages infrastructure, deployment pipelines, and operational tooling",
     tags: ["implementation", "testing"],
-    permissions: ["status", "handoff"],
+    permissions: ["status", "handoff", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -285,7 +358,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "Technical Writer",
     description: "Writes documentation, API specs, user guides, and technical references",
     tags: ["documentation"],
-    permissions: ["status"],
+    permissions: ["status", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -293,7 +366,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "Domain Expert",
     description: "Provides specialized knowledge and analysis for a specific domain",
     tags: ["analysis"],
-    permissions: ["status", "question"],
+    permissions: ["status", "question", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -301,7 +374,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "QA Lead",
     description: "Plans test strategies, coordinates quality assurance, and reviews test coverage",
     tags: ["testing", "code-review", "coordination"],
-    permissions: ["status", "review", "assign_tasks"],
+    permissions: ["status", "review", "assign_tasks", "broadcast"],
     maxInstances: 1,
   },
   {
@@ -309,7 +382,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     title: "Pair Programmer",
     description: "Works interactively alongside another role, writing and reviewing code together",
     tags: ["implementation", "code-review", "debugging"],
-    permissions: ["status", "handoff", "question"],
+    permissions: ["status", "handoff", "question", "broadcast"],
     maxInstances: 1,
   },
   {

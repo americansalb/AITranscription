@@ -69,6 +69,10 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[lib]
+name = "vaak_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vaak-mcp"
 path = "src/bin/vaak-mcp.rs"
