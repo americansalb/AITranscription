@@ -2389,14 +2389,32 @@ impl ModeratorError {
         }
     }
 
-    /// All tag strings currently defined. Kept in sync with the `match` in
-    /// `variant_tag` by compiler-enforced exhaustiveness on any new variant.
+    /// All tag strings currently defined. Compile-time exhaustive: a new variant
+    /// without a corresponding arm in the `match` below will fail to compile.
+    ///
+    /// Why this shape (dev-challenger msg 407): returning a hand-maintained
+    /// `&[&str]` would let someone add an enum variant + update `Display` +
+    /// update the TS union and forget to update this list. The drift-guard test
+    /// would then compare a stale Rust set to a stale TS set and silently pass.
+    /// Anchoring the set to an exhaustive `match` closes that hole.
+    ///
+    /// Fields are ignored (`.. => tag`); the point is to exhaust the variant set.
     #[cfg(test)]
-    fn all_variant_tags() -> &'static [&'static str] {
-        &[
-            "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT",
-            "HUMAN_BYPASS_YIELDS_TO_MODERATOR",
-        ]
+    fn all_variant_tags() -> Vec<&'static str> {
+        // Sample instance used only so the match exhausts — values are never read.
+        let samples: &[ModeratorError] = &[
+            ModeratorError::CapabilityNotSupportedForFormat {
+                capability: String::new(),
+                format: String::new(),
+                reason: String::new(),
+            },
+            ModeratorError::HumanBypassYieldsToModerator {
+                moderator: String::new(),
+                action: String::new(),
+                caller: String::new(),
+            },
+        ];
+        samples.iter().map(ModeratorError::variant_tag).collect()
     }
 }
 
