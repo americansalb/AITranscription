@@ -2389,20 +2389,31 @@ impl ModeratorError {
         }
     }
 
-    /// All tag strings currently defined. Compile-time exhaustive: a new variant
-    /// without a corresponding arm in the `match` below will fail to compile.
+    /// Single source of truth for "one instance per variant" used by all
+    /// drift-guard tests. Anchors `all_variant_tags()` AND
+    /// `moderator_error_variant_tag_matches_wire_prefix` to the same set.
     ///
-    /// Why this shape (dev-challenger msg 407): returning a hand-maintained
-    /// `&[&str]` would let someone add an enum variant + update `Display` +
-    /// update the TS union and forget to update this list. The drift-guard test
-    /// would then compare a stale Rust set to a stale TS set and silently pass.
-    /// Anchoring the set to an exhaustive `match` closes that hole.
+    /// **Drift-guard sync points** when adding a variant `FooBar` (per
+    /// tech-leader msg 423 + architect msg 429 vision § 11.13):
+    ///   1. add `FooBar { ... }` to the enum (Rust)
+    ///   2. add `FooBar { .. } => "FOO_BAR"` to `variant_tag()` — compiler forces
+    ///   3. add `FooBar { .. } => write!(...)` to `Display` — compiler forces
+    ///   4. add `FooBar { .. } => "FOO_BAR"` to the `_exhaustive_check` closure
+    ///      in `all_variant_tags()` — compiler forces (closure match exhaustive)
+    ///   5. add `ModeratorError::FooBar { ... }` to this samples function —
+    ///      compiler-silent but reviewer-obvious (4 prior sync points all
+    ///      mention FooBar by name)
+    ///   6. add `"FOO_BAR"` to `ModeratorErrorCode` union in
+    ///      `desktop/src/lib/collabTypes.ts` (TS)
+    ///   7. extend `parseModeratorError` for the new shape (TS) if applicable
     ///
-    /// Fields are ignored (`.. => tag`); the point is to exhaust the variant set.
+    /// Strum (option 1 from dev-challenger msg 407) would collapse 5 → 4 by
+    /// deriving the samples set automatically. Rejected per architect msg 429 +
+    /// platform-engineer msg 413: proc-macro cold-build cost on Windows NTFS is
+    /// disproportionate for a 2-variant enum. Revisit if the variant set grows.
     #[cfg(test)]
-    fn all_variant_tags() -> Vec<&'static str> {
-        // Sample instance used only so the match exhausts — values are never read.
-        let samples: &[ModeratorError] = &[
+    fn samples() -> Vec<ModeratorError> {
+        vec![
             ModeratorError::CapabilityNotSupportedForFormat {
                 capability: String::new(),
                 format: String::new(),
@@ -2413,8 +2424,33 @@ impl ModeratorError {
                 action: String::new(),
                 caller: String::new(),
             },
-        ];
-        samples.iter().map(ModeratorError::variant_tag).collect()
+            // ── Negative-test harness ──
+            // Uncomment the line below (and add a matching `FooBar` variant +
+            // arms in `variant_tag` / `Display` / `all_variant_tags`'s
+            // exhaustive-check closure) to verify drift-guard fails as expected.
+            // `cargo test test_ts_types_match_rust_enum_variants` should report
+            // the TS union missing `FOO_BAR`. Re-comment after manual verification.
+            // ModeratorError::FooBar { sample: String::new() },
+        ]
+    }
+
+    /// All tag strings currently defined. Two layers of drift-guard:
+    ///   1. `_exhaustive_check` closure forces the compiler to refuse a new
+    ///      variant unless a match arm with its literal tag is added here.
+    ///   2. Returned tags derive from `variant_tag()` applied to `samples()`,
+    ///      so the array values cannot diverge from the wire format.
+    ///
+    /// What this still doesn't catch: forgetting to add an instance to
+    /// `samples()`. The only no-deps fix is reviewer discipline (the
+    /// `samples()` doc above lists all 7 sync points). Strum closes it but
+    /// is rejected for this enum size.
+    #[cfg(test)]
+    fn all_variant_tags() -> Vec<&'static str> {
+        let _exhaustive_check: fn(&ModeratorError) -> &'static str = |e| match e {
+            ModeratorError::CapabilityNotSupportedForFormat { .. } => "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT",
+            ModeratorError::HumanBypassYieldsToModerator { .. } => "HUMAN_BYPASS_YIELDS_TO_MODERATOR",
+        };
+        Self::samples().iter().map(ModeratorError::variant_tag).collect()
     }
 }
 
@@ -8273,23 +8309,11 @@ mod tests {
 
     #[test]
     fn moderator_error_variant_tag_matches_wire_prefix() {
-        // Compiler-enforced sync between variant_tag() and Display: if a new
-        // variant is added, variant_tag() must update (exhaustive match) and
-        // Display must emit the matching `[error_code: TAG]` prefix. This test
-        // catches a stale variant_tag() that points at the wrong prefix.
-        let cases: &[ModeratorError] = &[
-            ModeratorError::CapabilityNotSupportedForFormat {
-                capability: "x".to_string(),
-                format: "y".to_string(),
-                reason: "z".to_string(),
-            },
-            ModeratorError::HumanBypassYieldsToModerator {
-                moderator: "m:0".to_string(),
-                action: "a".to_string(),
-                caller: "c:0".to_string(),
-            },
-        ];
-        for case in cases {
+        // Per tech-leader msg 423/431: derive cases from the same `samples()`
+        // function used by `all_variant_tags()` so drift-guards share a single
+        // variant-iteration source. A forgotten sample addition surfaces here
+        // AND in the TS-mirror drift test simultaneously.
+        for case in ModeratorError::samples() {
             let rendered = case.to_string();
             let expected_prefix = format!("[error_code: {}]", case.variant_tag());
             assert!(
