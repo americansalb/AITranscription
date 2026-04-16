@@ -2371,7 +2371,15 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 None
             };
 
+            // Why: architect msg 169 locked the "Session = container, Format = behavior"
+            // split. Every discussion instance needs a stable identity so downstream tooling
+            // (UI, exports, postmortems, audit trails) can correlate messages to a specific
+            // run across restarts. Using uuid v4 here; v7 deferred until Cargo.toml's uuid
+            // dependency is bumped to >=1.7 per platform-engineer msg 175. Field is additive
+            // JSON — DiscussionState struct reads default None for unknown fields today.
+            let session_id = uuid::Uuid::new_v4().to_string();
             let mut new_state = serde_json::json!({
+                "session_id": session_id,
                 "active": true,
                 "mode": mode,
                 "topic": topic,
