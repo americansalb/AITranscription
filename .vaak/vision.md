@@ -401,6 +401,13 @@ This invariant is already encoded at `vaak-mcp.rs:2176–2191` ("allow if no mod
 - **Why:** The permission model collapses without a moderator. Perpetual human:0 capability removes the off-switch — if the human wants a hands-off test or to demote themselves, there's no mechanism. Authoritative-when-claimed + fallback-when-vacant gives both control paths.
 - **How to apply:** Every format-action capability check respects this precedence. Tests must cover both branches (moderator claimed → moderator authoritative; moderator vacant → human:0 authoritative).
 
+#### 11.4a Paused moderator retains authority
+
+"Moderator claimed" includes "moderator session is paused." A paused moderator does NOT become effectively-vacant for the fallback rule. `human:0` does not acquire bypass capability while the moderator is paused.
+
+- **Why:** Pause is a session-state action the moderator took deliberately. Promoting human:0 to moderator authority during a moderator-initiated pause inverts the intent of pausing — the moderator paused to prevent further action, not to hand authority to someone else. Dev-challenger flagged this gap in board msg 313 sharpening #2.
+- **How to apply:** `active_moderator_session()` returns `Some(...)` for both live and paused moderator sessions. Only explicit moderator departure (session termination, `project_leave`) returns `None`. Resume authority belongs to the `manager` seat per § 11.7; a paused moderator does not auto-release their claim.
+
 ### 11.4b Manager Invariant
 
 Manager's capabilities (`@human` direct-message, pipeline/consecutive turn-lock bypass) exist independently of moderator state. A vacant moderator seat does not promote human:0 to manager privileges. A vacant manager seat does not redirect @human routing.
