@@ -2419,22 +2419,26 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         "toggle_pipeline_mode", "update_settings", "record_decision",
     ];
     if moderator_only_actions.contains(&action) {
-        // Human-yields-to-claimed-MODERATOR refinement (architect msg 310, tech-leader
-        // msg 316 retraction, dev-challenger msg 313, platform-engineer msg 320).
+        // Human-yields-to-claimed-MODERATOR refinement.
         //
-        // Why: vision § 11.4 "Moderator Fallback Invariant" says human:0's implicit
+        // Provenance chain: architect msg 310 (moderator != manager), tech-leader
+        // msg 316 (retraction) + msg 326 (final scope) + msg 337 (drop pause filter),
+        // dev-challenger msg 313, platform-engineer msg 320, architect's cf96dce
+        // vision § 11.4a.
+        //
+        // Why: vision § 11.4 "Moderator Fallback Invariant" — human:0's implicit
         // bypass on moderator gates holds ONLY when no moderator is actually present.
-        // If `discussion.moderator` names an active (not-paused) session, that session
-        // is authoritative and human must route through them.
+        // If `discussion.moderator` names an active session, that session is
+        // authoritative and human must route through them.
         //
-        // Key distinction (architect msg 310): this predicate checks the MODERATOR seat,
-        // not the manager seat. Manager has separate capabilities per § 11.4b and does
-        // NOT gate moderator actions. My initial PR 4 code used `has_active_manager_in_sessions`
-        // which was wrong; this is the fix.
+        // Moderator ≠ Manager (architect msg 310): this predicate checks the MODERATOR
+        // seat (stored in discussion.moderator). Manager has separate capabilities
+        // per § 11.4b and does NOT gate moderator actions.
         //
-        // Pause-state filter (dev-challenger msg 313 sharpening 2): a paused moderator
-        // yields authority back to human until resumed. Matches moderator-exit-auto-pause:
-        // paused moderator is effectively absent.
+        // Paused moderator RETAINS authority (vision § 11.4a, tech-leader msg 337):
+        // pause is a deliberate session-state action, not a release of claim. Only
+        // explicit departure (project_leave) clears the moderator seat. No pause
+        // filter on this predicate.
         //
         // TOCTOU: this check reads state at one instant; action executes at another.
         // Cost of the race is a misleading error on one retry; cost of locking is
@@ -2443,9 +2447,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         let moderator = discussion.get("moderator")
             .and_then(|m| m.as_str())
             .unwrap_or("");
-        let is_paused = discussion.get("paused_at").and_then(|p| p.as_str()).is_some();
         let moderator_is_active = !moderator.is_empty()
-            && !is_paused
             && has_active_session_for_label(&read_sessions(&state.project_dir), moderator);
 
         let human_bypass_ok = state.role == "human" && !moderator_is_active;
@@ -7924,16 +7926,19 @@ mod tests {
         unimplemented!("waiting on PR 4 item #3");
     }
 
-    /// 3c (pause filter): moderator is claimed but session is paused. Paused
-    /// moderator must NOT hold authority — human bypass re-applies while
-    /// paused. Dev-challenger msg 313 sharpening #2.
+    /// 3c (pause retains authority per architect § 11.4a): moderator is claimed
+    /// but session is paused. Paused moderator STILL holds authority — human
+    /// bypass stays yielded. Tech-leader msg 338 locked this disposition; the
+    /// dev-challenger msg 313 pause-filter direction was retracted when vision
+    /// § 11.4a merged as cf96dce. Moderator is authoritative across pause.
     #[test]
     #[ignore = "feature not implemented — unignore when item #3 ships in PR 4"]
-    fn test_human_yields_does_not_fire_when_moderator_paused() {
+    fn test_human_yields_when_moderator_paused() {
         // Assertion shape:
         //   1. discussion.moderator = "moderator:0", session.is_paused == true
         //   2. call from role="human" to a moderator_only_action
-        //   3. expect Ok — paused moderator does not yield authority over human
+        //   3. expect Err HumanBypassYieldsToModerator — paused moderator
+        //      retains authority, human bypass does NOT re-enable
         unimplemented!("waiting on PR 4 item #3");
     }
 
