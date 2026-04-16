@@ -1128,6 +1128,70 @@ fn update_session_activity(activity: &str) {
         write_sessions(&state.project_dir, &sessions)?;
         Ok(())
     });
+
+    // Moderator-exit auto-pause (dev-challenger msg 172 attack 3, tech-leader msg 292).
+    // Why: if the moderator's session terminates mid-discussion (process dies, terminal
+    // closes, parent-process monitor triggers), the discussion is left without a
+    // moderator but still "active." The next auto-advance / consensus check would
+    // still fire, pretending the moderator is there. Pausing on disconnect freezes
+    // state cleanly; the PR A consensus detector defers while `paused_at.is_some()`.
+    // Runs OUTSIDE the lock above to avoid re-entry — pause_if_current_session_is_moderator
+    // re-acquires the lock itself.
+    if activity == "disconnected" {
+        pause_if_current_session_is_moderator(&state.project_dir, &state.session_id, &state.role, state.instance);
+    }
+}
+
+/// Pause the active discussion if the given session is its moderator.
+///
+/// Why: see update_session_activity comment. Ensures moderator-exit during an active
+/// session leaves the discussion in a recoverable paused state rather than an
+/// ambiguously-moderated active state.
+///
+/// Semantics: reads discussion state, compares moderator field to the exiting
+/// session's `role:instance` label, sets `paused_at = now` + `paused_reason =
+/// "moderator_exit"` if they match. No-op otherwise. Does not auto-resume; the
+/// next moderator claim must call `resume` explicitly.
+fn pause_if_current_session_is_moderator(project_dir: &str, _session_id: &str, role: &str, instance: u32) {
+    let label = format!("{}:{}", role, instance);
+    let _ = with_file_lock(project_dir, || {
+        let disc = read_discussion_state(project_dir);
+        let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !is_active {
+            return Ok(());
+        }
+        let moderator = disc.get("moderator").and_then(|m| m.as_str()).unwrap_or("");
+        if moderator != label {
+            return Ok(());
+        }
+        let already_paused = disc.get("paused_at").and_then(|v| v.as_str()).is_some();
+        if already_paused {
+            return Ok(());
+        }
+        let now = utc_now_iso();
+        let mut updated = disc.clone();
+        updated["paused_at"] = serde_json::json!(now);
+        updated["paused_reason"] = serde_json::json!("moderator_exit");
+        write_discussion_state(project_dir, &updated)?;
+
+        // Emit system message so the team and UI see the pause.
+        let msg_id = next_message_id(project_dir);
+        let announcement = serde_json::json!({
+            "id": msg_id,
+            "from": "system:0",
+            "to": "all",
+            "type": "system",
+            "timestamp": now,
+            "subject": "Discussion auto-paused: moderator exited",
+            "body": format!("The moderator ({}) disconnected. Discussion is paused until a moderator resumes or rejoins.", label),
+            "metadata": {
+                "paused_reason": "moderator_exit",
+                "exited_moderator": label
+            }
+        });
+        append_to_board(project_dir, &announcement)?;
+        Ok(())
+    });
 }
 
 /// Read project.json
@@ -2249,6 +2313,24 @@ fn has_active_manager_in_sessions(sessions: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Format a capability-not-supported-for-format error with a structured error code
+/// so UX can pattern-match for tooltip rendering.
+///
+/// Why: dev-challenger msg 172 attack 2 flagged silent-failure UI bugs — moderator
+/// capabilities that appear available but are format-scoped (e.g. `reorder_pipeline`
+/// shown in Delphi where it does nothing). UX msg 166 confirmed the need for a
+/// structured tag so tooltips render `"Only available in pipeline mode"` rather
+/// than falling back to a generic string.
+///
+/// Emits: `[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='{cap}' format='{fmt}': {reason}`.
+/// UX parses the leading `[error_code: ...]` tag; the rest is human-readable hint.
+fn format_capability_error(capability: &str, format: &str, reason: &str) -> String {
+    format!(
+        "[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='{}' format='{}': {}",
+        capability, format, reason
+    )
+}
+
 /// Validate a decision record for the `record_decision` action.
 ///
 /// Why: tech-leader msg 279 routed the `decisions` primitive into PR 4. A decision
@@ -2681,7 +2763,9 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 return Err("No active discussion".to_string());
             }
             if typed_disc.mode.as_deref() != Some("pipeline") {
-                return Err("pipeline_next is only valid for Pipeline discussions".to_string());
+                let fmt = typed_disc.mode.as_deref().unwrap_or("(none)");
+                return Err(format_capability_error("pipeline_next", fmt,
+                    "pipeline_next is only valid for Pipeline discussions"));
             }
             let target = topic.ok_or("Specify the next agent as the topic parameter (e.g., 'developer:1')")?;
             let pipeline_order_vec = typed_disc.pipeline_order.clone().unwrap_or_default();
@@ -2754,7 +2838,9 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 return Err("No active discussion".to_string());
             }
             if typed_disc.mode.as_deref() != Some("pipeline") {
-                return Err("toggle_pipeline_mode is only valid for Pipeline discussions".to_string());
+                let fmt = typed_disc.mode.as_deref().unwrap_or("(none)");
+                return Err(format_capability_error("toggle_pipeline_mode", fmt,
+                    "toggle_pipeline_mode is only valid for Pipeline discussions"));
             }
             let current_mode = typed_disc.pipeline_mode.as_deref().unwrap_or("discussion");
             let new_mode = if current_mode == "discussion" { "action" } else { "discussion" };
@@ -7750,21 +7836,29 @@ mod tests {
         unimplemented!("waiting on moderator-exit pause hook");
     }
 
-    /// Open item 3 (tester msg 181 pushback):
-    /// human:0 carries moderator capability ONLY when no manager session is
-    /// claimed. If a manager session is active, manager is authoritative and
-    /// human:0's bypass of the moderator_only_actions gate must no longer fire.
-    /// Current code (vaak-mcp.rs:2203) bypasses for human unconditionally —
-    /// this is the ~3-line gap.
+    /// Open item 3 — AMENDED per tech-leader msg 303:
+    /// Replaces the dropped `test_human_zero_yields_to_claimed_manager`.
+    /// Tech-leader's msg 303 arbitrated that the "human yields to manager"
+    /// interpretation (tester msg 181) was philosophy drift. The project
+    /// invariant is: `state.role == "human"` unconditionally bypasses
+    /// moderator gates, whether or not a manager is claimed.
+    ///
+    /// Flag: vaak-mcp.rs:2396-2397 in the current uncommitted tree
+    /// implements the REJECTED conditional bypass
+    /// (`human_bypass_ok = ... && !has_active_manager_in_sessions(...)`).
+    /// This test asserts the invariant tech-leader directed; unignoring it
+    /// will fail against current code. Either the conditional bypass needs
+    /// revert or this test needs further amendment. Kept #[ignore]'d with
+    /// this note until tech-leader disposition clears the contradiction.
     #[test]
-    #[ignore = "feature not implemented — unignore when human bypass becomes conditional on no-claimed-manager"]
-    fn test_human_zero_yields_to_claimed_manager() {
-        // Assertion shape:
-        //   1. set discussion.moderator = "manager:0"
-        //   2. simulate call from human:0 to a moderator_only_action
-        //   3. expect Err("requires the moderator role") — human does NOT bypass
-        //      while a manager is claimed
-        unimplemented!("waiting on conditional human bypass");
+    #[ignore = "invariant conflicts with current conditional bypass at vaak-mcp.rs:2396-2397 — awaiting tech-leader disposition"]
+    fn test_human_always_bypasses_moderator_gate() {
+        // Assertion shape per tech-leader msg 303 project-philosophy:
+        //   for action in moderator_only_actions:
+        //     for manager_state in [claimed, unclaimed]:
+        //       let result = handle_discussion_control_as(role="human", action, manager_state);
+        //       assert!(result.is_ok(), "human must bypass {} regardless of manager state", action);
+        unimplemented!("philosophy-vs-code contradiction; awaiting tech-leader resolution");
     }
 
     /// Open item 4 (dev-challenger msg 172 attack 1, developer msg 223 defer):
@@ -7823,22 +7917,10 @@ mod tests {
         unimplemented!("waiting on paused_at honoring in round_reached_consensus");
     }
 
-    /// Complement of test 3 (tech-leader msg 293): when a claimed manager
-    /// session ends, human:0 must regain its implicit moderator bypass.
-    /// Otherwise a manager crash leaves the session without any moderator,
-    /// which is the exact vacancy failure mode the fallback was designed to
-    /// prevent.
-    #[test]
-    #[ignore = "feature not implemented — unignore when human bypass becomes re-enabled on manager exit"]
-    fn test_human_regains_moderator_on_manager_exit() {
-        // Assertion shape:
-        //   1. set discussion.moderator = "manager:0" (human bypass suppressed)
-        //   2. simulate manager:0 session_terminated event
-        //   3. expect discussion.moderator cleared OR bypass predicate re-enabled
-        //   4. call from human:0 to moderator_only_action
-        //   5. expect Ok — human bypass re-active
-        unimplemented!("waiting on bypass re-enable on manager exit");
-    }
+    // NOTE: `test_human_regains_moderator_on_manager_exit` removed per
+    // tech-leader msg 303 follow-through. The "regains" test was paired with
+    // the dropped "yields to claimed manager" test — if human always bypasses
+    // (philosophy per msg 303), there is no bypass state to lose and regain.
 
     /// Complement of test 5 (tech-leader msg 293): when the silent-turn
     /// auto-advance fires, it must emit the same moderator_action audit
@@ -7860,5 +7942,78 @@ mod tests {
         //          affected_role: "<skipped-role-instance>"
         //        }
         unimplemented!("waiting on audit metadata on auto-advance");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PR 4 helper tests (pure predicates, no I/O).
+    // These tests cover helpers the PR 4 code relies on; the moderator-gate
+    // and auto-pause integration points still need the placeholder tests
+    // above to unignore.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn has_active_manager_returns_false_on_empty_sessions() {
+        let sessions = serde_json::json!({ "bindings": [] });
+        assert!(!has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn has_active_manager_returns_false_when_no_manager_role() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "developer", "instance": 0, "status": "active" },
+                { "role": "tester", "instance": 0, "status": "active" }
+            ]
+        });
+        assert!(!has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn has_active_manager_returns_true_for_active_manager() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "developer", "instance": 0, "status": "active" },
+                { "role": "manager", "instance": 0, "status": "active" }
+            ]
+        });
+        assert!(has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn has_active_manager_returns_true_for_idle_manager() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "manager", "instance": 0, "status": "idle" }
+            ]
+        });
+        assert!(has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn has_active_manager_returns_false_for_disconnected_manager() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "manager", "instance": 0, "status": "disconnected" }
+            ]
+        });
+        assert!(!has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn format_capability_error_emits_structured_tag() {
+        let err = format_capability_error("pipeline_next", "delphi", "only valid for Pipeline");
+        assert!(err.starts_with("[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT]"));
+        assert!(err.contains("capability='pipeline_next'"));
+        assert!(err.contains("format='delphi'"));
+        assert!(err.contains("only valid for Pipeline"));
+    }
+
+    #[test]
+    fn format_capability_error_is_parseable_by_error_code() {
+        // UX relies on the [error_code: ...] tag to pattern-match for tooltip
+        // rendering. This test locks the tag format so UX integration can't
+        // break silently on string changes.
+        let err = format_capability_error("reorder_pipeline", "continuous", "reason text");
+        assert!(err.contains("[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT]"));
     }
 }
