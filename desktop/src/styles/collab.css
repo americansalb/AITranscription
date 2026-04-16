@@ -1831,6 +1831,46 @@
   line-height: 1;
 }
 
+/* PR H3: moderator-action error toast — dismissible banner that surfaces
+   backend moderator errors (previously silent console-only). Appears above
+   the compose bar so it sits in the user's focus path. */
+.moderator-error-toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 6px 8px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 6px;
+  color: var(--collab-text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.moderator-error-toast-text {
+  flex: 1;
+}
+
+.moderator-error-toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--collab-text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.moderator-error-toast-dismiss:hover {
+  color: var(--collab-text-primary);
+}
+
+.moderator-error-toast-dismiss:focus-visible {
+  outline: 2px solid var(--collab-accent);
+  outline-offset: 2px;
+}
+
 /* ==================== Message Timeline ==================== */
 
 .message-timeline {

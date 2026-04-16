@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
+import { parseModeratorError } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
@@ -740,6 +741,29 @@ export function CollabTab() {
     } catch { /* ignore */ }
     return "all";
   });
+  // PR H3: moderator-action error toast state.
+  // Why: when handleEndDiscussion / handleTogglePause fail (e.g. non-moderator
+  // clicks the button, wrong format, missing reason), the backend returns a
+  // tagged error string parseable by parseModeratorError. Previously these
+  // failures only logged to console — invisible to the user. Now they surface
+  // as a dismissible toast with a human-friendly rendering of each ModeratorErrorCode.
+  const [modErrorToast, setModErrorToast] = useState<string | null>(null);
+  const showModeratorError = (raw: string) => {
+    const parsed = parseModeratorError(raw);
+    if (!parsed) {
+      setModErrorToast(raw);
+      return;
+    }
+    if (parsed.code === "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT") {
+      setModErrorToast(`${parsed.capability ?? "That action"} is not available in ${parsed.format ?? "this"} mode.`);
+    } else if (parsed.code === "HUMAN_BYPASS_YIELDS_TO_MODERATOR") {
+      const mod = parsed.moderator ?? "the moderator";
+      setModErrorToast(`${mod} is the current moderator — route through them or wait for their stage.`);
+    } else {
+      setModErrorToast(parsed.rawMessage);
+    }
+  };
+
   // PR H2: last-seen timestamps per tab drive unread-count badges. Persisted so
   // the badges survive reloads — otherwise every reopen would show zero unread.
   // Why: tab badges are the only at-a-glance signal of "something new for me" —
@@ -2154,7 +2178,9 @@ When multiple instances of this role are active:
         }
       }
     } catch (e) {
+      // PR H3: surface moderator-action errors to the user (previously silent).
       console.error("[CollabTab] Failed to end discussion:", e);
+      showModeratorError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -2171,7 +2197,9 @@ When multiple instances of this role are active:
         if (state) setDiscussionState(state);
       }
     } catch (e) {
+      // PR H3: surface moderator-action errors to the user (previously silent).
       console.error("[CollabTab] Failed to toggle pause:", e);
+      showModeratorError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -4648,6 +4676,24 @@ When multiple instances of this role are active:
           <button className="new-messages-indicator" onClick={scrollToBottom}>
             {newMsgCount} new message{newMsgCount !== 1 ? "s" : ""} &darr;
           </button>
+        )}
+
+        {/* PR H3: moderator-action error toast.
+            Why: previously End Session / Pause failures were silent; users couldn't
+            tell whether the backend rejected them or the click didn't register.
+            aria-live="assertive" because an action-required error should interrupt
+            screen readers (platform-engineer msg 175 priority split). */}
+        {modErrorToast && (
+          <div className="moderator-error-toast" role="alert" aria-live="assertive">
+            <span className="moderator-error-toast-text">{modErrorToast}</span>
+            <button
+              className="moderator-error-toast-dismiss"
+              onClick={() => setModErrorToast(null)}
+              aria-label="Dismiss error"
+            >
+              {"\u00D7"}
+            </button>
+          </div>
         )}
 
         {/* Compose Bar */}
