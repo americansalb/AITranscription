@@ -2346,6 +2346,81 @@ fn has_active_session_for_label(sessions: &serde_json::Value, label: &str) -> bo
         .unwrap_or(false)
 }
 
+/// Source of truth for moderator-action error codes.
+///
+/// Why an enum and not string-prefixed strings anymore: dev-challenger msg 358 +
+/// architect msg 352 mandated a Rust↔TS drift-guard test (pr-t6). That test can't
+/// pattern-match on free-form strings — it needs reflectable variant names.
+///
+/// `Display` preserves the exact `[error_code: CODE] k='v' k='v': reason` wire
+/// format the UX side already parses (see `parseModeratorError` in
+/// `desktop/src/lib/collabTypes.ts`). Do not change the rendering without also
+/// updating the TS mirror and the two existing behavior tests below.
+///
+/// Adding a variant? Update `variant_tag()`, `Display`, and the TS union in the
+/// same PR — `test_ts_types_match_rust_enum_variants` will fail otherwise.
+#[derive(Debug)]
+enum ModeratorError {
+    /// A moderator capability is not valid in the active session format
+    /// (e.g. `reorder_pipeline` invoked during a Delphi round).
+    CapabilityNotSupportedForFormat {
+        capability: String,
+        format: String,
+        reason: String,
+    },
+    /// Human caller tried to bypass a moderator-only action while an active
+    /// moderator session exists. Per vision § 11.4, human must route through
+    /// the claimed moderator.
+    HumanBypassYieldsToModerator {
+        moderator: String,
+        action: String,
+        caller: String,
+    },
+}
+
+impl ModeratorError {
+    /// Returns the wire tag string (the `X` in `[error_code: X]`).
+    /// Used by the TS drift-guard test to reflect the variant set.
+    #[cfg(test)]
+    fn variant_tag(&self) -> &'static str {
+        match self {
+            ModeratorError::CapabilityNotSupportedForFormat { .. } => "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT",
+            ModeratorError::HumanBypassYieldsToModerator { .. } => "HUMAN_BYPASS_YIELDS_TO_MODERATOR",
+        }
+    }
+
+    /// All tag strings currently defined. Kept in sync with the `match` in
+    /// `variant_tag` by compiler-enforced exhaustiveness on any new variant.
+    #[cfg(test)]
+    fn all_variant_tags() -> &'static [&'static str] {
+        &[
+            "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT",
+            "HUMAN_BYPASS_YIELDS_TO_MODERATOR",
+        ]
+    }
+}
+
+impl std::fmt::Display for ModeratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModeratorError::CapabilityNotSupportedForFormat { capability, format, reason } => {
+                write!(
+                    f,
+                    "[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='{}' format='{}': {}",
+                    capability, format, reason
+                )
+            }
+            ModeratorError::HumanBypassYieldsToModerator { moderator, action, caller } => {
+                write!(
+                    f,
+                    "[error_code: HUMAN_BYPASS_YIELDS_TO_MODERATOR] moderator='{}': Action '{}' requires the moderator role. You are {}. Route through the active moderator or wait for their stage.",
+                    moderator, action, caller
+                )
+            }
+        }
+    }
+}
+
 /// Format a capability-not-supported-for-format error with a structured error code
 /// so UX can pattern-match for tooltip rendering.
 ///
@@ -2355,13 +2430,16 @@ fn has_active_session_for_label(sessions: &serde_json::Value, label: &str) -> bo
 /// structured tag so tooltips render `"Only available in pipeline mode"` rather
 /// than falling back to a generic string.
 ///
-/// Emits: `[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='{cap}' format='{fmt}': {reason}`.
-/// UX parses the leading `[error_code: ...]` tag; the rest is human-readable hint.
+/// Delegates to `ModeratorError::CapabilityNotSupportedForFormat`; the enum's
+/// `Display` impl owns the exact wire format. Kept as a free function so
+/// existing call sites don't need to import the enum path.
 fn format_capability_error(capability: &str, format: &str, reason: &str) -> String {
-    format!(
-        "[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='{}' format='{}': {}",
-        capability, format, reason
-    )
+    ModeratorError::CapabilityNotSupportedForFormat {
+        capability: capability.to_string(),
+        format: format.to_string(),
+        reason: reason.to_string(),
+    }
+    .to_string()
 }
 
 /// Validate a decision record for the `record_decision` action.
@@ -2455,10 +2533,12 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         if !human_bypass_ok {
             // Allow if caller is the assigned moderator, OR if no moderator is set (auto-mode)
             if !moderator.is_empty() && my_label != moderator {
-                return Err(format!(
-                    "[error_code: HUMAN_BYPASS_YIELDS_TO_MODERATOR] moderator='{}': Action '{}' requires the moderator role. You are {}. Route through the active moderator or wait for their stage.",
-                    moderator, action, my_label
-                ));
+                return Err(ModeratorError::HumanBypassYieldsToModerator {
+                    moderator: moderator.to_string(),
+                    action: action.to_string(),
+                    caller: my_label.clone(),
+                }
+                .to_string());
             }
         }
     }
@@ -8037,17 +8117,57 @@ mod tests {
     ///       string-prefixed error codes per developer msg 343 format-gating)
     ///   (b) `pr-4-frontend-types` has landed with a mirrored TS discriminated union
     #[test]
-    #[ignore = "gated on pr-4-frontend-types + enum promotion; unignore when both exist"]
     fn test_ts_types_match_rust_enum_variants() {
-        // Assertion shape:
-        //   1. read desktop/src/lib/collabTypes.ts
-        //   2. extract the discriminated-union tag values for ModeratorError
-        //   3. read collab.rs (or wherever the Rust enum lands)
-        //   4. extract the Rust enum variant names
-        //   5. assert the two sets are equal; fail with the diff if not
-        // Implementation note: std::fs::read_to_string against relative paths
-        // from CARGO_MANIFEST_DIR so the test runs from any cwd.
-        unimplemented!("drift guard — waiting on pr-4-frontend-types + enum promotion");
+        // Locate desktop/src/lib/collabTypes.ts from CARGO_MANIFEST_DIR so the
+        // test runs from any cwd. CARGO_MANIFEST_DIR points at desktop/src-tauri/
+        // so we go up one level.
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR not set during cargo test");
+        let ts_path = std::path::PathBuf::from(&manifest_dir)
+            .join("..")
+            .join("src")
+            .join("lib")
+            .join("collabTypes.ts");
+        let ts_src = std::fs::read_to_string(&ts_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", ts_path.display(), e));
+
+        // Extract the ModeratorErrorCode union body. The shape we mirror:
+        //   export type ModeratorErrorCode =
+        //     | "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT"
+        //     | "HUMAN_BYPASS_YIELDS_TO_MODERATOR";
+        // We grab everything between `export type ModeratorErrorCode =` and the
+        // terminating `;`, then pull each quoted literal.
+        let start_marker = "export type ModeratorErrorCode =";
+        let start = ts_src.find(start_marker).unwrap_or_else(|| {
+            panic!(
+                "ModeratorErrorCode union not found in {} — did the TS mirror move?",
+                ts_path.display()
+            )
+        });
+        let rest = &ts_src[start + start_marker.len()..];
+        let end = rest.find(';').expect("ModeratorErrorCode union has no terminating semicolon");
+        let union_body = &rest[..end];
+
+        let mut ts_tags: Vec<String> = union_body
+            .split('"')
+            .enumerate()
+            .filter_map(|(i, s)| if i % 2 == 1 { Some(s.to_string()) } else { None })
+            .collect();
+        ts_tags.sort();
+
+        let mut rust_tags: Vec<String> = ModeratorError::all_variant_tags()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        rust_tags.sort();
+
+        assert_eq!(
+            rust_tags, ts_tags,
+            "ModeratorError Rust↔TS drift detected.\n  Rust: {:?}\n  TS:   {:?}\n\
+             Update desktop/src/lib/collabTypes.ts (ModeratorErrorCode union) and \
+             `ModeratorError::all_variant_tags()` together.",
+            rust_tags, ts_tags
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -8103,6 +8223,63 @@ mod tests {
             ]
         });
         assert!(!has_active_manager_in_sessions(&sessions));
+    }
+
+    #[test]
+    fn moderator_error_display_preserves_wire_format_for_capability() {
+        // Lock byte-for-byte rendering — UX's parseModeratorError regex depends on
+        // the exact `key='value'` shape. Any drift here breaks the toast.
+        let err = ModeratorError::CapabilityNotSupportedForFormat {
+            capability: "reorder_pipeline".to_string(),
+            format: "delphi".to_string(),
+            reason: "only valid for Pipeline".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT] capability='reorder_pipeline' format='delphi': only valid for Pipeline"
+        );
+    }
+
+    #[test]
+    fn moderator_error_display_preserves_wire_format_for_bypass() {
+        let err = ModeratorError::HumanBypassYieldsToModerator {
+            moderator: "moderator:0".to_string(),
+            action: "pause".to_string(),
+            caller: "human:0".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "[error_code: HUMAN_BYPASS_YIELDS_TO_MODERATOR] moderator='moderator:0': Action 'pause' requires the moderator role. You are human:0. Route through the active moderator or wait for their stage."
+        );
+    }
+
+    #[test]
+    fn moderator_error_variant_tag_matches_wire_prefix() {
+        // Compiler-enforced sync between variant_tag() and Display: if a new
+        // variant is added, variant_tag() must update (exhaustive match) and
+        // Display must emit the matching `[error_code: TAG]` prefix. This test
+        // catches a stale variant_tag() that points at the wrong prefix.
+        let cases: &[ModeratorError] = &[
+            ModeratorError::CapabilityNotSupportedForFormat {
+                capability: "x".to_string(),
+                format: "y".to_string(),
+                reason: "z".to_string(),
+            },
+            ModeratorError::HumanBypassYieldsToModerator {
+                moderator: "m:0".to_string(),
+                action: "a".to_string(),
+                caller: "c:0".to_string(),
+            },
+        ];
+        for case in cases {
+            let rendered = case.to_string();
+            let expected_prefix = format!("[error_code: {}]", case.variant_tag());
+            assert!(
+                rendered.starts_with(&expected_prefix),
+                "variant_tag()/Display drift: variant_tag()={:?} but rendered={:?}",
+                case.variant_tag(), rendered
+            );
+        }
     }
 
     #[test]
