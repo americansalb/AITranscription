@@ -1,0 +1,326 @@
+import type { DiscussionState, BoardMessage } from "../lib/collabTypes";
+import { getTerminationStrategy, getAutomationLevel, getAudienceConfig } from "../lib/collabTypes";
+import { PipelineStepper } from "./PipelineStepper";
+import { OxfordView } from "./OxfordView";
+import { DelphiView } from "./DelphiView";
+import { RedTeamView } from "./RedTeamView";
+import { getRoleColor, getModeColor } from "../utils/roleColors";
+import "../styles/discussion.css";
+
+function getPhaseLabel(state: DiscussionState, closingRound: boolean): string {
+  if (closingRound) return "Aggregating...";
+  const { phase, mode } = state;
+  if (mode === "pipeline") {
+    if (phase === "pipeline_active") {
+      const stage = (state.pipeline_stage ?? 0) + 1;
+      const total = state.pipeline_order?.length ?? "?";
+      return `Stage ${stage}/${total}`;
+    }
+    if (phase === "pipeline_complete") return "Complete";
+  }
+  switch (phase) {
+    case "submitting": return "Submitting";
+    case "aggregating": return "Aggregating";
+    case "reviewing": return "Reviewing";
+    case "paused": return "Paused";
+    case "complete": return "Complete";
+    case "oxford_opening": return "Opening Statements";
+    case "oxford_rebuttal": return "Rebuttals";
+    case "oxford_closing": return "Closing Statements";
+    case "oxford_vote": return "Voting";
+    case "oxford_declaration": return "Declaration";
+    case "red_team_attacking": return "Attacking";
+    case "red_team_defending": return "Defending";
+    case "red_team_assessment": return "Assessment";
+    case "continuous_active": return "Active";
+    default: return phase || "";
+  }
+}
+
+function getTerminationLabel(state: DiscussionState): string | null {
+  const strategy = getTerminationStrategy(state.settings);
+  switch (strategy.type) {
+    case "fixed_rounds": return `${strategy.rounds} round${strategy.rounds !== 1 ? "s" : ""}`;
+    case "consensus": return `Consensus ≥${Math.round(strategy.threshold * 100)}%`;
+    case "moderator_call": return "Moderator decides";
+    case "time_bound": return `${strategy.minutes}min`;
+    case "unlimited": return "Unlimited";
+    default: return null;
+  }
+}
+
+interface DiscussionPanelProps {
+  discussionState: DiscussionState;
+  /** Board messages for format-specific views (Oxford needs them for speech cards) */
+  messages?: BoardMessage[];
+  /** Whether a round-close operation is in progress */
+  closingRound: boolean;
+  /** Continuous mode timeout value in seconds */
+  continuousTimeout: number;
+  /** Whether the auto-moderator ethereal agent is running */
+  autoModActive: boolean;
+  /** Callback: close the current round */
+  onCloseRound: () => void;
+  /** Callback: end the entire discussion */
+  onEndDiscussion: () => void;
+  /** Callback: change continuous timeout */
+  onSetContinuousTimeout: (seconds: number) => void;
+  /** Callback: pause/resume the discussion */
+  onTogglePause?: () => void;
+  /** Callback: update max_rounds mid-discussion */
+  onSetMaxRounds?: (rounds: number | null) => void;
+}
+
+/**
+ * DiscussionPanel — self-contained discussion status and control panel.
+ *
+ * Renders format-specific views based on the discussion mode:
+ * - Pipeline: PipelineStepper + turn info
+ * - Delphi: Submission tracker + round history
+ * - Oxford: Phase indicator (future: split view)
+ * - Red Team: Severity summary (future: attack/defense columns)
+ * - Continuous: Timeout controls + micro-round list
+ *
+ * This component is the first extraction step from the CollabTab monolith.
+ * Future phases will add richer format-specific sub-views.
+ */
+export function DiscussionPanel({
+  discussionState,
+  messages = [],
+  closingRound,
+  continuousTimeout,
+  autoModActive,
+  onCloseRound,
+  onEndDiscussion,
+  onSetContinuousTimeout,
+  onTogglePause,
+  onSetMaxRounds,
+}: DiscussionPanelProps) {
+  if (!discussionState.active) return null;
+
+  const modeColor = getModeColor(discussionState.mode);
+  const modeLabel = (discussionState.mode || "Discussion").charAt(0).toUpperCase() + (discussionState.mode || "").slice(1);
+  const phaseLabel = getPhaseLabel(discussionState, closingRound);
+  const terminationLabel = getTerminationLabel(discussionState);
+  // automationLevel reserved for Phase 2 moderator controls
+  void getAutomationLevel(discussionState.settings);
+  const audienceConfig = getAudienceConfig(discussionState.settings);
+
+  return (
+    <div
+      className="discussion-panel"
+      role="region"
+      aria-label="Active discussion"
+      aria-live="polite"
+    >
+      {/* Header: Mode badge + Phase + Round + Controls */}
+      <div className="discussion-panel-header">
+        <div className="discussion-panel-header-left">
+          {/* Mode badge */}
+          <span
+            className="discussion-panel-mode-badge"
+            style={{ background: `${modeColor}20`, color: modeColor, borderColor: `${modeColor}66` }}
+          >
+            {modeLabel}
+          </span>
+
+          {/* Pipeline mode indicator (Discussion / Action) */}
+          {discussionState.mode === "pipeline" && discussionState.pipeline_mode && (
+            <span
+              className="discussion-panel-pipeline-mode"
+              style={{
+                background: discussionState.pipeline_mode === "action" ? "rgba(249, 115, 22, 0.15)" : "rgba(99, 102, 241, 0.15)",
+                color: discussionState.pipeline_mode === "action" ? "#fb923c" : "#818cf8",
+                borderColor: discussionState.pipeline_mode === "action" ? "rgba(249, 115, 22, 0.4)" : "rgba(99, 102, 241, 0.4)",
+              }}
+            >
+              {discussionState.pipeline_mode === "action" ? "Action" : "Discussion"}
+            </span>
+          )}
+
+          {/* Phase badge */}
+          <span className={`discussion-panel-phase-badge${discussionState.paused_at ? " discussion-panel-paused" : ""}`}>
+            {discussionState.paused_at ? "Paused" : phaseLabel}
+          </span>
+
+          {/* Round counter or pipeline turn info */}
+          {discussionState.mode === "pipeline" && discussionState.pipeline_order && discussionState.phase === "pipeline_active" ? (
+            <span className="discussion-panel-turn-info">
+              Turn:{" "}
+              <span style={{ color: getRoleColor((discussionState.pipeline_order[discussionState.pipeline_stage ?? 0] ?? "").split(":")[0]) }}>
+                {discussionState.pipeline_order[discussionState.pipeline_stage ?? 0] ?? "—"}
+              </span>
+            </span>
+          ) : (
+            <span className="discussion-panel-round-info">
+              Round {(discussionState.current_round ?? 0) + 1}
+              {discussionState.settings?.max_rounds && discussionState.settings.max_rounds < 900 ? ` / ${discussionState.settings.max_rounds}` : ""}
+            </span>
+          )}
+
+          {/* Termination strategy indicator */}
+          {terminationLabel && (
+            <span className="discussion-panel-termination" title={`Termination: ${terminationLabel}`}>
+              {terminationLabel}
+            </span>
+          )}
+
+          {/* Moderator info */}
+          {discussionState.moderator && (
+            <span className="discussion-panel-moderator">
+              Mod:{" "}
+              <span style={{ color: getRoleColor(discussionState.moderator.split(":")[0]) }}>
+                {discussionState.moderator}
+              </span>
+              {autoModActive && (
+                <span className="discussion-panel-auto-mod" title="Automated Discussion Moderator is active">
+                  Auto-Mod
+                </span>
+              )}
+            </span>
+          )}
+
+          {/* Missing moderator warning */}
+          {!discussionState.moderator && (
+            <span className="discussion-panel-no-mod-warning">
+              Unmoderated
+            </span>
+          )}
+
+          {/* Continuous mode timeout selector */}
+          {discussionState.mode === "continuous" && (
+            <select
+              className="discussion-panel-timeout-select"
+              value={continuousTimeout}
+              onChange={(e) => onSetContinuousTimeout(Number(e.target.value))}
+              aria-label="Auto-close timeout"
+            >
+              <option value={30}>30s</option>
+              <option value={60}>60s</option>
+              <option value={120}>2m</option>
+              <option value={300}>5m</option>
+            </select>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div className="discussion-panel-actions">
+          {discussionState.phase === "submitting" && discussionState.mode !== "continuous" && (
+            <button
+              className="discussion-panel-btn"
+              onClick={onCloseRound}
+              disabled={closingRound}
+            >
+              {closingRound ? "Closing..." : "Close Round"}
+            </button>
+          )}
+          {onTogglePause && (
+            <button
+              className={`discussion-panel-btn${discussionState.paused_at ? " discussion-panel-btn-resume" : ""}`}
+              onClick={onTogglePause}
+              title={discussionState.paused_at ? "Resume discussion" : "Pause after current speaker"}
+            >
+              {discussionState.paused_at ? "Resume" : "Pause"}
+            </button>
+          )}
+          <button
+            className="discussion-panel-btn discussion-panel-btn-end"
+            onClick={onEndDiscussion}
+          >
+            End
+          </button>
+          {onSetMaxRounds && discussionState.settings?.max_rounds != null && (
+            <select
+              className="discussion-panel-rounds-select"
+              value={discussionState.settings.max_rounds >= 900 ? "unlimited" : String(discussionState.settings.max_rounds)}
+              onChange={(e) => {
+                const val = e.target.value;
+                onSetMaxRounds(val === "unlimited" ? null : parseInt(val));
+              }}
+              title="Change round limit"
+              aria-label="Round limit"
+            >
+              <option value="3">3 rounds</option>
+              <option value="5">5 rounds</option>
+              <option value="10">10 rounds</option>
+              <option value="20">20 rounds</option>
+              <option value="unlimited">Unlimited</option>
+            </select>
+          )}
+        </div>
+      </div>
+
+      {/* Topic */}
+      {discussionState.topic && (
+        <div className="discussion-panel-topic" title={discussionState.topic}>
+          {discussionState.topic}
+        </div>
+      )}
+
+      {/* Format-specific views */}
+      {discussionState.mode === "pipeline" && (
+        <PipelineStepper discussionState={discussionState} messages={messages} compact />
+      )}
+      {discussionState.mode === "oxford" && discussionState.oxford_teams && (
+        <OxfordView discussionState={discussionState} messages={messages} />
+      )}
+      {discussionState.mode === "delphi" && (
+        <DelphiView discussionState={discussionState} />
+      )}
+      {(discussionState.mode as string) === "red_team" && discussionState.attack_chains && (
+        <RedTeamView discussionState={discussionState} />
+      )}
+
+      {/* Delphi submission tracker */}
+      {discussionState.phase === "submitting" && discussionState.rounds.length > 0 && (() => {
+        const currentRound = discussionState.rounds[discussionState.rounds.length - 1];
+        const submittedBy = new Set((currentRound?.submissions || []).map(s => s.from));
+        const eligible = (discussionState.participants || []).filter(p => p !== discussionState.moderator);
+        if (eligible.length === 0) return null;
+        return (
+          <div className="discussion-panel-submissions" aria-label={`${submittedBy.size} of ${eligible.length} submitted`}>
+            {eligible.map(pid => {
+              const [role] = pid.split(":");
+              const didSubmit = submittedBy.has(pid);
+              return (
+                <span
+                  key={pid}
+                  className={`discussion-panel-participant${didSubmit ? " dp-submitted" : ""}`}
+                  title={`${pid}${didSubmit ? " — submitted" : " — waiting"}`}
+                >
+                  <span className="dp-check" aria-hidden="true">{didSubmit ? "✓" : "•"}</span>
+                  <span style={{ color: getRoleColor(role) }}>{pid}</span>
+                </span>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* Round history mini-bar */}
+      {discussionState.rounds.length > 1 && (
+        <div className="discussion-panel-rounds-bar" aria-label="Round history">
+          {discussionState.rounds.map((round, i) => (
+            <span
+              key={i}
+              className={`dp-round-pip${round.closed_at ? " dp-round-closed" : " dp-round-open"}`}
+              title={`Round ${round.number}: ${round.closed_at ? "closed" : "open"} — ${round.submissions?.length || 0} submissions`}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Audience bar */}
+      {audienceConfig.enabled && (
+        <div className="discussion-panel-audience-bar">
+          <span className="discussion-panel-audience-gate">
+            {audienceConfig.gate.charAt(0).toUpperCase() + audienceConfig.gate.slice(1)}
+          </span>
+          <span className="discussion-panel-audience-size">
+            {audienceConfig.size} persona{audienceConfig.size !== 1 ? "s" : ""}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
