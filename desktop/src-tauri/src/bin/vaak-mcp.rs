@@ -2293,13 +2293,11 @@ fn validate_moderator_reason(action: &str, reason: Option<&str>) -> Result<(), S
 
 /// True if the sessions snapshot contains an active (or idle) `manager:N` binding.
 ///
-/// Why: tester msg 181 flagged that `human:0`'s implicit moderator-capability bypass
-/// needs an off-switch — specifically, the bypass should only apply when no dedicated
-/// manager is present. This helper reads a sessions-shaped JSON (pure, testable)
-/// so callsites can gate human fallback on manager presence.
-///
-/// Semantics: returns true iff any binding has `role == "manager"` and `status` in
-/// {"active", "idle"}. Vacant or disconnected manager sessions don't count.
+/// Kept for completeness; NOT used by the moderator gate (which checks
+/// `has_active_session_for_label` with the `discussion.moderator` field instead).
+/// Architect msg 310 + vision § 11.4b separate moderator from manager: manager
+/// has independent capabilities; the moderator-fallback invariant cares about
+/// the moderator seat, not the manager seat.
 fn has_active_manager_in_sessions(sessions: &serde_json::Value) -> bool {
     sessions.get("bindings")
         .and_then(|b| b.as_array())
@@ -2308,6 +2306,41 @@ fn has_active_manager_in_sessions(sessions: &serde_json::Value) -> bool {
                 let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
                 let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 role == "manager" && (status == "active" || status == "idle")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// True if the sessions snapshot contains an active (or idle) binding for the
+/// given `role:instance` label (e.g. "moderator:0").
+///
+/// Why: architect msg 310 corrected my earlier item-1 code in PR 4 that checked
+/// `has_active_manager_in_sessions` for the moderator gate. Vision § 11.4 says
+/// the human-yields-to-claimed-moderator invariant cares about the *moderator* seat
+/// (whoever is stored in `discussion.moderator`), not the manager role. Manager has
+/// its own invariant (§ 11.4b) and does not gate moderator actions.
+///
+/// Semantics: parses "role:instance" label, returns true iff any binding matches
+/// that exact role+instance with status in {active, idle}. Malformed labels or
+/// bindings without an instance field return false.
+fn has_active_session_for_label(sessions: &serde_json::Value, label: &str) -> bool {
+    let (target_role, target_instance) = match label.split_once(':') {
+        Some((r, i)) => (r, i),
+        None => return false,
+    };
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter().any(|b| {
+                let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let instance_str = b.get("instance")
+                    .and_then(|i| i.as_u64())
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                role == target_role
+                    && instance_str == target_instance
+                    && (status == "active" || status == "idle")
             })
         })
         .unwrap_or(false)
@@ -2386,25 +2419,43 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         "toggle_pipeline_mode", "update_settings", "record_decision",
     ];
     if moderator_only_actions.contains(&action) {
-        // Human-yields-to-manager refinement (tester msg 181, tech-leader msg 292).
-        // Why: before this fix, human:0 carried an unconditional bypass on moderator
-        // gates. If a dedicated manager session was claimed, human bypass remained
-        // active — there was no off-switch. Now human bypass is CONDITIONAL on
-        // no-active-manager. When a real manager joins, they become authoritative
-        // and human must route through them (or answer-type replies, which remain
-        // permitted everywhere per vaak-mcp.rs:3533+).
-        let human_bypass_ok = state.role == "human"
-            && !has_active_manager_in_sessions(&read_sessions(&state.project_dir));
+        // Human-yields-to-claimed-MODERATOR refinement (architect msg 310, tech-leader
+        // msg 316 retraction, dev-challenger msg 313, platform-engineer msg 320).
+        //
+        // Why: vision § 11.4 "Moderator Fallback Invariant" says human:0's implicit
+        // bypass on moderator gates holds ONLY when no moderator is actually present.
+        // If `discussion.moderator` names an active (not-paused) session, that session
+        // is authoritative and human must route through them.
+        //
+        // Key distinction (architect msg 310): this predicate checks the MODERATOR seat,
+        // not the manager seat. Manager has separate capabilities per § 11.4b and does
+        // NOT gate moderator actions. My initial PR 4 code used `has_active_manager_in_sessions`
+        // which was wrong; this is the fix.
+        //
+        // Pause-state filter (dev-challenger msg 313 sharpening 2): a paused moderator
+        // yields authority back to human until resumed. Matches moderator-exit-auto-pause:
+        // paused moderator is effectively absent.
+        //
+        // TOCTOU: this check reads state at one instant; action executes at another.
+        // Cost of the race is a misleading error on one retry; cost of locking is
+        // serializing every moderator gate check. Accepting the race per msg 323 #3.
+        let discussion = read_discussion_state(&state.project_dir);
+        let moderator = discussion.get("moderator")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let is_paused = discussion.get("paused_at").and_then(|p| p.as_str()).is_some();
+        let moderator_is_active = !moderator.is_empty()
+            && !is_paused
+            && has_active_session_for_label(&read_sessions(&state.project_dir), moderator);
+
+        let human_bypass_ok = state.role == "human" && !moderator_is_active;
+
         if !human_bypass_ok {
-            let discussion = read_discussion_state(&state.project_dir);
-            let moderator = discussion.get("moderator")
-                .and_then(|m| m.as_str())
-                .unwrap_or("");
             // Allow if caller is the assigned moderator, OR if no moderator is set (auto-mode)
             if !moderator.is_empty() && my_label != moderator {
                 return Err(format!(
-                    "Action '{}' requires the moderator role. You are {}. Moderator is {}.",
-                    action, my_label, moderator
+                    "[error_code: HUMAN_BYPASS_YIELDS_TO_MODERATOR] moderator='{}': Action '{}' requires the moderator role. You are {}. Route through the active moderator or wait for their stage.",
+                    moderator, action, my_label
                 ));
             }
         }
@@ -8015,5 +8066,70 @@ mod tests {
         // break silently on string changes.
         let err = format_capability_error("reorder_pipeline", "continuous", "reason text");
         assert!(err.contains("[error_code: CAPABILITY_NOT_SUPPORTED_FOR_FORMAT]"));
+    }
+
+    // --- PR 4 fix tests: has_active_session_for_label (architect msg 310 correction) ---
+
+    #[test]
+    fn label_match_returns_true_for_exact_role_instance_match() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "moderator", "instance": 0, "status": "active" }
+            ]
+        });
+        assert!(has_active_session_for_label(&sessions, "moderator:0"));
+    }
+
+    #[test]
+    fn label_match_returns_false_for_wrong_instance() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "moderator", "instance": 0, "status": "active" }
+            ]
+        });
+        assert!(!has_active_session_for_label(&sessions, "moderator:1"));
+    }
+
+    #[test]
+    fn label_match_returns_false_for_wrong_role() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "manager", "instance": 0, "status": "active" }
+            ]
+        });
+        // Critical: manager presence does NOT satisfy a moderator label check
+        // (architect msg 310 correction).
+        assert!(!has_active_session_for_label(&sessions, "moderator:0"));
+    }
+
+    #[test]
+    fn label_match_returns_false_for_disconnected_session() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "moderator", "instance": 0, "status": "disconnected" }
+            ]
+        });
+        assert!(!has_active_session_for_label(&sessions, "moderator:0"));
+    }
+
+    #[test]
+    fn label_match_accepts_idle_status() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "moderator", "instance": 0, "status": "idle" }
+            ]
+        });
+        assert!(has_active_session_for_label(&sessions, "moderator:0"));
+    }
+
+    #[test]
+    fn label_match_returns_false_for_malformed_label() {
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "moderator", "instance": 0, "status": "active" }
+            ]
+        });
+        assert!(!has_active_session_for_label(&sessions, "moderator")); // no colon
+        assert!(!has_active_session_for_label(&sessions, "")); // empty
     }
 }
