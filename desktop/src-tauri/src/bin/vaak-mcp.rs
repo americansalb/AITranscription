@@ -17,17 +17,36 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Atomic file write: write to .tmp, fsync, rename. Prevents partial writes on macOS.
+// Import typed DiscussionState from the library crate — enables typed reads/writes
+// instead of raw serde_json::Value manipulation. Migration is incremental:
+// new code uses typed functions, old code still works via JSON.
+use vaak_desktop::collab::{self, DiscussionState};
+
+/// Atomic file write. On Windows, writes directly (rename over open files fails).
+/// On Unix, uses tmp+rename for atomicity. All callers use file locking for concurrency.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    let tmp_path = path.with_extension("tmp");
-    std::fs::write(&tmp_path, content)
-        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-    if let Ok(f) = std::fs::File::open(&tmp_path) {
-        let _ = f.sync_all();
+    #[cfg(windows)]
+    {
+        std::fs::write(path, content)
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+        if let Ok(f) = std::fs::File::open(path) {
+            let _ = f.sync_all();
+        }
+        return Ok(());
     }
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
-    Ok(())
+
+    #[cfg(not(windows))]
+    {
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, content)
+            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+        if let Ok(f) = std::fs::File::open(&tmp_path) {
+            let _ = f.sync_all();
+        }
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+        Ok(())
+    }
 }
 
 /// Backend API base URL. Override via VAAK_BACKEND_URL env var; defaults to localhost:19836.
@@ -108,6 +127,203 @@ fn project_json_path(project_dir: &str) -> PathBuf {
 
 fn sessions_json_path(project_dir: &str) -> PathBuf {
     vaak_dir(project_dir).join("sessions.json")
+}
+
+fn turn_state_path(project_dir: &str) -> PathBuf {
+    vaak_dir(project_dir).join("turn_state.json")
+}
+
+/// Read turn_state.json for consecutive mode turn tracking
+fn read_turn_state(project_dir: &str) -> serde_json::Value {
+    let path = turn_state_path(project_dir);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({"completed": true}))
+}
+
+/// Write turn_state.json atomically
+fn write_turn_state(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let path = turn_state_path(project_dir);
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize turn state: {}", e))?;
+    atomic_write(&path, content.as_bytes())
+}
+
+/// Build a relevance-scored pipeline order. Delegates to the library crate's
+/// collab::build_pipeline_order — single source of truth, no more duplication.
+fn build_pipeline_order(project_dir: &str, topic: &str, participants: &[String]) -> Vec<String> {
+    collab::build_pipeline_order(project_dir, topic, participants)
+}
+
+/// Shuffle a pipeline order using Fisher-Yates with cryptographic entropy.
+fn shuffle_pipeline_order(order: &mut Vec<String>) {
+    if order.len() <= 1 { return; }
+    let mut rng_state = uuid::Uuid::new_v4().as_u128();
+    for i in (1..order.len()).rev() {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        let j = (rng_state as usize) % (i + 1);
+        order.swap(i, j);
+    }
+}
+
+/// Get all active non-human, non-manager agents as "role:instance" strings.
+/// Used by consecutive mode where there's no explicit participant list.
+fn get_all_active_agents(project_dir: &str) -> Vec<String> {
+    let sessions = read_sessions(project_dir);
+    let bindings = sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .cloned()
+        .unwrap_or_default();
+    bindings.iter()
+        .filter(|b| b.get("status").and_then(|s| s.as_str()) == Some("active"))
+        .filter(|b| {
+            let r = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            r != "human" && r != "manager"
+        })
+        .filter_map(|b| {
+            let role = b.get("role")?.as_str()?.to_string();
+            let instance = b.get("instance")?.as_u64().unwrap_or(0);
+            Some(format!("{}:{}", role, instance))
+        })
+        .collect()
+}
+
+/// Initialize or reset turn state for a new broadcast message in consecutive mode.
+/// Uses relevance scoring to determine turn order based on message content.
+fn reset_turn_state(project_dir: &str, trigger_msg_id: u64, trigger_text: &str) -> Result<(), String> {
+    // For consecutive mode, include ALL active agents (no participant filter)
+    let all_active = get_all_active_agents(project_dir);
+    let relevance_order = build_pipeline_order(project_dir, trigger_text, &all_active);
+    let first = relevance_order.first().cloned().unwrap_or_default();
+    let state = serde_json::json!({
+        "trigger_msg_id": trigger_msg_id,
+        "relevance_order": relevance_order,
+        "current_index": 0,
+        "responded": [],
+        "passed": [],
+        "completed": false,
+        "started_at": utc_now_iso()
+    });
+    let result = write_turn_state(project_dir, &state);
+    if result.is_ok() && !first.is_empty() {
+        post_turn_system_message(project_dir, &format!("Turn started: {}", first));
+        // Send directed notification to wake the first agent from project_wait
+        // Use full role:instance so only the specific instance is notified
+        let wake_msg = serde_json::json!({
+            "id": next_message_id(project_dir),
+            "from": "system:0",
+            "to": first,
+            "type": "system",
+            "subject": "Your turn",
+            "body": format!("It is now your turn to respond. Broadcast your response to all."),
+            "timestamp": utc_now_iso(),
+            "metadata": {"turn_notification": true}
+        });
+        let _ = append_to_board(project_dir, &wake_msg);
+    }
+    result
+}
+
+/// Advance the turn to the next agent. Called after an agent responds or passes.
+fn advance_turn(project_dir: &str, agent_label: &str, passed: bool) -> Result<(), String> {
+    with_file_lock(project_dir, || {
+        let mut state = read_turn_state(project_dir);
+        if state.get("completed").and_then(|c| c.as_bool()).unwrap_or(true) {
+            return Ok(());
+        }
+
+        // Record this agent's action
+        let list_key = if passed { "passed" } else { "responded" };
+        if let Some(arr) = state.get_mut(list_key).and_then(|a| a.as_array_mut()) {
+            if !arr.iter().any(|v| v.as_str() == Some(agent_label)) {
+                arr.push(serde_json::json!(agent_label));
+            }
+        }
+
+        // Track consecutive timeouts per agent for auto-pruning
+        let timeout_counts = state.get("timeout_counts").cloned().unwrap_or(serde_json::json!({}));
+        let mut tc = timeout_counts.as_object().cloned().unwrap_or_default();
+        if passed {
+            let count = tc.get(agent_label).and_then(|v| v.as_u64()).unwrap_or(0);
+            tc.insert(agent_label.to_string(), serde_json::json!(count + 1));
+        } else {
+            tc.remove(agent_label);
+        }
+        state["timeout_counts"] = serde_json::json!(tc);
+
+        // Advance current_index past agents that have already responded or passed
+        let relevance_order = state.get("relevance_order")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let responded: Vec<String> = state.get("responded")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let passed_list: Vec<String> = state.get("passed")
+            .and_then(|p| p.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        let mut idx = state.get("current_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        let mut completed = false;
+        // Move to next unhandled agent
+        loop {
+            idx += 1;
+            if idx >= relevance_order.len() {
+                state["completed"] = serde_json::json!(true);
+                completed = true;
+                break;
+            }
+            let next = relevance_order[idx].as_str().unwrap_or("");
+            // Skip agents with 2+ consecutive timeouts (auto-pruned)
+            let next_timeouts = tc.get(next).and_then(|v| v.as_u64()).unwrap_or(0);
+            if next_timeouts >= 2 {
+                // Auto-mark as passed
+                if let Some(arr) = state.get_mut("passed").and_then(|a| a.as_array_mut()) {
+                    if !arr.iter().any(|v| v.as_str() == Some(next)) {
+                        arr.push(serde_json::json!(next));
+                    }
+                }
+                continue;
+            }
+            if !responded.contains(&next.to_string()) && !passed_list.contains(&next.to_string()) {
+                break;
+            }
+        }
+        state["current_index"] = serde_json::json!(idx);
+        // Update started_at for timeout tracking of the new turn holder
+        state["turn_started_at"] = serde_json::json!(utc_now_iso());
+
+        let result = write_turn_state(project_dir, &state);
+
+        // Post system message about turn change and notify next agent
+        if result.is_ok() {
+            if completed {
+                post_turn_system_message(project_dir, "Round complete");
+            } else if let Some(next_agent) = relevance_order.get(idx).and_then(|v| v.as_str()) {
+                let action = if passed { "passed" } else { "responded" };
+                post_turn_system_message(project_dir, &format!("{} {} — turn: {}", agent_label, action, next_agent));
+                // Send directed notification to wake the next agent from project_wait
+                // Use full role:instance so only the specific instance is notified
+                let wake_msg = serde_json::json!({
+                    "id": next_message_id(project_dir),
+                    "from": "system:0",
+                    "to": next_agent,
+                    "type": "system",
+                    "subject": "Your turn",
+                    "body": format!("It is now your turn to respond. Broadcast your response to all."),
+                    "timestamp": utc_now_iso(),
+                    "metadata": {"turn_notification": true}
+                });
+                let _ = append_to_board(project_dir, &wake_msg);
+            }
+        }
+        result
+    })
 }
 
 /// Get the active section slug. Checks per-session binding in sessions.json first,
@@ -278,24 +494,37 @@ fn handle_create_section(project_dir: &str, name: &str) -> Result<serde_json::Va
         config["sections"] = serde_json::json!([new_entry]);
     }
 
+    // Auto-switch to the new section so old messages don't persist
+    config["active_section"] = serde_json::json!(slug);
+
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
     atomic_write(&config_path, content.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
 
-    eprintln!("[sections] Created section '{}' (slug: {})", name, slug);
+    eprintln!("[sections] Created and switched to section '{}' (slug: {})", name, slug);
 
     Ok(serde_json::json!({
         "status": "created",
         "slug": slug,
-        "name": name
+        "name": name,
+        "switched": true
     }))
 }
 
 /// Switch active section for the current session.
 fn handle_switch_section(project_dir: &str, slug: &str) -> Result<serde_json::Value, String> {
-    // "default" uses legacy root .vaak/ paths — no sections/default/ dir needed
+    // Validate slug to prevent path traversal (e.g., "../../.." escaping .vaak/)
     if slug != "default" {
+        if slug.is_empty() {
+            return Err("Section slug cannot be empty".to_string());
+        }
+        if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err("Section slug must be lowercase alphanumeric with hyphens only".to_string());
+        }
+        if slug.starts_with('-') || slug.ends_with('-') {
+            return Err("Section slug cannot start or end with a hyphen".to_string());
+        }
         let section_dir = vaak_dir(project_dir).join("sections").join(slug);
         if !section_dir.exists() {
             return Err(format!("Section '{}' does not exist", slug));
@@ -724,12 +953,30 @@ fn read_board_filtered(project_dir: &str) -> Vec<serde_json::Value> {
 /// Get the next message ID (count of existing messages + 1)
 fn next_message_id(project_dir: &str) -> u64 {
     let path = board_jsonl_path(project_dir);
-    let count = std::fs::read_to_string(&path)
+    let max_id: u64 = std::fs::read_to_string(&path)
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .count();
-    (count + 1) as u64
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+        .max()
+        .unwrap_or(0);
+    max_id + 1
+}
+
+/// Write a system message to board.jsonl for turn changes
+fn post_turn_system_message(project_dir: &str, body: &str) {
+    let msg = serde_json::json!({
+        "id": next_message_id(project_dir),
+        "from": "system:0",
+        "to": "all",
+        "type": "system",
+        "subject": "",
+        "body": body,
+        "timestamp": utc_now_iso(),
+        "metadata": {}
+    });
+    let _ = append_to_board(project_dir, &msg);
 }
 
 /// Append a message to board.jsonl (caller must hold file lock)
@@ -1098,6 +1345,29 @@ fn discussion_json_path(project_dir: &str) -> PathBuf {
     }
 }
 
+/// Read discussion state as a TYPED struct.
+/// Use this for new code paths. Returns Default (inactive) if file is missing or unparseable.
+fn read_discussion_typed(project_dir: &str) -> DiscussionState {
+    std::fs::read_to_string(discussion_json_path(project_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Write discussion state from a TYPED struct.
+/// Use this for new code paths. Acquires file lock.
+fn write_discussion_typed(project_dir: &str, state: &DiscussionState) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize discussion state: {}", e))?;
+    let pd = project_dir.to_string();
+    with_discussion_lock(project_dir, move || {
+        let path = discussion_json_path(&pd);
+        atomic_write(&path, content.as_bytes())
+    })
+}
+
+/// LEGACY: Read discussion state as raw JSON Value.
+/// Prefer read_discussion_typed for new code paths.
 fn read_discussion_state(project_dir: &str) -> serde_json::Value {
     std::fs::read_to_string(discussion_json_path(project_dir))
         .ok()
@@ -1115,6 +1385,7 @@ fn read_discussion_state(project_dir: &str) -> serde_json::Value {
             "expire_at": null,
             "previous_phase": null,
             "rounds": [],
+            "audience_state": "listening",
             "settings": {
                 "max_rounds": 10,
                 "timeout_minutes": 15,
@@ -1888,10 +2159,67 @@ fn handle_audience_history(topic: &str, pool: Option<&str>) -> Result<serde_json
     }))
 }
 
-fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+/// Validate that a moderator-issued action carries a sufficient audit reason.
+///
+/// Why: dev-challenger msg 172 flagged that unaudited privileged actions (end_discussion,
+/// pipeline_next) let a moderator silently terminate or skip ahead without a trail.
+/// Mandating a non-empty reason ≥3 chars after trim forces accountability at the API layer,
+/// not at policy. Empty strings AND whitespace-only strings are both rejected per tester
+/// msg 181 (gap test #3: `"    "` and `"n/a"` should not pass).
+///
+/// Returns Ok for non-high-risk actions (they bypass the check) and for valid reasons.
+/// Returns Err(message) if a high-risk action is called with a reason too short after trim.
+fn validate_moderator_reason(action: &str, reason: Option<&str>) -> Result<(), String> {
+    const HIGH_RISK_ACTIONS: &[&str] = &["end_discussion", "pipeline_next"];
+    if !HIGH_RISK_ACTIONS.contains(&action) {
+        return Ok(());
+    }
+    let trimmed = reason.unwrap_or("").trim();
+    if trimmed.len() < 3 {
+        return Err(format!(
+            "Action '{}' requires a non-empty reason (min 3 chars after trim). Moderator justification is recorded in the audit trail.",
+            action
+        ));
+    }
+    Ok(())
+}
+
+fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>, reason: Option<&str>) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
     let my_label = format!("{}:{}", state.role, state.instance);
+
+    // ── Moderator role-gating ──
+    // These actions require the moderator role (or human override).
+    // Guards are checked BEFORE dispatching to action handlers.
+    let moderator_only_actions = [
+        "close_round", "open_next_round", "pause", "resume",
+        "pipeline_next", "end_discussion", "gate_audience",
+        "inject_summary", "skip_participant", "reorder_pipeline",
+        "toggle_pipeline_mode", "update_settings",
+    ];
+    if moderator_only_actions.contains(&action) {
+        // Human always bypasses role gates
+        if state.role != "human" {
+            let discussion = read_discussion_state(&state.project_dir);
+            let moderator = discussion.get("moderator")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            // Allow if caller is the assigned moderator, OR if no moderator is set (auto-mode)
+            if !moderator.is_empty() && my_label != moderator {
+                return Err(format!(
+                    "Action '{}' requires the moderator role. You are {}. Moderator is {}.",
+                    action, my_label, moderator
+                ));
+            }
+        }
+    }
+
+    // ── High-risk action audit gate ──
+    // Human always bypasses.
+    if state.role != "human" {
+        validate_moderator_reason(action, reason)?;
+    }
 
     match action {
         "start_discussion" => {
@@ -1899,8 +2227,8 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             let topic = topic.ok_or("topic is required for start_discussion")?;
 
             // Validate mode — only discussion formats, not communication modes
-            if !["delphi", "oxford", "red_team", "continuous"].contains(&mode) {
-                return Err(format!("Invalid discussion format '{}'. Must be: delphi, oxford, red_team, continuous. (Communication modes 'open'/'directed' are set separately via set_discussion_mode.)", mode));
+            if !["delphi", "oxford", "red_team", "continuous", "pipeline"].contains(&mode) {
+                return Err(format!("Invalid discussion format '{}'. Must be: delphi, oxford, red_team, continuous, pipeline. (Communication modes 'open'/'directed' are set separately via set_discussion_mode.)", mode));
             }
 
             // Check no active discussion
@@ -1932,13 +2260,50 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                     .unwrap_or_default()
             };
 
+            // Determine the actual moderator: prefer the "moderator" role if it
+            // exists in the roster (even if not yet active — discussion-bound roles
+            // auto-start when the discussion begins). Fall back to the caller.
+            let discussion_moderator = {
+                // First check if "moderator" role exists in the project roster
+                let roster_has_moderator = read_project_config(&state.project_dir)
+                    .ok()
+                    .and_then(|cfg| cfg.get("roles").cloned())
+                    .and_then(|roles| roles.get("moderator").cloned())
+                    .is_some();
+
+                if roster_has_moderator {
+                    // Check for an active session first
+                    let sessions = read_sessions(&state.project_dir);
+                    let active_moderator = sessions.get("bindings")
+                        .and_then(|b| b.as_array())
+                        .and_then(|bindings| {
+                            bindings.iter().find(|b| {
+                                let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                                role == "moderator" && (status == "active" || status == "idle")
+                            })
+                        })
+                        .and_then(|b| {
+                            let instance = b.get("instance").and_then(|i| i.as_u64())?;
+                            Some(format!("moderator:{}", instance))
+                        });
+                    // If no active session, use moderator:0 (will auto-start as discussion-bound)
+                    active_moderator.unwrap_or_else(|| "moderator:0".to_string())
+                } else {
+                    my_label.clone()
+                }
+            };
+
             let now = utc_now_iso();
 
             // Continuous mode starts in "reviewing" phase with no rounds —
             // rounds are auto-created when developers post status messages.
             // "reviewing" = ready for next auto-trigger (consistent with post-close phase).
             // Other modes (delphi/oxford/red_team) start with round 1 open.
-            let (initial_round, initial_phase, initial_rounds) = if mode == "continuous" {
+            let (initial_round, initial_phase, initial_rounds) = if mode == "pipeline" {
+                // Pipeline starts at stage 0 (first participant), phase "pipeline_active"
+                (0u64, "pipeline_active", serde_json::json!([]))
+            } else if mode == "continuous" {
                 (0u64, "reviewing", serde_json::json!([]))
             } else if mode == "delphi" {
                 // Delphi starts in "preparing" phase — broadcasts are immediately blocked
@@ -1955,12 +2320,20 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 }]))
             };
 
-            let new_state = serde_json::json!({
+            // For pipeline mode, compute the stage order using build_pipeline_order
+            // (same function as collab.rs — single source of truth for ordering)
+            let pipeline_order: Option<Vec<String>> = if mode == "pipeline" {
+                Some(build_pipeline_order(&state.project_dir, topic, &participant_list))
+            } else {
+                None
+            };
+
+            let mut new_state = serde_json::json!({
                 "active": true,
                 "mode": mode,
                 "topic": topic,
                 "started_at": now,
-                "moderator": my_label,
+                "moderator": discussion_moderator,
                 "participants": participant_list,
                 "teams": null,
                 "current_round": initial_round,
@@ -1969,13 +2342,25 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "expire_at": null,
                 "previous_phase": null,
                 "rounds": initial_rounds,
+                "audience_state": "listening",
+                "audience_enabled": false,
                 "settings": {
-                    "max_rounds": if mode == "continuous" { 999 } else { 10 },
+                    "max_rounds": if mode == "continuous" { 999 } else if mode == "pipeline" { 5 } else { 10 },
                     "timeout_minutes": 15,
                     "expire_paused_after_minutes": 60,
-                    "auto_close_timeout_seconds": if mode == "continuous" { 60 } else { 0 }
+                    "auto_close_timeout_seconds": if mode == "continuous" { 60 } else if mode == "pipeline" { 30 } else { 0 },
+                    "termination": serde_json::json!(null),
+                    "automation": "auto"
                 }
             });
+
+            // Add pipeline-specific fields
+            if let Some(ref order) = pipeline_order {
+                new_state["pipeline_order"] = serde_json::json!(order);
+                new_state["pipeline_stage"] = serde_json::json!(0);
+                new_state["pipeline_outputs"] = serde_json::json!([]);
+                new_state["pipeline_mode"] = serde_json::json!("discussion");
+            }
 
             with_file_lock(&state.project_dir, || {
                 write_discussion_state(&state.project_dir, &new_state)?;
@@ -1987,15 +2372,23 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
 
                 // Post announcement to board
                 let msg_id = next_message_id(&state.project_dir);
-                let announcement_body = if mode == "continuous" {
+                let announcement_body = if mode == "pipeline" {
+                    let order = new_state.get("pipeline_order").and_then(|o| o.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" → "))
+                        .unwrap_or_default();
+                    let first = new_state.get("pipeline_order").and_then(|o| o.as_array())
+                        .and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("?");
+                    format!("Pipeline started.\n\n**Topic:** {}\n**Pipeline order:** {}\n**Current stage:** {} (1/{})\n\nEach agent processes in order, seeing all previous outputs. Respond with a broadcast when your stage is complete.",
+                        topic, order, first, participant_list.len())
+                } else if mode == "continuous" {
                     format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / neutral / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
-                        topic, my_label, participant_list.join(", "))
+                        topic, discussion_moderator, participant_list.join(", "))
                 } else if mode == "delphi" {
                     format!("A Delphi discussion is being prepared.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Phase:** Preparing (broadcasts locked)\n\nAll broadcasts to \"all\" are now blocked to protect blind submission integrity. The moderator will coordinate privately via directed messages, then open Round 1 when ready. Do NOT share reference material publicly.",
-                        topic, my_label, participant_list.join(", "))
+                        topic, discussion_moderator, participant_list.join(", "))
                 } else {
                     format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
-                        mode, topic, my_label, participant_list.join(", "))
+                        mode, topic, discussion_moderator, participant_list.join(", "))
                 };
                 let announcement = serde_json::json!({
                     "id": msg_id,
@@ -2023,7 +2416,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "phase": initial_phase,
                 "round": initial_round,
                 "participants": participant_list,
-                "moderator": my_label
+                "moderator": discussion_moderator
             }))
         }
 
@@ -2160,15 +2553,121 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             }))
         }
 
+        "pipeline_next" => {
+            // Moderator selects the next pipeline stage agent (typed struct access)
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion".to_string());
+            }
+            if typed_disc.mode.as_deref() != Some("pipeline") {
+                return Err("pipeline_next is only valid for Pipeline discussions".to_string());
+            }
+            let target = topic.ok_or("Specify the next agent as the topic parameter (e.g., 'developer:1')")?;
+            let pipeline_order_vec = typed_disc.pipeline_order.clone().unwrap_or_default();
+            let pipeline_order: Vec<serde_json::Value> = pipeline_order_vec.iter().map(|s| serde_json::json!(s)).collect();
+            let current_stage = typed_disc.pipeline_stage.unwrap_or(0) as usize;
+            // Read raw JSON for mutation (typed write not yet used for complex updates)
+            let disc = read_discussion_state(&state.project_dir);
+
+            // Audit trail for the jump — required non-empty reason enforced above for pipeline_next.
+            // Why: dev-challenger msg 172 tier table flagged jump-to-stage as skipping participants;
+            // the reason must be traceable on the wake message so the skipped roles and UI can
+            // reconstruct why the moderator intervened.
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            let audit_timestamp = utc_now_iso();
+
+            with_file_lock(&state.project_dir, || {
+                let mut updated = disc.clone();
+                // Update pipeline order: insert the target as the next stage
+                let mut new_order: Vec<serde_json::Value> = pipeline_order[..current_stage].to_vec();
+                // Keep completed stages, add new target as next
+                new_order.push(serde_json::json!(target));
+                // Add remaining unprocessed agents (excluding the target if already present)
+                for item in &pipeline_order[current_stage..] {
+                    if item.as_str() != Some(target) {
+                        new_order.push(item.clone());
+                    }
+                }
+                updated["pipeline_order"] = serde_json::json!(new_order);
+                updated["pipeline_stage"] = serde_json::json!(current_stage);
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                // Post system message and wake the target agent
+                // Use full role:instance so only the specific instance is notified
+                post_turn_system_message(&state.project_dir, &format!("Moderator selected next stage: {} — reason: {}", target, audit_reason));
+                let wake_msg = serde_json::json!({
+                    "id": next_message_id(&state.project_dir),
+                    "from": "system:0",
+                    "to": target,
+                    "type": "system",
+                    "subject": "Your pipeline stage",
+                    "body": format!("The moderator has selected you as the next pipeline stage. Review previous outputs and broadcast your response.\n\nModerator reason: {}", audit_reason),
+                    "timestamp": audit_timestamp,
+                    "metadata": {
+                        "pipeline_notification": true,
+                        "moderator_action": {
+                            "action": "pipeline_next",
+                            "reason": audit_reason,
+                            "timestamp": audit_timestamp,
+                            "actor": my_label,
+                            "affected_role": target
+                        }
+                    }
+                });
+                append_to_board(&state.project_dir, &wake_msg)?;
+                Ok(())
+            })?;
+
+            notify_desktop();
+            Ok(serde_json::json!({
+                "status": "next_stage_set",
+                "next_agent": target,
+                "stage": current_stage + 1
+            }))
+        }
+
+        "toggle_pipeline_mode" => {
+            // Toggle pipeline between "discussion" (opinions) and "action" (write code)
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion".to_string());
+            }
+            if typed_disc.mode.as_deref() != Some("pipeline") {
+                return Err("toggle_pipeline_mode is only valid for Pipeline discussions".to_string());
+            }
+            let current_mode = typed_disc.pipeline_mode.as_deref().unwrap_or("discussion");
+            let new_mode = if current_mode == "discussion" { "action" } else { "discussion" };
+            let disc = read_discussion_state(&state.project_dir);
+
+            with_file_lock(&state.project_dir, || {
+                let mut updated = disc.clone();
+                updated["pipeline_mode"] = serde_json::json!(new_mode);
+                write_discussion_state(&state.project_dir, &updated)?;
+                post_turn_system_message(&state.project_dir,
+                    &format!("Pipeline mode switched to: {} (was: {})", new_mode, current_mode));
+                Ok(())
+            })?;
+
+            notify_desktop();
+            Ok(serde_json::json!({
+                "status": "pipeline_mode_toggled",
+                "previous_mode": current_mode,
+                "new_mode": new_mode
+            }))
+        }
+
         "end_discussion" => {
-            let discussion = read_discussion_state(&state.project_dir);
-            if !discussion.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+            // Use typed struct for reliable field access
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
                 return Err("No active discussion to end".to_string());
             }
 
             let now = utc_now_iso();
-            let round_num = discussion.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
-            let topic = discussion.get("topic").and_then(|t| t.as_str()).unwrap_or("");
+            let round_num = typed_disc.current_round as u64;
+            let topic = typed_disc.topic.as_str();
+            // Read raw JSON for mutation (write path still uses JSON)
+            let discussion = read_discussion_state(&state.project_dir);
 
             with_file_lock(&state.project_dir, || {
                 let mut updated = discussion.clone();
@@ -2176,7 +2675,12 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 updated["phase"] = serde_json::json!("complete");
                 write_discussion_state(&state.project_dir, &updated)?;
 
-                // Post end announcement
+                // Post end announcement with moderator-action audit metadata.
+                // Why: dev-challenger msg 172 + tech-leader msg 178 require every privileged
+                // moderator action to carry {action, reason, timestamp} so downstream tooling
+                // (UI, exports, postmortems) can surface who ended what and why. The 'reason'
+                // field is validated non-empty above for high-risk actions — safe to unwrap.
+                let audit_reason = reason.unwrap_or("").trim().to_string();
                 let msg_id = next_message_id(&state.project_dir);
                 let announcement = serde_json::json!({
                     "id": msg_id,
@@ -2185,10 +2689,16 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                     "type": "moderation",
                     "timestamp": now,
                     "subject": format!("Discussion ended: {}", topic),
-                    "body": format!("The discussion on \"{}\" has concluded after {} round(s).", topic, round_num),
+                    "body": format!("The discussion on \"{}\" has concluded after {} round(s). Reason: {}", topic, round_num, audit_reason),
                     "metadata": {
                         "discussion_action": "end",
-                        "final_round": round_num
+                        "final_round": round_num,
+                        "moderator_action": {
+                            "action": "end_discussion",
+                            "reason": audit_reason,
+                            "timestamp": now,
+                            "actor": my_label
+                        }
                     }
                 });
                 append_to_board(&state.project_dir, &announcement)?;
@@ -2201,6 +2711,93 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "topic": topic,
                 "final_round": round_num
             }))
+        }
+
+        "pause" => {
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion to pause".to_string());
+            }
+            if typed_disc.paused_at.is_some() {
+                return Err("Discussion is already paused".to_string());
+            }
+            let now = utc_now_iso();
+            let discussion = read_discussion_state(&state.project_dir);
+            with_file_lock(&state.project_dir, || {
+                let mut updated = discussion.clone();
+                updated["paused_at"] = serde_json::json!(now);
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                let msg_id = next_message_id(&state.project_dir);
+                let announcement = serde_json::json!({
+                    "id": msg_id,
+                    "from": my_label,
+                    "to": "all",
+                    "type": "system",
+                    "timestamp": now,
+                    "subject": "Discussion paused",
+                    "body": "The discussion has been paused. It will resume when the moderator or human resumes it.",
+                    "metadata": {"discussion_action": "pause"}
+                });
+                append_to_board(&state.project_dir, &announcement)?;
+                Ok(())
+            })?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "paused", "paused_at": now}))
+        }
+
+        "resume" => {
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion to resume".to_string());
+            }
+            if typed_disc.paused_at.is_none() {
+                return Err("Discussion is not paused".to_string());
+            }
+            let now = utc_now_iso();
+            let discussion = read_discussion_state(&state.project_dir);
+            with_file_lock(&state.project_dir, || {
+                let mut updated = discussion.clone();
+                updated["paused_at"] = serde_json::json!(null);
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                let msg_id = next_message_id(&state.project_dir);
+                let announcement = serde_json::json!({
+                    "id": msg_id,
+                    "from": my_label,
+                    "to": "all",
+                    "type": "system",
+                    "timestamp": now,
+                    "subject": "Discussion resumed",
+                    "body": "The discussion has been resumed.",
+                    "metadata": {"discussion_action": "resume"}
+                });
+                append_to_board(&state.project_dir, &announcement)?;
+                Ok(())
+            })?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "resumed"}))
+        }
+
+        "update_settings" => {
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion to update settings for".to_string());
+            }
+            let discussion = read_discussion_state(&state.project_dir);
+            with_file_lock(&state.project_dir, || {
+                let mut updated = discussion.clone();
+                // Accept max_rounds from the topic parameter (repurposed for settings value)
+                if let Some(ref value) = topic {
+                    if let Ok(max_r) = value.parse::<u64>() {
+                        updated["settings"]["max_rounds"] = serde_json::json!(max_r);
+                    }
+                }
+                write_discussion_state(&state.project_dir, &updated)?;
+                Ok(())
+            })?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "settings_updated"}))
         }
 
         "set_teams" => {
@@ -2276,7 +2873,149 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             Ok(discussion)
         }
 
-        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams", action))
+        "create_review_round" => {
+            // Moderator-initiated review round in continuous mode
+            let round_topic = topic.unwrap_or("Review round");
+
+            let disc = read_discussion_state(&state.project_dir);
+            if !disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("No active discussion.".to_string());
+            }
+            let disc_mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+            if disc_mode != "continuous" {
+                return Err(format!("create_review_round only works in continuous mode (current: {})", disc_mode));
+            }
+
+            // Only the moderator can create review rounds
+            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("");
+            if my_label != moderator {
+                return Err(format!("Only the moderator ({}) can create review rounds", moderator));
+            }
+
+            // Check no round is already open
+            let current_phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            if current_phase == "submitting" {
+                return Err("A round is already open. Close it first.".to_string());
+            }
+
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            let current_round = updated.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
+            let next_round = current_round + 1;
+
+            updated["current_round"] = serde_json::json!(next_round);
+            updated["phase"] = serde_json::json!("submitting");
+
+            if let Some(rounds) = updated.get_mut("rounds").and_then(|r| r.as_array_mut()) {
+                rounds.push(serde_json::json!({
+                    "number": next_round,
+                    "opened_at": now,
+                    "closed_at": null,
+                    "submissions": [],
+                    "aggregate_message_id": null,
+                    "auto_triggered": false,
+                    "topic": round_topic,
+                    "trigger_from": my_label
+                }));
+            }
+
+            let timeout_secs = updated.get("settings")
+                .and_then(|s| s.get("auto_close_timeout_seconds"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60);
+
+            with_file_lock(&state.project_dir, || {
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                let msg_id = next_message_id(&state.project_dir);
+                let announcement = serde_json::json!({
+                    "id": msg_id,
+                    "from": "system",
+                    "to": "all",
+                    "type": "moderation",
+                    "timestamp": now,
+                    "subject": format!("Review #{}: {}", next_round, round_topic),
+                    "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} opened review round #{}: {}\n\nRespond with: agree / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.",
+                        timeout_secs, my_label, next_round, round_topic, timeout_secs),
+                    "metadata": {
+                        "discussion_action": "review_round",
+                        "round": next_round,
+                        "timeout_seconds": timeout_secs
+                    }
+                });
+                append_to_board(&state.project_dir, &announcement)?;
+                Ok(())
+            })?;
+
+            notify_desktop();
+            Ok(serde_json::json!({
+                "status": "review_round_created",
+                "round": next_round,
+                "topic": round_topic,
+                "timeout_seconds": timeout_secs
+            }))
+        }
+
+        "audience_control" => {
+            // Set audience state: listening, voting, qa, commenting, open
+            let new_state = mode.ok_or("mode is required for audience_control (listening, voting, qa, commenting, open)")?;
+            if !["listening", "voting", "qa", "commenting", "open"].contains(&new_state) {
+                return Err(format!("Invalid audience state '{}'. Must be: listening, voting, qa, commenting, open", new_state));
+            }
+
+            let disc = read_discussion_state(&state.project_dir);
+            if !disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("No active discussion. Audience control requires an active discussion.".to_string());
+            }
+
+            // Only the moderator can control audience
+            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("");
+            if my_label != moderator {
+                return Err(format!("Only the moderator ({}) can control the audience", moderator));
+            }
+
+            let mut updated = disc.clone();
+            updated["audience_state"] = serde_json::json!(new_state);
+            // Enable/disable audience based on state
+            updated["audience_enabled"] = serde_json::json!(new_state != "listening");
+
+            with_file_lock(&state.project_dir, || {
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                // Announce the state change
+                let msg_id = next_message_id(&state.project_dir);
+                let announcement = serde_json::json!({
+                    "id": msg_id,
+                    "from": "system",
+                    "to": "all",
+                    "type": "moderation",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("Audience state: {}", new_state),
+                    "body": match new_state {
+                        "listening" => "Audience is now in listen-only mode. No audience responses will be posted.",
+                        "voting" => "Audience voting is now OPEN. Audience members may submit votes.",
+                        "qa" => "Audience Q&A is now OPEN. Audience members may ask questions.",
+                        "commenting" => "Audience commenting is now OPEN. Audience members may share reactions.",
+                        "open" => "Audience is now fully OPEN. All audience responses will be posted.",
+                        _ => "Audience state changed."
+                    },
+                    "metadata": {
+                        "discussion_action": "audience_control",
+                        "audience_state": new_state
+                    }
+                });
+                append_to_board(&state.project_dir, &announcement)?;
+                Ok(())
+            })?;
+
+            notify_desktop();
+            Ok(serde_json::json!({
+                "status": "audience_state_changed",
+                "audience_state": new_state
+            }))
+        }
+
+        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control", action))
     }
 }
 
@@ -2358,6 +3097,29 @@ fn grandfather_role_templates(project_dir: &str, config: &mut serde_json::Value)
             if !dest.exists() {
                 if let Err(e) = std::fs::copy(&briefing_template, &dest) {
                     eprintln!("[vaak-mcp] Failed to copy briefing for '{}': {}", slug, e);
+                }
+            }
+        }
+    }
+
+    // Also import global role groups (~/.vaak/role-groups.json) if project has none
+    let role_groups_path = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|h| PathBuf::from(h).join(".vaak").join("role-groups.json"))
+        .unwrap_or_default();
+
+    if role_groups_path.exists() {
+        let project_groups = config.get("role_groups").and_then(|g| g.as_array());
+        let has_groups = project_groups.map(|a| !a.is_empty()).unwrap_or(false);
+
+        if !has_groups {
+            if let Ok(content) = std::fs::read_to_string(&role_groups_path) {
+                if let Ok(groups) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if groups.is_array() {
+                        eprintln!("[vaak-mcp] Importing global role groups into project");
+                        config["role_groups"] = groups;
+                        added_any = true;
+                    }
                 }
             }
         }
@@ -2612,10 +3374,13 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     let briefing = std::fs::read_to_string(&briefing_path).unwrap_or_default();
 
     // Read last 10 messages directed to this role, this instance, or 'all'
+    // Roles with "see_all" permission (e.g., manager) see ALL messages
     let my_instance_label = format!("{}:{}", role, instance);
+    let has_see_all = role_has_see_all(&normalized, role);
     let all_messages = read_board_filtered(&normalized);
     let my_messages: Vec<&serde_json::Value> = all_messages.iter()
         .filter(|m| {
+            if has_see_all { return true; }
             let to = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
             to == role || to == my_instance_label || to == "all"
         })
@@ -2757,8 +3522,28 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
     let disc_format = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Validate permission for broadcast
-    if to == "all" {
+    // Broadcast permission: all roles can broadcast by default.
+    // Noise control is handled by work mode (consecutive/simultaneous) and
+    // communication mode (directed/open), not by permission flags.
+
+    // Pipeline mode: only current stage agent can broadcast
+    // Uses typed DiscussionState for reliable field access (no raw JSON chains)
+    if disc_active && disc_format == "pipeline" && to == "all" && state.role != "human" && state.role != "manager" {
+        let typed_disc = read_discussion_typed(&state.project_dir);
+        let pipeline_order = typed_disc.pipeline_order.as_deref().unwrap_or(&[]);
+        let current_stage = typed_disc.pipeline_stage.unwrap_or(0) as usize;
+        let pipeline_phase = typed_disc.phase.as_deref().unwrap_or("");
+        let from_label = format!("{}:{}", state.role, state.instance);
+        let current_agent = pipeline_order.get(current_stage).map(|s| s.as_str()).unwrap_or("");
+        if pipeline_phase != "pipeline_complete" && from_label != current_agent {
+            return Err(format!("Pipeline mode: not your stage. Current stage: {} ({}/{}). Wait for your turn or send directed messages.",
+                current_agent, current_stage + 1, pipeline_order.len()));
+        }
+    }
+
+    // Validate message type against role permissions.
+    // Maps message types to required permissions. Human is always exempt.
+    if state.role != "human" {
         let roles = config.get("roles").and_then(|r| r.as_object());
         let my_role_def = roles.and_then(|r| r.get(&state.role));
         let perms: Vec<String> = my_role_def
@@ -2767,22 +3552,163 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
 
-        // Check if open communication mode is set (overrides role-level broadcast permission)
-        let comm_mode = config.get("settings")
-            .and_then(|s| s.get("discussion_mode"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("directed");
+        let required_perm = match msg_type {
+            "directive" | "approval" | "revision" => Some("assign_tasks"),
+            "review" => Some("review"),
+            "moderation" => Some("moderation"),
+            "handoff" => Some("handoff"),
+            // status, question, answer, submission, vote — allowed for all roles
+            _ => None,
+        };
 
-        // Active discussions in public formats allow broadcasting (oxford, red_team, continuous)
-        let discussion_allows_broadcast = disc_active
-            && matches!(disc_format, "oxford" | "red_team" | "continuous");
+        if let Some(perm) = required_perm {
+            if !perms.contains(&perm.to_string()) {
+                return Err(format!(
+                    "Permission denied: message type '{}' requires '{}' permission. Your permissions: {:?}",
+                    msg_type, perm, perms
+                ));
+            }
+        }
+    }
 
-        let has_role_perm = perms.contains(&"broadcast".to_string())
-            || perms.contains(&"assign_tasks".to_string());
-        let open_mode = comm_mode == "open";
+    // Block acknowledgment-only messages (e.g., "Got it", "Will do", "Okay").
+    // These waste message bandwidth and add no value.
+    if state.role != "human" {
+        let trimmed = body.trim().to_lowercase();
+        let ack_patterns = [
+            "got it", "will do", "okay", "ok", "understood", "acknowledged",
+            "thanks", "thank you", "noted", "roger", "copy that", "on it",
+            "sure", "yes", "yep", "yeah", "ack", "k",
+        ];
+        if trimmed.len() < 20 && ack_patterns.iter().any(|p| trimmed == *p || trimmed == format!("{}.", p) || trimmed == format!("{}!", p)) {
+            return Err("Acknowledgment-only messages are not allowed. Either do the work, ask a question, or provide substantive information.".to_string());
+        }
+    }
 
-        if !has_role_perm && !open_mode && !discussion_allows_broadcast {
-            return Err("You don't have permission to broadcast. Use a specific role target.".to_string());
+    // Block non-manager roles from messaging the human directly.
+    // Only the manager can send messages to the human. Exception: type "answer"
+    // (replying to a human question) is always allowed from any role.
+    if to == "human" && state.role != "human" && state.role != "manager" && msg_type != "answer" {
+        return Err("Only the Manager can message the human directly. Send your message to the Manager for relay, or to the relevant peer role.".to_string());
+    }
+
+    // Consecutive mode turn enforcement — block out-of-turn broadcasts.
+    // Directed messages to specific roles are always allowed for coordination.
+    // Manager always has priority. Human is always exempt.
+    if to == "all" && state.role != "human" {
+        let work_mode = config.get("settings")
+            .and_then(|s| s.get("work_mode"))
+            .and_then(|w| w.as_str())
+            .unwrap_or("simultaneous");
+
+        if work_mode == "consecutive" {
+            let turn_state = read_turn_state(&state.project_dir);
+            let turn_completed = turn_state.get("completed").and_then(|c| c.as_bool()).unwrap_or(true);
+
+            if !turn_completed && state.role != "manager" {
+                let relevance_order = turn_state.get("relevance_order")
+                    .and_then(|t| t.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let current_idx = turn_state.get("current_index")
+                    .and_then(|i| i.as_u64())
+                    .unwrap_or(0) as usize;
+
+                // Auto-advance timeout: if current turn holder has been waiting too long, skip them
+                let timeout_secs = config.get("settings")
+                    .and_then(|s| s.get("consecutive_timeout_secs"))
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(120);
+                let turn_started = turn_state.get("turn_started_at")
+                    .or_else(|| turn_state.get("started_at"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+
+                // Parse ISO timestamp and check timeout
+                if !turn_started.is_empty() {
+                    // Simple seconds-since comparison using system time
+                    // (turn_started_at is updated on each advance)
+                    let now = utc_now_iso();
+                    if let (Some(start_secs), Some(now_secs)) = (
+                        parse_iso_to_epoch_secs(turn_started),
+                        parse_iso_to_epoch_secs(&now)
+                    ) {
+                        if now_secs > start_secs + timeout_secs {
+                            // Timeout: auto-skip current turn holder
+                            let current_label = relevance_order.get(current_idx)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            eprintln!("[consecutive] Timeout: skipping {} after {}s", current_label, timeout_secs);
+                            post_turn_system_message(&state.project_dir, &format!("{} skipped (timeout {}s)", current_label, timeout_secs));
+                            let _ = advance_turn(&state.project_dir, current_label, true);
+                            // Re-read state after advancement
+                            let updated_state = read_turn_state(&state.project_dir);
+                            let new_completed = updated_state.get("completed").and_then(|c| c.as_bool()).unwrap_or(true);
+                            if new_completed {
+                                // All turns done after timeout skip — allow this send
+                            } else {
+                                let new_idx = updated_state.get("current_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                let new_order = updated_state.get("relevance_order").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+                                let new_current = new_order.get(new_idx).and_then(|v| v.as_str()).unwrap_or("");
+                                let my_label = format!("{}:{}", state.role, state.instance);
+                                if my_label != new_current {
+                                    return Err(format!(
+                                        "Consecutive mode: not your turn. Current: {}. You may send directed messages to specific roles, or wait for your turn.",
+                                        new_current
+                                    ));
+                                }
+                            }
+                        } else {
+                            // No timeout — enforce turn order
+                            let current_label = relevance_order.get(current_idx)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let my_label = format!("{}:{}", state.role, state.instance);
+                            if my_label != current_label {
+                                return Err(format!(
+                                    "Consecutive mode: not your turn. Current: {}. You may send directed messages to specific roles, or wait for your turn.",
+                                    current_label
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Audience gating: enforce audience_state during active discussions.
+    // The audience role can only speak when the moderator has opened their state.
+    // Submissions (to moderator) are always allowed regardless of audience state.
+    if state.role == "audience" && disc_active {
+        let audience_state = disc.get("audience_state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("listening");
+
+        // Submissions to the moderator are always allowed (e.g., vote results)
+        if msg_type != "submission" {
+            let allowed = match audience_state {
+                "listening" => false, // silent — cannot speak
+                "voting" => msg_type == "vote" || msg_type == "status", // can only submit votes
+                "qa" => msg_type == "question", // can only ask questions
+                "commenting" => msg_type == "status" || msg_type == "question", // can comment/question
+                "open" => true, // unrestricted
+                _ => false,
+            };
+
+            if !allowed {
+                let hint = match audience_state {
+                    "listening" => "The audience is in LISTENING mode — you cannot speak until the moderator opens the floor.",
+                    "voting" => "The audience is in VOTING mode — only vote submissions are allowed.",
+                    "qa" => "The audience is in Q&A mode — only questions are allowed.",
+                    "commenting" => "The audience is in COMMENTING mode — only status updates and questions are allowed.",
+                    _ => "The audience state does not allow this message type.",
+                };
+                return Err(format!(
+                    "Audience gating: message type '{}' blocked. {}",
+                    msg_type, hint
+                ));
+            }
         }
     }
 
@@ -2844,9 +3770,47 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         });
         append_to_board(&state.project_dir, &message)?;
 
-        // Continuous review: auto-create micro-round when developer posts a status
+        // Continuous review: notify moderator when developer posts a status
+        // (moderator decides whether to open a review round)
         if msg_type == "status" {
-            let _ = auto_create_continuous_round(&state.project_dir, subject, body, &from_label, msg_id);
+            let disc = read_discussion_state(&state.project_dir);
+            let is_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if is_active && mode == "continuous" && from_label != moderator && !moderator.is_empty() {
+                // Dedup: skip if there's already a pending auto_review_prompt
+                // (no review round opened since the last notification)
+                let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+                let has_open_round = phase == "submitting";
+                let board_content = std::fs::read_to_string(
+                    board_jsonl_path(&state.project_dir)
+                ).unwrap_or_default();
+                let has_pending_prompt = board_content.lines().rev().take(50).any(|line| {
+                    line.contains("auto_review_prompt") && line.contains(&moderator)
+                });
+                if has_pending_prompt && !has_open_round {
+                    // Already notified, moderator hasn't acted yet — skip
+                } else {
+
+                let notify_id = next_message_id(&state.project_dir);
+                let notification = serde_json::json!({
+                    "id": notify_id,
+                    "from": "system",
+                    "to": moderator,
+                    "type": "status",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("Status update from {} — open a review round?", from_label),
+                    "body": format!("{} posted a status: \"{}\". Use discussion_control with action create_review_round to open a review round, or ignore to skip.", from_label, subject),
+                    "metadata": {
+                        "auto_review_prompt": true,
+                        "trigger_from": from_label.clone(),
+                        "trigger_message_id": msg_id
+                    }
+                });
+                let _ = append_to_board(&state.project_dir, &notification);
+
+                } // else (not deduped)
+            }
         }
 
         // Continuous review: check quorum after a submission arrives
@@ -2983,24 +3947,40 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                                                 eprintln!("[auto-close] ERROR posting aggregate: {}", e);
                                             }
 
-                                            // Update discussion state: close round
+                                            // Update discussion state: close round, transition to "reviewing"
+                                            // (moderator decides whether to open next round or end discussion)
                                             let mut closed = fresh_disc.clone();
-                                            closed["phase"] = serde_json::json!("closed");
+                                            closed["phase"] = serde_json::json!("reviewing");
+                                            closed["previous_phase"] = serde_json::json!("submitting");
                                             if let Some(rounds) = closed.get_mut("rounds").and_then(|r| r.as_array_mut()) {
                                                 if let Some(last_round) = rounds.last_mut() {
                                                     last_round["closed_at"] = serde_json::json!(now);
                                                     last_round["aggregate_message_id"] = serde_json::json!(agg_msg_id);
                                                 }
                                             }
-                                            // End the discussion (single-round auto-close)
-                                            closed["active"] = serde_json::json!(false);
-                                            closed["previous_phase"] = serde_json::json!("submitting");
 
                                             if let Err(e) = write_discussion_state(&state.project_dir, &closed) {
                                                 eprintln!("[auto-close] ERROR writing discussion state: {}", e);
                                             } else {
                                                 eprintln!("[auto-close] Round {} auto-closed, aggregate posted as msg {}", round_num, agg_msg_id);
                                             }
+
+                                            // Notify the moderator to decide next steps
+                                            let mod_notify_id = next_message_id(&state.project_dir);
+                                            let mod_notification = serde_json::json!({
+                                                "id": mod_notify_id,
+                                                "from": "system",
+                                                "to": moderator,
+                                                "type": "status",
+                                                "timestamp": now,
+                                                "subject": format!("Round {} complete — all submissions in", round_num),
+                                                "body": format!("All {} submissions received and aggregate posted. Use discussion_control with action open_next_round to start another round, or end_discussion to conclude.", expected),
+                                                "metadata": {
+                                                    "round_complete": true,
+                                                    "round": round_num
+                                                }
+                                            });
+                                            let _ = append_to_board(&state.project_dir, &mod_notification);
 
                                             notify_desktop();
                                         }
@@ -3064,6 +4044,168 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     // Reset hook compliance tracker — this session just sent a message
     write_send_tracker(&state.project_dir, &state.session_id, 0);
 
+    // Consecutive mode turn state management
+    let work_mode = config.get("settings")
+        .and_then(|s| s.get("work_mode"))
+        .and_then(|w| w.as_str())
+        .unwrap_or("simultaneous");
+
+    if work_mode == "consecutive" {
+        let from_label = format!("{}:{}", state.role, state.instance);
+
+        // Only human broadcasts trigger new turn rounds — manager broadcasts don't
+        if to == "all" && state.role == "human" {
+            let trigger_text = format!("{} {}", subject, body);
+            let _ = reset_turn_state(&state.project_dir, result, &trigger_text);
+        }
+
+        // If an agent responds to a broadcast (not a directed message), advance turn
+        // Check if body starts with "PASS:" to detect a pass
+        if to == "all" && state.role != "human" {
+            let is_pass = body.trim().to_uppercase().starts_with("PASS:");
+            let _ = advance_turn(&state.project_dir, &from_label, is_pass);
+        }
+    }
+
+    // Pipeline discussion: advance stage when current stage agent broadcasts
+    {
+        let disc = read_discussion_state(&state.project_dir);
+        let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let disc_mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        if disc_active && disc_mode == "pipeline" && to == "all" {
+            let pipeline_order = disc.get("pipeline_order").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+            let current_stage = disc.get("pipeline_stage").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+            let from_label = format!("{}:{}", state.role, state.instance);
+            let current_agent = pipeline_order.get(current_stage).and_then(|v| v.as_str()).unwrap_or("");
+
+            if from_label == current_agent {
+                let mut updated_disc = disc.clone();
+                // Record this stage's output
+                let mut outputs = updated_disc.get("pipeline_outputs").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+                outputs.push(serde_json::json!({
+                    "stage": current_stage,
+                    "agent": from_label,
+                    "message_id": result,
+                    "timestamp": utc_now_iso()
+                }));
+                updated_disc["pipeline_outputs"] = serde_json::json!(outputs);
+
+                let next_stage = current_stage + 1;
+                if next_stage >= pipeline_order.len() {
+                    // All stages complete for this round — check termination strategy
+                    let typed_disc = read_discussion_typed(&state.project_dir);
+                    let termination = typed_disc.settings.effective_termination();
+                    let current_round = updated_disc.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    let should_loop = match &termination {
+                        vaak_desktop::collab::TerminationStrategy::FixedRounds { rounds } => current_round + 1 < *rounds as u64,
+                        vaak_desktop::collab::TerminationStrategy::Unlimited => true,
+                        vaak_desktop::collab::TerminationStrategy::Consensus { .. } => true, // moderator decides
+                        vaak_desktop::collab::TerminationStrategy::ModeratorCall => true, // moderator decides
+                        vaak_desktop::collab::TerminationStrategy::TimeBound { .. } => true, // time decides
+                    };
+
+                    // Stagnation detection: auto-close if N consecutive rounds have no substantive output
+                    let stagnant_rounds = updated_disc.get("stagnant_rounds").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let disc_mode = updated_disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                    let max_stagnant = if disc_mode == "pipeline" { 1u64 } else { 3u64 };
+                    let round_is_stagnant = {
+                        // Check if all pipeline_outputs for this round are short (< 100 chars body)
+                        let round_start_stage = 0usize;
+                        let round_outputs = outputs.iter().filter(|o| {
+                            o.get("stage").and_then(|s| s.as_u64()).map(|s| s as usize) >= Some(round_start_stage)
+                        });
+                        // Read the actual message bodies from the board
+                        let board = read_board(&state.project_dir);
+                        let mut all_short = true;
+                        for output in round_outputs {
+                            let msg_id = output.get("message_id").and_then(|i| i.as_u64()).unwrap_or(0);
+                            if let Some(msg) = board.iter().find(|m| m.get("id").and_then(|i| i.as_u64()) == Some(msg_id)) {
+                                let msg_body = msg.get("body").and_then(|b| b.as_str()).unwrap_or("");
+                                if msg_body.len() >= 100 {
+                                    all_short = false;
+                                    break;
+                                }
+                            }
+                        }
+                        all_short && current_round > 0 // Don't count round 0 as stagnant
+                    };
+                    let new_stagnant = if round_is_stagnant { stagnant_rounds + 1 } else { 0 };
+                    updated_disc["stagnant_rounds"] = serde_json::json!(new_stagnant);
+
+                    // Check if discussion is paused — don't auto-advance
+                    let is_paused = updated_disc.get("paused_at").and_then(|v| v.as_str()).is_some();
+                    if is_paused {
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        post_turn_system_message(&state.project_dir,
+                            &format!("Round {} complete — discussion is paused. Waiting for resume.", current_round + 1));
+                    } else if should_loop && new_stagnant >= max_stagnant {
+                        // Stagnation limit reached — auto-close
+                        updated_disc["active"] = serde_json::json!(false);
+                        updated_disc["phase"] = serde_json::json!("pipeline_complete");
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        post_turn_system_message(&state.project_dir,
+                            &format!("Discussion auto-closed: {} consecutive rounds with no substantive output. Start a new discussion when there's work to discuss.", max_stagnant));
+                    } else if should_loop {
+                        // Auto-advance to next round
+                        let next_round = current_round + 1;
+                        updated_disc["pipeline_stage"] = serde_json::json!(0);
+                        updated_disc["current_round"] = serde_json::json!(next_round);
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+
+                        let first_agent = pipeline_order.first().and_then(|v| v.as_str()).unwrap_or("?");
+                        post_turn_system_message(&state.project_dir, &format!("Round {} complete — starting round {}. First up: {}", current_round + 1, next_round + 1, first_agent));
+
+                        // Wake first agent for the new round
+                        let wake_msg = serde_json::json!({
+                            "id": next_message_id(&state.project_dir),
+                            "from": "system:0",
+                            "to": first_agent,
+                            "type": "system",
+                            "subject": "Your pipeline stage",
+                            "body": format!("Round {} has started. It is now your turn in the pipeline (stage 1/{}). Review previous round outputs and broadcast your response.", next_round + 1, pipeline_order.len()),
+                            "timestamp": utc_now_iso(),
+                            "metadata": {"pipeline_notification": true}
+                        });
+                        let _ = append_to_board(&state.project_dir, &wake_msg);
+                    } else {
+                        // Pipeline truly complete — all rounds done
+                        updated_disc["phase"] = serde_json::json!("pipeline_complete");
+                        updated_disc["pipeline_stage"] = serde_json::json!(next_stage);
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        post_turn_system_message(&state.project_dir, "Pipeline complete — all stages finished");
+                    }
+                } else {
+                    // Check if paused before advancing to next stage
+                    let is_paused = updated_disc.get("paused_at").and_then(|v| v.as_str()).is_some();
+                    if is_paused {
+                        updated_disc["pipeline_stage"] = serde_json::json!(next_stage);
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        post_turn_system_message(&state.project_dir, &format!("Stage {} complete ({}) — discussion is paused. Next up: stage {}/{} when resumed.", current_stage + 1, from_label, next_stage + 1, pipeline_order.len()));
+                    } else {
+                        // Advance to next stage
+                        updated_disc["pipeline_stage"] = serde_json::json!(next_stage);
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
+                        post_turn_system_message(&state.project_dir, &format!("Stage {} complete ({}) — next: {} ({}/{})", current_stage + 1, from_label, next_agent, next_stage + 1, pipeline_order.len()));
+                        // Wake next agent (use full role:instance so only the specific instance is notified)
+                        let wake_msg = serde_json::json!({
+                            "id": next_message_id(&state.project_dir),
+                            "from": "system:0",
+                            "to": next_agent,
+                            "type": "system",
+                            "subject": "Your pipeline stage",
+                            "body": format!("It is now your turn in the pipeline (stage {}/{}). Review previous outputs and broadcast your response.", next_stage + 1, pipeline_order.len()),
+                            "timestamp": utc_now_iso(),
+                            "metadata": {"pipeline_notification": true}
+                        });
+                        let _ = append_to_board(&state.project_dir, &wake_msg);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(serde_json::json!({
         "message_id": result,
         "delivered_to": [to]
@@ -3088,9 +4230,11 @@ fn handle_project_check(last_seen: u64) -> Result<serde_json::Value, String> {
     };
 
     let my_instance_label = format!("{}:{}", state.role, state.instance);
+    let has_see_all = role_has_see_all(&state.project_dir, &state.role);
     let all_messages = read_board_filtered(&state.project_dir);
     let my_messages: Vec<&serde_json::Value> = all_messages.iter()
         .filter(|m| {
+            if has_see_all { return true; }
             let to = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
             to == state.role || to == my_instance_label || to == "all"
         })
@@ -3167,6 +4311,36 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             polls_since_heartbeat = 0;
         }
 
+        // Consecutive mode: check for stale turns and auto-advance (timeout watchdog)
+        {
+            let config: serde_json::Value = std::fs::read_to_string(
+                std::path::Path::new(&state.project_dir).join(".vaak").join("project.json")
+            ).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({}));
+            let wm = config.get("settings").and_then(|s| s.get("work_mode")).and_then(|w| w.as_str()).unwrap_or("simultaneous");
+            if wm == "consecutive" {
+                let ts = read_turn_state(&state.project_dir);
+                let completed = ts.get("completed").and_then(|c| c.as_bool()).unwrap_or(true);
+                if !completed {
+                    let timeout = config.get("settings").and_then(|s| s.get("consecutive_timeout_secs")).and_then(|t| t.as_u64()).unwrap_or(120);
+                    let turn_started = ts.get("turn_started_at").or_else(|| ts.get("started_at")).and_then(|t| t.as_str()).unwrap_or("");
+                    if !turn_started.is_empty() {
+                        let now_str = utc_now_iso();
+                        if let (Some(start), Some(now)) = (parse_iso_to_epoch_secs(turn_started), parse_iso_to_epoch_secs(&now_str)) {
+                            if now > start + timeout {
+                                let order = ts.get("relevance_order").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+                                let idx = ts.get("current_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                if let Some(stale) = order.get(idx).and_then(|v| v.as_str()) {
+                                    eprintln!("[project_wait watchdog] Timeout: skipping {} after {}s", stale, timeout);
+                                    post_turn_system_message(&state.project_dir, &format!("{} skipped (timeout {}s)", stale, timeout));
+                                    let _ = advance_turn(&state.project_dir, stale, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Read current last_seen
         let last_seen_id: u64 = std::fs::read_to_string(&ls_path)
             .ok()
@@ -3176,9 +4350,11 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
 
         // Check for new messages
         let wait_instance_label = format!("{}:{}", state.role, state.instance);
+        let has_see_all = role_has_see_all(&state.project_dir, &state.role);
         let all_messages = read_board_filtered(&state.project_dir);
         let new_messages: Vec<serde_json::Value> = all_messages.into_iter()
             .filter(|m| {
+                if has_see_all { return true; }
                 let to = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
                 to == state.role || to == wait_instance_label || to == "all"
             })
@@ -3301,6 +4477,21 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
         "role_released": state.role,
         "instance": state.instance
     }))
+}
+
+/// Check if a role has the "see_all" permission in project config.
+/// Roles with this permission can see all messages regardless of the `to` field.
+fn role_has_see_all(project_dir: &str, role: &str) -> bool {
+    read_project_config(project_dir)
+        .ok()
+        .and_then(|config| {
+            config.get("roles")?
+                .get(role)?
+                .get("permissions")?
+                .as_array()
+                .map(|arr| arr.iter().any(|v| v.as_str() == Some("see_all")))
+        })
+        .unwrap_or(false)
 }
 
 /// Handle project_kick: forcibly revoke a team member's role
@@ -3555,11 +4746,42 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         .and_then(|t| t.as_str())
         .unwrap_or(my_role);
 
+    // Re-inject abbreviated role briefing to prevent context drift.
+    // Full briefing is shown at join; here we inject key boundaries/anti-patterns.
+    let briefing_path = role_briefing_path(&project_dir, my_role);
+    let role_reminder = if let Ok(briefing_text) = std::fs::read_to_string(&briefing_path) {
+        // Extract lines containing key boundary markers
+        let mut reminder_lines = Vec::new();
+        let mut in_relevant_section = false;
+        for line in briefing_text.lines() {
+            if line.starts_with("## Role Boundaries") || line.starts_with("## Anti-patterns")
+                || line.starts_with("## Core Responsibilities") || line.contains("YOU DO NOT")
+                || line.contains("YOU OWN") || line.contains("NEVER") {
+                in_relevant_section = true;
+            } else if line.starts_with("## ") && in_relevant_section {
+                in_relevant_section = false;
+            }
+            if in_relevant_section {
+                reminder_lines.push(line);
+            }
+        }
+        if !reminder_lines.is_empty() {
+            format!("\nROLE REMINDER (from your briefing):\n{}", reminder_lines.join("\n"))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     // Read board.jsonl, filter for messages to my role or my specific instance
+    // Roles with "see_all" permission see all messages
     let my_instance_label = format!("{}:{}", my_role, my_instance);
+    let has_see_all = role_has_see_all(&project_dir, my_role);
     let all_messages = read_board_filtered(&project_dir);
     let my_messages: Vec<&serde_json::Value> = all_messages.iter()
         .filter(|m| {
+            if has_see_all { return true; }
             let to = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
             to == my_role || to == my_instance_label || to == "all"
         })
@@ -3691,6 +4913,64 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
     output.push_str("\nSOURCE OF TRUTH: The human's most recent message is your primary source of truth. Form your OWN understanding of what the human said before reading other team members' interpretations. If a team member's interpretation contradicts the human's words, trust the human's words.");
     output.push_str("\nTOKEN EFFICIENCY: Do NOT call project_check redundantly. The messages shown below ARE your latest messages — you already have them. Use project_wait to block until NEW messages arrive. Do NOT call project_check(0) to re-read history you've already seen. Do NOT re-read board.jsonl or discussion.json when the state is already shown above. Every unnecessary tool call wastes tokens.");
     output.push_str("\nSECTION DISCIPLINE: You are in your assigned section. Do NOT switch sections unless YOU are specifically named in a switch request. If the human asks another agent to switch sections, STAY WHERE YOU ARE. Do not follow other agents between sections. Each section has its own team — only move if explicitly told to by the human or manager.");
+    output.push_str("\nCOMMUNICATION RULES (enforced by system):\n- Talk to the relevant peer role, not the human. Only the Manager relays to the human.\n- Default to silence — if you have no assigned work, say nothing.\n- Stay in your role's scope. If something is outside your domain, send it to the right role.");
+
+    // Consecutive mode — brief queue position indicator
+    let work_mode = config.get("settings")
+        .and_then(|s| s.get("work_mode"))
+        .and_then(|w| w.as_str())
+        .unwrap_or("simultaneous");
+
+    if work_mode == "consecutive" {
+        let turn_state = read_turn_state(&project_dir);
+        let turn_completed = turn_state.get("completed").and_then(|c| c.as_bool()).unwrap_or(true);
+
+        if !turn_completed {
+            let relevance_order = turn_state.get("relevance_order")
+                .and_then(|t| t.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let current_idx = turn_state.get("current_index")
+                .and_then(|i| i.as_u64())
+                .unwrap_or(0) as usize;
+            let current_turn = relevance_order.get(current_idx)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let my_label = format!("{}:{}", my_role, my_instance);
+            let my_position = relevance_order.iter()
+                .position(|v| v.as_str() == Some(&my_label));
+
+            if my_role == "manager" {
+                output.push_str("\nCONSECUTIVE MODE: You have PRIORITY — you may respond at any time.");
+            } else if my_label == current_turn {
+                output.push_str("\nCONSECUTIVE MODE: It is YOUR TURN. Respond now, or send PASS: to skip.");
+            } else if let Some(pos) = my_position {
+                output.push_str(&format!(
+                    "\nCONSECUTIVE MODE: You are #{} in queue. Current turn: {}. project_send will block until your turn.",
+                    pos + 1, current_turn
+                ));
+            }
+        }
+
+        output.push_str("\nWork mode: consecutive.");
+    } else {
+        output.push_str("\nWork mode: simultaneous.");
+    }
+
+    // Inject abbreviated role briefing reminder (boundaries, anti-patterns)
+    if !role_reminder.is_empty() {
+        output.push_str(&role_reminder);
+    }
+
+    // Universal role boundary enforcement — always injected regardless of briefing content
+    output.push_str(&format!(
+        "\n\nROLE BOUNDARY ENFORCEMENT: You are {}:{}. Stay STRICTLY within your role's scope. \
+        If a task falls outside your responsibilities, hand it off to the appropriate role using \
+        project_send. Do NOT perform work that belongs to another role — delegate instead. \
+        Do NOT make decisions reserved for other roles (e.g., architecture decisions belong to \
+        architect, task assignments belong to manager). When uncertain, ASK before acting.",
+        my_role, my_instance
+    ));
 
     // Inject active discussion context (Delphi, Oxford, etc.)
     if disc_active && disc_mode == "delphi" {
@@ -3749,6 +5029,64 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         };
 
         output.push_str(&format!("\n\nCONTINUOUS REVIEW MODE: {}", review_status));
+    }
+
+    // Pipeline discussion context injection
+    if disc_active && disc_mode == "pipeline" {
+        let disc_fresh = read_discussion_state(&project_dir);
+        let pipeline_order = disc_fresh.get("pipeline_order").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+        let current_stage = disc_fresh.get("pipeline_stage").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+        let pipeline_outputs = disc_fresh.get("pipeline_outputs").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+        let pipeline_phase = disc_fresh.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+        let pipeline_mode = disc_fresh.get("pipeline_mode").and_then(|v| v.as_str()).unwrap_or("discussion");
+        let my_label = format!("{}:{}", my_role, my_instance);
+        let current_agent = pipeline_order.get(current_stage).and_then(|v| v.as_str()).unwrap_or("");
+        let order_display = pipeline_order.iter().enumerate()
+            .map(|(i, v)| {
+                let name = v.as_str().unwrap_or("?");
+                if i == current_stage && pipeline_phase != "pipeline_complete" {
+                    format!("**[{}. {}]**", i + 1, name)
+                } else if i < current_stage || pipeline_phase == "pipeline_complete" {
+                    format!("~~{}. {}~~", i + 1, name)
+                } else {
+                    format!("{}. {}", i + 1, name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" → ");
+
+        if pipeline_phase == "pipeline_complete" {
+            output.push_str(&format!("\n\nPIPELINE COMPLETE: All {} stages finished.\nTopic: {}\nOrder: {}",
+                pipeline_order.len(), disc_topic, order_display));
+        } else if my_label == current_agent {
+            output.push_str(&format!("\n\nPIPELINE — YOUR STAGE ({}/{}) [{}]: You are the current stage. Topic: \"{}\"\nOrder: {}",
+                current_stage + 1, pipeline_order.len(), pipeline_mode.to_uppercase(), disc_topic, order_display));
+            // Show previous stage outputs
+            if !pipeline_outputs.is_empty() {
+                output.push_str("\n\nPREVIOUS STAGE OUTPUTS (build on these):");
+                for po in &pipeline_outputs {
+                    let agent = po.get("agent").and_then(|a| a.as_str()).unwrap_or("?");
+                    let msg_id = po.get("message_id").and_then(|i| i.as_u64()).unwrap_or(0);
+                    output.push_str(&format!("\n  - Stage {}: {} (msg #{})", po.get("stage").and_then(|s| s.as_u64()).map(|s| s + 1).unwrap_or(0), agent, msg_id));
+                }
+            }
+            output.push_str("\n\nBroadcast your response when ready. Your output becomes input for the next stage.");
+        } else if my_role == "moderator" || my_role == "manager" {
+            output.push_str(&format!("\n\nPIPELINE ORCHESTRATOR VIEW [{}] — Current stage: {} ({}/{}). Topic: \"{}\"\nOrder: {}",
+                pipeline_mode.to_uppercase(), current_agent, current_stage + 1, pipeline_order.len(), disc_topic, order_display));
+            if !pipeline_outputs.is_empty() {
+                output.push_str("\n\nSTAGE OUTPUTS SO FAR:");
+                for po in &pipeline_outputs {
+                    let agent = po.get("agent").and_then(|a| a.as_str()).unwrap_or("?");
+                    let msg_id = po.get("message_id").and_then(|i| i.as_u64()).unwrap_or(0);
+                    output.push_str(&format!("\n  - Stage {}: {} (msg #{})", po.get("stage").and_then(|s| s.as_u64()).map(|s| s + 1).unwrap_or(0), agent, msg_id));
+                }
+            }
+            output.push_str("\n\nTo override the next stage: call discussion_control with action: 'pipeline_next', topic: 'role:instance'");
+        } else {
+            output.push_str(&format!("\n\nPIPELINE ACTIVE [{}] — Not your stage. Current: {} ({}/{}). Topic: \"{}\"\nOrder: {}\nWait for your turn. Call project_wait to enter standby.",
+                pipeline_mode.to_uppercase(), current_agent, current_stage + 1, pipeline_order.len(), disc_topic, order_display));
+        }
     }
 
     // Inject active work claims
@@ -3880,6 +5218,32 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         }
     }
 
+    // Consecutive mode read-side gating: suppress messages for out-of-turn agents
+    let consecutive_suppressed = {
+        let wm = config.get("settings")
+            .and_then(|s| s.get("work_mode"))
+            .and_then(|w| w.as_str())
+            .unwrap_or("simultaneous");
+        if wm == "consecutive" && my_role != "manager" && my_role != "human" {
+            let ts = read_turn_state(&project_dir);
+            let completed = ts.get("completed").and_then(|c| c.as_bool()).unwrap_or(true);
+            if !completed {
+                let order = ts.get("relevance_order").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+                let idx = ts.get("current_index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let current = order.get(idx).and_then(|v| v.as_str()).unwrap_or("");
+                let me = format!("{}:{}", my_role, my_instance);
+                me != current
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+
+    if consecutive_suppressed {
+        output.push_str("\n\nCONSECUTIVE MODE: It is NOT your turn. You may READ the messages below to prepare, but do NOT broadcast a response yet. Call project_wait to enter standby until your turn arrives. Broadcasts will be blocked until then.");
+    }
     if new_messages.is_empty() {
         output.push_str(" No new messages.");
     } else {
@@ -3909,8 +5273,9 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
             // Only messages to a DIFFERENT specific role/instance from OTHER agents are filtered out
             let is_broadcast = to == "all";
             let is_from_me = from == my_instance_label;
-            if discussion_mode == "directed" && !is_from_human && !is_directed_to_me && !is_broadcast && !is_from_me {
-                continue; // Skip — between other roles, not relevant to us in Directed mode
+            let is_manager = my_role == "manager";
+            if discussion_mode == "directed" && !is_from_human && !is_directed_to_me && !is_broadcast && !is_from_me && !is_manager {
+                continue; // Skip — between other roles, not relevant to us in Directed mode (managers see all)
             }
 
             // Blind submission filtering: hide other agents' submissions during submitting phase
@@ -3961,6 +5326,8 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
     // This prevents double-delivery: without this, messages shown in the hook
     // would be re-delivered by project_check/project_wait, wasting tokens.
     // project_wait re-reads last_seen_path on each poll, so no messages are lost.
+    // Don't advance last_seen_id when messages are suppressed (consecutive mode, not your turn)
+    // so the agent sees them when their turn arrives
     let max_hook_id = new_messages.iter()
         .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
         .max();
@@ -4394,7 +5761,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "project_send",
-                    "description": "Send a message to a specific role on your team. Messages are directed - only the target role sees them. Use 'all' to broadcast (requires broadcast permission).",
+                    "description": "Send a message to a specific role on your team. Messages are directed - only the target role sees them. Use 'all' to broadcast to everyone.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -4569,13 +5936,13 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "discussion_control",
-                    "description": "Control structured discussions (Delphi, Oxford, Continuous Review). Actions: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams. Delphi/Oxford: manual rounds with anonymized aggregates. Continuous: auto-rounds triggered by developer status messages, silence=consent, lightweight tallies.",
+                    "description": "Control structured discussions (Delphi, Oxford, Continuous Review). Actions: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control. Delphi/Oxford: manual rounds with anonymized aggregates. Continuous: moderator-controlled rounds (moderator gets notified on status updates, uses create_review_round to open rounds). audience_control: set audience state (listening/voting/qa/commenting/open) and toggle audience_enabled — only moderator can use this. High-risk actions (end_discussion, pipeline_next) require a non-empty 'reason' for audit trail.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "description": "Action to perform: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams"
+                                "description": "Action to perform: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control"
                             },
                             "mode": {
                                 "type": "string",
@@ -4593,6 +5960,10 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "teams": {
                                 "type": "object",
                                 "description": "Team assignments for Oxford format (for set_teams action). Keys: 'for' and 'against', values: arrays of participant IDs (e.g. {\"for\": [\"dev:0\"], \"against\": [\"dev:1\"]})"
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Moderator justification for the action. Required for high-risk actions (end_discussion, pipeline_next). Non-empty after trim, minimum 3 chars. Recorded in audit trail."
                             }
                         },
                         "required": ["action"]
@@ -5115,8 +6486,9 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     .and_then(|p| p.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
                 let teams = args.get("teams").cloned();
+                let reason = args.get("reason").and_then(|r| r.as_str());
 
-                match handle_discussion_control(action, mode, topic, participants, teams) {
+                match handle_discussion_control(action, mode, topic, participants, teams, reason) {
                     Ok(resp) => {
                         serde_json::json!({
                             "content": [{
@@ -5395,9 +6767,11 @@ fn run_stop_hook() {
     let reason = if !my_role.is_empty() {
         // We know who we are — check for unread messages
         let stop_instance_label = format!("{}:{}", my_role, my_instance_num);
+        let has_see_all = role_has_see_all(&project_dir, &my_role);
         let all_messages = read_board_filtered(&project_dir);
         let my_messages: Vec<&serde_json::Value> = all_messages.iter()
             .filter(|m| {
+                if has_see_all { return true; }
                 let to = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
                 to == my_role || to == stop_instance_label || to == "all"
             })
@@ -5835,4 +7209,55 @@ fn main() {
     // Cleanup: mark session as disconnected so the UI shows "gone" immediately
     update_session_activity("disconnected");
     eprintln!("[vaak-mcp] Session ended, marked as disconnected");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_high_risk_action_accepts_no_reason() {
+        assert!(validate_moderator_reason("pause", None).is_ok());
+        assert!(validate_moderator_reason("resume", None).is_ok());
+        assert!(validate_moderator_reason("get_state", None).is_ok());
+        assert!(validate_moderator_reason("close_round", Some("")).is_ok());
+    }
+
+    #[test]
+    fn high_risk_end_discussion_rejects_none() {
+        let err = validate_moderator_reason("end_discussion", None).unwrap_err();
+        assert!(err.contains("end_discussion"));
+        assert!(err.contains("reason"));
+    }
+
+    #[test]
+    fn high_risk_end_discussion_rejects_empty() {
+        assert!(validate_moderator_reason("end_discussion", Some("")).is_err());
+    }
+
+    #[test]
+    fn high_risk_end_discussion_rejects_whitespace_only() {
+        assert!(validate_moderator_reason("end_discussion", Some("   ")).is_err());
+        assert!(validate_moderator_reason("end_discussion", Some("\t\n")).is_err());
+    }
+
+    #[test]
+    fn high_risk_end_discussion_rejects_below_min_length() {
+        assert!(validate_moderator_reason("end_discussion", Some("ab")).is_err());
+        assert!(validate_moderator_reason("end_discussion", Some(" a ")).is_err());
+    }
+
+    #[test]
+    fn high_risk_end_discussion_accepts_valid_reason() {
+        assert!(validate_moderator_reason("end_discussion", Some("done")).is_ok());
+        assert!(validate_moderator_reason("end_discussion", Some("   consensus reached   ")).is_ok());
+    }
+
+    #[test]
+    fn high_risk_pipeline_next_enforces_reason() {
+        assert!(validate_moderator_reason("pipeline_next", None).is_err());
+        assert!(validate_moderator_reason("pipeline_next", Some("")).is_err());
+        assert!(validate_moderator_reason("pipeline_next", Some("skip tester"))
+            .is_ok());
+    }
 }
