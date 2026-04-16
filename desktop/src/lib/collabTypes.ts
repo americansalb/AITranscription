@@ -431,3 +431,57 @@ export interface SpawnedAgent {
   instance: number;
   spawned_at: string;  // ISO 8601
 }
+
+// ==================== Moderator Error Types ====================
+// Why: architect msg 352 directs the Rust-enum owner to own the TS mirror.
+// Rust source-of-truth lives at `desktop/src-tauri/src/bin/vaak-mcp.rs`:
+//   - format_capability_error()    → CAPABILITY_NOT_SUPPORTED_FOR_FORMAT
+//   - human-yields-to-moderator    → HUMAN_BYPASS_YIELDS_TO_MODERATOR
+// Errors are emitted as strings with a `[error_code: X]` prefix so callers can
+// pattern-match without JSON-deserializing the whole error payload. When Rust
+// adds a new variant, update the ModeratorErrorCode union below in the same PR.
+
+/** Closed enum of moderator-action error codes emitted by `discussion_control`. */
+export type ModeratorErrorCode =
+  | "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT"
+  | "HUMAN_BYPASS_YIELDS_TO_MODERATOR";
+
+/** Parsed shape of a tagged moderator error string. */
+export interface ModeratorError {
+  /** Discriminator — matches the `[error_code: X]` prefix. */
+  code: ModeratorErrorCode;
+  /** Full original error string from the Rust side (for logging/debugging). */
+  rawMessage: string;
+  /** Capability name, populated for CAPABILITY_NOT_SUPPORTED_FOR_FORMAT. */
+  capability?: string;
+  /** Session format name, populated for CAPABILITY_NOT_SUPPORTED_FOR_FORMAT. */
+  format?: string;
+  /** Moderator role:instance label, populated for HUMAN_BYPASS_YIELDS_TO_MODERATOR. */
+  moderator?: string;
+}
+
+/**
+ * Parse a Rust-side error string into a structured ModeratorError.
+ * Returns null if the string has no `[error_code: X]` prefix — i.e. it's a
+ * generic/unstructured error and should be rendered as plain text.
+ *
+ * Kept minimal on purpose: regex-extract the code, then extract fields by
+ * their named keys. Adding a new variant means adding a case + a field.
+ */
+export function parseModeratorError(rawMessage: string): ModeratorError | null {
+  const codeMatch = rawMessage.match(/^\[error_code: (\w+)\]/);
+  if (!codeMatch) return null;
+  const code = codeMatch[1] as ModeratorErrorCode;
+
+  if (code === "CAPABILITY_NOT_SUPPORTED_FOR_FORMAT") {
+    const cap = rawMessage.match(/capability='([^']+)'/)?.[1];
+    const fmt = rawMessage.match(/format='([^']+)'/)?.[1];
+    return { code, rawMessage, capability: cap, format: fmt };
+  }
+  if (code === "HUMAN_BYPASS_YIELDS_TO_MODERATOR") {
+    const mod = rawMessage.match(/moderator='([^']+)'/)?.[1];
+    return { code, rawMessage, moderator: mod };
+  }
+  // Unknown code — still return a parsed shell so callers can log it
+  return { code, rawMessage };
+}
