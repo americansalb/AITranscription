@@ -2227,7 +2227,47 @@ fn validate_moderator_reason(action: &str, reason: Option<&str>) -> Result<(), S
     Ok(())
 }
 
-fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>, reason: Option<&str>) -> Result<serde_json::Value, String> {
+/// Validate a decision record for the `record_decision` action.
+///
+/// Why: tech-leader msg 279 routed the `decisions` primitive into PR 4. A decision
+/// without a claim or a valid status is noise — it defeats the point of making
+/// pipeline output actionable. This predicate enforces the contract at the API
+/// layer so downstream tooling (UI, exports, postmortems) can rely on shape.
+///
+/// Shape: `{claim: string ≥5 chars after trim, status: accepted|deferred|rejected,
+///          owner?: string, next_action?: string}`.
+///
+/// Returns Ok((claim, status, owner, next_action)) as owned strings on success,
+/// or Err(message) describing what's wrong.
+fn validate_decision_record(
+    decision: Option<&serde_json::Value>,
+) -> Result<(String, String, Option<String>, Option<String>), String> {
+    let decision = decision.ok_or_else(||
+        "record_decision requires a `decision` object. Shape: {claim, status, owner?, next_action?}.".to_string())?;
+    let obj = decision.as_object().ok_or_else(||
+        "`decision` must be a JSON object.".to_string())?;
+
+    let claim = obj.get("claim").and_then(|c| c.as_str()).unwrap_or("").trim().to_string();
+    if claim.len() < 5 {
+        return Err("decision.claim must be a non-empty string with >=5 chars after trim.".to_string());
+    }
+
+    let status = obj.get("status").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
+    const VALID_STATUSES: &[&str] = &["accepted", "deferred", "rejected"];
+    if !VALID_STATUSES.contains(&status.as_str()) {
+        return Err(format!(
+            "decision.status must be one of: accepted, deferred, rejected. Got: '{}'.",
+            status
+        ));
+    }
+
+    let owner = obj.get("owner").and_then(|o| o.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let next_action = obj.get("next_action").and_then(|n| n.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    Ok((claim, status, owner, next_action))
+}
+
+fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>, reason: Option<&str>, decision: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
     let my_label = format!("{}:{}", state.role, state.instance);
@@ -2239,7 +2279,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         "close_round", "open_next_round", "pause", "resume",
         "pipeline_next", "end_discussion", "gate_audience",
         "inject_summary", "skip_participant", "reorder_pipeline",
-        "toggle_pipeline_mode", "update_settings",
+        "toggle_pipeline_mode", "update_settings", "record_decision",
     ];
     if moderator_only_actions.contains(&action) {
         // Human always bypasses role gates
@@ -2903,6 +2943,86 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "status": "teams_set",
                 "for": team_for,
                 "against": team_against
+            }))
+        }
+
+        "record_decision" => {
+            // Moderator records a decision reached during the discussion.
+            //
+            // Why: tech-leader msg 279 routed the `decisions` primitive into PR 4 per the
+            // msg 56 ledger. Pipeline sessions produce transcripts; decisions make the
+            // output actionable. Appending to a structured `decisions` array on the
+            // discussion state lets downstream UI render a checklist and downstream
+            // postmortems measure how many decisions actually shipped.
+            //
+            // Shape enforced by validate_decision_record:
+            //   claim (>=5 chars), status in {accepted, deferred, rejected}, owner?, next_action?.
+            //
+            // Each decision also posts a concise board message so the team sees it in-band.
+            let (claim, status, owner, next_action) = validate_decision_record(decision.as_ref())?;
+            let now = utc_now_iso();
+            let typed_disc = read_discussion_typed(&state.project_dir);
+            if !typed_disc.active {
+                return Err("No active discussion to record decisions against.".to_string());
+            }
+            let raw_disc = read_discussion_state(&state.project_dir);
+
+            with_file_lock(&state.project_dir, || {
+                let mut updated = raw_disc.clone();
+                let mut decisions = updated.get("decisions").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+                let decision_entry = serde_json::json!({
+                    "claim": claim,
+                    "status": status,
+                    "owner": owner,
+                    "next_action": next_action,
+                    "recorded_at": now,
+                    "recorded_by": my_label,
+                });
+                decisions.push(decision_entry.clone());
+                updated["decisions"] = serde_json::json!(decisions);
+                write_discussion_state(&state.project_dir, &updated)?;
+
+                // Post concise board message so the team sees the decision in-band.
+                let msg_id = next_message_id(&state.project_dir);
+                let status_glyph = match status.as_str() {
+                    "accepted" => "✓",
+                    "deferred" => "⚠",
+                    "rejected" => "✗",
+                    _ => "•",
+                };
+                let body = match (&owner, &next_action) {
+                    (Some(o), Some(n)) => format!("{} {} — {} — owner: {} — next: {}", status_glyph, status, claim, o, n),
+                    (Some(o), None) => format!("{} {} — {} — owner: {}", status_glyph, status, claim, o),
+                    (None, Some(n)) => format!("{} {} — {} — next: {}", status_glyph, status, claim, n),
+                    (None, None) => format!("{} {} — {}", status_glyph, status, claim),
+                };
+                let announcement = serde_json::json!({
+                    "id": msg_id,
+                    "from": my_label,
+                    "to": "all",
+                    "type": "moderation",
+                    "timestamp": now,
+                    "subject": format!("Decision {}: {}", status, if claim.chars().count() > 60 { format!("{}…", claim.chars().take(60).collect::<String>()) } else { claim.clone() }),
+                    "body": body,
+                    "metadata": {
+                        "discussion_action": "record_decision",
+                        "decision": decision_entry,
+                        "moderator_action": {
+                            "action": "record_decision",
+                            "timestamp": now,
+                            "actor": my_label,
+                        }
+                    }
+                });
+                append_to_board(&state.project_dir, &announcement)?;
+                Ok(())
+            })?;
+
+            notify_desktop();
+            Ok(serde_json::json!({
+                "status": "decision_recorded",
+                "decision_status": status,
+                "claim": claim,
             }))
         }
 
@@ -6048,6 +6168,10 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "reason": {
                                 "type": "string",
                                 "description": "Moderator justification for the action. Required for high-risk actions (end_discussion, pipeline_next). Non-empty after trim, minimum 3 chars. Recorded in audit trail."
+                            },
+                            "decision": {
+                                "type": "object",
+                                "description": "Decision record for action 'record_decision'. Shape: {claim: string, status: 'accepted'|'deferred'|'rejected', owner?: string, next_action?: string}. All moderator-only; appends to the discussion's decisions array."
                             }
                         },
                         "required": ["action"]
@@ -6571,8 +6695,9 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect());
                 let teams = args.get("teams").cloned();
                 let reason = args.get("reason").and_then(|r| r.as_str());
+                let decision = args.get("decision").cloned();
 
-                match handle_discussion_control(action, mode, topic, participants, teams, reason) {
+                match handle_discussion_control(action, mode, topic, participants, teams, reason, decision) {
                     Ok(resp) => {
                         serde_json::json!({
                             "content": [{
@@ -7479,5 +7604,76 @@ mod tests {
         let board = vec![mk_plain_msg(1, "developer:0")];
         let round_ids = vec![1u64];
         assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    // --- PR 4a decision-record tests ---
+
+    #[test]
+    fn decision_accepts_minimal_valid_record() {
+        let d = serde_json::json!({ "claim": "use Session name", "status": "accepted" });
+        let out = validate_decision_record(Some(&d)).unwrap();
+        assert_eq!(out.0, "use Session name");
+        assert_eq!(out.1, "accepted");
+        assert!(out.2.is_none());
+        assert!(out.3.is_none());
+    }
+
+    #[test]
+    fn decision_accepts_full_record() {
+        let d = serde_json::json!({
+            "claim": "ship PR 4a",
+            "status": "accepted",
+            "owner": "developer:0",
+            "next_action": "commit + merge"
+        });
+        let out = validate_decision_record(Some(&d)).unwrap();
+        assert_eq!(out.2.as_deref(), Some("developer:0"));
+        assert_eq!(out.3.as_deref(), Some("commit + merge"));
+    }
+
+    #[test]
+    fn decision_rejects_none() {
+        let err = validate_decision_record(None).unwrap_err();
+        assert!(err.contains("record_decision requires"));
+    }
+
+    #[test]
+    fn decision_rejects_non_object() {
+        let d = serde_json::json!("not an object");
+        assert!(validate_decision_record(Some(&d)).is_err());
+    }
+
+    #[test]
+    fn decision_rejects_short_claim() {
+        let d = serde_json::json!({ "claim": "hi", "status": "accepted" });
+        assert!(validate_decision_record(Some(&d)).is_err());
+    }
+
+    #[test]
+    fn decision_rejects_whitespace_claim() {
+        let d = serde_json::json!({ "claim": "     ", "status": "accepted" });
+        assert!(validate_decision_record(Some(&d)).is_err());
+    }
+
+    #[test]
+    fn decision_rejects_unknown_status() {
+        let d = serde_json::json!({ "claim": "valid claim", "status": "pending" });
+        let err = validate_decision_record(Some(&d)).unwrap_err();
+        assert!(err.contains("accepted, deferred, rejected"));
+    }
+
+    #[test]
+    fn decision_accepts_all_three_statuses() {
+        for status in &["accepted", "deferred", "rejected"] {
+            let d = serde_json::json!({ "claim": "valid claim", "status": status });
+            assert!(validate_decision_record(Some(&d)).is_ok(), "status '{}' should be valid", status);
+        }
+    }
+
+    #[test]
+    fn decision_normalizes_empty_owner_to_none() {
+        let d = serde_json::json!({ "claim": "valid claim", "status": "accepted", "owner": "   " });
+        let out = validate_decision_record(Some(&d)).unwrap();
+        assert!(out.2.is_none());
     }
 }
