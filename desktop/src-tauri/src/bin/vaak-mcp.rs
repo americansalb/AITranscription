@@ -7676,4 +7676,100 @@ mod tests {
         let out = validate_decision_record(Some(&d)).unwrap();
         assert!(out.2.is_none());
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // pr-t: placeholder tests for 5 open items from board msgs 255, 279, 282.
+    //
+    // Why placeholders: the features these exercise are not implemented yet.
+    // Writing the tests now (#[ignore]'d) locks the acceptance criteria into
+    // the repo so they can't ship silently without meeting them. Each test
+    // unignores when the matching code lands.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Open item 1 (dev-challenger msg 255 attack 2, tech-leader msg 279):
+    /// Pipeline-only moderator capabilities (e.g. reorder_pipeline, jump_to_stage)
+    /// must fail-fast with a distinct error variant when the active session
+    /// format does not support them. String-match on the message is brittle —
+    /// UX needs an enum to pattern-match for tooltip rendering.
+    ///
+    /// Unignore when `ModeratorError::CapabilityNotSupportedForFormat` (or
+    /// equivalent distinct variant) exists in the error type and the capability
+    /// check in handle_discussion_control honors format.
+    #[test]
+    #[ignore = "feature not implemented — unignore when CapabilityNotSupportedForFormat variant exists"]
+    fn test_format_gated_capability_returns_distinct_error_variant() {
+        // Shape of the assertion once implemented:
+        //   let err = try_moderator_action("reorder_pipeline", format = "delphi");
+        //   assert!(matches!(err, ModeratorError::CapabilityNotSupportedForFormat { .. }));
+        unimplemented!("waiting on PR 4 format-gating");
+    }
+
+    /// Open item 2 (dev-challenger msg 255 attack 3, tester msg 159):
+    /// When the role holding the moderator seat terminates its session mid-pipeline,
+    /// the pipeline must auto-pause (set session.paused_at) rather than silently
+    /// stall. PR A's consensus detector must return early while paused —
+    /// paused != stagnant.
+    #[test]
+    #[ignore = "feature not implemented — unignore when session.paused_at is wired"]
+    fn test_moderator_exit_auto_pauses_session_and_consensus_defers_while_paused() {
+        // Assertion shape:
+        //   1. simulate moderator session_terminated event
+        //   2. assert discussion.get("paused_at").is_some()
+        //   3. call round_reached_consensus(...) with all-accept votes
+        //   4. expect false (paused state suppresses consensus-triggered terminate)
+        unimplemented!("waiting on moderator-exit pause hook");
+    }
+
+    /// Open item 3 (tester msg 181 pushback):
+    /// human:0 carries moderator capability ONLY when no manager session is
+    /// claimed. If a manager session is active, manager is authoritative and
+    /// human:0's bypass of the moderator_only_actions gate must no longer fire.
+    /// Current code (vaak-mcp.rs:2203) bypasses for human unconditionally —
+    /// this is the ~3-line gap.
+    #[test]
+    #[ignore = "feature not implemented — unignore when human bypass becomes conditional on no-claimed-manager"]
+    fn test_human_zero_yields_to_claimed_manager() {
+        // Assertion shape:
+        //   1. set discussion.moderator = "manager:0"
+        //   2. simulate call from human:0 to a moderator_only_action
+        //   3. expect Err("requires the moderator role") — human does NOT bypass
+        //      while a manager is claimed
+        unimplemented!("waiting on conditional human bypass");
+    }
+
+    /// Open item 4 (dev-challenger msg 172 attack 1, developer msg 223 defer):
+    /// HIGH_RISK_ACTIONS (vaak-mcp.rs:2173) currently covers only end_discussion
+    /// and pipeline_next. Dev-challenger's tier table mandates reorder_pipeline,
+    /// skip_participant, and jump_to_stage also require reasons. Developer
+    /// deferred until handlers for those actions exist — adding the gate now is
+    /// dead code. This test is the ship-gate for when those handlers land.
+    #[test]
+    #[ignore = "deferred per developer msg 223 — unignore when reorder/skip/jump handlers exist"]
+    fn test_high_risk_actions_list_covers_reorder_skip_jump() {
+        // Assertion shape:
+        //   for action in ["reorder_pipeline", "skip_participant", "jump_to_stage"]:
+        //     assert!(validate_moderator_reason(action, None).is_err());
+        //     assert!(validate_moderator_reason(action, Some("")).is_err());
+        //     assert!(validate_moderator_reason(action, Some("legitimate reason")).is_ok());
+        unimplemented!("deferred — handlers not in code yet");
+    }
+
+    /// Open item 5 (tech-leader msg 279, new after their silent-stage failure):
+    /// When a pipeline stage remains silent past a configurable deadline, the
+    /// moderator should auto-advance rather than block the entire pipeline on
+    /// an unresponsive role. This is the exact failure mode tech-leader hit at
+    /// their own msg 279 stage-6 timeout (~8 min silent). The feature is
+    /// complementary to PR A's consensus-based auto-termination; this one fires
+    /// on silence, not on agreement.
+    #[test]
+    #[ignore = "feature not implemented — unignore when stage deadline + auto-advance lands"]
+    fn test_pipeline_auto_advances_after_stage_timeout() {
+        // Assertion shape:
+        //   1. set stage_deadline_secs = 5 (test fixture value)
+        //   2. advance to stage N
+        //   3. simulate 6s elapsed with no post from stage-N role
+        //   4. assert `stage_auto_advanced` event emitted
+        //   5. assert current_stage == N + 1
+        unimplemented!("waiting on stage-deadline+auto-advance");
+    }
 }
