@@ -28,7 +28,9 @@ interface EndSessionConfirmModalProps {
   topic?: string;
   /** Called with the trimmed reason when the moderator confirms */
   onConfirm: (reason: string) => void | Promise<void>;
-  /** Called when moderator cancels (Escape, backdrop click, Cancel button) */
+  /** Called when moderator cancels (Escape or Cancel button).
+   *  Backdrop click does NOT cancel — destructive-confirm dialogs should only
+   *  dismiss on explicit intent (dev-challenger msg 407 gap #2). */
   onCancel: () => void;
 }
 
@@ -41,6 +43,10 @@ export function EndSessionConfirmModal({
   const [reason, setReason] = useState("");
   const [typedConfirm, setTypedConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Track whether the reason field has ever been blurred, so the "too short"
+  // hint only surfaces after the user has moved on — avoids per-keystroke
+  // screen-reader announcement (dev-challenger msg 407 gap #3).
+  const [reasonTouched, setReasonTouched] = useState(false);
   const reasonRef = useRef<HTMLTextAreaElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
@@ -51,6 +57,7 @@ export function EndSessionConfirmModal({
       setReason("");
       setTypedConfirm("");
       setSubmitting(false);
+      setReasonTouched(false);
       previouslyFocused.current = document.activeElement as HTMLElement | null;
       // Defer focus until after paint so screen readers announce the dialog first
       queueMicrotask(() => reasonRef.current?.focus());
@@ -113,10 +120,14 @@ export function EndSessionConfirmModal({
     }
   };
 
+  // Only show the "too short" hint after the field has been blurred AND the
+  // current value is still too short. Avoids noisy per-keystroke announcements
+  // when the user is mid-typing (dev-challenger msg 407 gap #3).
+  const showReasonHint = reasonTouched && reason.length > 0 && !reasonValid;
+
   return (
     <div
       className="end-session-overlay"
-      onClick={() => !submitting && onCancel()}
       onKeyDown={handleKeyDown}
     >
       <div
@@ -126,7 +137,6 @@ export function EndSessionConfirmModal({
         aria-modal="true"
         aria-labelledby="end-session-title"
         aria-describedby="end-session-desc"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="end-session-header">
           <h3 id="end-session-title">End Session?</h3>
@@ -148,14 +158,15 @@ export function EndSessionConfirmModal({
             className="end-session-reason"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
+            onBlur={() => setReasonTouched(true)}
             placeholder="Why are you ending this session?"
             rows={3}
             maxLength={500}
-            aria-invalid={reason.length > 0 && !reasonValid}
-            aria-describedby={reason.length > 0 && !reasonValid ? "end-session-reason-err" : undefined}
+            aria-invalid={showReasonHint}
+            aria-describedby={showReasonHint ? "end-session-reason-err" : undefined}
           />
-          {reason.length > 0 && !reasonValid && (
-            <div id="end-session-reason-err" className="end-session-field-err" role="alert">
+          {showReasonHint && (
+            <div id="end-session-reason-err" className="end-session-field-err">
               Reason must be at least {REASON_MIN_LENGTH} characters.
             </div>
           )}
@@ -168,7 +179,11 @@ export function EndSessionConfirmModal({
             className="end-session-typed"
             type="text"
             value={typedConfirm}
-            onChange={(e) => setTypedConfirm(e.target.value)}
+            /* Normalize case + strip surrounding whitespace so the visual
+               `text-transform: uppercase` matches the stored value — typing
+               "end " would otherwise leave the button disabled despite the
+               on-screen text reading "END" (dev-challenger msg 407 gap #1). */
+            onChange={(e) => setTypedConfirm(e.target.value.toUpperCase().trim())}
             autoComplete="off"
             spellCheck={false}
             aria-invalid={typedConfirm.length > 0 && !confirmValid}
