@@ -2159,6 +2159,49 @@ fn handle_audience_history(topic: &str, pool: Option<&str>) -> Result<serde_json
     }))
 }
 
+/// Returns true if every participant in the pipeline has an `accept` vote
+/// in the most-recently-completed round's messages.
+///
+/// Why: human msg 145 identified "pipeline got stuck and wouldn't end on its own"
+/// as the top pain. The existing stagnation detector at vaak-mcp.rs:4108+ uses
+/// body-length (<100 chars) as the signal, which silently misses verbose
+/// stall-close messages like the ones we produced in msgs 89/92/95/98/101/104/107.
+/// A metadata-based consensus detector catches unanimity directly.
+///
+/// Semantics locked in developer msg 155:
+/// - Snapshot: latest vote per participant in the round wins over earlier votes
+/// - Round-boundary: single round only, no cross-round accumulation
+/// - Counts every participant in pipeline_order (no synthesizer exclusion per
+///   tech-leader msg 200 scope cut — option (a) from dev-challenger msg 151)
+/// - Reads metadata keys `vote` and `synthesis_vote_reaffirmed.choice`; either satisfies
+///   (both were in use during the stall-close rounds 4-5 of this very conversation)
+/// - Empty participant list returns false (no consensus from nothing)
+fn round_reached_consensus(
+    participants: &[&str],
+    round_message_ids: &[u64],
+    board: &[serde_json::Value],
+) -> bool {
+    if participants.is_empty() {
+        return false;
+    }
+    participants.iter().all(|participant| {
+        // Latest-vote-wins: reverse scan the round's messages, find the most recent
+        // vote-bearing message from this participant.
+        let vote = round_message_ids.iter().rev().find_map(|msg_id| {
+            let msg = board.iter().find(|m| m.get("id").and_then(|i| i.as_u64()) == Some(*msg_id))?;
+            let from = msg.get("from").and_then(|f| f.as_str())?;
+            if from != *participant { return None; }
+            let meta = msg.get("metadata")?;
+            meta.get("vote").and_then(|v| v.as_str())
+                .or_else(|| meta.get("synthesis_vote_reaffirmed")
+                    .and_then(|v| v.get("choice"))
+                    .and_then(|c| c.as_str()))
+                .map(|s| s.to_string())
+        });
+        vote.as_deref() == Some("accept")
+    })
+}
+
 /// Validate that a moderator-issued action carries a sufficient audit reason.
 ///
 /// Why: dev-challenger msg 172 flagged that unaudited privileged actions (end_discussion,
@@ -4133,16 +4176,49 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     let new_stagnant = if round_is_stagnant { stagnant_rounds + 1 } else { 0 };
                     updated_disc["stagnant_rounds"] = serde_json::json!(new_stagnant);
 
+                    // Consensus detection: auto-close if every pipeline participant voted `accept`
+                    // in the just-completed round.
+                    // Why: the stagnation check above uses body-length <100 chars and misses
+                    // verbose stall-close content (see msgs 89/92/95/98/101/104/107 from this
+                    // very conversation). Metadata-based consensus catches unanimity directly.
+                    // Semantics per developer msg 155 + locked with dev-challenger msg 151:
+                    //   snapshot (latest vote per role), round-boundary (single round window),
+                    //   count every participant, read both `vote` and `synthesis_vote_reaffirmed.choice`.
+                    let round_is_consensus = {
+                        let round_len = pipeline_order.len();
+                        let round_start_idx = outputs.len().saturating_sub(round_len);
+                        let round_msg_ids: Vec<u64> = outputs[round_start_idx..].iter()
+                            .filter_map(|o| o.get("message_id").and_then(|i| i.as_u64()))
+                            .collect();
+                        let participants: Vec<&str> = pipeline_order.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect();
+                        let board = read_board(&state.project_dir);
+                        round_reached_consensus(&participants, &round_msg_ids, &board)
+                    };
+
                     // Check if discussion is paused — don't auto-advance
                     let is_paused = updated_disc.get("paused_at").and_then(|v| v.as_str()).is_some();
                     if is_paused {
                         let _ = write_discussion_state(&state.project_dir, &updated_disc);
                         post_turn_system_message(&state.project_dir,
                             &format!("Round {} complete — discussion is paused. Waiting for resume.", current_round + 1));
+                    } else if should_loop && round_is_consensus {
+                        // Consensus reached — auto-close with distinct reason.
+                        // Why: dev-challenger msg 172 attack 3 — consensus-close and stagnation-close
+                        // are semantically different failure/success modes; the board message should
+                        // let the UI and human distinguish them.
+                        updated_disc["active"] = serde_json::json!(false);
+                        updated_disc["phase"] = serde_json::json!("pipeline_complete");
+                        updated_disc["terminated_by"] = serde_json::json!("consensus");
+                        let _ = write_discussion_state(&state.project_dir, &updated_disc);
+                        post_turn_system_message(&state.project_dir,
+                            "Pipeline auto-closed: consensus reached. Every participant voted `accept` in the final round. See decisions record for accepted items.");
                     } else if should_loop && new_stagnant >= max_stagnant {
                         // Stagnation limit reached — auto-close
                         updated_disc["active"] = serde_json::json!(false);
                         updated_disc["phase"] = serde_json::json!("pipeline_complete");
+                        updated_disc["terminated_by"] = serde_json::json!("stagnation");
                         let _ = write_discussion_state(&state.project_dir, &updated_disc);
                         post_turn_system_message(&state.project_dir,
                             &format!("Discussion auto-closed: {} consecutive rounds with no substantive output. Start a new discussion when there's work to discuss.", max_stagnant));
@@ -7259,5 +7335,141 @@ mod tests {
         assert!(validate_moderator_reason("pipeline_next", Some("")).is_err());
         assert!(validate_moderator_reason("pipeline_next", Some("skip tester"))
             .is_ok());
+    }
+
+    // --- PR A consensus-detection tests ---
+
+    fn mk_vote_msg(id: u64, from: &str, vote: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "from": from,
+            "metadata": { "vote": vote, "on": 56 }
+        })
+    }
+
+    fn mk_reaffirmed_msg(id: u64, from: &str, choice: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "from": from,
+            "metadata": { "synthesis_vote_reaffirmed": { "choice": choice, "on": 56 } }
+        })
+    }
+
+    fn mk_plain_msg(id: u64, from: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "from": from,
+            "metadata": {}
+        })
+    }
+
+    #[test]
+    fn consensus_all_accept_returns_true() {
+        let participants = vec!["developer:0", "tester:0", "architect:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_vote_msg(2, "tester:0", "accept"),
+            mk_vote_msg(3, "architect:0", "accept"),
+        ];
+        let round_ids = vec![1u64, 2, 3];
+        assert!(round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_missing_one_vote_returns_false() {
+        let participants = vec!["developer:0", "tester:0", "architect:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_vote_msg(2, "tester:0", "accept"),
+            // architect:0 never voted
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_reject_vote_blocks_consensus() {
+        let participants = vec!["developer:0", "tester:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_vote_msg(2, "tester:0", "reject"),
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_defer_vote_blocks_consensus() {
+        let participants = vec!["developer:0", "tester:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_vote_msg(2, "tester:0", "defer"),
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_empty_participants_returns_false() {
+        let participants: Vec<&str> = vec![];
+        let board: Vec<serde_json::Value> = vec![];
+        let round_ids: Vec<u64> = vec![];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_snapshot_semantics_latest_vote_wins() {
+        // developer votes accept, then reject — reject wins (latest vote)
+        let participants = vec!["developer:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_vote_msg(2, "developer:0", "reject"),
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_snapshot_semantics_reject_then_accept_passes() {
+        // developer changes mind: reject, then accept — accept wins (latest)
+        let participants = vec!["developer:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "reject"),
+            mk_vote_msg(2, "developer:0", "accept"),
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_reads_synthesis_vote_reaffirmed_key() {
+        // Mixed: one uses `vote`, one uses `synthesis_vote_reaffirmed.choice`
+        let participants = vec!["developer:0", "tester:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "accept"),
+            mk_reaffirmed_msg(2, "tester:0", "accept"),
+        ];
+        let round_ids = vec![1u64, 2];
+        assert!(round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_ignores_messages_outside_current_round() {
+        // Prior round's reject should NOT block current round's unanimous accept
+        let participants = vec!["developer:0"];
+        let board = vec![
+            mk_vote_msg(1, "developer:0", "reject"),  // prior round
+            mk_vote_msg(2, "developer:0", "accept"),  // current round
+        ];
+        let round_ids = vec![2u64]; // only current round
+        assert!(round_reached_consensus(&participants, &round_ids, &board));
+    }
+
+    #[test]
+    fn consensus_plain_message_without_vote_metadata_is_not_accept() {
+        let participants = vec!["developer:0"];
+        let board = vec![mk_plain_msg(1, "developer:0")];
+        let round_ids = vec![1u64];
+        assert!(!round_reached_consensus(&participants, &round_ids, &board));
     }
 }
