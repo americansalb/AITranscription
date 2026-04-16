@@ -7887,29 +7887,54 @@ mod tests {
         unimplemented!("waiting on moderator-exit pause hook");
     }
 
-    /// Open item 3 — AMENDED per tech-leader msg 303:
-    /// Replaces the dropped `test_human_zero_yields_to_claimed_manager`.
-    /// Tech-leader's msg 303 arbitrated that the "human yields to manager"
-    /// interpretation (tester msg 181) was philosophy drift. The project
-    /// invariant is: `state.role == "human"` unconditionally bypasses
-    /// moderator gates, whether or not a manager is claimed.
-    ///
-    /// Flag: vaak-mcp.rs:2396-2397 in the current uncommitted tree
-    /// implements the REJECTED conditional bypass
-    /// (`human_bypass_ok = ... && !has_active_manager_in_sessions(...)`).
-    /// This test asserts the invariant tech-leader directed; unignoring it
-    /// will fail against current code. Either the conditional bypass needs
-    /// revert or this test needs further amendment. Kept #[ignore]'d with
-    /// this note until tech-leader disposition clears the contradiction.
+    // Open item 3 — FINAL per tech-leader msg 326 (msg 303 retracted by msg 318).
+    // Architect msg 310 identified the moderator/manager conflation in msg 303;
+    // vision § 11.4 / § 11.4b hold:
+    //   - human bypass on moderator_only_actions yields when MODERATOR is
+    //     claimed (not when manager is claimed)
+    //   - manager has separate capabilities, orthogonal to moderator gates
+    // Dev-challenger msg 313 split this into 3 distinct tests with a pause
+    // filter so the invariant is unambiguous. Platform msg 320 requires the
+    // check live inside with_file_lock to close the TOCTOU race.
+
+    /// 3a (positive): moderator is claimed → human bypass on moderator gates
+    /// disabled. Error should be `ModeratorError::HumanBypassYieldsToModerator
+    /// { moderator: "<role:instance>" }`.
     #[test]
-    #[ignore = "invariant conflicts with current conditional bypass at vaak-mcp.rs:2396-2397 — awaiting tech-leader disposition"]
-    fn test_human_always_bypasses_moderator_gate() {
-        // Assertion shape per tech-leader msg 303 project-philosophy:
-        //   for action in moderator_only_actions:
-        //     for manager_state in [claimed, unclaimed]:
-        //       let result = handle_discussion_control_as(role="human", action, manager_state);
-        //       assert!(result.is_ok(), "human must bypass {} regardless of manager state", action);
-        unimplemented!("philosophy-vs-code contradiction; awaiting tech-leader resolution");
+    #[ignore = "feature not implemented — unignore when item #3 ships in PR 4"]
+    fn test_human_yields_when_moderator_claimed() {
+        // Assertion shape:
+        //   1. discussion.moderator = "moderator:0" (active session)
+        //   2. call from role="human" to a moderator_only_action
+        //   3. expect Err with HumanBypassYieldsToModerator { moderator: "moderator:0" }
+        //   4. predicate must execute inside with_file_lock (narrative comment required)
+        unimplemented!("waiting on PR 4 item #3");
+    }
+
+    /// 3b (negative): only manager is claimed, moderator vacant. Human bypass
+    /// must STILL apply — manager presence does not trigger the yield. Guards
+    /// against the moderator/manager conflation tech-leader retracted twice.
+    #[test]
+    #[ignore = "feature not implemented — unignore when item #3 ships in PR 4"]
+    fn test_human_retains_bypass_when_only_manager_claimed() {
+        // Assertion shape:
+        //   1. discussion.moderator unset; manager:0 has active session
+        //   2. call from role="human" to a moderator_only_action
+        //   3. expect Ok — bypass still holds (manager presence irrelevant)
+        unimplemented!("waiting on PR 4 item #3");
+    }
+
+    /// 3c (pause filter): moderator is claimed but session is paused. Paused
+    /// moderator must NOT hold authority — human bypass re-applies while
+    /// paused. Dev-challenger msg 313 sharpening #2.
+    #[test]
+    #[ignore = "feature not implemented — unignore when item #3 ships in PR 4"]
+    fn test_human_yields_does_not_fire_when_moderator_paused() {
+        // Assertion shape:
+        //   1. discussion.moderator = "moderator:0", session.is_paused == true
+        //   2. call from role="human" to a moderator_only_action
+        //   3. expect Ok — paused moderator does not yield authority over human
+        unimplemented!("waiting on PR 4 item #3");
     }
 
     /// Open item 4 (dev-challenger msg 172 attack 1, developer msg 223 defer):
