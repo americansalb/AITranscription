@@ -4396,7 +4396,9 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             let to_role_part = to.split(':').next().unwrap_or(to);
             let current_role_part = current_agent.split(':').next().unwrap_or(current_agent);
             let is_question_to_current = msg_type == "question" && to_role_part == current_role_part;
-            let is_ack = msg_type == "ack";
+            // Per dev-challenger msg 1139 attack #2: ack must come from the current-stage holder,
+            // otherwise any idle role could send "ack" to bypass the gate.
+            let is_ack = msg_type == "ack" && from_label == current_agent;
             let is_answer_to_current_question = msg_type == "answer" && {
                 if let Some(reply_id) = metadata.as_ref().and_then(|m| m.get("in_reply_to")).and_then(|v| v.as_u64()) {
                     let referenced = read_board_filtered(&state.project_dir).into_iter()
