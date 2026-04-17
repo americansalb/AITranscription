@@ -1461,6 +1461,36 @@ When multiple instances of this role are active:
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
+  // pr-respawn-dead-agents wiring (developer msg 527 + human msgs 512/515):
+  // agents die silently — sometimes the PowerShell stays open but Claude
+  // exits, sometimes the whole process is gone. The new Tauri command
+  // `check_and_respawn_dead_agents` inspects both cases (dead PID +
+  // alive-PID-with-stale-heartbeat) and relaunches what's missing. Running
+  // the check every 60s keeps the team alive without hammering tasklist.
+  useEffect(() => {
+    if (!window.__TAURI__ || !projectDir) return;
+    let cancelled = false;
+    const tickRespawn = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const respawned = await invoke<number>("check_and_respawn_dead_agents", {
+          projectDir,
+          staleThresholdSecs: 90,
+        });
+        if (!cancelled && respawned > 0) {
+          console.log(`[respawn-watchdog] respawned ${respawned} dead agent(s)`);
+        }
+      } catch (e) {
+        if (!cancelled) console.error("[respawn-watchdog] tick failed:", e);
+      }
+    };
+    // One-shot on mount catches the case where repopulate_spawned fired
+    // before the team launcher panel was visible.
+    tickRespawn();
+    const interval = setInterval(tickRespawn, 60_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [projectDir]);
+
   const handleCreateSection = async () => {
     if (!newSectionName.trim() || !projectDir || sectionLoading) return;
     setSectionLoading(true);
