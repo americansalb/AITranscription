@@ -17,11 +17,15 @@ fn emit_git_build_info() {
         .args(["log", "-1", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--format=%cd"]).output()
         .ok().and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
         .map(|s| s.trim().to_string()).unwrap_or_default();
+    let tag = Command::new("git").args(["describe", "--tags", "--exact-match"]).output()
+        .ok().and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .map(|s| s.trim().to_string()).unwrap_or_default();
     let built_at = chrono_like_iso_now();
     println!("cargo:rustc-env=VAAK_GIT_SHA={}", sha);
     println!("cargo:rustc-env=VAAK_GIT_DIRTY={}", dirty);
     println!("cargo:rustc-env=VAAK_GIT_SUBJECT={}", subject);
     println!("cargo:rustc-env=VAAK_GIT_COMMIT_DATE={}", commit_date);
+    println!("cargo:rustc-env=VAAK_GIT_TAG={}", tag);
     println!("cargo:rustc-env=VAAK_BUILT_AT={}", built_at);
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
