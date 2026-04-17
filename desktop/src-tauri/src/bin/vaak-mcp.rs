@@ -2981,6 +2981,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             if let Some(ref order) = pipeline_order {
                 new_state["pipeline_order"] = serde_json::json!(order);
                 new_state["pipeline_stage"] = serde_json::json!(0);
+                new_state["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
                 new_state["pipeline_outputs"] = serde_json::json!([]);
                 new_state["pipeline_mode"] = serde_json::json!("review");
             }
@@ -4902,6 +4903,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         // Auto-advance to next round
                         let next_round = current_round + 1;
                         updated_disc["pipeline_stage"] = serde_json::json!(0);
+                        updated_disc["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
                         updated_disc["current_round"] = serde_json::json!(next_round);
                         let _ = write_discussion_state(&state.project_dir, &updated_disc);
 
@@ -4937,6 +4939,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     } else {
                         // Advance to next stage
                         updated_disc["pipeline_stage"] = serde_json::json!(next_stage);
+                        updated_disc["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
                         let _ = write_discussion_state(&state.project_dir, &updated_disc);
                         let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
                         post_turn_system_message(&state.project_dir, &format!("Stage {} complete ({}) — next: {} ({}/{})", current_stage + 1, from_label, next_agent, next_stage + 1, pipeline_order.len()));
