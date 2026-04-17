@@ -3324,42 +3324,41 @@ fn end_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
 
 /// Explicitly designate a moderator for the active session.
 ///
-/// Per architect msg 524 (pr-moderator-set, addresses human msg 511 ask #3
-/// "no clear way to designate a moderator"). Today moderator is implicit
-/// (whichever role claims first, or `null` for auto). This command makes
-/// it explicit.
+/// Per architect msg 524 + tech-leader msg 540 (pr-moderator-set + cleanup,
+/// addresses human msg 511 ask #3 "no clear way to designate a moderator").
+/// Today moderator is implicit (whichever role claims first, or `null` for
+/// auto). This command makes it explicit.
 ///
 /// Validation:
 ///   1. session must be active
 ///   2. target role + instance must have an active session in sessions.json
 ///      (last_heartbeat within heartbeat_timeout_seconds)
-///   3. caller must be the current moderator OR a human (per § 11.14)
+///   3. authority: this is a `#[tauri::command]` callable only from the
+///      Tauri webview (not exposed via MCP per platform-engineer msg 534
+///      Finding 2 rebuttal). The caller therefore IS the human, by
+///      construction — no per-call caller verification needed.
+///
+/// SAFETY GATE (vision § 11.14a, tech-leader msg 540): if this command is
+/// ever exposed via the MCP sidecar (`handle_*` in vaak-mcp.rs), Option A
+/// from architect msg 533 (Tauri-window-injection or split into separate
+/// MCP/Tauri commands) MUST be implemented first. Otherwise an agent
+/// claiming the `human` role gains pipeline-hijack capability.
 ///
 /// On success: writes discussion.json.moderator = "<role>:<instance>" (string
 /// format consistent with how `handle_discussion_control` reads it at
 /// vaak-mcp.rs:2614). Posts a `moderation` board message announcing the
 /// reassignment so the audit trail captures it.
-///
-/// `caller_role` parameter: the role:instance label of the invoker. Frontend
-/// passes the active project_join'd role (the human-direct UI passes
-/// "human:0"). This is a soft trust boundary — frontend is the trust
-/// boundary today, since Tauri commands are invoked from the same process.
 #[tauri::command]
 fn set_session_moderator(
     dir: String,
     role: String,
     instance: u32,
-    caller_role: String,
 ) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
     let role = role.trim().to_string();
-    let caller_role = caller_role.trim().to_string();
 
     if role.is_empty() {
         return Err("role must be non-empty".to_string());
-    }
-    if caller_role.is_empty() {
-        return Err("caller_role must be non-empty (typically the active session's role:instance label)".to_string());
     }
 
     let new_moderator_label = format!("{}:{}", role, instance);
@@ -3419,18 +3418,10 @@ fn set_session_moderator(
             ));
         }
 
-        // Authorization: caller must be current moderator OR human
-        let current_mod = state.moderator.as_deref().unwrap_or("");
-        let is_human = caller_role.starts_with("human:") || caller_role == "human";
-        let is_current_mod = !current_mod.is_empty() && current_mod == caller_role;
-        let no_current_mod = current_mod.is_empty();
-        // No current moderator → first-claim is allowed (matches existing implicit behavior).
-        if !is_human && !is_current_mod && !no_current_mod {
-            return Err(format!(
-                "Only the current moderator ({}) or a human can reassign the moderator. Caller: {}",
-                current_mod, caller_role
-            ));
-        }
+        // Authorization: command is Tauri-only (not MCP-exposed) per safety
+        // gate in the doc comment above. Caller IS the human via construction;
+        // no per-call check needed. Future MCP exposure must add Option A
+        // discrimination first.
 
         let prior_moderator = state.moderator.clone().unwrap_or_default();
         state.moderator = Some(new_moderator_label.clone());
@@ -3456,16 +3447,15 @@ fn set_session_moderator(
             "timestamp": now_iso,
             "subject": format!("Moderator set to {}", new_moderator_label),
             "body": format!(
-                "Session moderator is now {} (was: {}). Set by {}.",
+                "Session moderator is now {} (was: {}). Set via Tauri UI (human).",
                 new_moderator_label,
-                if prior_moderator.is_empty() { "none" } else { prior_moderator.as_str() },
-                caller_role
+                if prior_moderator.is_empty() { "none" } else { prior_moderator.as_str() }
             ),
             "metadata": {
                 "discussion_action": "set_moderator",
                 "prior_moderator": prior_moderator,
                 "new_moderator": new_moderator_label,
-                "set_by": caller_role
+                "set_by": "tauri_ui"
             }
         });
         if let Ok(line) = serde_json::to_string(&announcement) {
@@ -5581,9 +5571,8 @@ mod tests {
             tmp.to_str().unwrap().to_string(),
             "developer".to_string(),
             0,
-            "human:0".to_string(),
         );
-        assert!(result.is_ok(), "human-as-authority should succeed, got {:?}", result);
+        assert!(result.is_ok(), "tauri-only call should succeed, got {:?}", result);
 
         // Verify discussion.json got the new moderator
         let disc: serde_json::Value = serde_json::from_str(
@@ -5608,7 +5597,6 @@ mod tests {
             tmp.to_str().unwrap().to_string(),
             "ghost".to_string(),
             0,
-            "human:0".to_string(),
         );
         assert!(result.is_err(), "stale target must be rejected");
         let err = result.unwrap_err();
@@ -5630,35 +5618,14 @@ mod tests {
             tmp.to_str().unwrap().to_string(),
             "phantom".to_string(),
             0,
-            "human:0".to_string(),
         );
         assert!(result.is_err(), "unknown role must be rejected");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn set_session_moderator_rejects_non_authority_caller() {
-        // Current moderator = developer:0; caller = tester:0 (not human, not current mod)
-        let tmp = fixture_set_moderator(
-            "auth",
-            Some("developer:0"),
-            r#"{"role":"developer","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"},
-              {"role":"tester","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}"#,
-        );
-        let result = super::set_session_moderator(
-            tmp.to_str().unwrap().to_string(),
-            "tester".to_string(),
-            0,
-            "tester:0".to_string(),
-        );
-        assert!(result.is_err(), "non-moderator non-human caller must be rejected");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Only the current moderator") || err.contains("can reassign"),
-            "error must explain authority gate, got: {}", err
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
+    // (Removed: set_session_moderator_rejects_non_authority_caller — the
+    // command no longer takes a caller_role parameter. Authority is now
+    // enforced structurally by Tauri-only exposure per safety gate above.)
 
     #[test]
     fn set_session_moderator_rejects_when_session_inactive() {
@@ -5677,7 +5644,6 @@ mod tests {
             tmp.to_str().unwrap().to_string(),
             "developer".to_string(),
             0,
-            "human:0".to_string(),
         );
         assert!(result.is_err(), "inactive session must reject moderator-set");
         assert!(

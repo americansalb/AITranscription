@@ -80,16 +80,17 @@ static HEARTBEAT_TICKER_STARTED: std::sync::atomic::AtomicBool = std::sync::atom
 /// before this PR, heartbeats only fired on `project_wait` poll iterations,
 /// `project_send`, and `project_claim`. An agent doing several minutes of
 /// `Bash`/`Read`/`Grep` tool-calls between message-sends would age past the
-/// 180s pipeline-stage watchdog and get auto-skipped while alive.
+/// pipeline-stage watchdog (DEFAULT_PIPELINE_STAGE_TIMEOUT_SECS) and get
+/// auto-skipped while alive.
 ///
 /// This thread is the agent's continuous liveness signal — every 30 seconds
 /// it bumps `last_heartbeat` regardless of what the agent is doing. The
 /// watchdog now reflects "process alive" rather than "process recently sent
 /// a message." Decoupling is the architectural fix.
 ///
-/// Cadence: 30s — aggressive enough that a 180s watchdog has 6 ticks of
-/// margin before considering the agent stale; still infrequent enough to
-/// avoid sessions.json write contention.
+/// Cadence: 30s — paired with the 360s watchdog default (post-stopgap),
+/// gives 12 ticks of margin before staleness; small enough that sessions.json
+/// write contention stays negligible.
 fn ensure_heartbeat_ticker_started() {
     use std::sync::atomic::Ordering;
     if HEARTBEAT_TICKER_STARTED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -1533,13 +1534,22 @@ fn write_discussion_state(project_dir: &str, state: &serde_json::Value) -> Resul
 /// auto-skipped by the watchdog. Configurable via project.json
 /// `settings.pipeline_stage_timeout_secs`.
 ///
-/// Why 180s: long enough for a real agent to finish reading a long context +
-/// thinking + composing a stage broadcast (~1-2 min in practice), short enough
-/// to keep the pipeline flowing when an agent's terminal closes or process
-/// crashes. Existing heartbeat_timeout_seconds defaults to 300s; we trigger
-/// earlier than that on purpose so a stage moves before the agent is fully
-/// declared dead — gives them a chance to recover the slot when they rejoin.
-const DEFAULT_PIPELINE_STAGE_TIMEOUT_SECS: u64 = 180;
+/// History:
+///   - 180s (initial): chosen to fire earlier than heartbeat_timeout_seconds
+///     (300s default) so the pipeline keeps flowing before an agent is fully
+///     declared dead.
+///   - 360s (pr-watchdog-timeout-stopgap, per tech-leader msg 540 +
+///     platform-engineer msg 534 Flag-1): bumped to 2× heartbeat_timeout
+///     because heartbeats were event-driven (only fired on project_wait/
+///     send/claim — see `ensure_heartbeat_ticker_started` for the proper
+///     fix). An agent doing 4-5 minutes of Bash/Read/Grep tool-calls
+///     between message-sends would age past 180s and get skipped while
+///     alive. Stopgap until all sidecar binaries are rebuilt with the
+///     pr-sidecar-heartbeat-thread fix and existing agents respawn.
+///
+/// After all agents run the heartbeat-thread version, this can drop back
+/// to 180s in a future cleanup.
+const DEFAULT_PIPELINE_STAGE_TIMEOUT_SECS: u64 = 360;
 
 /// Read the pipeline-stage timeout from project.json with fallback to default.
 fn pipeline_stage_timeout_secs(project_dir: &str) -> u64 {
