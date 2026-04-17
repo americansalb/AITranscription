@@ -21,6 +21,7 @@ use std::sync::Mutex;
 // instead of raw serde_json::Value manipulation. Migration is incremental:
 // new code uses typed functions, old code still works via JSON.
 use vaak_desktop::collab::{self, DiscussionState};
+use vaak_desktop::build_info;
 
 /// Atomic file write. On Windows, writes directly (rename over open files fails).
 /// On Unix, uses tmp+rename for atomicity. All callers use file locking for concurrency.
@@ -7847,6 +7848,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "--stop-hook") {
         run_stop_hook();
+        return;
+    }
+    if args.iter().any(|a| a == "--build-info") {
+        println!("{}", build_info::as_json());
         return;
     }
 

@@ -3,6 +3,7 @@
 
 mod a11y;
 mod audio;
+mod build_info;
 mod collab;
 mod database;
 mod ethereal;
@@ -332,6 +333,31 @@ fn check_sidecar_status() -> serde_json::Value {
             "found": false,
             "path": null
         }),
+    }
+}
+
+/// Return build identity for host + sidecar (+ ui injected by frontend).
+/// Host info is compile-time baked via build.rs; sidecar info comes from
+/// spawning `vaak-mcp --build-info` and parsing its stdout.
+#[tauri::command]
+fn get_build_info() -> serde_json::Value {
+    let host = build_info::as_json();
+    let sidecar = match get_sidecar_path() {
+        Some(path) => probe_sidecar_build_info(&path),
+        None => serde_json::json!({ "error": "binary missing", "sha": "unknown", "dirty": false }),
+    };
+    serde_json::json!({ "host": host, "sidecar": sidecar })
+}
+
+fn probe_sidecar_build_info(path: &std::path::Path) -> serde_json::Value {
+    match std::process::Command::new(path).arg("--build-info").output() {
+        Ok(output) if output.status.success() => {
+            match String::from_utf8(output.stdout).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok()) {
+                Some(v) => v,
+                None => serde_json::json!({ "error": "malformed output", "sha": "unknown", "dirty": false }),
+            }
+        }
+        _ => serde_json::json!({ "error": "probe failed", "sha": "unknown", "dirty": false }),
     }
 }
 
@@ -5427,6 +5453,7 @@ fn main() {
             set_auto_collab,
             get_auto_collab,
             check_sidecar_status,
+            get_build_info,
             set_human_in_loop,
             get_human_in_loop,
             save_screen_reader_settings,
