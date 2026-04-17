@@ -1482,6 +1482,177 @@ fn write_discussion_state(project_dir: &str, state: &serde_json::Value) -> Resul
     })
 }
 
+/// Default seconds before a pipeline stage's holder is considered stale and
+/// auto-skipped by the watchdog. Configurable via project.json
+/// `settings.pipeline_stage_timeout_secs`.
+///
+/// Why 180s: long enough for a real agent to finish reading a long context +
+/// thinking + composing a stage broadcast (~1-2 min in practice), short enough
+/// to keep the pipeline flowing when an agent's terminal closes or process
+/// crashes. Existing heartbeat_timeout_seconds defaults to 300s; we trigger
+/// earlier than that on purpose so a stage moves before the agent is fully
+/// declared dead — gives them a chance to recover the slot when they rejoin.
+const DEFAULT_PIPELINE_STAGE_TIMEOUT_SECS: u64 = 180;
+
+/// Read the pipeline-stage timeout from project.json with fallback to default.
+fn pipeline_stage_timeout_secs(project_dir: &str) -> u64 {
+    let cfg_path = vaak_dir(project_dir).join("project.json");
+    std::fs::read_to_string(&cfg_path).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|j| j.get("settings")?.get("pipeline_stage_timeout_secs")?.as_u64())
+        .unwrap_or(DEFAULT_PIPELINE_STAGE_TIMEOUT_SECS)
+}
+
+/// Pipeline auto-skip watchdog: if the current stage holder has not heartbeated
+/// in `timeout_secs`, advance the stage and post a system message naming what
+/// was skipped and why.
+///
+/// Why this exists (human msg 511 ask #4): when an agent's terminal closes
+/// mid-pipeline, the stage holder never broadcasts, and the existing
+/// broadcast-driven auto-advance never fires. Result: pipeline stalls
+/// indefinitely until human intervention. tech-leader:1 holding stage 7 of
+/// the prior round-1 pipeline for >2 hours triggered this work. Watchdog
+/// runs in every active agent's `project_wait` loop — first agent to detect
+/// the staleness wins, others see updated state on next tick.
+///
+/// Returns Ok(true) if a skip was performed, Ok(false) otherwise.
+fn auto_skip_stale_pipeline_stage(project_dir: &str, timeout_secs: u64) -> Result<bool, String> {
+    let disc = read_discussion_state(project_dir);
+    let active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mode = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    if !active || mode != "pipeline" {
+        return Ok(false);
+    }
+    if disc.get("paused_at").and_then(|v| v.as_str()).is_some() {
+        return Ok(false);
+    }
+
+    let pipeline_order: Vec<String> = disc.get("pipeline_order")
+        .and_then(|o| o.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let current_stage = disc.get("pipeline_stage").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    if current_stage >= pipeline_order.len() {
+        return Ok(false);
+    }
+
+    let stage_holder = match pipeline_order.get(current_stage) {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => return Ok(false),
+    };
+
+    // Find the stage holder's last_heartbeat
+    let sessions = read_sessions(project_dir);
+    let bindings = sessions.get("bindings").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+    let stage_session = bindings.iter().find(|b| {
+        let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+        format!("{}:{}", role, inst) == stage_holder
+    });
+
+    let last_hb = stage_session
+        .and_then(|s| s.get("last_heartbeat").and_then(|h| h.as_str()))
+        .and_then(parse_iso_to_epoch_secs);
+    let now = parse_iso_to_epoch_secs(&utc_now_iso()).unwrap_or(0);
+
+    let is_stale = match last_hb {
+        Some(hb) => now.saturating_sub(hb) > timeout_secs,
+        None => true, // No session record at all = stale
+    };
+    if !is_stale {
+        return Ok(false);
+    }
+
+    // Acquire the discussion lock and re-verify (TOCTOU): another watchdog in
+    // a sibling agent's project_wait may have already advanced. Skip-update
+    // happens inside the lock so writes are serialized.
+    let project_dir_owned = project_dir.to_string();
+    let stage_holder_inner = stage_holder.clone();
+    let advanced_stage: Option<usize> = with_discussion_lock(project_dir, move || -> Result<Option<usize>, String> {
+        let disc2 = read_discussion_state(&project_dir_owned);
+        let cur2 = disc2.get("pipeline_stage").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+        if cur2 != current_stage {
+            return Ok(None); // Already advanced by another watchdog or by the agent itself
+        }
+
+        let mut outputs = disc2.get("pipeline_outputs").and_then(|o| o.as_array()).cloned().unwrap_or_default();
+        outputs.push(serde_json::json!({
+            "stage": current_stage,
+            "agent": stage_holder_inner,
+            "skipped": true,
+            "skip_reason": format!("stale: no heartbeat for >{}s", timeout_secs),
+            "timestamp": utc_now_iso(),
+        }));
+
+        let mut updated = disc2.clone();
+        updated["pipeline_outputs"] = serde_json::json!(outputs);
+        updated["pipeline_stage"] = serde_json::json!(current_stage + 1);
+        write_discussion_state_unlocked(&project_dir_owned, &updated)?;
+        Ok(Some(current_stage + 1))
+    })?;
+
+    let next_stage = match advanced_stage {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    // Post system messages outside the discussion lock — board has its own lock chain.
+    let skip_msg = serde_json::json!({
+        "id": next_message_id(project_dir),
+        "from": "system:0",
+        "to": "all",
+        "type": "system",
+        "subject": format!("Stage {} auto-skipped: {} stale", current_stage + 1, stage_holder),
+        "body": format!(
+            "Pipeline stage {} ({}) auto-skipped — no heartbeat in >{}s. Pipeline advancing to stage {}/{}.",
+            current_stage + 1, stage_holder, timeout_secs, next_stage + 1, pipeline_order.len()
+        ),
+        "timestamp": utc_now_iso(),
+        "metadata": {
+            "pipeline_auto_skip": true,
+            "skipped_agent": stage_holder,
+            "skipped_stage": current_stage,
+            "timeout_secs": timeout_secs
+        }
+    });
+    let _ = append_to_board(project_dir, &skip_msg);
+
+    if next_stage < pipeline_order.len() {
+        let next_agent = pipeline_order[next_stage].clone();
+        let wake_msg = serde_json::json!({
+            "id": next_message_id(project_dir),
+            "from": "system:0",
+            "to": next_agent,
+            "type": "system",
+            "subject": "Your pipeline stage",
+            "body": format!(
+                "It is now your turn in the pipeline (stage {}/{}). The previous stage was auto-skipped due to a stale agent. Review previous outputs and broadcast your response.",
+                next_stage + 1, pipeline_order.len()
+            ),
+            "timestamp": utc_now_iso(),
+            "metadata": {"pipeline_notification": true, "preceded_by_skip": true}
+        });
+        let _ = append_to_board(project_dir, &wake_msg);
+    } else {
+        // Auto-skip pushed past the final stage — emit completion notice so
+        // the round can close on the next tick. Don't toggle active here;
+        // round-end logic is owned by the broadcast handler.
+        let done_msg = serde_json::json!({
+            "id": next_message_id(project_dir),
+            "from": "system:0",
+            "to": "all",
+            "type": "system",
+            "subject": "Pipeline round ended via auto-skip",
+            "body": format!("Final stage ({}) was auto-skipped — round considered complete. Next round / consensus check pending.", stage_holder),
+            "timestamp": utc_now_iso(),
+            "metadata": {"pipeline_auto_skip": true, "round_ended_via_skip": true}
+        });
+        let _ = append_to_board(project_dir, &done_msg);
+    }
+
+    Ok(true)
+}
+
 /// Generate anonymized aggregate from submissions in the current round.
 /// Collects submission messages from board.jsonl, strips identity, randomizes order.
 /// For Oxford with teams: groups submissions by team (FOR/AGAINST) instead of randomizing.
@@ -4818,6 +4989,16 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             polls_since_heartbeat = 0;
         }
 
+        // Pipeline mode: check for stale stage holder and auto-skip
+        // (per human msg 511 ask #4 — pipeline shouldn't stall when an agent
+        // closes its terminal mid-stage).
+        {
+            let stage_timeout = pipeline_stage_timeout_secs(&state.project_dir);
+            if let Ok(true) = auto_skip_stale_pipeline_stage(&state.project_dir, stage_timeout) {
+                eprintln!("[project_wait watchdog] pipeline stage auto-skipped (stale holder)");
+            }
+        }
+
         // Consecutive mode: check for stale turns and auto-advance (timeout watchdog)
         {
             let config: serde_json::Value = std::fs::read_to_string(
@@ -8101,15 +8282,156 @@ mod tests {
     /// complementary to PR A's consensus-based auto-termination; this one fires
     /// on silence, not on agreement.
     #[test]
-    #[ignore = "feature not implemented — unignore when stage deadline + auto-advance lands"]
     fn test_pipeline_auto_advances_after_stage_timeout() {
-        // Assertion shape:
-        //   1. set stage_deadline_secs = 5 (test fixture value)
-        //   2. advance to stage N
-        //   3. simulate 6s elapsed with no post from stage-N role
-        //   4. assert `stage_auto_advanced` event emitted
-        //   5. assert current_stage == N + 1
-        unimplemented!("waiting on stage-deadline+auto-advance");
+        // Real implementation lands with pr-pipeline-stale-watchdog (this PR).
+        // Shape: write a pipeline-mode discussion.json + a sessions.json with
+        // the current stage holder's last_heartbeat well beyond timeout. Call
+        // auto_skip_stale_pipeline_stage(timeout=1). Assert:
+        //   - returned Ok(true)
+        //   - discussion.json's pipeline_stage advanced by 1
+        //   - board.jsonl gained a `pipeline_auto_skip` system message naming
+        //     the skipped agent
+        let tmp = std::env::temp_dir().join(format!("vaak-test-stale-pipeline-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+
+        // Minimal project.json — auto_skip reads pipeline_stage_timeout_secs
+        // here but our explicit timeout arg overrides; still need it parseable.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":300,"pipeline_stage_timeout_secs":1}}"#)
+            .expect("write project.json");
+
+        // Pipeline discussion with ghost:0 holding stage 0 of 2
+        std::fs::write(vaak.join("discussion.json"), r#"{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["ghost:0", "willing:0"],
+            "pipeline_stage": 0,
+            "pipeline_outputs": []
+        }"#).expect("write discussion.json");
+
+        // Stale heartbeat: way before now
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role":"ghost","instance":0,"status":"active","last_heartbeat":"2020-01-01T00:00:00Z"},
+                {"role":"willing","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}
+            ]
+        }"#).expect("write sessions.json");
+
+        // Empty board so next_message_id starts at 1
+        std::fs::write(vaak.join("board.jsonl"), "").expect("write board.jsonl");
+
+        let result = auto_skip_stale_pipeline_stage(tmp.to_str().unwrap(), 1);
+        assert!(result.is_ok(), "auto_skip should succeed, got {:?}", result);
+        assert_eq!(result.unwrap(), true, "stale stage holder should trigger skip");
+
+        // Verify pipeline_stage advanced
+        let disc_after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vaak.join("discussion.json")).expect("read discussion.json")
+        ).expect("parse discussion.json");
+        assert_eq!(
+            disc_after.get("pipeline_stage").and_then(|s| s.as_u64()),
+            Some(1),
+            "pipeline_stage should have advanced from 0 to 1"
+        );
+
+        // Verify board got a pipeline_auto_skip message naming ghost:0
+        let board = std::fs::read_to_string(vaak.join("board.jsonl")).expect("read board.jsonl");
+        let lines: Vec<&str> = board.lines().filter(|l| !l.trim().is_empty()).collect();
+        let skip_msg = lines.iter()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|m| m.get("metadata")
+                .and_then(|md| md.get("pipeline_auto_skip"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false));
+        assert!(skip_msg.is_some(), "board should contain a pipeline_auto_skip system message");
+        let skip_msg = skip_msg.unwrap();
+        assert_eq!(
+            skip_msg.get("metadata").and_then(|m| m.get("skipped_agent")).and_then(|s| s.as_str()),
+            Some("ghost:0"),
+            "skip message should name the stale agent"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pipeline_auto_skip_no_op_when_holder_has_fresh_heartbeat() {
+        // Inverse case: if the stage holder is heartbeating, the watchdog
+        // must NOT skip. Otherwise it would steal stages from agents that
+        // are actively working.
+        let tmp = std::env::temp_dir().join(format!("vaak-test-fresh-pipeline-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":300}}"#)
+            .expect("write project.json");
+        std::fs::write(vaak.join("discussion.json"), r#"{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["awake:0", "willing:0"],
+            "pipeline_stage": 0,
+            "pipeline_outputs": []
+        }"#).expect("write discussion.json");
+        // Future heartbeat — definitely not stale
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role":"awake","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}
+            ]
+        }"#).expect("write sessions.json");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("write board.jsonl");
+
+        let result = auto_skip_stale_pipeline_stage(tmp.to_str().unwrap(), 1);
+        assert!(result.is_ok(), "auto_skip should succeed");
+        assert_eq!(result.unwrap(), false, "fresh heartbeat must NOT trigger skip");
+
+        let disc_after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vaak.join("discussion.json")).expect("read")
+        ).expect("parse");
+        assert_eq!(
+            disc_after.get("pipeline_stage").and_then(|s| s.as_u64()),
+            Some(0),
+            "pipeline_stage should be unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pipeline_auto_skip_no_op_when_paused() {
+        // Pause is a deliberate hold — the watchdog must not auto-advance
+        // through it. Otherwise pause loses its semantic value as a
+        // moderator-controlled freeze.
+        let tmp = std::env::temp_dir().join(format!("vaak-test-paused-pipeline-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":300}}"#)
+            .expect("write project.json");
+        std::fs::write(vaak.join("discussion.json"), r#"{
+            "active": true,
+            "mode": "pipeline",
+            "paused_at": "2026-01-01T00:00:00Z",
+            "pipeline_order": ["ghost:0", "willing:0"],
+            "pipeline_stage": 0,
+            "pipeline_outputs": []
+        }"#).expect("write discussion.json");
+        // Stale, but paused — must not skip
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role":"ghost","instance":0,"status":"active","last_heartbeat":"2020-01-01T00:00:00Z"}
+            ]
+        }"#).expect("write sessions.json");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("write board.jsonl");
+
+        let result = auto_skip_stale_pipeline_stage(tmp.to_str().unwrap(), 1);
+        assert!(result.is_ok(), "auto_skip should succeed");
+        assert_eq!(result.unwrap(), false, "paused pipeline must NOT auto-skip");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ─────────────────────────────────────────────────────────────────────
