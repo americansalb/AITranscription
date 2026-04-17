@@ -99,7 +99,13 @@ export function DiscussionPanel({
   if (!discussionState.active) return null;
 
   const modeColor = getModeColor(discussionState.mode);
-  const modeLabel = (discussionState.mode || "Discussion").charAt(0).toUpperCase() + (discussionState.mode || "").slice(1);
+  // Mode-aware label. Falls back to "Session" (mode-neutral) rather than
+  // "Discussion" when the mode string is missing — the user clearly asked
+  // for the UI to stop calling everything "discussion" when it's running
+  // as a pipeline / delphi / etc. (human msg 511).
+  const modeLabel = discussionState.mode
+    ? discussionState.mode.charAt(0).toUpperCase() + discussionState.mode.slice(1)
+    : "Session";
   const phaseLabel = getPhaseLabel(discussionState, closingRound);
   const terminationLabel = getTerminationLabel(discussionState);
   // automationLevel reserved for Phase 2 moderator controls
@@ -110,7 +116,7 @@ export function DiscussionPanel({
     <div
       className="discussion-panel"
       role="region"
-      aria-label="Active discussion"
+      aria-label="Active session"
       aria-live="polite"
     >
       {/* Header: Mode badge + Phase + Round + Controls */}
@@ -124,7 +130,9 @@ export function DiscussionPanel({
             {modeLabel}
           </span>
 
-          {/* Pipeline mode indicator (Discussion / Action) */}
+          {/* Pipeline sub-mode indicator (Review / Action). "Review" displayed
+              in place of the internal "discussion" pipeline_mode to avoid
+              collision with the top-level session-format terminology. */}
           {discussionState.mode === "pipeline" && discussionState.pipeline_mode && (
             <span
               className="discussion-panel-pipeline-mode"
@@ -134,7 +142,7 @@ export function DiscussionPanel({
                 borderColor: discussionState.pipeline_mode === "action" ? "rgba(249, 115, 22, 0.4)" : "rgba(99, 102, 241, 0.4)",
               }}
             >
-              {discussionState.pipeline_mode === "action" ? "Action" : "Discussion"}
+              {discussionState.pipeline_mode === "action" ? "Action" : "Review"}
             </span>
           )}
 
@@ -173,7 +181,7 @@ export function DiscussionPanel({
                 {discussionState.moderator}
               </span>
               {autoModActive && (
-                <span className="discussion-panel-auto-mod" title="Automated Discussion Moderator is active">
+                <span className="discussion-panel-auto-mod" title="Automated Session Moderator is active">
                   Auto-Mod
                 </span>
               )}

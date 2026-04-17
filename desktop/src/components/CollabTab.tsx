@@ -3121,10 +3121,10 @@ When multiple instances of this role are active:
             <button
               className="start-discussion-btn"
               onClick={handleOpenStartDiscussion}
-              title="Start a structured discussion (Delphi, Oxford, Red Team, or Continuous)"
-              aria-label="Start discussion"
+              title="Start a structured session (Pipeline, Delphi, Oxford, Red Team, or Continuous)"
+              aria-label="Start session"
             >
-              &#9998; Discuss
+              &#9998; Start Session
             </button>
           )}
           <button
@@ -5317,11 +5317,11 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        {/* Start Discussion Dialog */}
+        {/* Start Session Dialog (session = pipeline / delphi / oxford / red_team / continuous) */}
         {startDiscussionOpen && (
           <div className="confirm-dialog" onClick={() => setStartDiscussionOpen(false)}>
             <div className="start-discussion-dialog" onClick={(e) => e.stopPropagation()}>
-              <div className="confirm-dialog-title">Start Discussion</div>
+              <div className="confirm-dialog-title">Start Session</div>
 
               {/* Format selection */}
               <div className="sd-section-label">Format</div>
@@ -5503,7 +5503,7 @@ When multiple instances of this role are active:
                   onClick={handleStartDiscussion}
                   disabled={sdStarting || (sdFormat !== "continuous" && !sdTopic.trim()) || Object.values(sdParticipants).filter(Boolean).length === 0}
                 >
-                  {sdStarting ? "Starting..." : "Start Discussion"}
+                  {sdStarting ? "Starting..." : "Start Session"}
                 </button>
               </div>
             </div>

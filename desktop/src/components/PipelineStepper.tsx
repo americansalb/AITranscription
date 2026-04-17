@@ -50,7 +50,7 @@ export function PipelineStepper({ discussionState, messages = [], compact = fals
       {!compact && (
         <div className="pipeline-status-bar">
           <span className={`pipeline-mode-badge pipeline-mode-${pipelineMode}`}>
-            {pipelineMode === "action" ? "Action" : "Discussion"}
+            {pipelineMode === "action" ? "Action" : "Review"}
           </span>
           <span className="pipeline-stepper-counter">
             {isPipelineDone
