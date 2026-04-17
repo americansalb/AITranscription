@@ -1,4 +1,4 @@
-# Build the scribe-mcp sidecar for the current platform
+# Build the vaak-mcp sidecar for the current platform
 # This script is run before Tauri build
 
 $ErrorActionPreference = "Stop"
@@ -19,33 +19,33 @@ $OS = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
 
 if ($IsWindows -or $env:OS -eq "Windows_NT") {
     $TargetTriple = "x86_64-pc-windows-msvc"
-    $BinaryName = "scribe-mcp-$TargetTriple.exe"
+    $BinaryName = "vaak-mcp-$TargetTriple.exe"
 } elseif ($IsMacOS) {
     if ($Arch -eq "Arm64") {
         $TargetTriple = "aarch64-apple-darwin"
     } else {
         $TargetTriple = "x86_64-apple-darwin"
     }
-    $BinaryName = "scribe-mcp-$TargetTriple"
+    $BinaryName = "vaak-mcp-$TargetTriple"
 } else {
     $TargetTriple = "x86_64-unknown-linux-gnu"
-    $BinaryName = "scribe-mcp-$TargetTriple"
+    $BinaryName = "vaak-mcp-$TargetTriple"
 }
 
-Write-Host "Building scribe-mcp for $TargetTriple..."
+Write-Host "Building vaak-mcp for $TargetTriple..."
 
 # Build the binary
 Push-Location $TauriDir
 try {
-    cargo build --bin scribe-mcp --release
+    cargo build --bin vaak-mcp --release
     if ($LASTEXITCODE -ne 0) {
         throw "Cargo build failed"
     }
 
     # Copy to binaries folder
-    $SourcePath = Join-Path $TauriDir "target" "release" "scribe-mcp.exe"
+    $SourcePath = Join-Path $TauriDir "target" "release" "vaak-mcp.exe"
     if (-not (Test-Path $SourcePath)) {
-        $SourcePath = Join-Path $TauriDir "target" "release" "scribe-mcp"
+        $SourcePath = Join-Path $TauriDir "target" "release" "vaak-mcp"
     }
 
     $DestPath = Join-Path $BinariesDir $BinaryName
