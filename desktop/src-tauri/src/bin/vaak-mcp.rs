@@ -61,6 +61,53 @@ fn get_backend_url() -> String {
 /// Set on project_join, read by project_send/project_check/etc.
 static ACTIVE_PROJECT: Mutex<Option<ActiveProjectState>> = Mutex::new(None);
 
+/// One-shot guard for the background heartbeat ticker. The ticker is spawned
+/// the first time `ensure_heartbeat_ticker_started` is called (typically from
+/// `handle_project_join`) and lives until the sidecar process exits. There is
+/// no stop signal — process death is the stop signal, which is correct for a
+/// per-process daemon thread.
+///
+/// Why a global atomic instead of per-session state: ACTIVE_PROJECT may be
+/// re-bound when a session rejoins (`get_or_rejoin_state`), but the OS
+/// process is the same. Spawning a fresh thread on every rejoin would leak
+/// threads. One thread per sidecar process, reading whatever ACTIVE_PROJECT
+/// currently holds.
+static HEARTBEAT_TICKER_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Spawn the background heartbeat ticker if not already running.
+///
+/// Per architect msg 539 + platform-engineer msg 534 (pr-sidecar-heartbeat-thread):
+/// before this PR, heartbeats only fired on `project_wait` poll iterations,
+/// `project_send`, and `project_claim`. An agent doing several minutes of
+/// `Bash`/`Read`/`Grep` tool-calls between message-sends would age past the
+/// 180s pipeline-stage watchdog and get auto-skipped while alive.
+///
+/// This thread is the agent's continuous liveness signal — every 30 seconds
+/// it bumps `last_heartbeat` regardless of what the agent is doing. The
+/// watchdog now reflects "process alive" rather than "process recently sent
+/// a message." Decoupling is the architectural fix.
+///
+/// Cadence: 30s — aggressive enough that a 180s watchdog has 6 ticks of
+/// margin before considering the agent stale; still infrequent enough to
+/// avoid sessions.json write contention.
+fn ensure_heartbeat_ticker_started() {
+    use std::sync::atomic::Ordering;
+    if HEARTBEAT_TICKER_STARTED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return; // Already running
+    }
+    std::thread::spawn(|| {
+        let interval = std::time::Duration::from_secs(30);
+        loop {
+            std::thread::sleep(interval);
+            // No-op if no active project bound yet (process started but not joined).
+            let bound = ACTIVE_PROJECT.lock().ok().and_then(|g| g.as_ref().cloned());
+            if bound.is_some() {
+                update_session_heartbeat_in_file();
+            }
+        }
+    });
+}
+
 #[derive(Clone)]
 struct ActiveProjectState {
     project_dir: String,
@@ -4065,6 +4112,12 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         });
     }
 
+    // Spawn the background heartbeat ticker (no-op if already running for this
+    // sidecar process — see ensure_heartbeat_ticker_started). This is the fix
+    // for the "agent disappears after 40 min of tool-calls" pattern: heartbeat
+    // now ticks independently of project_wait/send/claim cadence.
+    ensure_heartbeat_ticker_started();
+
     notify_desktop();
 
     let active_section = get_active_section(project_dir);
@@ -7907,6 +7960,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ensure_heartbeat_ticker_started (pr-sidecar-heartbeat-thread) ──
+
+    #[test]
+    fn ensure_heartbeat_ticker_started_is_idempotent() {
+        // Calling twice must spawn at most one thread. The AtomicBool guard
+        // ensures get-and-set semantics; second call observes "already true"
+        // and returns without spawning. We can't directly count threads, but
+        // we can verify the AtomicBool transitions correctly.
+        use std::sync::atomic::Ordering;
+
+        // Reset for this test (other tests may have set it; this is not a
+        // production code path so the reset is acceptable test isolation).
+        HEARTBEAT_TICKER_STARTED.store(false, Ordering::SeqCst);
+
+        ensure_heartbeat_ticker_started();
+        assert!(
+            HEARTBEAT_TICKER_STARTED.load(Ordering::SeqCst),
+            "first call must flip the guard to true"
+        );
+
+        // Second call: should be a no-op. Guard stays true.
+        ensure_heartbeat_ticker_started();
+        assert!(
+            HEARTBEAT_TICKER_STARTED.load(Ordering::SeqCst),
+            "second call must not flip the guard back"
+        );
+
+        // The thread is now running forever in this test process; harmless
+        // because it no-ops when ACTIVE_PROJECT is None.
+    }
 
     #[test]
     fn non_high_risk_action_accepts_no_reason() {
