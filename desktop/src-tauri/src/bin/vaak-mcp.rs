@@ -112,10 +112,21 @@ fn ensure_heartbeat_ticker_started() {
 }
 
 /// Pipeline turn-ack watchdog (pr-pipeline-turn-ack-p2). If the current pipeline
-/// stage's assigned role has not broadcast within PIPELINE_ACK_TIMEOUT_SECS of
+/// stage's assigned role has not broadcast within the configured timeout of
 /// being notified, force-advance past them. Prevents the "1hr silent agent
 /// stalls everyone" failure mode the human flagged in msg 1111.
-const PIPELINE_ACK_TIMEOUT_SECS: i64 = 30;
+///
+/// Timeout source: project.json > settings > pipeline_ack_timeout_secs (default 30).
+/// Tester msg 1136 flagged that 30s is aggressive for stages that take minutes
+/// to compose (e.g. an 8000-word architect output). Per-project tunable.
+const PIPELINE_ACK_TIMEOUT_DEFAULT: i64 = 30;
+fn pipeline_ack_timeout_secs(project_dir: &str) -> i64 {
+    std::fs::read_to_string(project_json_path(project_dir)).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("settings")?.get("pipeline_ack_timeout_secs")?.as_i64())
+        .filter(|&t| t > 0 && t <= 3600)
+        .unwrap_or(PIPELINE_ACK_TIMEOUT_DEFAULT)
+}
 fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
     let disc = read_discussion_state_raw(project_dir);
     if disc.get("active").and_then(|v| v.as_bool()) != Some(true) { return; }
@@ -126,7 +137,8 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
     };
     let started_at = match chrono_iso_to_unix(started_at_str) { Some(t) => t, None => return };
     let elapsed = utc_now_unix() - started_at;
-    if elapsed < PIPELINE_ACK_TIMEOUT_SECS { return; }
+    let timeout = pipeline_ack_timeout_secs(project_dir);
+    if elapsed < timeout { return; }
     let pipeline_order = match disc.get("pipeline_order").and_then(|v| v.as_array()) {
         Some(a) => a.clone(), None => return,
     };
@@ -148,7 +160,7 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
         updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
     }
     let _ = write_discussion_state(project_dir, &updated);
-    post_turn_system_message(project_dir, &format!("{} did not respond within {}s — pipeline auto-advanced (skipped)", current_role, PIPELINE_ACK_TIMEOUT_SECS));
+    post_turn_system_message(project_dir, &format!("{} did not respond within {}s — pipeline auto-advanced (skipped)", current_role, timeout));
     if next_stage < pipeline_order.len() {
         let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
         let wake_msg = serde_json::json!({
@@ -157,7 +169,7 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
             "to": next_agent,
             "type": "system",
             "subject": "Your pipeline stage",
-            "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped after {}s no response.", next_stage + 1, pipeline_order.len(), PIPELINE_ACK_TIMEOUT_SECS),
+            "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped after {}s no response.", next_stage + 1, pipeline_order.len(), timeout),
             "timestamp": utc_now_iso(),
             "metadata": {"pipeline_notification": true, "auto_skip_predecessor": current_role}
         });
