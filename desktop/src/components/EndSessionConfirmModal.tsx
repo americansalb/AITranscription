@@ -2,35 +2,32 @@ import { useEffect, useRef, useState } from "react";
 import "./EndSessionConfirmModal.css";
 
 /**
- * PR H3 v2 — End Session typed-confirm modal.
+ * PR H3 v2 — End Session confirmation modal.
  *
- * Why: destructive moderator actions must require deliberate intent. Spec
- * `.vaak/specs/pr-h3-moderator-toolbar.md` § "End session" mandates a reason
- * field (≥3 chars) plus a literal "type END" confirmation input, with focus
- * trap + Escape-to-cancel + Enter-to-confirm per WCAG 2.1 AA. This component
- * is the guardrail between the red End button and `invoke("end_discussion")`.
+ * Why: destructive moderator actions still need a guardrail against
+ * accidental clicks, but the prior typed-confirm + mandatory-reason gate
+ * was too much friction for the common case of a moderator ending their
+ * own session (human msg 462). The modal now just asks for explicit
+ * confirmation via Cancel/End buttons; a reason textarea is provided
+ * but optional — if left blank the parent falls back to
+ * DEFAULT_END_REASON so the backend's ≥3-char audit rule still passes.
  *
- * Reason is surfaced to onConfirm as a trimmed string; the parent is
- * responsible for broadcasting it to the board before the end call (the
- * existing Tauri `end_discussion` command does not yet accept a reason arg —
- * see developer msg 374 deferred item). When the command signature gains
- * `reason`, the parent can pass it through; this component's contract is
- * unchanged.
+ * Keeps: focus trap, Escape-to-cancel, Enter-to-confirm, AAA contrast,
+ * prefers-reduced-motion honor. Drops: mandatory reason, typed "END"
+ * string, backdrop-click dismissal.
  */
-
-const REASON_MIN_LENGTH = 3;
-const CONFIRM_WORD = "END";
 
 interface EndSessionConfirmModalProps {
   /** Whether the modal is mounted/visible */
   open: boolean;
-  /** Optional context: current discussion topic, surfaced in the dialog title */
+  /** Optional context: current discussion topic, surfaced in the dialog body */
   topic?: string;
-  /** Called with the trimmed reason when the moderator confirms */
+  /** Called with the user-typed reason (may be empty). Parent substitutes
+   *  a default when blank so the backend audit contract is met. */
   onConfirm: (reason: string) => void | Promise<void>;
   /** Called when moderator cancels (Escape or Cancel button).
    *  Backdrop click does NOT cancel — destructive-confirm dialogs should only
-   *  dismiss on explicit intent (dev-challenger msg 407 gap #2). */
+   *  dismiss on explicit intent. */
   onCancel: () => void;
 }
 
@@ -41,13 +38,8 @@ export function EndSessionConfirmModal({
   onCancel,
 }: EndSessionConfirmModalProps) {
   const [reason, setReason] = useState("");
-  const [typedConfirm, setTypedConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  // Track whether the reason field has ever been blurred, so the "too short"
-  // hint only surfaces after the user has moved on — avoids per-keystroke
-  // screen-reader announcement (dev-challenger msg 407 gap #3).
-  const [reasonTouched, setReasonTouched] = useState(false);
-  const reasonRef = useRef<HTMLTextAreaElement | null>(null);
+  const confirmBtnRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
@@ -55,14 +47,13 @@ export function EndSessionConfirmModal({
   useEffect(() => {
     if (open) {
       setReason("");
-      setTypedConfirm("");
       setSubmitting(false);
-      setReasonTouched(false);
       previouslyFocused.current = document.activeElement as HTMLElement | null;
-      // Defer focus until after paint so screen readers announce the dialog first
-      queueMicrotask(() => reasonRef.current?.focus());
+      // Focus lands on the confirm button by default — one-tap close for the
+      // common case where the moderator just wants to end. They can Tab to
+      // the reason field if they want to add audit context.
+      queueMicrotask(() => confirmBtnRef.current?.focus());
     } else if (previouslyFocused.current) {
-      // Restore focus to the trigger element when the modal closes
       previouslyFocused.current.focus();
       previouslyFocused.current = null;
     }
@@ -70,18 +61,12 @@ export function EndSessionConfirmModal({
 
   if (!open) return null;
 
-  const reasonValid = reason.trim().length >= REASON_MIN_LENGTH;
-  const confirmValid = typedConfirm === CONFIRM_WORD;
-  const canSubmit = reasonValid && confirmValid && !submitting;
-
   const handleConfirm = async () => {
-    if (!canSubmit) return;
+    if (submitting) return;
     setSubmitting(true);
     try {
       await onConfirm(reason.trim());
     } finally {
-      // Parent controls `open`; leaving submitting=true briefly prevents
-      // double-click resubmission if the parent is slow to close us.
       setSubmitting(false);
     }
   };
@@ -96,7 +81,7 @@ export function EndSessionConfirmModal({
       // Enter inside the reason textarea should insert newlines, not submit.
       const target = e.target as HTMLElement;
       if (target.tagName === "TEXTAREA") return;
-      if (canSubmit) {
+      if (!submitting) {
         e.preventDefault();
         void handleConfirm();
       }
@@ -119,11 +104,6 @@ export function EndSessionConfirmModal({
       }
     }
   };
-
-  // Only show the "too short" hint after the field has been blurred AND the
-  // current value is still too short. Avoids noisy per-keystroke announcements
-  // when the user is mid-typing (dev-challenger msg 407 gap #3).
-  const showReasonHint = reasonTouched && reason.length > 0 && !reasonValid;
 
   return (
     <div
@@ -149,44 +129,16 @@ export function EndSessionConfirmModal({
           </p>
 
           <label className="end-session-label" htmlFor="end-session-reason">
-            Reason <span className="end-session-required" aria-hidden="true">*</span>
-            <span className="end-session-sr-only"> (required, minimum 3 characters)</span>
+            Reason <span className="end-session-optional">(optional)</span>
           </label>
           <textarea
             id="end-session-reason"
-            ref={reasonRef}
             className="end-session-reason"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
-            onBlur={() => setReasonTouched(true)}
-            placeholder="Why are you ending this session?"
-            rows={3}
+            placeholder="Add audit context — leave blank to use a default"
+            rows={2}
             maxLength={500}
-            aria-invalid={showReasonHint}
-            aria-describedby={showReasonHint ? "end-session-reason-err" : undefined}
-          />
-          {showReasonHint && (
-            <div id="end-session-reason-err" className="end-session-field-err">
-              Reason must be at least {REASON_MIN_LENGTH} characters.
-            </div>
-          )}
-
-          <label className="end-session-label" htmlFor="end-session-typed">
-            Type <code>END</code> to confirm
-          </label>
-          <input
-            id="end-session-typed"
-            className="end-session-typed"
-            type="text"
-            value={typedConfirm}
-            /* Normalize case + strip surrounding whitespace so the visual
-               `text-transform: uppercase` matches the stored value — typing
-               "end " would otherwise leave the button disabled despite the
-               on-screen text reading "END" (dev-challenger msg 407 gap #1). */
-            onChange={(e) => setTypedConfirm(e.target.value.toUpperCase().trim())}
-            autoComplete="off"
-            spellCheck={false}
-            aria-invalid={typedConfirm.length > 0 && !confirmValid}
           />
         </div>
 
@@ -200,10 +152,11 @@ export function EndSessionConfirmModal({
             Cancel
           </button>
           <button
+            ref={confirmBtnRef}
             type="button"
             className="end-session-btn end-session-btn-confirm"
             onClick={handleConfirm}
-            disabled={!canSubmit}
+            disabled={submitting}
           >
             {submitting ? "Ending..." : "End Session"}
           </button>

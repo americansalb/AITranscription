@@ -72,24 +72,16 @@
   letter-spacing: 0.04em;
 }
 
-.end-session-label code {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 12px;
-  font-weight: 700;
-  color: #ef4444;
-  background: rgba(239, 68, 68, 0.12);
-  padding: 1px 6px;
-  border-radius: 3px;
+.end-session-optional {
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 400;
   text-transform: none;
+  letter-spacing: normal;
+  margin-left: 4px;
+  font-size: 11px;
 }
 
-.end-session-required {
-  color: #ef4444;
-  margin-left: 2px;
-}
-
-.end-session-reason,
-.end-session-typed {
+.end-session-reason {
   width: 100%;
   box-sizing: border-box;
   background: var(--collab-bg-secondary, #0f1014);
@@ -97,39 +89,17 @@
   border-radius: 6px;
   padding: 8px 10px;
   color: rgba(255, 255, 255, 0.95);
-}
-
-.end-session-reason {
   font-size: 13px;
   line-height: 1.5;
   font-family: inherit;
   resize: vertical;
-  min-height: 64px;
+  min-height: 48px;
 }
 
-.end-session-typed {
-  font-size: 14px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.end-session-reason:focus,
-.end-session-typed:focus {
-  outline: 2px solid #ef4444;
+.end-session-reason:focus {
+  outline: 2px solid #b91c1c;
   outline-offset: 1px;
   border-color: transparent;
-}
-
-.end-session-reason[aria-invalid="true"],
-.end-session-typed[aria-invalid="true"] {
-  border-color: rgba(239, 68, 68, 0.5);
-}
-
-.end-session-field-err {
-  font-size: 12px;
-  color: #ef4444;
-  margin-top: -4px;
 }
 
 .end-session-actions {
