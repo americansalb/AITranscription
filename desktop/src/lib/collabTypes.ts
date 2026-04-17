@@ -31,6 +31,14 @@ export interface ProjectConfig {
     workflow_colors?: Record<string, string>;
     auto_collab?: boolean;
     human_in_loop?: boolean;
+    /** Preferred field name post-pr-r2-data-fields (0477758 backend).
+     *  Parsers should prefer `session_mode` when present, falling back to
+     *  `discussion_mode` for projects last written before the rename. */
+    session_mode?: string;
+    /** Legacy: deprecated alias for `session_mode`. Backend serde aliases the
+     *  field on read, so both forms still resolve. New writes emit
+     *  `session_mode` only. Kept in the type so projects last written
+     *  pre-rename still typecheck. */
     discussion_mode?: string;
     work_mode?: string;
   };

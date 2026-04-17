@@ -2165,9 +2165,9 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("set_discussion_mode", {
+        await invoke("set_session_mode", {
           dir: projectDir,
-          discussionMode: mode,
+          sessionMode: mode,
         });
         setDiscussionModeOpen(false);
         // Force re-read project to update UI immediately
@@ -3041,7 +3041,13 @@ When multiple instances of this role are active:
           </label>
           {/* Visibility Mode + Work Mode Selectors — hidden during active discussions to avoid contradictory labels */}
           {!discussionState?.active && (() => {
-            const currentMode = project?.config?.settings?.discussion_mode || "directed";
+            // pr-r2-data-fields dual-read: prefer session_mode (new name),
+            // fall back to discussion_mode for projects last written before
+            // 0477758. Backend serde aliases on read, but the raw JSON may
+            // still have either key until the next write rewrites it.
+            const currentMode = project?.config?.settings?.session_mode
+              ?? project?.config?.settings?.discussion_mode
+              ?? "directed";
             const modes: Record<string, { label: string; color: string; desc: string }> = {
               directed: { label: "Directed", color: "#1da1f2", desc: "Agents only see messages addressed to them" },
               open: { label: "Open", color: "#f5a623", desc: "All agents see all messages" },
