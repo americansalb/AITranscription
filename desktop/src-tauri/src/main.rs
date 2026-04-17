@@ -2698,6 +2698,9 @@ fn notify_collab_change() {
 
 // ==================== Discussion Control Commands ====================
 
+/// DEPRECATED (pr-r2-tauri-cmds): use `start_session` instead.
+/// Kept for backward compat during the UX migration window. Will be
+/// removed in a future cleanup PR after all callers flip to the new name.
 #[tauri::command]
 fn start_discussion(
     dir: String,
@@ -2708,6 +2711,7 @@ fn start_discussion(
     rounds: Option<u32>,
     pipeline_mode: Option<String>,
 ) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `start_discussion` is deprecated — use `start_session` instead.");
     // DIAGNOSTIC: Write immediately at function entry to prove this code runs
     let diag_path = std::path::Path::new(&dir).join(".vaak").join("start_discussion_debug.log");
     let _ = std::fs::write(&diag_path, format!("ENTRY: mode={} topic={} dir={}\n", mode, topic, dir));
@@ -2967,6 +2971,7 @@ fn start_discussion(
 
 #[tauri::command]
 fn close_discussion_round(dir: String) -> Result<String, String> {
+    eprintln!("[deprecated] Tauri command `close_discussion_round` is deprecated — use `close_session_round` instead.");
     let dir = validate_project_dir(&dir)?;
     // Wrap the entire read-modify-write in a single lock acquisition
     // to prevent the dual-writer race with MCP sidecar submissions.
@@ -3267,6 +3272,7 @@ fn normalize_action_reason(reason: &str, action_default: &str) -> String {
 
 #[tauri::command]
 fn end_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `end_discussion` is deprecated — use `end_session` instead.");
     let dir = validate_project_dir(&dir)?;
     let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Ended by user");
     // Wrap in board lock to prevent race with MCP sidecar
@@ -3473,6 +3479,7 @@ fn set_session_moderator(
 
 #[tauri::command]
 fn pause_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `pause_discussion` is deprecated — use `pause_session` instead.");
     let dir = validate_project_dir(&dir)?;
     let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Paused by user");
     let result = collab::with_board_lock(&dir, || {
@@ -3517,6 +3524,7 @@ fn pause_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
 
 #[tauri::command]
 fn resume_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `resume_discussion` is deprecated — use `resume_session` instead.");
     let dir = validate_project_dir(&dir)?;
     let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Resumed by user");
     let result = collab::with_board_lock(&dir, || {
@@ -3561,6 +3569,7 @@ fn resume_discussion(dir: String, reason: Option<String>) -> Result<(), String> 
 
 #[tauri::command]
 fn update_discussion_settings(dir: String, max_rounds: Option<u32>) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `update_discussion_settings` is deprecated — use `update_session_settings` instead.");
     let dir = validate_project_dir(&dir)?;
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
@@ -3580,6 +3589,7 @@ fn update_discussion_settings(dir: String, max_rounds: Option<u32>) -> Result<()
 
 #[tauri::command]
 fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
+    eprintln!("[deprecated] Tauri command `get_discussion_state` is deprecated — use `get_session_state` instead.");
     let dir = validate_project_dir(&dir)?;
     let state = collab::read_discussion(&dir);
     let mut val = serde_json::to_value(&state)
@@ -3673,6 +3683,71 @@ fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), Strin
     if result.is_ok() { notify_collab_change(); }
     result
 }
+
+// ════════════════════════════════════════════════════════════════════
+// pr-r2-tauri-cmds: Session-named aliases for the Discussion-named
+// Tauri commands. Per architect msg 524 + tech-leader msg 540/550 +
+// human msg 511 ask #2 ("It still is called a discussion").
+//
+// Strategy (split into 3 commits per dev-challenger msg 530 Finding 3):
+//   1. THIS PR — register both old and new names; old logs deprecation
+//   2. UX (separate PR) — flip frontend invoke sites to new names
+//   3. Future cleanup PR — remove old aliases entirely
+//
+// Each new alias is a one-line delegation. Behavior is identical;
+// only the externally-visible Tauri command name differs. UX can call
+// either name during the migration window.
+//
+// See `set_session_moderator` (already shipped under the new name) for
+// the eventual single-name target shape.
+// ════════════════════════════════════════════════════════════════════
+
+#[tauri::command]
+fn start_session(
+    dir: String,
+    mode: String,
+    topic: String,
+    moderator: Option<String>,
+    participants: Vec<String>,
+    rounds: Option<u32>,
+    pipeline_mode: Option<String>,
+) -> Result<(), String> {
+    start_discussion(dir, mode, topic, moderator, participants, rounds, pipeline_mode)
+}
+
+#[tauri::command]
+fn close_session_round(dir: String) -> Result<String, String> {
+    close_discussion_round(dir)
+}
+
+#[tauri::command]
+fn end_session(dir: String, reason: Option<String>) -> Result<(), String> {
+    end_discussion(dir, reason)
+}
+
+#[tauri::command]
+fn pause_session(dir: String, reason: Option<String>) -> Result<(), String> {
+    pause_discussion(dir, reason)
+}
+
+#[tauri::command]
+fn resume_session(dir: String, reason: Option<String>) -> Result<(), String> {
+    resume_discussion(dir, reason)
+}
+
+#[tauri::command]
+fn update_session_settings(dir: String, max_rounds: Option<u32>) -> Result<(), String> {
+    update_discussion_settings(dir, max_rounds)
+}
+
+#[tauri::command]
+fn get_session_state(dir: String) -> Result<serde_json::Value, String> {
+    get_discussion_state(dir)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// END pr-r2-tauri-cmds aliases
+// ════════════════════════════════════════════════════════════════════
 
 /// Generate ISO 8601 UTC timestamp
 fn iso_now() -> String {
@@ -5376,6 +5451,14 @@ fn main() {
             update_discussion_settings,
             get_discussion_state,
             set_continuous_timeout,
+            // pr-r2-tauri-cmds: session-named aliases (UX migrating away from "discussion")
+            start_session,
+            close_session_round,
+            end_session,
+            pause_session,
+            resume_session,
+            update_session_settings,
+            get_session_state,
             delete_message,
             clear_all_messages,
             set_message_retention,
@@ -5525,6 +5608,62 @@ fn show_error_dialog(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── pr-r2-tauri-cmds aliases ──────────────────────────────────────
+    // Sanity check that each session-named alias delegates to its
+    // discussion-named counterpart with the same Result. Uses an inactive
+    // session fixture so the call returns Err quickly without touching
+    // discussion state — the assertion is "alias and original behave the
+    // same way" rather than exercising the underlying handler.
+
+    fn fixture_inactive_for_alias_test(test_name: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("vaak-test-r2-alias-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"), r#"{"settings":{"heartbeat_timeout_seconds":3600}}"#).expect("project");
+        std::fs::write(vaak.join("discussion.json"), r#"{"active":false,"mode":"pipeline"}"#).expect("disc");
+        std::fs::write(vaak.join("sessions.json"), r#"{"bindings":[]}"#).expect("sess");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        tmp
+    }
+
+    #[test]
+    fn end_session_alias_matches_end_discussion_behavior() {
+        let tmp = fixture_inactive_for_alias_test("end");
+        let dir = tmp.to_str().unwrap().to_string();
+        let original = super::end_discussion(dir.clone(), Some("test reason 123".to_string()));
+        let alias = super::end_session(dir.clone(), Some("test reason 123".to_string()));
+        // Both must err with the same "No active discussion" message
+        assert!(original.is_err() && alias.is_err());
+        assert_eq!(original.unwrap_err(), alias.unwrap_err(),
+            "end_session alias must produce identical error to end_discussion");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pause_session_alias_matches_pause_discussion_behavior() {
+        let tmp = fixture_inactive_for_alias_test("pause");
+        let dir = tmp.to_str().unwrap().to_string();
+        let original = super::pause_discussion(dir.clone(), Some("test".to_string()));
+        let alias = super::pause_session(dir.clone(), Some("test".to_string()));
+        assert!(original.is_err() && alias.is_err());
+        assert_eq!(original.unwrap_err(), alias.unwrap_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn get_session_state_alias_matches_get_discussion_state_behavior() {
+        let tmp = fixture_inactive_for_alias_test("get-state");
+        let dir = tmp.to_str().unwrap().to_string();
+        let original = super::get_discussion_state(dir.clone());
+        let alias = super::get_session_state(dir.clone());
+        // Both should succeed identically (returns the discussion.json content)
+        assert!(original.is_ok() && alias.is_ok(),
+            "get_session_state alias and get_discussion_state must both succeed");
+        assert_eq!(original.unwrap(), alias.unwrap(),
+            "get_session_state must return the same value as get_discussion_state");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ── set_session_moderator (pr-moderator-set) ──────────────────────
     // Per architect msg 524 testing spec: happy path + 3 validation failures.
