@@ -5261,6 +5261,7 @@ fn main() {
             launcher::get_spawned_agents,
             launcher::get_role_companions,
             launcher::repopulate_spawned,
+            launcher::check_and_respawn_dead_agents,
             launcher::focus_agent_window,
             launcher::buzz_agent_terminal,
             launcher::check_macos_permissions,

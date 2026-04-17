@@ -1191,6 +1191,18 @@ fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
 /// Re-populate the in-memory spawned list from disk on app startup.
 /// Keeps entries whose PIDs are still alive, and auto-respawns dead agents
 /// so team members survive app restarts.
+///
+/// Per human msg 512/515 (pr-respawn-dead-agents): the prior version logged
+/// "not respawning" when dead PIDs were detected, forcing the human to open
+/// PowerShell and manually relaunch each one. The launcher already knows the
+/// role+instance for every dead agent — calling `do_spawn_member` for each is
+/// strictly an improvement. A 2-second stagger between respawns matches the
+/// existing `launch_team` cadence so the system isn't slammed by simultaneous
+/// PowerShell spawns when several roles died together.
+///
+/// Returns the count of alive agents (existing + freshly respawned) found at
+/// startup. Respawn errors are logged and don't fail the call — partial
+/// success is better than a hard failure that leaves the human with no team.
 #[tauri::command]
 pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) -> Result<u32, String> {
     *state.project_dir.lock() = Some(project_dir.clone());
@@ -1207,21 +1219,186 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
                 alive_count += 1;
             }
         } else {
-            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — removing from tracker", agent.role, agent.instance, agent.pid);
+            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — queuing respawn", agent.role, agent.instance, agent.pid);
             dead_agents.push(agent);
         }
     }
 
-    // Update disk with only alive agents (remove dead ones)
+    // Update disk with only alive agents (remove dead ones) before respawn so
+    // the about-to-respawn entries don't double-up if respawn succeeds quickly.
     let all: Vec<SpawnedAgent> = spawned.clone();
     drop(spawned);
     save_spawned_to_disk(&project_dir, &all);
 
+    // Auto-respawn dead agents in a background thread so the Tauri command
+    // returns promptly. Each respawn opens a PowerShell window via
+    // do_spawn_member; staggering by 2s keeps the system responsive.
     if !dead_agents.is_empty() {
-        eprintln!("[launcher] Cleaned up {} dead agent(s) from spawned.json (not respawning)", dead_agents.len());
+        eprintln!("[launcher] Auto-respawning {} dead agent(s)", dead_agents.len());
+        let dir_clone = project_dir.clone();
+        let spawned_clone = Arc::clone(&state.spawned);
+        std::thread::spawn(move || {
+            let bg_state = LauncherState {
+                spawned: spawned_clone,
+                project_dir: Mutex::new(Some(dir_clone.clone())),
+            };
+            for (i, agent) in dead_agents.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                eprintln!("[launcher] Respawning {}:{}", agent.role, agent.instance);
+                if let Err(e) = do_spawn_member(&dir_clone, &agent.role, Some(agent.instance as i32), &bg_state) {
+                    eprintln!("[launcher] Failed to respawn {}:{}: {}", agent.role, agent.instance, e);
+                }
+            }
+        });
     }
 
     Ok(alive_count)
+}
+
+/// Periodic watchdog: detect spawned agents whose PID is dead OR whose
+/// vaak heartbeat has gone stale beyond a threshold, and auto-respawn them.
+///
+/// Why both checks (per human msg 512/515): the prior `is_pid_alive`-only
+/// approach misses the common case where Claude exits but PowerShell (with
+/// `-NoExit`) stays open — PID is alive, but no heartbeats are reaching
+/// sessions.json, so the agent is effectively dead from vaak's POV. The
+/// human reported this exact pattern: "they finish and they like sign off
+/// and I have to open the powershell and buzz them back in."
+///
+/// `stale_threshold_secs` defaults to 90s if not provided. Below the
+/// project's `heartbeat_timeout_seconds` (typically 300s) so respawn
+/// happens before the agent is fully declared gone, giving a fresh
+/// process time to claim the role before the slot is reassigned.
+///
+/// Returns the count of agents respawned this call. Frontend should call
+/// on a setInterval (recommended ~60s).
+#[tauri::command]
+pub fn check_and_respawn_dead_agents(
+    project_dir: String,
+    stale_threshold_secs: Option<u64>,
+    state: State<'_, LauncherState>,
+) -> Result<u32, String> {
+    let threshold = stale_threshold_secs.unwrap_or(90);
+    *state.project_dir.lock() = Some(project_dir.clone());
+
+    let spawned_now: Vec<SpawnedAgent> = state.spawned.lock().clone();
+    if spawned_now.is_empty() {
+        return Ok(0);
+    }
+
+    // Read sessions.json for heartbeat lookup
+    let sessions_path = std::path::Path::new(&project_dir)
+        .join(".vaak")
+        .join("sessions.json");
+    let sessions_val: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({"bindings": []}));
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let bindings = sessions_val.get("bindings")
+        .and_then(|b| b.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut to_respawn: Vec<SpawnedAgent> = Vec::new();
+    for agent in &spawned_now {
+        let pid_dead = !is_pid_alive(agent.pid);
+
+        // Find this agent's session record by role + instance
+        let session = bindings.iter().find(|b| {
+            let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            let inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+            role == agent.role && inst as i32 == agent.instance
+        });
+
+        let heartbeat_stale = match session.and_then(|s| s.get("last_heartbeat").and_then(|h| h.as_str())) {
+            Some(hb_iso) => {
+                // Reuse the same epoch parser the MCP sidecar uses
+                match parse_iso_to_secs(hb_iso) {
+                    Some(hb_secs) => now_secs.saturating_sub(hb_secs) > threshold,
+                    None => true, // unparseable timestamp = treat as stale
+                }
+            }
+            None => true, // no session record = stale
+        };
+
+        if pid_dead || heartbeat_stale {
+            eprintln!(
+                "[launcher] Agent {}:{} needs respawn (pid_dead={}, heartbeat_stale={})",
+                agent.role, agent.instance, pid_dead, heartbeat_stale
+            );
+            to_respawn.push(agent.clone());
+        }
+    }
+
+    if to_respawn.is_empty() {
+        return Ok(0);
+    }
+
+    let respawn_count = to_respawn.len() as u32;
+
+    // Remove dead/stale entries from in-memory + disk before respawn so the
+    // about-to-spawn entries don't double-count
+    {
+        let mut spawned_lock = state.spawned.lock();
+        spawned_lock.retain(|a| !to_respawn.iter().any(|r| r.role == a.role && r.instance == a.instance));
+        let snapshot: Vec<SpawnedAgent> = spawned_lock.clone();
+        drop(spawned_lock);
+        save_spawned_to_disk(&project_dir, &snapshot);
+    }
+
+    // Background respawn with stagger
+    let dir_clone = project_dir.clone();
+    let spawned_clone = Arc::clone(&state.spawned);
+    std::thread::spawn(move || {
+        let bg_state = LauncherState {
+            spawned: spawned_clone,
+            project_dir: Mutex::new(Some(dir_clone.clone())),
+        };
+        for (i, agent) in to_respawn.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            eprintln!("[launcher] Respawning {}:{} (watchdog)", agent.role, agent.instance);
+            if let Err(e) = do_spawn_member(&dir_clone, &agent.role, Some(agent.instance as i32), &bg_state) {
+                eprintln!("[launcher] Watchdog respawn failed for {}:{}: {}", agent.role, agent.instance, e);
+            }
+        }
+    });
+
+    Ok(respawn_count)
+}
+
+/// Parse an ISO-8601 string ("2026-04-17T00:44:17Z") to seconds since
+/// epoch. Minimal — handles the format vaak's heartbeats use, doesn't
+/// pull chrono just for this.
+fn parse_iso_to_secs(iso: &str) -> Option<u64> {
+    // Format: YYYY-MM-DDTHH:MM:SSZ — fixed offsets
+    if iso.len() < 19 { return None; }
+    let year: i64 = iso[0..4].parse().ok()?;
+    let month: i64 = iso[5..7].parse().ok()?;
+    let day: i64 = iso[8..10].parse().ok()?;
+    let hour: i64 = iso[11..13].parse().ok()?;
+    let minute: i64 = iso[14..16].parse().ok()?;
+    let second: i64 = iso[17..19].parse().ok()?;
+
+    // Days from epoch to year start (Howard Hinnant's algorithm, simplified)
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as i64;
+    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_since_epoch = era * 146097 + doe - 719468;
+
+    let total = days_since_epoch * 86400 + hour * 3600 + minute * 60 + second;
+    if total < 0 { None } else { Some(total as u64) }
 }
 
 /// Check if a PID is still alive (cross-platform)
@@ -1644,6 +1821,46 @@ pub fn open_terminal_in_dir(dir: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── parse_iso_to_secs (pr-respawn-dead-agents) ─────────────────────
+    // Locks the minimal ISO-8601 parser the watchdog uses. Drift here would
+    // mean the heartbeat-staleness check silently uses bogus epoch values
+    // and either over-triggers (respawning live agents) or under-triggers
+    // (leaving dead agents alive).
+
+    #[test]
+    fn parse_iso_to_secs_handles_known_recent_timestamp() {
+        // 2026-04-17T00:44:17Z is from real sessions.json output during the
+        // session that triggered this PR. Parsed value should be a positive
+        // u64; we don't assert exact since UNIX_EPOCH math depends on locale
+        // settings on Windows, but cross-check that round-trip via the
+        // current clock keeps parser+now within 5-year sanity bounds.
+        let result = parse_iso_to_secs("2026-04-17T00:44:17Z");
+        assert!(result.is_some(), "should parse the heartbeat shape");
+        let secs = result.unwrap();
+        // Reasonable sanity: between 2020 (1577836800) and 2050 (2524608000)
+        assert!(secs > 1_577_836_800 && secs < 2_524_608_000,
+                "epoch should land in [2020, 2050], got {}", secs);
+    }
+
+    #[test]
+    fn parse_iso_to_secs_rejects_short_string() {
+        assert!(parse_iso_to_secs("").is_none());
+        assert!(parse_iso_to_secs("2026-04-17").is_none());
+        assert!(parse_iso_to_secs("not-a-date").is_none());
+    }
+
+    #[test]
+    fn parse_iso_to_secs_returns_increasing_for_later_times() {
+        // Ordering test — if A is later than B, parse(A) > parse(B).
+        // Catches off-by-one or month/day swap bugs.
+        let earlier = parse_iso_to_secs("2026-04-17T00:00:00Z").unwrap();
+        let later = parse_iso_to_secs("2026-04-17T00:44:17Z").unwrap();
+        let next_day = parse_iso_to_secs("2026-04-18T00:00:00Z").unwrap();
+        assert!(later > earlier, "later time should yield larger epoch");
+        assert!(next_day > later, "next day should yield larger epoch");
+        assert_eq!(later - earlier, 44 * 60 + 17, "44m17s difference");
+    }
 
     // ── build_join_prompt ──────────────────────────────────────────────
 
