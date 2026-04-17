@@ -214,8 +214,12 @@ pub struct ProjectSettings {
     pub human_in_loop: Option<bool>,
     #[serde(default)]
     pub workflow_colors: Option<std::collections::HashMap<String, String>>,
-    #[serde(default)]
-    pub discussion_mode: Option<String>,
+    /// Communication visibility mode ("open" or "directed"). Renamed from
+    /// `discussion_mode` per pr-r2-data-fields (human msg 511 ask #2). Serde
+    /// `alias` reads either name; serialization uses the new name only, so
+    /// existing project.json files migrate on first write.
+    #[serde(default, alias = "discussion_mode")]
+    pub session_mode: Option<String>,
     #[serde(default)]
     pub work_mode: Option<String>,
     #[serde(default)]
@@ -3333,6 +3337,50 @@ mod tests {
         // pipeline_outputs is Vec<serde_json::Value> in the current flat struct
         let outputs = state.pipeline_outputs.as_ref().unwrap();
         assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn project_settings_session_mode_reads_legacy_discussion_mode() {
+        // pr-r2-data-fields: ProjectSettings.session_mode must accept the
+        // legacy `discussion_mode` field name on read (serde alias). This
+        // is the migration mechanism — old project.json files keep working.
+        let legacy = json!({
+            "heartbeat_timeout_seconds": 300,
+            "message_retention_days": 30,
+            "discussion_mode": "directed"
+        });
+        let parsed: ProjectSettings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.session_mode.as_deref(), Some("directed"),
+            "legacy discussion_mode field must populate session_mode");
+    }
+
+    #[test]
+    fn project_settings_session_mode_reads_canonical_field() {
+        // New canonical field name works directly.
+        let canonical = json!({
+            "heartbeat_timeout_seconds": 300,
+            "message_retention_days": 30,
+            "session_mode": "open"
+        });
+        let parsed: ProjectSettings = serde_json::from_value(canonical).unwrap();
+        assert_eq!(parsed.session_mode.as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn project_settings_session_mode_serializes_to_canonical_only() {
+        // After read+write cycle, output uses the new name only — legacy
+        // alias is read-only. Files migrate on first write.
+        let json_in = json!({
+            "heartbeat_timeout_seconds": 300,
+            "message_retention_days": 30,
+            "session_mode": "directed"
+        });
+        let parsed: ProjectSettings = serde_json::from_value(json_in).unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert!(serialized.get("session_mode").is_some(),
+            "serialization must emit session_mode");
+        assert!(serialized.get("discussion_mode").is_none(),
+            "serialization must NOT emit the legacy discussion_mode key");
     }
 
     #[test]

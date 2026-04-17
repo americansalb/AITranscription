@@ -2523,12 +2523,21 @@ fn set_workflow_type(dir: String, workflow_type: Option<String>) -> Result<(), S
     Ok(())
 }
 
+/// DEPRECATED (pr-r2-data-fields): use `set_session_mode` instead. This
+/// alias exists so frontend caches mid-migration keep working. Will be
+/// removed in a future cleanup PR.
 #[tauri::command]
 fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(), String> {
+    eprintln!("[deprecated] Tauri command `set_discussion_mode` is deprecated — use `set_session_mode` instead.");
+    set_session_mode(dir, discussion_mode)
+}
+
+#[tauri::command]
+fn set_session_mode(dir: String, discussion_mode: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
     if let Some(ref dm) = discussion_mode {
         if dm != "open" && dm != "directed" {
-            return Err(format!("Invalid communication mode '{}'. Must be 'open' or 'directed'. (Discussion formats like 'delphi'/'oxford' are set when starting a discussion, not here.)", dm));
+            return Err(format!("Invalid communication mode '{}'. Must be 'open' or 'directed'. (Session formats like 'delphi'/'oxford' are set when starting a session, not here.)", dm));
         }
     }
 
@@ -2539,9 +2548,15 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
         .map_err(|e| format!("Failed to parse project.json: {}", e))?;
 
     if let Some(settings) = config.get_mut("settings") {
+        // pr-r2-data-fields: write the new field name AND remove the legacy one
+        // so existing project.json files migrate on first set. Keeps the file
+        // clean — no dual-key drift between session_mode and discussion_mode.
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("discussion_mode");
+        }
         match &discussion_mode {
-            Some(dm) => { settings["discussion_mode"] = serde_json::Value::String(dm.clone()); }
-            None => { settings.as_object_mut().map(|o| o.remove("discussion_mode")); }
+            Some(dm) => { settings["session_mode"] = serde_json::Value::String(dm.clone()); }
+            None => { settings.as_object_mut().map(|o| o.remove("session_mode")); }
         }
     }
 
@@ -5439,6 +5454,7 @@ fn main() {
             send_team_message,
             set_workflow_type,
             set_discussion_mode,
+            set_session_mode,
             set_work_mode,
             get_turn_state,
             start_discussion,

@@ -5651,12 +5651,15 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         _ => output.push_str(" Workflow: not set."),
     }
 
-    // Read discussion mode — defaults to "directed" (agents only see messages addressed to them + human messages)
+    // Read communication-visibility mode — defaults to "directed" (agents only
+    // see messages addressed to them + human messages). Per pr-r2-data-fields:
+    // canonical key is `session_mode`; legacy `discussion_mode` is read as a
+    // fallback so projects whose project.json hasn't been migrated still work.
     let discussion_mode = config.get("settings")
-        .and_then(|s| s.get("discussion_mode"))
+        .and_then(|s| s.get("session_mode").or_else(|| s.get("discussion_mode")))
         .and_then(|m| m.as_str())
         .unwrap_or("directed");
-    output.push_str(&format!(" Discussion mode: {}.", discussion_mode));
+    output.push_str(&format!(" Session mode: {}.", discussion_mode));
 
     // Inject self-selection rules — anti-convergence design
     output.push_str("\nRESPONSE RULES: ONLY respond when a message is ADDRESSED TO YOU (your role name appears in the 'to' field) OR when you have a genuinely DIFFERENT perspective that nobody else has stated. If the human addresses you by name, respond immediately. NEVER echo — if someone already said what you'd say, stay SILENT. Silence is better than overlap. Before responding to any broadcast message, ask: 'Would my response be meaningfully different from what's already been said?' If not, do not respond. When multiple agents need to act on the same message, only the ADDRESSED role should respond. Others observe silently unless they disagree or have unique expertise to add.");
