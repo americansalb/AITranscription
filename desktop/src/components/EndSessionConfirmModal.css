@@ -81,7 +81,19 @@
   font-size: 11px;
 }
 
-.end-session-reason {
+.end-session-label code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.12);
+  padding: 1px 6px;
+  border-radius: 3px;
+  text-transform: none;
+}
+
+.end-session-reason,
+.end-session-typed {
   width: 100%;
   box-sizing: border-box;
   background: var(--collab-bg-secondary, #0f1014);
@@ -89,6 +101,9 @@
   border-radius: 6px;
   padding: 8px 10px;
   color: rgba(255, 255, 255, 0.95);
+}
+
+.end-session-reason {
   font-size: 13px;
   line-height: 1.5;
   font-family: inherit;
@@ -96,10 +111,22 @@
   min-height: 48px;
 }
 
-.end-session-reason:focus {
+.end-session-typed {
+  font-size: 14px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.end-session-reason:focus,
+.end-session-typed:focus {
   outline: 2px solid #b91c1c;
   outline-offset: 1px;
   border-color: transparent;
+}
+
+.end-session-typed[aria-invalid="true"] {
+  border-color: rgba(239, 68, 68, 0.5);
 }
 
 .end-session-actions {

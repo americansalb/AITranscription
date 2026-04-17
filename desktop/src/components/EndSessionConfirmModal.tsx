@@ -4,25 +4,25 @@ import "./EndSessionConfirmModal.css";
 /**
  * PR H3 v2 — End Session confirmation modal.
  *
- * Why: destructive moderator actions still need a guardrail against
- * accidental clicks, but the prior typed-confirm + mandatory-reason gate
- * was too much friction for the common case of a moderator ending their
- * own session (human msg 462). The modal now just asks for explicit
- * confirmation via Cancel/End buttons; a reason textarea is provided
- * but optional — if left blank the parent falls back to
- * DEFAULT_END_REASON so the backend's ≥3-char audit rule still passes.
+ * Why: destructive moderator actions need a misclick guard. Per architect
+ * msg 480 (post-human-feedback in msg 462), the right friction is:
+ * typed "END" confirmation (prevents single-touchpad-tap from wiping
+ * session state), reason textarea strictly OPTIONAL (parent substitutes
+ * DEFAULT_END_REASON on empty so the backend's ≥3-char audit rule still
+ * passes — see CollabTab.tsx doEndDiscussion).
  *
- * Keeps: focus trap, Escape-to-cancel, Enter-to-confirm, AAA contrast,
- * prefers-reduced-motion honor. Drops: mandatory reason, typed "END"
- * string, backdrop-click dismissal.
+ * Keeps: focus trap, Escape cancel, AAA contrast, prefers-reduced-motion
+ * honor, no backdrop dismissal.
  */
+
+const CONFIRM_WORD = "END";
 
 interface EndSessionConfirmModalProps {
   /** Whether the modal is mounted/visible */
   open: boolean;
   /** Optional context: current discussion topic, surfaced in the dialog body */
   topic?: string;
-  /** Called with the user-typed reason (may be empty). Parent substitutes
+  /** Called with the user-typed reason (may be empty). Parent MUST substitute
    *  a default when blank so the backend audit contract is met. */
   onConfirm: (reason: string) => void | Promise<void>;
   /** Called when moderator cancels (Escape or Cancel button).
@@ -38,6 +38,7 @@ export function EndSessionConfirmModal({
   onCancel,
 }: EndSessionConfirmModalProps) {
   const [reason, setReason] = useState("");
+  const [typedConfirm, setTypedConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const confirmBtnRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -47,11 +48,13 @@ export function EndSessionConfirmModal({
   useEffect(() => {
     if (open) {
       setReason("");
+      setTypedConfirm("");
       setSubmitting(false);
       previouslyFocused.current = document.activeElement as HTMLElement | null;
-      // Focus lands on the confirm button by default — one-tap close for the
-      // common case where the moderator just wants to end. They can Tab to
-      // the reason field if they want to add audit context.
+      // Focus lands on the red End Session button by default (architect msg 480)
+      // — gives immediate visual cue of the destructive action. User types
+      // END in the confirm field (Shift+Tab twice back into it) or clicks
+      // to target the field directly.
       queueMicrotask(() => confirmBtnRef.current?.focus());
     } else if (previouslyFocused.current) {
       previouslyFocused.current.focus();
@@ -61,8 +64,11 @@ export function EndSessionConfirmModal({
 
   if (!open) return null;
 
+  const confirmValid = typedConfirm === CONFIRM_WORD;
+  const canSubmit = confirmValid && !submitting;
+
   const handleConfirm = async () => {
-    if (submitting) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     try {
       await onConfirm(reason.trim());
@@ -81,7 +87,7 @@ export function EndSessionConfirmModal({
       // Enter inside the reason textarea should insert newlines, not submit.
       const target = e.target as HTMLElement;
       if (target.tagName === "TEXTAREA") return;
-      if (!submitting) {
+      if (canSubmit) {
         e.preventDefault();
         void handleConfirm();
       }
@@ -140,6 +146,24 @@ export function EndSessionConfirmModal({
             rows={2}
             maxLength={500}
           />
+
+          <label className="end-session-label" htmlFor="end-session-typed">
+            Type <code>END</code> to confirm
+          </label>
+          <input
+            id="end-session-typed"
+            className="end-session-typed"
+            type="text"
+            value={typedConfirm}
+            /* Normalize case + strip surrounding whitespace so the visual
+               `text-transform: uppercase` matches the stored value — typing
+               "end " would otherwise leave the button disabled despite the
+               on-screen text reading "END". */
+            onChange={(e) => setTypedConfirm(e.target.value.toUpperCase().trim())}
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={typedConfirm.length > 0 && !confirmValid}
+          />
         </div>
 
         <div className="end-session-actions">
@@ -156,7 +180,7 @@ export function EndSessionConfirmModal({
             type="button"
             className="end-session-btn end-session-btn-confirm"
             onClick={handleConfirm}
-            disabled={submitting}
+            disabled={!canSubmit}
           >
             {submitting ? "Ending..." : "End Session"}
           </button>
