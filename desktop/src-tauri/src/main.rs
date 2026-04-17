@@ -338,26 +338,71 @@ fn check_sidecar_status() -> serde_json::Value {
 
 /// Return build identity for host + sidecar (+ ui injected by frontend).
 /// Host info is compile-time baked via build.rs; sidecar info comes from
-/// spawning `vaak-mcp --build-info` and parsing its stdout.
+/// spawning `vaak-mcp --build-info` and parsing its stdout. Cached 30s.
 #[tauri::command]
 fn get_build_info() -> serde_json::Value {
+    static CACHE: once_cell::sync::Lazy<Mutex<Option<(std::time::Instant, serde_json::Value)>>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    let mut guard = CACHE.lock();
+    if let Some((when, v)) = guard.as_ref() {
+        if when.elapsed() < std::time::Duration::from_secs(30) {
+            return v.clone();
+        }
+    }
     let host = build_info::as_json();
     let sidecar = match get_sidecar_path() {
         Some(path) => probe_sidecar_build_info(&path),
-        None => serde_json::json!({ "error": "binary missing", "sha": "unknown", "dirty": false }),
+        None => build_info_err("binary_missing", None),
     };
-    serde_json::json!({ "host": host, "sidecar": sidecar })
+    let result = serde_json::json!({ "host": host, "sidecar": sidecar });
+    *guard = Some((std::time::Instant::now(), result.clone()));
+    result
+}
+
+/// Invalidate the cached build-info so the next call re-probes. Called on
+/// manual SHA click, window focus, or after pr-sidecar-atomic-swap completes.
+#[tauri::command]
+fn invalidate_build_info_cache() {
+    static CACHE: once_cell::sync::Lazy<Mutex<Option<(std::time::Instant, serde_json::Value)>>> =
+        once_cell::sync::Lazy::new(|| Mutex::new(None));
+    *CACHE.lock() = None;
+}
+
+fn build_info_err(kind: &str, detail: Option<String>) -> serde_json::Value {
+    let mut v = serde_json::json!({ "error": kind, "sha": "unknown", "dirty": false });
+    if let Some(d) = detail {
+        let truncated: String = d.chars().take(512).collect();
+        v["detail"] = serde_json::Value::String(truncated);
+    }
+    v
 }
 
 fn probe_sidecar_build_info(path: &std::path::Path) -> serde_json::Value {
-    match std::process::Command::new(path).arg("--build-info").output() {
-        Ok(output) if output.status.success() => {
-            match String::from_utf8(output.stdout).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(s.trim()).ok()) {
-                Some(v) => v,
-                None => serde_json::json!({ "error": "malformed output", "sha": "unknown", "dirty": false }),
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path_owned = path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&path_owned).arg("--build-info").output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(output)) => {
+            let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+            if !output.status.success() {
+                log_error(&format!("Vaak: vaak-mcp --build-info exit={:?} stdout={:?} stderr={:?}",
+                    output.status.code(), stdout_str.chars().take(512).collect::<String>(), stderr_str));
+                return build_info_err("probe_exited_nonzero", Some(format!("exit={:?}", output.status.code())));
+            }
+            match serde_json::from_str::<serde_json::Value>(stdout_str.trim()) {
+                Ok(v) => v,
+                Err(_) => {
+                    log_error(&format!("Vaak: vaak-mcp --build-info malformed stdout={:?} stderr={:?}",
+                        stdout_str.chars().take(512).collect::<String>(), stderr_str));
+                    build_info_err("malformed_output", Some(stdout_str))
+                }
             }
         }
-        _ => serde_json::json!({ "error": "probe failed", "sha": "unknown", "dirty": false }),
+        Ok(Err(e)) => build_info_err("probe_failed", Some(e.to_string())),
+        Err(_) => build_info_err("probe_timeout", None),
     }
 }
 
@@ -5454,6 +5499,7 @@ fn main() {
             get_auto_collab,
             check_sidecar_status,
             get_build_info,
+            invalidate_build_info_cache,
             set_human_in_loop,
             get_human_in_loop,
             save_screen_reader_settings,
