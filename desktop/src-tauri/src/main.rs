@@ -2851,9 +2851,8 @@ fn start_discussion(
     };
 
     // Step 1: Write discussion.json directly (no board lock needed — uses its own lock)
-    if !collab::write_discussion(&dir, &state) {
-        return Err("Failed to write discussion.json".to_string());
-    }
+    collab::write_discussion(&dir, &state)
+        .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
 
     // Step 2: Post announcement to board file (inside file lock for atomic ID + write).
     // Diagnostic: log before attempting board lock
@@ -3152,9 +3151,8 @@ fn close_discussion_round(dir: String) -> Result<String, String> {
         }
         state.phase = Some("reviewing".to_string());
 
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
         Ok(format!("Round {} closed. {} submissions aggregated.", round_num, total))
     });
     if result.is_ok() { notify_collab_change(); }
@@ -3193,9 +3191,8 @@ fn open_next_round(dir: String) -> Result<u32, String> {
             topic: None,
         });
 
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
 
         // Post round-open announcement to board.jsonl (lock already held)
         let board_path = collab::active_board_path(&dir);
@@ -3274,9 +3271,8 @@ fn end_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
         state.active = false;
         state.phase = Some("complete".to_string());
 
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Could not save discussion state to disk. The session is likely still ending — check .vaak/sections/<active>/discussion.json. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Could not save discussion state to disk: {}. The session may have ended despite this error — check .vaak/sections/<active>/discussion.json.", e))?;
 
         // Post end announcement to board.jsonl (lock already held)
         let board_path = collab::active_board_path(&dir);
@@ -3328,9 +3324,8 @@ fn pause_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
         }
         let now = iso_now();
         state.paused_at = Some(now.clone());
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Could not save discussion state to disk. The pause is likely still applying — refresh the panel. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Could not save discussion state to disk: {}. The pause may have applied despite this error — refresh the panel.", e))?;
         // Post pause announcement
         let board_path = collab::active_board_path(&dir);
         let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
@@ -3373,9 +3368,8 @@ fn resume_discussion(dir: String, reason: Option<String>) -> Result<(), String> 
         }
         let now = iso_now();
         state.paused_at = None;
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Could not save discussion state to disk. The resume is likely still applying — refresh the panel. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Could not save discussion state to disk: {}. The resume may have applied despite this error — refresh the panel.", e))?;
         // Post resume announcement
         let board_path = collab::active_board_path(&dir);
         let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
@@ -3415,9 +3409,8 @@ fn update_discussion_settings(dir: String, max_rounds: Option<u32>) -> Result<()
         if let Some(rounds) = max_rounds {
             state.settings.max_rounds = rounds;
         }
-        if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
-        }
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
         Ok(())
     });
     if result.is_ok() { notify_collab_change(); }
@@ -5369,6 +5362,43 @@ fn show_error_dialog(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── write_discussion_unlocked error surface (pr-error-bubble) ──────
+
+    #[test]
+    fn write_discussion_unlocked_returns_error_detail_on_path_failure() {
+        // Force atomic_write to fail by pointing at a project dir that doesn't
+        // exist so active_discussion_path resolves to a missing parent. The
+        // returned Err string must include both "write" (function-level) and
+        // a path/OS error fragment (atomic_write detail) — this is what the
+        // human will now see in the toast instead of "Failed to write".
+        let bogus_dir = std::env::temp_dir()
+            .join("vaak-test-error-bubble-nonexistent-99999")
+            .join("nested")
+            .join("never-created");
+        let _ = std::fs::remove_dir_all(&bogus_dir); // ensure missing
+
+        let state = collab::DiscussionState::default();
+        let result = collab::write_discussion_unlocked(
+            bogus_dir.to_str().unwrap(),
+            &state,
+        );
+
+        assert!(result.is_err(), "expected Err on missing parent dir");
+        let err = result.unwrap_err();
+        assert!(
+            err.starts_with("write "),
+            "error must include the wrapped 'write <path>:' prefix, got: {}",
+            err
+        );
+        // OS error message varies by platform but always contains some
+        // diagnostic substring beyond the bare prefix
+        assert!(
+            err.len() > "write : ".len(),
+            "error must include OS detail beyond the prefix, got: {}",
+            err
+        );
+    }
 
     // ── normalize_action_reason (pr-reason-relax) ──────────────────────
     // Soft contract: backend never rejects on reason. Caller value used when

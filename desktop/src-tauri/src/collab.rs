@@ -850,8 +850,13 @@ pub fn read_discussion(dir: &str) -> DiscussionState {
 }
 
 /// Write discussion state to the active section's discussion.json with file locking.
-/// Returns true on success, false on failure.
-pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
+///
+/// Returns the underlying serialization / lock / write error so callers can
+/// surface the actual cause (lock timeout, permission denied, sharing
+/// violation, disk full) instead of a generic "write failed." See
+/// `write_discussion_unlocked`'s doc for the motivating human bug report
+/// (msg 462 in the collab board).
+pub fn write_discussion(dir: &str, state: &DiscussionState) -> Result<(), String> {
     let path = active_discussion_path(dir);
     // Use discussion.lock instead of board.lock to avoid contention with MCP sidecar board writes
     let lock_path = {
@@ -864,20 +869,15 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
         }
     };
 
-    let json = match serde_json::to_string_pretty(state) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
 
     // Acquire file lock with timeout (matches with_board_lock pattern)
-    let lock_file = match std::fs::OpenOptions::new()
+    let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&lock_path)
-    {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
+        .map_err(|e| format!("open lock file {}: {}", lock_path.display(), e))?;
 
     const LOCK_TIMEOUT_MS: u64 = 10_000; // 10 seconds max wait
     const LOCK_RETRY_MS: u64 = 50;       // retry interval
@@ -906,13 +906,18 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
                 };
                 if retry != 0 { break; }
                 if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
-                    eprintln!("[write_discussion] Lock timeout after {}s on {}", LOCK_TIMEOUT_MS / 1000, lock_path.display());
-                    return false;
+                    let err_msg = format!(
+                        "lock timeout after {}s on {} (another process may be holding the discussion lock)",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    );
+                    eprintln!("[write_discussion] {}", err_msg);
+                    return Err(err_msg);
                 }
             }
         }
 
-        let result = atomic_write(&path, json.as_bytes()).is_ok();
+        let result = atomic_write(&path, json.as_bytes())
+            .map_err(|e| format!("write {}: {}", path.display(), e));
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
         result
@@ -931,13 +936,18 @@ pub fn write_discussion(dir: &str, state: &DiscussionState) -> bool {
                 std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
                 if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
                 if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
-                    eprintln!("[write_discussion] Lock timeout after {}s on {}", LOCK_TIMEOUT_MS / 1000, lock_path.display());
-                    return false;
+                    let err_msg = format!(
+                        "lock timeout after {}s on {} (another process may be holding the discussion lock)",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    );
+                    eprintln!("[write_discussion] {}", err_msg);
+                    return Err(err_msg);
                 }
             }
         }
 
-        let result = atomic_write(&path, json.as_bytes()).is_ok();
+        let result = atomic_write(&path, json.as_bytes())
+            .map_err(|e| format!("write {}: {}", path.display(), e));
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -1052,13 +1062,22 @@ where
 
 /// Write discussion state WITHOUT acquiring a lock.
 /// Use only inside a with_board_lock closure to avoid the dual-writer race.
-pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> bool {
+///
+/// Returns the underlying serialization or atomic_write error so callers can
+/// surface the actual cause (Win32 sharing violation, permission denied,
+/// disk full, etc.) instead of a generic "write failed" message.
+///
+/// History (pr-error-bubble): previously returned `bool` and the OS error
+/// detail was lost. Human msg 462 hit this when an end-discussion call
+/// produced "Failed to write discussion.json" with no further context —
+/// dev-challenger msg 471 + platform-engineer msg 468 + tester msg 470
+/// all converged on signature change as the right fix.
+pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> Result<(), String> {
     let path = active_discussion_path(dir);
-    let json = match serde_json::to_string_pretty(state) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    atomic_write(&path, json.as_bytes()).is_ok()
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
+    atomic_write(&path, json.as_bytes())
+        .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
 /// Compact board.jsonl by removing messages older than `max_age_days`.
