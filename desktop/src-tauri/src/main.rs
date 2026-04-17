@@ -381,7 +381,14 @@ fn probe_sidecar_build_info(path: &std::path::Path) -> serde_json::Value {
     let (tx, rx) = std::sync::mpsc::channel();
     let path_owned = path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = tx.send(std::process::Command::new(&path_owned).arg("--build-info").output());
+        let mut cmd = std::process::Command::new(&path_owned);
+        cmd.arg("--build-info");
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — suppress console flash on GUI-app spawn
+        }
+        let _ = tx.send(cmd.output());
     });
     match rx.recv_timeout(std::time::Duration::from_secs(2)) {
         Ok(Ok(output)) => {
