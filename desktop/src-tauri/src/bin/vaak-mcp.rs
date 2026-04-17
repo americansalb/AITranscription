@@ -4361,18 +4361,48 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     // Noise control is handled by work mode (consecutive/simultaneous) and
     // communication mode (directed/open), not by permission flags.
 
-    // Pipeline mode: only current stage agent can broadcast
-    // Uses typed DiscussionState for reliable field access (no raw JSON chains)
-    if disc_active && disc_format == "pipeline" && to == "all" && state.role != "human" && state.role != "manager" {
+    // Pipeline mode: strict gating per human msg 1122 ("discussion mode is meaningless if not strict").
+    // Old behavior: only `to == "all"` was blocked, leaving `to: <role>` directed messages as a loophole.
+    // New behavior (pr-pipeline-gate-strict): block ALL sends from non-current-stage roles unless
+    // they're one of these explicit exceptions:
+    //   - type=="question" directed to current-stage role
+    //   - type=="answer" in_reply_to a question from the current-stage role
+    //   - type=="ack" (turn-acknowledgement, must come from any role to enable pr-pipeline-turn-ack flow)
+    //   - to=="human" (always allowed — human is always reachable)
+    //   - sender role is "human" or "manager" (override authority)
+    if disc_active && disc_format == "pipeline" && state.role != "human" && state.role != "manager" {
         let typed_disc = read_discussion_typed(&state.project_dir);
         let pipeline_order = typed_disc.pipeline_order.as_deref().unwrap_or(&[]);
         let current_stage = typed_disc.pipeline_stage.unwrap_or(0) as usize;
         let pipeline_phase = typed_disc.phase.as_deref().unwrap_or("");
         let from_label = format!("{}:{}", state.role, state.instance);
         let current_agent = pipeline_order.get(current_stage).map(|s| s.as_str()).unwrap_or("");
-        if pipeline_phase != "pipeline_complete" && from_label != current_agent {
-            return Err(format!("Pipeline mode: not your stage. Current stage: {} ({}/{}). Wait for your turn or send directed messages.",
-                current_agent, current_stage + 1, pipeline_order.len()));
+        let is_complete = pipeline_phase == "pipeline_complete";
+        let is_current = from_label == current_agent;
+        if !is_complete && !is_current && to != "human" {
+            // Check the three allowed exception types
+            let to_role_part = to.split(':').next().unwrap_or(to);
+            let current_role_part = current_agent.split(':').next().unwrap_or(current_agent);
+            let is_question_to_current = msg_type == "question" && to_role_part == current_role_part;
+            let is_ack = msg_type == "ack";
+            let is_answer_to_current_question = msg_type == "answer" && {
+                if let Some(reply_id) = metadata.as_ref().and_then(|m| m.get("in_reply_to")).and_then(|v| v.as_u64()) {
+                    let referenced = read_board_filtered(&state.project_dir).into_iter()
+                        .find(|m| m.get("id").and_then(|i| i.as_u64()) == Some(reply_id));
+                    referenced.map(|m| {
+                        let ref_type = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let ref_from = m.get("from").and_then(|v| v.as_str()).unwrap_or("");
+                        ref_type == "question" && ref_from == current_agent
+                    }).unwrap_or(false)
+                } else { false }
+            };
+            if !is_question_to_current && !is_ack && !is_answer_to_current_question {
+                return Err(format!(
+                    "Pipeline mode strict gating: not your stage. Current stage: {} ({}/{}). \
+                    Allowed during pipeline: type=question to current-stage role, type=answer to current-stage role's question (with in_reply_to), type=ack, or to=human. \
+                    Sender: {}, attempted: type={} to={}.",
+                    current_agent, current_stage + 1, pipeline_order.len(), from_label, msg_type, to));
+            }
         }
     }
 
