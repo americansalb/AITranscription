@@ -103,11 +103,126 @@ fn ensure_heartbeat_ticker_started() {
             std::thread::sleep(interval);
             // No-op if no active project bound yet (process started but not joined).
             let bound = ACTIVE_PROJECT.lock().ok().and_then(|g| g.as_ref().cloned());
-            if bound.is_some() {
+            if let Some(state) = bound {
                 update_session_heartbeat_in_file();
+                check_pipeline_ack_timeout_and_skip(&state.project_dir);
             }
         }
     });
+}
+
+/// Pipeline turn-ack watchdog (pr-pipeline-turn-ack-p2). If the current pipeline
+/// stage's assigned role has not broadcast within PIPELINE_ACK_TIMEOUT_SECS of
+/// being notified, force-advance past them. Prevents the "1hr silent agent
+/// stalls everyone" failure mode the human flagged in msg 1111.
+const PIPELINE_ACK_TIMEOUT_SECS: i64 = 30;
+fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
+    let disc = read_discussion_state_raw(project_dir);
+    if disc.get("active").and_then(|v| v.as_bool()) != Some(true) { return; }
+    if disc.get("mode").and_then(|v| v.as_str()) != Some("pipeline") { return; }
+    if disc.get("paused_at").and_then(|v| v.as_str()).is_some() { return; }
+    let started_at_str = match disc.get("pipeline_stage_started_at").and_then(|v| v.as_str()) {
+        Some(s) => s, None => return,
+    };
+    let started_at = match chrono_iso_to_unix(started_at_str) { Some(t) => t, None => return };
+    let elapsed = utc_now_unix() - started_at;
+    if elapsed < PIPELINE_ACK_TIMEOUT_SECS { return; }
+    let pipeline_order = match disc.get("pipeline_order").and_then(|v| v.as_array()) {
+        Some(a) => a.clone(), None => return,
+    };
+    let current_stage = disc.get("pipeline_stage").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let current_role = match pipeline_order.get(current_stage).and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(), None => return,
+    };
+    if board_has_message_from_since(project_dir, &current_role, started_at_str) { return; }
+    // Force-advance past the silent role.
+    let next_stage = current_stage + 1;
+    let mut updated = disc.clone();
+    if next_stage >= pipeline_order.len() {
+        // End of round — skipped role was the last. Loop or complete handled by the
+        // next broadcast path; for the watchdog, just bump stage and post a system msg.
+        updated["pipeline_stage"] = serde_json::json!(next_stage);
+        updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
+    } else {
+        updated["pipeline_stage"] = serde_json::json!(next_stage);
+        updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
+    }
+    let _ = write_discussion_state(project_dir, &updated);
+    post_turn_system_message(project_dir, &format!("{} did not respond within {}s — pipeline auto-advanced (skipped)", current_role, PIPELINE_ACK_TIMEOUT_SECS));
+    if next_stage < pipeline_order.len() {
+        let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
+        let wake_msg = serde_json::json!({
+            "id": next_message_id(project_dir),
+            "from": "system:0",
+            "to": next_agent,
+            "type": "system",
+            "subject": "Your pipeline stage",
+            "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped after {}s no response.", next_stage + 1, pipeline_order.len(), PIPELINE_ACK_TIMEOUT_SECS),
+            "timestamp": utc_now_iso(),
+            "metadata": {"pipeline_notification": true, "auto_skip_predecessor": current_role}
+        });
+        let _ = append_to_board(project_dir, &wake_msg);
+    }
+}
+
+fn read_discussion_state_raw(project_dir: &str) -> serde_json::Value {
+    let path = vaak_dir(project_dir).join("sections").join(read_active_section(project_dir)).join("discussion.json");
+    let path = if path.exists() { path } else { vaak_dir(project_dir).join("discussion.json") };
+    std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn read_active_section(project_dir: &str) -> String {
+    let path = project_json_path(project_dir);
+    std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("active_section").and_then(|s| s.as_str()).map(String::from))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn board_has_message_from_since(project_dir: &str, role: &str, since_iso: &str) -> bool {
+    let since_unix = chrono_iso_to_unix(since_iso).unwrap_or(0);
+    let path = vaak_dir(project_dir).join("sections").join(read_active_section(project_dir)).join("board.jsonl");
+    let path = if path.exists() { path } else { vaak_dir(project_dir).join("board.jsonl") };
+    let content = match std::fs::read_to_string(&path) { Ok(s) => s, Err(_) => return false };
+    for line in content.lines() {
+        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+            let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
+            if from != role { continue; }
+            let ts = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+            if chrono_iso_to_unix(ts).unwrap_or(0) > since_unix { return true; }
+        }
+    }
+    false
+}
+
+fn chrono_iso_to_unix(iso: &str) -> Option<i64> {
+    // Parse "2026-04-17T19:54:31Z" format minimally without chrono dep.
+    let s = iso.trim_end_matches('Z');
+    let parts: Vec<&str> = s.split(|c| c == 'T' || c == '-' || c == ':').collect();
+    if parts.len() < 6 { return None; }
+    let y: i64 = parts[0].parse().ok()?;
+    let mo: i64 = parts[1].parse().ok()?;
+    let d: i64 = parts[2].parse().ok()?;
+    let h: i64 = parts[3].parse().ok()?;
+    let mi: i64 = parts[4].parse().ok()?;
+    let se: i64 = parts[5].parse().ok()?;
+    // Days since epoch using Howard Hinnant's algorithm.
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + se)
+}
+
+fn utc_now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
