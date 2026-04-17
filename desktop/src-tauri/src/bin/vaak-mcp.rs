@@ -2972,12 +2972,16 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 }
             });
 
-            // Add pipeline-specific fields
+            // Add pipeline-specific fields. Per pr-r2-pipeline-mode-value
+            // (UX msg 521 + tech-leader msg 554 audit): the sub-mode that
+            // alternates with "action" is now called "review" everywhere.
+            // UI already labels it that way; this aligns the underlying
+            // value so the data layer matches the visible name.
             if let Some(ref order) = pipeline_order {
                 new_state["pipeline_order"] = serde_json::json!(order);
                 new_state["pipeline_stage"] = serde_json::json!(0);
                 new_state["pipeline_outputs"] = serde_json::json!([]);
-                new_state["pipeline_mode"] = serde_json::json!("discussion");
+                new_state["pipeline_mode"] = serde_json::json!("review");
             }
 
             with_file_lock(&state.project_dir, || {
@@ -3247,7 +3251,10 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         }
 
         "toggle_pipeline_mode" => {
-            // Toggle pipeline between "discussion" (opinions) and "action" (write code)
+            // Toggle pipeline between "review" (formerly "discussion" — opinions)
+            // and "action" (write code). Per pr-r2-pipeline-mode-value: legacy
+            // "discussion" value is normalized to "review" on read so old state
+            // files toggle correctly; new writes always emit "review".
             let typed_disc = read_discussion_typed(&state.project_dir);
             if !typed_disc.active {
                 return Err("No active discussion".to_string());
@@ -3257,8 +3264,11 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 return Err(format_capability_error("toggle_pipeline_mode", fmt,
                     "toggle_pipeline_mode is only valid for Pipeline discussions"));
             }
-            let current_mode = typed_disc.pipeline_mode.as_deref().unwrap_or("discussion");
-            let new_mode = if current_mode == "discussion" { "action" } else { "discussion" };
+            let raw_mode = typed_disc.pipeline_mode.as_deref().unwrap_or("review");
+            // Normalize legacy "discussion" → "review" so toggle treats them as
+            // the same logical state.
+            let current_mode = if raw_mode == "discussion" { "review" } else { raw_mode };
+            let new_mode = if current_mode == "review" { "action" } else { "review" };
             let disc = read_discussion_state(&state.project_dir);
 
             with_file_lock(&state.project_dir, || {
@@ -5792,7 +5802,11 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         let current_stage = disc_fresh.get("pipeline_stage").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
         let pipeline_outputs = disc_fresh.get("pipeline_outputs").and_then(|o| o.as_array()).cloned().unwrap_or_default();
         let pipeline_phase = disc_fresh.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-        let pipeline_mode = disc_fresh.get("pipeline_mode").and_then(|v| v.as_str()).unwrap_or("discussion");
+        // pr-r2-pipeline-mode-value: normalize legacy "discussion" to "review"
+        // so prompt strings always render the canonical name regardless of
+        // when the discussion.json was written.
+        let pipeline_mode_raw = disc_fresh.get("pipeline_mode").and_then(|v| v.as_str()).unwrap_or("review");
+        let pipeline_mode = if pipeline_mode_raw == "discussion" { "review" } else { pipeline_mode_raw };
         let my_label = format!("{}:{}", my_role, my_instance);
         let current_agent = pipeline_order.get(current_stage).and_then(|v| v.as_str()).unwrap_or("");
         let order_display = pipeline_order.iter().enumerate()

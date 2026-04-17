@@ -774,7 +774,10 @@ pub struct DiscussionState {
     /// Whether the audience is enabled for this discussion (default: false)
     #[serde(default)]
     pub audience_enabled: bool,
-    /// Pipeline mode: "discussion" (opinions/review) or "action" (write code). Default: "discussion"
+    /// Pipeline sub-mode: "review" (opinions, formerly "discussion") or
+    /// "action" (write code). Default on new pipelines: "review". Per
+    /// pr-r2-pipeline-mode-value, callers normalize legacy "discussion"
+    /// values to "review" on read; serde stores whatever string was given.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipeline_mode: Option<String>,
     /// Pipeline mode: ordered list of agents (e.g. ["developer:0", "tester:0"])
