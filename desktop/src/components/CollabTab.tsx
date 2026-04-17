@@ -1656,7 +1656,7 @@ When multiple instances of this role are active:
     const pollDiscussion = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
         if (!cancelled) {
           setDiscussionState(state);
           // Sync continuous timeout from server state
@@ -2201,8 +2201,8 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("close_discussion_round", { dir: projectDir });
-        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        await invoke("close_session_round", { dir: projectDir });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
         if (state) setDiscussionState(state);
       }
     } catch (e) {
@@ -2220,7 +2220,7 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("end_discussion", { dir: projectDir, reason: reason?.trim() || null });
+        await invoke("end_session", { dir: projectDir, reason: reason?.trim() || null });
         setDiscussionState(null);
         setEndSessionAnnouncement("Session ended.");
 
@@ -2265,11 +2265,11 @@ When multiple instances of this role are active:
         // future PR can add one (architect msg 449 option 2: contextual default
         // with moderator override) without changing this call site.
         if (discussionState?.paused_at) {
-          await invoke("resume_discussion", { dir: projectDir, reason: null });
+          await invoke("resume_session", { dir: projectDir, reason: null });
         } else {
-          await invoke("pause_discussion", { dir: projectDir, reason: null });
+          await invoke("pause_session", { dir: projectDir, reason: null });
         }
-        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
         if (state) setDiscussionState(state);
       }
     } catch (e) {
@@ -2283,11 +2283,11 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("update_discussion_settings", {
+        await invoke("update_session_settings", {
           dir: projectDir,
           maxRounds: rounds ?? 999,
         });
-        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
         if (state) setDiscussionState(state);
       }
     } catch (e) {
@@ -2339,10 +2339,10 @@ When multiple instances of this role are active:
         const moderator = modSession
           ? `moderator:${modSession.instance}`
           : undefined;  // let backend auto-detect from roster (or no moderator if disabled)
-        console.log("[handleStartDiscussion] Invoking start_discussion:", { dir: projectDir, mode: sdFormat, topic, moderator, participants });
+        console.log("[handleStartDiscussion] Invoking start_session:", { dir: projectDir, mode: sdFormat, topic, moderator, participants });
         let startDiscussionError: string | null = null;
         try {
-          await invoke("start_discussion", {
+          await invoke("start_session", {
             dir: projectDir,
             mode: sdFormat,
             topic,
@@ -2356,7 +2356,7 @@ When multiple instances of this role are active:
           // start_discussion may partially succeed (writes discussion.json but fails on board announcement)
           // We continue to post the announcement via send_team_message as a fallback
           startDiscussionError = String(sdErr);
-          console.warn("[handleStartDiscussion] start_discussion returned error (will post announcement via fallback):", sdErr);
+          console.warn("[handleStartDiscussion] start_session returned error (will post announcement via fallback):", sdErr);
         }
 
         // === OPTIMISTIC UI UPDATE ===
@@ -2368,7 +2368,7 @@ When multiple instances of this role are active:
         let pipelineOrder = "";
         if (sdFormat === "pipeline") {
           try {
-            const discState = await invoke<Record<string, unknown> | null>("get_discussion_state", { dir: projectDir });
+            const discState = await invoke<Record<string, unknown> | null>("get_session_state", { dir: projectDir });
             const scoredOrder = discState?.pipeline_order as string[] | undefined;
             pipelineOrder = scoredOrder ? scoredOrder.join(" \u2192 ") : participants.join(" \u2192 ");
           } catch {
@@ -2408,7 +2408,7 @@ When multiple instances of this role are active:
         } catch (boardErr) {
           console.warn("[CollabTab] Board announcement write failed (optimistic UI already shown):", boardErr);
         }
-        const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
         if (state) setDiscussionState(state);
         setStartDiscussionOpen(false);
 
@@ -2449,8 +2449,8 @@ When multiple instances of this role are active:
         await inv("send_team_message", {
           dir: projectDir,
           to: "all",
-          subject: "DEBUG: start_discussion FAILED",
-          body: `Error: ${String(e)}\n\nThis means invoke("start_discussion") threw an exception. The Tauri command either didn't run or returned an error.`,
+          subject: "DEBUG: start_session FAILED",
+          body: `Error: ${String(e)}\n\nThis means invoke("start_session") threw an exception. The Tauri command either didn't run or returned an error.`,
           msgType: "status",
           metadata: { debug: true },
         });
@@ -2854,7 +2854,7 @@ When multiple instances of this role are active:
                 ? `${activeSessions[0].role}:${activeSessions[0].instance}`
                 : "human:0";
             const participants = activeSessions.map(s => `${s.role}:${s.instance}`);
-            await invoke("start_discussion", {
+            await invoke("start_session", {
               dir: projectDir,
               mode: format,
               topic,
@@ -2862,7 +2862,7 @@ When multiple instances of this role are active:
               participants,
             });
             setMsgBody("");
-            const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+            const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
             if (state) setDiscussionState(state);
           }
         } catch (e) {
@@ -2879,11 +2879,11 @@ When multiple instances of this role are active:
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("end_discussion", { dir: projectDir, reason: "Ended via /end-discussion command" });
+            await invoke("end_session", { dir: projectDir, reason: "Ended via /end-discussion command" });
             // Inline reason — conveys invocation source, distinct from
             // backend's default "Ended by user" applied when reason is null.
             setMsgBody("");
-            const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+            const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
             if (state) setDiscussionState(state);
 
             // Auto-stop discussion-bound agents (moderator + audience)
@@ -2912,9 +2912,9 @@ When multiple instances of this role are active:
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("close_discussion_round", { dir: projectDir });
+            await invoke("close_session_round", { dir: projectDir });
             setMsgBody("");
-            const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+            const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
             if (state) setDiscussionState(state);
           }
         } catch (e) {
@@ -3302,15 +3302,15 @@ When multiple instances of this role are active:
                 const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
                 const moderator = modSession ? `moderator:${modSession.instance}` : undefined;
                 try {
-                  await invoke("start_discussion", { dir: projectDir, mode: format, topic: effectiveTopic, moderator, participants });
+                  await invoke("start_session", { dir: projectDir, mode: format, topic: effectiveTopic, moderator, participants });
                 } catch (e) {
-                  console.warn("[QuickLaunch] start_discussion error (will post announcement):", e);
+                  console.warn("[QuickLaunch] start_session error (will post announcement):", e);
                 }
                 // Post announcement to board — read actual scored pipeline order from discussion state
                 let pipelineOrder = "";
                 if (format === "pipeline") {
                   try {
-                    const discState = await invoke<Record<string, unknown> | null>("get_discussion_state", { dir: projectDir });
+                    const discState = await invoke<Record<string, unknown> | null>("get_session_state", { dir: projectDir });
                     const scoredOrder = discState?.pipeline_order as string[] | undefined;
                     pipelineOrder = scoredOrder ? scoredOrder.join(" → ") : participants.join(" → ");
                   } catch {
@@ -3330,7 +3330,7 @@ When multiple instances of this role are active:
                     metadata: { discussion_action: "start", mode: format, round: 1 },
                   });
                 } catch { /* ignore send failure — optimistic UI */ }
-                const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+                const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
                 if (state) setDiscussionState(state);
               }
             } catch (e) {
