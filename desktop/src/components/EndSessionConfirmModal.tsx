@@ -4,12 +4,12 @@ import "./EndSessionConfirmModal.css";
 /**
  * PR H3 v2 — End Session confirmation modal.
  *
- * Why: destructive moderator actions need a misclick guard. Per architect
- * msg 480 (post-human-feedback in msg 462), the right friction is:
- * typed "END" confirmation (prevents single-touchpad-tap from wiping
- * session state), reason textarea strictly OPTIONAL (parent substitutes
- * DEFAULT_END_REASON on empty so the backend's ≥3-char audit rule still
- * passes — see CollabTab.tsx doEndDiscussion).
+ * Destructive-action misclick guard: typed "END" confirmation is required
+ * before the red End Session button enables. Reason textarea is strictly
+ * optional — empty reason flows through as `null` to the Tauri
+ * `end_discussion` command, and the Rust-side `normalize_action_reason`
+ * substitutes an action-specific default ("Ended by user") for the audit
+ * metadata.
  *
  * Keeps: focus trap, Escape cancel, AAA contrast, prefers-reduced-motion
  * honor, no backdrop dismissal.
