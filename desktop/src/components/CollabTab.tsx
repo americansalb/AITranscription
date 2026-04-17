@@ -2874,14 +2874,16 @@ When multiple instances of this role are active:
         return;
       }
 
-      if (cmd === "/end-debate" || cmd === "/end-discussion") {
+      if (cmd === "/end-debate" || cmd === "/end-discussion" || cmd === "/end-session") {
+        // pr-r2-slash-cmds: `/end-session` is canonical; `/end-debate` and
+        // `/end-discussion` kept as synonyms so muscle-memory keeps working.
         setSending(true);
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
-            await invoke("end_session", { dir: projectDir, reason: "Ended via /end-discussion command" });
-            // Inline reason — conveys invocation source, distinct from
-            // backend's default "Ended by user" applied when reason is null.
+            await invoke("end_session", { dir: projectDir, reason: `Ended via ${cmd} command` });
+            // Inline reason — conveys exact invocation command (so audit
+            // distinguishes /end-session vs /end-discussion vs /end-debate).
             setMsgBody("");
             const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
             if (state) setDiscussionState(state);
