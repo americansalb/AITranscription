@@ -12,17 +12,13 @@ import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import "../styles/collab.css";
 
-// pr-reason-params: contract shared with the Rust validator
-// (validate_action_reason in main.rs) — must stay ≥3 chars to match the
-// backend's audit-trail requirement on end/pause/resume_discussion.
+// pr-reason-params + pr-reason-relax: shared contract with the Rust
+// `normalize_action_reason` helper in main.rs. The number reflects the
+// backend's "use caller value if ≥N chars after trim, else fall back to
+// the action default." Backend never rejects on reason — this is the
+// threshold at which a caller-supplied reason is considered informative
+// enough to override the default.
 export const MODERATOR_REASON_MIN_CHARS = 3;
-
-// pr-reason-params: default reasons for moderator actions invoked outside
-// a typed-confirm modal (slash commands, toggle button). Must satisfy
-// MODERATOR_REASON_MIN_CHARS so the backend accepts them.
-export const DEFAULT_END_REASON = "Ended via moderator action";
-export const DEFAULT_PAUSE_REASON = "Paused by moderator";
-export const DEFAULT_RESUME_REASON = "Resumed by moderator";
 
 const ROLE_COLORS: Record<string, string> = {
   manager: "#9b59b6",
@@ -2186,18 +2182,15 @@ When multiple instances of this role are active:
     }
   };
 
-  // PR H3 v2 / pr-reason-params: reason now flows as a Tauri command argument
-  // straight into the announcement metadata (was a separate pre-broadcast
-  // workaround until end_discussion gained the param). Default reason is used
-  // by callers without an explicit modal flow (slash-command path).
+  // PR H3 v2 / pr-reason-params / pr-reason-relax: backend `end_discussion`
+  // accepts an optional reason and applies its own "Ended by user" default
+  // when missing or under MODERATOR_REASON_MIN_CHARS. Frontend just passes
+  // through whatever the caller gave (modal value, /end-discussion slash, etc.).
   const doEndDiscussion = async (reason?: string) => {
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        const effectiveReason = (reason && reason.trim().length >= MODERATOR_REASON_MIN_CHARS)
-          ? reason.trim()
-          : DEFAULT_END_REASON;
-        await invoke("end_discussion", { dir: projectDir, reason: effectiveReason });
+        await invoke("end_discussion", { dir: projectDir, reason: reason?.trim() || null });
         setDiscussionState(null);
         setEndSessionAnnouncement("Session ended.");
 
@@ -2237,14 +2230,14 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
-        // pr-reason-params: backend now requires a ≥3-char reason for audit.
-        // Toggle button has no reason-input UX yet — placeholder reason is the
-        // minimal contract-satisfying value. Future PR can add a prompt modal
-        // (similar to EndSessionConfirmModal) for moderator-supplied reasons.
+        // pr-reason-relax: backend applies "Paused by user" / "Resumed by user"
+        // defaults when reason is null. No reason-prompt UI yet on this toggle —
+        // future PR can add one (architect msg 449 option 2: contextual default
+        // with moderator override) without changing this call site.
         if (discussionState?.paused_at) {
-          await invoke("resume_discussion", { dir: projectDir, reason: DEFAULT_RESUME_REASON });
+          await invoke("resume_discussion", { dir: projectDir, reason: null });
         } else {
-          await invoke("pause_discussion", { dir: projectDir, reason: DEFAULT_PAUSE_REASON });
+          await invoke("pause_discussion", { dir: projectDir, reason: null });
         }
         const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
         if (state) setDiscussionState(state);
@@ -2857,9 +2850,8 @@ When multiple instances of this role are active:
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
             await invoke("end_discussion", { dir: projectDir, reason: "Ended via /end-discussion command" });
-            // Note: this slash-command path uses an inline-literal reason
-            // (not DEFAULT_END_REASON) because it conveys the invocation
-            // source — useful audit signal distinct from the modal flow.
+            // Inline reason — conveys invocation source, distinct from
+            // backend's default "Ended by user" applied when reason is null.
             setMsgBody("");
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);

@@ -3232,28 +3232,34 @@ fn open_next_round(dir: String) -> Result<u32, String> {
     result
 }
 
-/// Validate a moderator-action reason: must be ≥3 chars after trim.
+/// Normalize a moderator-action reason: trim and apply a fallback default
+/// when the input is empty or too short to be informative.
 ///
-/// Why: tech-leader msg 423 + architect msg 412 — `end_discussion`,
-/// `pause_discussion`, `resume_discussion` Tauri commands now require a
-/// structured reason for the audit trail (matches the contract UX's
-/// EndSessionConfirmModal already enforces). Centralized so all three
-/// commands share one validation rule.
-fn validate_action_reason(reason: &str) -> Result<String, String> {
+/// History: pr-reason-params (commit 0f0911c) initially returned `Err` for
+/// inputs under 3 chars. Human msg 462 reported friction — required typed
+/// reasons on every End click broke the hot-path UX. Architect msg 449
+/// independently flagged the audit-null placeholder problem and recommended
+/// auto-derived defaults rather than mandatory prompts (option 2).
+///
+/// Resolution (pr-reason-relax): soft contract — backend never rejects.
+/// Caller-supplied reason is used when ≥3 chars after trim; otherwise a
+/// default tagged with the action name flows through so the audit trail
+/// stays populated without blocking the user. UI layers (e.g. EndSession-
+/// ConfirmModal) may still enforce stricter prompts where audit value
+/// matters most.
+fn normalize_action_reason(reason: &str, action_default: &str) -> String {
     let trimmed = reason.trim();
-    if trimmed.len() < 3 {
-        return Err(format!(
-            "Reason must be at least 3 characters after trim (got {} chars). Provide a brief justification for the moderator action.",
-            trimmed.len()
-        ));
+    if trimmed.len() >= 3 {
+        trimmed.to_string()
+    } else {
+        action_default.to_string()
     }
-    Ok(trimmed.to_string())
 }
 
 #[tauri::command]
-fn end_discussion(dir: String, reason: String) -> Result<(), String> {
+fn end_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
-    let reason = validate_action_reason(&reason)?;
+    let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Ended by user");
     // Wrap in board lock to prevent race with MCP sidecar
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
@@ -3269,7 +3275,7 @@ fn end_discussion(dir: String, reason: String) -> Result<(), String> {
         state.phase = Some("complete".to_string());
 
         if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
+            return Err("Could not save discussion state to disk. The session is likely still ending — check .vaak/sections/<active>/discussion.json. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
         }
 
         // Post end announcement to board.jsonl (lock already held)
@@ -3309,9 +3315,9 @@ fn end_discussion(dir: String, reason: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pause_discussion(dir: String, reason: String) -> Result<(), String> {
+fn pause_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
-    let reason = validate_action_reason(&reason)?;
+    let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Paused by user");
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
@@ -3323,7 +3329,7 @@ fn pause_discussion(dir: String, reason: String) -> Result<(), String> {
         let now = iso_now();
         state.paused_at = Some(now.clone());
         if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
+            return Err("Could not save discussion state to disk. The pause is likely still applying — refresh the panel. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
         }
         // Post pause announcement
         let board_path = collab::active_board_path(&dir);
@@ -3354,9 +3360,9 @@ fn pause_discussion(dir: String, reason: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn resume_discussion(dir: String, reason: String) -> Result<(), String> {
+fn resume_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
-    let reason = validate_action_reason(&reason)?;
+    let reason = normalize_action_reason(reason.as_deref().unwrap_or(""), "Resumed by user");
     let result = collab::with_board_lock(&dir, || {
         let mut state = collab::read_discussion(&dir);
         if !state.active {
@@ -3368,7 +3374,7 @@ fn resume_discussion(dir: String, reason: String) -> Result<(), String> {
         let now = iso_now();
         state.paused_at = None;
         if !collab::write_discussion_unlocked(&dir, &state) {
-            return Err("Failed to write discussion.json".to_string());
+            return Err("Could not save discussion state to disk. The resume is likely still applying — refresh the panel. If this persists, look for a stale lock file or a permission issue on .vaak/.".to_string());
         }
         // Post resume announcement
         let board_path = collab::active_board_path(&dir);
@@ -5364,48 +5370,58 @@ fn show_error_dialog(message: &str) {
 mod tests {
     use super::*;
 
-    // ── validate_action_reason (pr-reason-params) ──────────────────────
-    // Locks the contract that end/pause/resume_discussion enforce on the
-    // moderator-reason argument. Matches UX EndSessionConfirmModal's
-    // ≥3-char trim rule so frontend and backend can't drift.
+    // ── normalize_action_reason (pr-reason-relax) ──────────────────────
+    // Soft contract: backend never rejects on reason. Caller value used when
+    // ≥3 chars after trim; otherwise the action default flows through. This
+    // replaced validate_action_reason after human msg 462 reported the
+    // hard-rejection broke the End-button hot path.
 
     #[test]
-    fn validate_action_reason_accepts_minimum_three_chars() {
-        let result = validate_action_reason("end");
-        assert!(result.is_ok(), "exactly 3 chars after trim must pass");
-        assert_eq!(result.unwrap(), "end");
+    fn normalize_action_reason_uses_caller_value_when_three_chars_or_more() {
+        let result = normalize_action_reason("end", "default");
+        assert_eq!(result, "end", "caller value at threshold passes through");
     }
 
     #[test]
-    fn validate_action_reason_trims_whitespace_before_length_check() {
-        let result = validate_action_reason("  end  ");
-        assert!(result.is_ok(), "trim before length check");
-        assert_eq!(result.unwrap(), "end", "returned reason is the trimmed form");
+    fn normalize_action_reason_trims_whitespace_before_length_check() {
+        let result = normalize_action_reason("  Done with debate  ", "default");
+        assert_eq!(result, "Done with debate", "returned reason is trimmed");
     }
 
     #[test]
-    fn validate_action_reason_rejects_under_three_chars_after_trim() {
-        let result = validate_action_reason("ab");
-        assert!(result.is_err(), "2 chars must fail");
-        assert!(result.unwrap_err().contains("at least 3"));
+    fn normalize_action_reason_falls_back_when_under_three_chars() {
+        let result = normalize_action_reason("ab", "Ended by user");
+        assert_eq!(result, "Ended by user", "2 chars triggers default");
     }
 
     #[test]
-    fn validate_action_reason_rejects_only_whitespace() {
-        let result = validate_action_reason("   ");
-        assert!(result.is_err(), "whitespace-only must fail (trims to empty)");
+    fn normalize_action_reason_falls_back_for_only_whitespace() {
+        let result = normalize_action_reason("   ", "Paused by user");
+        assert_eq!(result, "Paused by user", "whitespace-only triggers default");
     }
 
     #[test]
-    fn validate_action_reason_rejects_empty_string() {
-        let result = validate_action_reason("");
-        assert!(result.is_err(), "empty string must fail");
+    fn normalize_action_reason_falls_back_for_empty_string() {
+        let result = normalize_action_reason("", "Resumed by user");
+        assert_eq!(result, "Resumed by user", "empty triggers default");
     }
 
     #[test]
-    fn validate_action_reason_error_message_includes_actual_length() {
-        let err = validate_action_reason("ab").unwrap_err();
-        assert!(err.contains("got 2 chars"), "error must report actual length: {}", err);
+    fn normalize_action_reason_default_is_action_specific() {
+        // Each command passes its own default so audit can distinguish them
+        // even when the user supplied no reason.
+        assert_eq!(
+            normalize_action_reason("", "Ended by user"),
+            "Ended by user"
+        );
+        assert_eq!(
+            normalize_action_reason("", "Paused by user"),
+            "Paused by user"
+        );
+        assert_eq!(
+            normalize_action_reason("", "Resumed by user"),
+            "Resumed by user"
+        );
     }
 
     // ── validate_project_dir ───────────────────────────────────────────
