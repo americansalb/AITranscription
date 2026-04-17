@@ -1,9 +1,11 @@
+import { useState } from "react";
 import type { DiscussionState, BoardMessage } from "../lib/collabTypes";
 import { getTerminationStrategy, getAutomationLevel, getAudienceConfig } from "../lib/collabTypes";
 import { PipelineStepper } from "./PipelineStepper";
 import { OxfordView } from "./OxfordView";
 import { DelphiView } from "./DelphiView";
 import { RedTeamView } from "./RedTeamView";
+import { ModeratorPicker, type ModeratorPickerCandidate } from "./ModeratorPicker";
 import { getRoleColor, getModeColor } from "../utils/roleColors";
 import "../styles/discussion.css";
 
@@ -35,6 +37,24 @@ function getPhaseLabel(state: DiscussionState, closingRound: boolean): string {
     case "continuous_active": return "Active";
     default: return phase || "";
   }
+}
+
+/**
+ * Convert the current session's participant list into the shape the
+ * ModeratorPicker component consumes. Participants are stored as
+ * "role:instance" strings in discussion.json; the picker expects the
+ * split-out role + instance for a clean invoke("set_session_moderator").
+ */
+function buildModeratorCandidates(state: DiscussionState): ModeratorPickerCandidate[] {
+  const participants = state.participants ?? [];
+  return participants
+    .map((id) => {
+      const [role, instanceStr] = id.split(":");
+      const instance = Number.parseInt(instanceStr ?? "0", 10);
+      if (!role || Number.isNaN(instance)) return null;
+      return { id, role, instance };
+    })
+    .filter((c): c is ModeratorPickerCandidate => c !== null);
 }
 
 function getTerminationLabel(state: DiscussionState): string | null {
@@ -69,6 +89,9 @@ interface DiscussionPanelProps {
   onTogglePause?: () => void;
   /** Callback: update max_rounds mid-discussion */
   onSetMaxRounds?: (rounds: number | null) => void;
+  /** Callback: change the moderator. Parent wires to invoke("set_session_moderator").
+   *  When omitted, the Change affordance is hidden (read-only moderator display). */
+  onSetModerator?: (role: string, instance: number) => void | Promise<void>;
 }
 
 /**
@@ -95,7 +118,9 @@ export function DiscussionPanel({
   onSetContinuousTimeout,
   onTogglePause,
   onSetMaxRounds,
+  onSetModerator,
 }: DiscussionPanelProps) {
+  const [modPickerOpen, setModPickerOpen] = useState(false);
   if (!discussionState.active) return null;
 
   const modeColor = getModeColor(discussionState.mode);
@@ -173,9 +198,9 @@ export function DiscussionPanel({
             </span>
           )}
 
-          {/* Moderator info */}
+          {/* Moderator info (+ change affordance when the parent wires onSetModerator) */}
           {discussionState.moderator && (
-            <span className="discussion-panel-moderator">
+            <span className="discussion-panel-moderator" style={{ position: "relative" }}>
               Mod:{" "}
               <span style={{ color: getRoleColor(discussionState.moderator.split(":")[0]) }}>
                 {discussionState.moderator}
@@ -185,13 +210,59 @@ export function DiscussionPanel({
                   Auto-Mod
                 </span>
               )}
+              {onSetModerator && (
+                <>
+                  <button
+                    type="button"
+                    className="discussion-panel-mod-change"
+                    onClick={() => setModPickerOpen((prev) => !prev)}
+                    aria-haspopup="menu"
+                    aria-expanded={modPickerOpen}
+                    title="Designate a different moderator"
+                  >
+                    Change
+                  </button>
+                  <ModeratorPicker
+                    open={modPickerOpen}
+                    onClose={() => setModPickerOpen(false)}
+                    candidates={buildModeratorCandidates(discussionState)}
+                    currentModeratorId={discussionState.moderator ?? null}
+                    onSelect={async (role, instance) => {
+                      await onSetModerator(role, instance);
+                    }}
+                  />
+                </>
+              )}
             </span>
           )}
 
-          {/* Missing moderator warning */}
+          {/* Missing moderator warning (+ designate affordance when writable) */}
           {!discussionState.moderator && (
-            <span className="discussion-panel-no-mod-warning">
+            <span className="discussion-panel-no-mod-warning" style={{ position: "relative" }}>
               Unmoderated
+              {onSetModerator && (
+                <>
+                  <button
+                    type="button"
+                    className="discussion-panel-mod-change"
+                    onClick={() => setModPickerOpen((prev) => !prev)}
+                    aria-haspopup="menu"
+                    aria-expanded={modPickerOpen}
+                    title="Designate a moderator"
+                  >
+                    Designate
+                  </button>
+                  <ModeratorPicker
+                    open={modPickerOpen}
+                    onClose={() => setModPickerOpen(false)}
+                    candidates={buildModeratorCandidates(discussionState)}
+                    currentModeratorId={null}
+                    onSelect={async (role, instance) => {
+                      await onSetModerator(role, instance);
+                    }}
+                  />
+                </>
+              )}
             </span>
           )}
 

@@ -110,6 +110,32 @@
   border: 1px solid rgba(245, 158, 11, 0.2);
 }
 
+/* PR H3 moderator picker: subtle text-button affordance next to the
+   moderator badge. Inline with the badge; popover is absolute-positioned
+   via the surrounding `position: relative` wrapper. */
+.discussion-panel-mod-change {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.65);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+
+.discussion-panel-mod-change:hover,
+.discussion-panel-mod-change:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.3);
+  outline: none;
+}
+
 .discussion-panel-timeout-select {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);

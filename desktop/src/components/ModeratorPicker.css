@@ -1,0 +1,99 @@
+/* PR H3 — moderator picker popover styles.
+   Self-contained CSS; imported by ModeratorPicker.tsx. */
+
+.moderator-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: transparent;
+}
+
+.moderator-picker-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  z-index: 950;
+  min-width: 200px;
+  max-width: 280px;
+  background: var(--collab-bg-primary, #17181c);
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.moderator-picker-header {
+  padding: 6px 10px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.moderator-picker-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+
+.moderator-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 80ms ease;
+}
+
+.moderator-picker-item:hover:not(:disabled),
+.moderator-picker-item:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+.moderator-picker-item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--collab-accent, #6366f1);
+}
+
+.moderator-picker-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.moderator-picker-item-current {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.moderator-picker-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.moderator-picker-label {
+  flex: 1;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.moderator-picker-current-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--collab-accent, #818cf8);
+  background: rgba(99, 102, 241, 0.12);
+  padding: 1px 6px;
+  border-radius: 3px;
+}

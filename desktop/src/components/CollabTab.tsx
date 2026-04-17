@@ -2256,6 +2256,24 @@ When multiple instances of this role are active:
     await doEndDiscussion(reason);
   };
 
+  // pr-h3-moderator-picker: designate a different moderator mid-session.
+  // Wires to invoke("set_session_moderator", { dir, role, instance }) per
+  // developer msg 562 / architect msg 524. Errors surface through the
+  // existing pr-h3-v1 showModeratorError toast channel.
+  const handleSetModerator = async (role: string, instance: number) => {
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("set_session_moderator", { dir: projectDir, role, instance });
+        const state = await invoke<DiscussionState | null>("get_session_state", { dir: projectDir });
+        if (state) setDiscussionState(state);
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to set moderator:", e);
+      showModeratorError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const handleTogglePause = async () => {
     try {
       if (window.__TAURI__) {
@@ -3363,6 +3381,7 @@ When multiple instances of this role are active:
             onSetContinuousTimeout={handleSetContinuousTimeout}
             onTogglePause={handleTogglePause}
             onSetMaxRounds={handleSetMaxRounds}
+            onSetModerator={handleSetModerator}
           />
         ) : null}
 
