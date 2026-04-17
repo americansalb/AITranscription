@@ -3249,6 +3249,18 @@ fn normalize_action_reason(reason: &str, action_default: &str) -> String {
     if trimmed.len() >= 3 {
         trimmed.to_string()
     } else {
+        // Per architect msg 484 (pr-normalize-debug-warn): silent substitution
+        // is the right behavior for human callers but masks broken agent
+        // reason-builders in development. Warn in debug builds when the
+        // caller passed a non-empty-but-too-short value (the empty case is
+        // the expected default-flow path and stays silent).
+        #[cfg(debug_assertions)]
+        if !reason.is_empty() {
+            eprintln!(
+                "[normalize_action_reason] caller passed reason={:?} (trimmed len {}, below 3 char threshold) — substituting default {:?}",
+                reason, trimmed.len(), action_default
+            );
+        }
         action_default.to_string()
     }
 }
