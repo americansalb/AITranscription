@@ -16,7 +16,15 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
     {
         std::fs::write(path, content)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-        let f = std::fs::File::open(path)
+        // Open with write permission for sync_all — on Windows, fsync on a
+        // read-only handle returns ERROR_ACCESS_DENIED (os error 5). Pre-pr-
+        // error-bubble code used .is_ok() and silently swallowed this; once
+        // the error started bubbling, it broke deterministic-fixture tests.
+        // OpenOptions with .write(true) without .truncate(true) opens the
+        // existing file for the flush without altering content.
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
             .map_err(|e| format!("Failed to open for fsync {}: {}", path.display(), e))?;
         f.sync_all()
             .map_err(|e| format!("fsync failed for {}: {}", path.display(), e))?;

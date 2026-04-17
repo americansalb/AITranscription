@@ -3322,6 +3322,165 @@ fn end_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
     result
 }
 
+/// Explicitly designate a moderator for the active session.
+///
+/// Per architect msg 524 (pr-moderator-set, addresses human msg 511 ask #3
+/// "no clear way to designate a moderator"). Today moderator is implicit
+/// (whichever role claims first, or `null` for auto). This command makes
+/// it explicit.
+///
+/// Validation:
+///   1. session must be active
+///   2. target role + instance must have an active session in sessions.json
+///      (last_heartbeat within heartbeat_timeout_seconds)
+///   3. caller must be the current moderator OR a human (per § 11.14)
+///
+/// On success: writes discussion.json.moderator = "<role>:<instance>" (string
+/// format consistent with how `handle_discussion_control` reads it at
+/// vaak-mcp.rs:2614). Posts a `moderation` board message announcing the
+/// reassignment so the audit trail captures it.
+///
+/// `caller_role` parameter: the role:instance label of the invoker. Frontend
+/// passes the active project_join'd role (the human-direct UI passes
+/// "human:0"). This is a soft trust boundary — frontend is the trust
+/// boundary today, since Tauri commands are invoked from the same process.
+#[tauri::command]
+fn set_session_moderator(
+    dir: String,
+    role: String,
+    instance: u32,
+    caller_role: String,
+) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let role = role.trim().to_string();
+    let caller_role = caller_role.trim().to_string();
+
+    if role.is_empty() {
+        return Err("role must be non-empty".to_string());
+    }
+    if caller_role.is_empty() {
+        return Err("caller_role must be non-empty (typically the active session's role:instance label)".to_string());
+    }
+
+    let new_moderator_label = format!("{}:{}", role, instance);
+
+    let result = collab::with_board_lock(&dir, || {
+        let mut state = collab::read_discussion(&dir);
+        if !state.active {
+            return Err("No active session — cannot set moderator on a closed session.".to_string());
+        }
+
+        // Validate target has an active heartbeat
+        let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+        let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::json!({"bindings": []}));
+        let bindings = sessions.get("bindings")
+            .and_then(|b| b.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let project_cfg_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+        let project_cfg: serde_json::Value = std::fs::read_to_string(&project_cfg_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::json!({}));
+        let timeout_secs = project_cfg.get("settings")
+            .and_then(|s| s.get("heartbeat_timeout_seconds"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(300);
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let target_session = bindings.iter().find(|b| {
+            let r = b.get("role").and_then(|x| x.as_str()).unwrap_or("");
+            let i = b.get("instance").and_then(|x| x.as_u64()).unwrap_or(0);
+            r == role && i as u32 == instance
+        });
+
+        let target_alive = match target_session.and_then(|s| s.get("last_heartbeat").and_then(|h| h.as_str())) {
+            Some(hb_iso) => {
+                match collab::parse_iso_epoch_pub(hb_iso) {
+                    Some(hb_secs) => now_secs.saturating_sub(hb_secs) <= timeout_secs,
+                    None => false,
+                }
+            }
+            None => false,
+        };
+
+        if !target_alive {
+            return Err(format!(
+                "{} is not an active session (no recent heartbeat in last {}s) — cannot designate as moderator.",
+                new_moderator_label, timeout_secs
+            ));
+        }
+
+        // Authorization: caller must be current moderator OR human
+        let current_mod = state.moderator.as_deref().unwrap_or("");
+        let is_human = caller_role.starts_with("human:") || caller_role == "human";
+        let is_current_mod = !current_mod.is_empty() && current_mod == caller_role;
+        let no_current_mod = current_mod.is_empty();
+        // No current moderator → first-claim is allowed (matches existing implicit behavior).
+        if !is_human && !is_current_mod && !no_current_mod {
+            return Err(format!(
+                "Only the current moderator ({}) or a human can reassign the moderator. Caller: {}",
+                current_mod, caller_role
+            ));
+        }
+
+        let prior_moderator = state.moderator.clone().unwrap_or_default();
+        state.moderator = Some(new_moderator_label.clone());
+
+        collab::write_discussion_unlocked(&dir, &state)
+            .map_err(|e| format!("Failed to write discussion.json: {}", e))?;
+
+        // Post moderation announcement (lock already held → use append directly)
+        let board_path = collab::active_board_path(&dir);
+        let board_content = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let msg_id: u64 = board_content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
+        let now_iso = iso_now();
+        let announcement = serde_json::json!({
+            "id": msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now_iso,
+            "subject": format!("Moderator set to {}", new_moderator_label),
+            "body": format!(
+                "Session moderator is now {} (was: {}). Set by {}.",
+                new_moderator_label,
+                if prior_moderator.is_empty() { "none" } else { prior_moderator.as_str() },
+                caller_role
+            ),
+            "metadata": {
+                "discussion_action": "set_moderator",
+                "prior_moderator": prior_moderator,
+                "new_moderator": new_moderator_label,
+                "set_by": caller_role
+            }
+        });
+        if let Ok(line) = serde_json::to_string(&announcement) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+
+        Ok(())
+    });
+    if result.is_ok() { notify_collab_change(); }
+    result
+}
+
 #[tauri::command]
 fn pause_discussion(dir: String, reason: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
@@ -5223,6 +5382,7 @@ fn main() {
             end_discussion,
             pause_discussion,
             resume_discussion,
+            set_session_moderator,
             update_discussion_settings,
             get_discussion_state,
             set_continuous_timeout,
@@ -5375,6 +5535,157 @@ fn show_error_dialog(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── set_session_moderator (pr-moderator-set) ──────────────────────
+    // Per architect msg 524 testing spec: happy path + 3 validation failures.
+    // TOCTOU coverage handled by the with_board_lock wrapper itself; these
+    // tests exercise the predicate logic.
+
+    /// Build a project fixture with the given moderator and a sessions.json
+    /// containing the supplied bindings. Returns the temp path.
+    fn fixture_set_moderator(test_name: &str, moderator: Option<&str>, bindings: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("vaak-test-set-mod-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600},"name":"test"}"#)
+            .expect("write project.json");
+        let mod_field = match moderator {
+            Some(m) => format!(r#""moderator":"{}","#, m),
+            None => String::new(),
+        };
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            {}
+            "topic": "test"
+        }}"#, mod_field);
+        std::fs::write(vaak.join("discussion.json"), disc).expect("write discussion.json");
+        std::fs::write(vaak.join("sessions.json"), format!(r#"{{"bindings":[{}]}}"#, bindings))
+            .expect("write sessions.json");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("write board.jsonl");
+        tmp
+    }
+
+    #[test]
+    fn set_session_moderator_happy_path_human_assigns_active_role() {
+        // Future heartbeat = always-alive (test runs in 2026, "2099" is far future)
+        let tmp = fixture_set_moderator(
+            "happy",
+            None,
+            r#"{"role":"developer","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}"#,
+        );
+        // Use the underlying impl directly so we don't need a Tauri runtime.
+        // The Tauri command just delegates to this function body.
+        let result = super::set_session_moderator(
+            tmp.to_str().unwrap().to_string(),
+            "developer".to_string(),
+            0,
+            "human:0".to_string(),
+        );
+        assert!(result.is_ok(), "human-as-authority should succeed, got {:?}", result);
+
+        // Verify discussion.json got the new moderator
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak").join("discussion.json")).expect("read")
+        ).expect("parse");
+        assert_eq!(
+            disc.get("moderator").and_then(|m| m.as_str()),
+            Some("developer:0")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn set_session_moderator_rejects_stale_target() {
+        let tmp = fixture_set_moderator(
+            "stale-target",
+            None,
+            r#"{"role":"ghost","instance":0,"status":"active","last_heartbeat":"2020-01-01T00:00:00Z"}"#,
+        );
+        let result = super::set_session_moderator(
+            tmp.to_str().unwrap().to_string(),
+            "ghost".to_string(),
+            0,
+            "human:0".to_string(),
+        );
+        assert!(result.is_err(), "stale target must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not an active session") || err.contains("no recent heartbeat"),
+            "error must explain staleness, got: {}", err
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn set_session_moderator_rejects_unknown_role() {
+        let tmp = fixture_set_moderator(
+            "unknown",
+            None,
+            r#"{"role":"developer","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}"#,
+        );
+        let result = super::set_session_moderator(
+            tmp.to_str().unwrap().to_string(),
+            "phantom".to_string(),
+            0,
+            "human:0".to_string(),
+        );
+        assert!(result.is_err(), "unknown role must be rejected");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn set_session_moderator_rejects_non_authority_caller() {
+        // Current moderator = developer:0; caller = tester:0 (not human, not current mod)
+        let tmp = fixture_set_moderator(
+            "auth",
+            Some("developer:0"),
+            r#"{"role":"developer","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"},
+              {"role":"tester","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}"#,
+        );
+        let result = super::set_session_moderator(
+            tmp.to_str().unwrap().to_string(),
+            "tester".to_string(),
+            0,
+            "tester:0".to_string(),
+        );
+        assert!(result.is_err(), "non-moderator non-human caller must be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Only the current moderator") || err.contains("can reassign"),
+            "error must explain authority gate, got: {}", err
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn set_session_moderator_rejects_when_session_inactive() {
+        let tmp = std::env::temp_dir().join(format!("vaak-test-set-mod-inactive-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600}}"#).expect("project");
+        std::fs::write(vaak.join("discussion.json"),
+            r#"{"active":false,"mode":"pipeline"}"#).expect("disc");
+        std::fs::write(vaak.join("sessions.json"),
+            r#"{"bindings":[{"role":"developer","instance":0,"status":"active","last_heartbeat":"2099-01-01T00:00:00Z"}]}"#).expect("sess");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+
+        let result = super::set_session_moderator(
+            tmp.to_str().unwrap().to_string(),
+            "developer".to_string(),
+            0,
+            "human:0".to_string(),
+        );
+        assert!(result.is_err(), "inactive session must reject moderator-set");
+        assert!(
+            result.unwrap_err().contains("No active session"),
+            "error must explain inactive state"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     // ── write_discussion_unlocked error surface (pr-error-bubble) ──────
 
