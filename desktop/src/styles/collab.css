@@ -2710,6 +2710,85 @@
   opacity: 0.5;
 }
 
+.human-override-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: rgba(155, 89, 182, 0.08);
+  border: 1px solid rgba(155, 89, 182, 0.25);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.human-override-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: #9b59b6;
+  padding-right: 4px;
+}
+
+.human-override-btn {
+  background: rgba(155, 89, 182, 0.15);
+  color: #b97cd8;
+  border: 1px solid rgba(155, 89, 182, 0.35);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.human-override-btn:hover:not(:disabled) {
+  background: rgba(155, 89, 182, 0.25);
+}
+
+.human-override-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.human-override-btn-danger {
+  background: rgba(224, 65, 65, 0.12);
+  color: #e04141;
+  border-color: rgba(224, 65, 65, 0.35);
+}
+
+.human-override-btn-danger:hover:not(:disabled) {
+  background: rgba(224, 65, 65, 0.22);
+}
+
+.human-override-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.human-override-confirm-prompt {
+  font-size: 12px;
+  color: var(--collab-text);
+  font-weight: 600;
+}
+
+.human-override-btn-subtle {
+  background: transparent;
+  color: var(--collab-text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.human-override-btn-subtle:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .previous-team-banner {
   background: rgba(232, 147, 90, 0.08);
   border: 1px solid rgba(232, 147, 90, 0.25);
