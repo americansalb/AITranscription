@@ -1288,6 +1288,20 @@ pub fn discard_spawned_manifest(project_dir: String) -> Result<(), String> {
     Ok(())
 }
 
+/// RAII guard that clears the `relaunch_in_progress` atomic on drop — covers
+/// both normal exit and panic unwind. Per tech-leader:1 msg 215, evil-architect
+/// msg 217, dev-challenger:1 msg 221: explicit `store(false)` in the bg thread
+/// was unreachable if `do_spawn_member` / `thread::sleep` / any transitive call
+/// panicked, leaving the gate stuck true forever and silently killing the
+/// Relaunch feature until app restart. The guard's Drop fires on unwind, so
+/// the gate always clears.
+struct RelaunchGate(Arc<AtomicBool>);
+impl Drop for RelaunchGate {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// Explicit human-triggered relaunch of every dead entry in `spawned.json`.
 ///
 /// pr-relaunch-spawned (2026-04-18). Paired with PR2's reconnect-only
@@ -1329,6 +1343,8 @@ pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) ->
     drop(spawned_now);
 
     if to_relaunch.is_empty() {
+        // No bg thread will start, so clear the gate directly rather than
+        // constructing a one-shot guard.
         state.relaunch_in_progress.store(false, Ordering::Release);
         return Ok(0);
     }
@@ -1338,6 +1354,9 @@ pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) ->
     let spawned_clone = Arc::clone(&state.spawned);
     let gate_clone = Arc::clone(&state.relaunch_in_progress);
     std::thread::spawn(move || {
+        // Guard covers normal exit AND panic unwind. The final store is no
+        // longer explicit — dropping `_guard` at end-of-scope runs it.
+        let _guard = RelaunchGate(gate_clone);
         let bg_state = LauncherState {
             spawned: spawned_clone,
             project_dir: Mutex::new(Some(dir_clone.clone())),
@@ -1352,7 +1371,6 @@ pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) ->
                 eprintln!("[launcher] Failed to relaunch {}:{}: {}", agent.role, agent.instance, e);
             }
         }
-        gate_clone.store(false, Ordering::Release);
     });
 
     Ok(queued)
@@ -2202,11 +2220,16 @@ mod tests {
         save_spawned_to_disk(tmp.to_str().unwrap(), &agents);
         let loaded = load_spawned_from_disk(tmp.to_str().unwrap());
 
+        // pr-manifest-durability (e06a32e) added dedupe-on-load which sorts by
+        // spawned_at DESC, so positional indexing is no longer stable. Assert
+        // presence by (role, instance) lookup instead.
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].pid, 111);
-        assert_eq!(loaded[0].role, "developer");
-        assert_eq!(loaded[1].pid, 222);
-        assert_eq!(loaded[1].role, "tester");
+        let dev = loaded.iter().find(|a| a.role == "developer" && a.instance == 0)
+            .expect("developer:0 entry missing after round-trip");
+        assert_eq!(dev.pid, 111);
+        let tester = loaded.iter().find(|a| a.role == "tester" && a.instance == 0)
+            .expect("tester:0 entry missing after round-trip");
+        assert_eq!(tester.pid, 222);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
