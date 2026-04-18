@@ -1275,8 +1275,19 @@ pub struct SpawnedManifestEntry {
 /// Return the deduped `spawned.json` manifest with a fresh PID-alive probe
 /// per entry. Pure read — no mutation. Frontend uses the `alive` flag to
 /// decide whether a given role needs the Relaunch affordance.
+///
+/// Holds `spawned.lock()` across the disk read to serialize against
+/// `do_spawn_member`'s in-memory push and the kill paths (tech-leader:0
+/// msg 246 item 3). Partial coverage only: `do_spawn_member` releases
+/// the lock before its own disk I/O, so concurrent disk writes are still
+/// possible. Full coverage via a disk-level file lock is tracked as tech
+/// debt (evil-architect:0 msg 243 Option 3).
 #[tauri::command]
-pub fn list_spawned_manifest(project_dir: String) -> Vec<SpawnedManifestEntry> {
+pub fn list_spawned_manifest(
+    project_dir: String,
+    state: State<'_, LauncherState>,
+) -> Vec<SpawnedManifestEntry> {
+    let _guard = state.spawned.lock();
     load_spawned_from_disk(&project_dir)
         .into_iter()
         .map(|a| SpawnedManifestEntry {
@@ -1292,9 +1303,14 @@ pub fn list_spawned_manifest(project_dir: String) -> Vec<SpawnedManifestEntry> {
 /// Clear the `spawned.json` manifest on human request. Wired to the Dismiss
 /// action on ux-engineer:0's PreviousTeamBanner (msg 179). Writes an empty
 /// Vec; the file is kept rather than deleted so path-based watchers don't
-/// fire a gone-then-recreated churn.
+/// fire a gone-then-recreated churn. Holds `spawned.lock()` for the same
+/// reason as `list_spawned_manifest` above.
 #[tauri::command]
-pub fn discard_spawned_manifest(project_dir: String) -> Result<(), String> {
+pub fn discard_spawned_manifest(
+    project_dir: String,
+    state: State<'_, LauncherState>,
+) -> Result<(), String> {
+    let _guard = state.spawned.lock();
     save_spawned_to_disk(&project_dir, &[]);
     Ok(())
 }
