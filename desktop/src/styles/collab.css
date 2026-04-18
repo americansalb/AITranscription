@@ -2499,6 +2499,217 @@
   flex-shrink: 0;
 }
 
+.sequence-mod-panel {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.sequence-mod-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  color: var(--collab-text);
+  border: 0;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.sequence-mod-panel-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.sequence-mod-panel-chevron {
+  font-size: 10px;
+  color: var(--collab-text-secondary);
+  width: 12px;
+}
+
+.sequence-mod-panel-summary {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sequence-mod-panel-body {
+  padding: 4px 14px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sequence-mod-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sequence-mod-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--collab-text-secondary);
+  font-weight: 600;
+}
+
+.sequence-mod-section-controls {
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.sequence-mod-action-btn {
+  background: rgba(29, 161, 242, 0.15);
+  color: var(--collab-accent);
+  border: 1px solid rgba(29, 161, 242, 0.3);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sequence-mod-action-btn:hover:not(:disabled) {
+  background: rgba(29, 161, 242, 0.25);
+}
+
+.sequence-mod-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sequence-mod-action-warn {
+  background: rgba(232, 147, 90, 0.15);
+  color: #e8935a;
+  border-color: rgba(232, 147, 90, 0.35);
+}
+
+.sequence-mod-action-warn:hover:not(:disabled) {
+  background: rgba(232, 147, 90, 0.25);
+}
+
+.sequence-mod-queue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sequence-mod-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+}
+
+.sequence-mod-pos {
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 22px;
+}
+
+.sequence-mod-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sequence-mod-label {
+  flex: 1;
+  font-family: var(--collab-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
+  font-size: 12px;
+}
+
+.sequence-mod-role {
+  color: var(--collab-text);
+}
+
+.sequence-mod-instance {
+  color: var(--collab-text-secondary);
+  font-size: 11px;
+}
+
+.sequence-mod-item-controls {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.sequence-mod-icon-btn {
+  background: transparent;
+  color: var(--collab-text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  width: 24px;
+  height: 24px;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.sequence-mod-icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--collab-text);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.sequence-mod-icon-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.sequence-mod-icon-danger:hover:not(:disabled) {
+  background: rgba(224, 65, 65, 0.15);
+  color: #e04141;
+  border-color: rgba(224, 65, 65, 0.35);
+}
+
+.sequence-mod-empty {
+  font-size: 12px;
+  color: var(--collab-text-secondary);
+  font-style: italic;
+  padding: 8px;
+}
+
+.sequence-mod-insert-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.sequence-mod-select {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--collab-text);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.sequence-mod-select:disabled {
+  opacity: 0.5;
+}
+
 .previous-team-banner {
   background: rgba(232, 147, 90, 0.08);
   border: 1px solid rgba(232, 147, 90, 0.25);

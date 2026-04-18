@@ -14,6 +14,9 @@ import { BuildIdentityFooter } from "./BuildIdentityFooter";
 import PreviousTeamBanner from "./PreviousTeamBanner";
 import SequenceBanner, { type SequenceTurnState } from "./SequenceBanner";
 import QueueVisualization from "./QueueVisualization";
+import ModeratorSequencePanel, {
+  type ModeratorSequencePanelRosterEntry,
+} from "./ModeratorSequencePanel";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -4466,6 +4469,18 @@ When multiple instances of this role are active:
 
         <SequenceBanner turn={sequenceTurn} selfRoleInstance={null} />
         <QueueVisualization turn={sequenceTurn} />
+        <ModeratorSequencePanel
+          turn={sequenceTurn}
+          projectDir={projectDir}
+          availableRoleInstances={
+            ((project?.sessions || [])
+              .filter((s) => s.status === "active")
+              .map<ModeratorSequencePanelRosterEntry>((s) => ({
+                id: `${s.role}:${s.instance}`,
+                title: project?.config?.roles?.[s.role]?.title ?? s.role,
+              })))
+          }
+        />
 
         <PreviousTeamBanner
           projectDir={projectDir}
