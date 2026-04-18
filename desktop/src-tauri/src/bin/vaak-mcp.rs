@@ -106,9 +106,123 @@ fn ensure_heartbeat_ticker_started() {
             if let Some(state) = bound {
                 update_session_heartbeat_in_file();
                 check_pipeline_ack_timeout_and_skip(&state.project_dir);
+                check_sequence_stall_and_notify(&state.project_dir);
             }
         }
     });
+}
+
+/// Sequential-turn stall watchdog (pr-seq-6). Non-destructive: checks if the
+/// current turn-holder has been silent for more than `SEQUENCE_STALL_SECS`
+/// (default 300s = 5 min) and posts a notification message to the board if so.
+/// Does NOT mutate sequence state, does NOT advance the queue, does NOT end
+/// the sequence. Per manager msg 384 amendment 2: "non-destructive UI ping —
+/// doesn't advance the turn, doesn't change state." Sequence state change is
+/// human/moderator authority only (manager msg 377 anchor 6).
+///
+/// Rate limiting: once a stall ping fires for a given `turn_started_at`, the
+/// `stall_ping_sent_at` field is written to `active_sequence` so subsequent
+/// checks skip the same turn window. A new turn (fresh `turn_started_at`)
+/// clears the gate naturally since the ping field would be older than the
+/// turn start.
+const SEQUENCE_STALL_SECS: i64 = 300;
+
+/// Decision output from the stall check. Extracted as a pure fn so the
+/// trigger logic can be unit-tested without fixture project directories
+/// (tester:0 msg 438 ask #2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum StallDecision {
+    NoActiveSequence,
+    Paused,
+    NoHolder,
+    UnparseableTurnStart,
+    NotYetElapsed { elapsed_secs: i64 },
+    AlreadyPinged,
+    ShouldFire { holder: String, elapsed_secs: i64 },
+}
+
+/// Pure-function stall trigger. `now_unix` is injected so tests can advance
+/// the clock without `thread::sleep`. Returns `ShouldFire { ... }` when the
+/// caller should post a stall notification; other variants are short-circuits.
+pub(crate) fn decide_sequence_stall(
+    disc: &serde_json::Value,
+    now_unix: i64,
+    stall_threshold_secs: i64,
+) -> StallDecision {
+    let seq = match disc.get("active_sequence") {
+        Some(s) => s,
+        None => return StallDecision::NoActiveSequence,
+    };
+    if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return StallDecision::NoActiveSequence;
+    }
+    if seq.get("paused_for_human").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return StallDecision::Paused;
+    }
+    let holder = match seq.get("current_holder").and_then(|v| v.as_str()) {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return StallDecision::NoHolder,
+    };
+    let turn_started_at = match seq.get("turn_started_at").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return StallDecision::UnparseableTurnStart,
+    };
+    let turn_started_unix = match chrono_iso_to_unix(turn_started_at) {
+        Some(t) => t,
+        None => return StallDecision::UnparseableTurnStart,
+    };
+    let elapsed = now_unix - turn_started_unix;
+    if elapsed < stall_threshold_secs {
+        return StallDecision::NotYetElapsed { elapsed_secs: elapsed };
+    }
+    let already_pinged_at = seq.get("stall_ping_sent_at").and_then(|v| v.as_str()).unwrap_or("");
+    if !already_pinged_at.is_empty() {
+        if let Some(ping_unix) = chrono_iso_to_unix(already_pinged_at) {
+            if ping_unix >= turn_started_unix {
+                return StallDecision::AlreadyPinged;
+            }
+        }
+    }
+    StallDecision::ShouldFire { holder, elapsed_secs: elapsed }
+}
+
+pub(crate) fn check_sequence_stall_and_notify(project_dir: &str) {
+    let disc = read_discussion_state_raw(project_dir);
+    let decision = decide_sequence_stall(&disc, utc_now_unix(), SEQUENCE_STALL_SECS);
+    let (current_holder, elapsed) = match decision {
+        StallDecision::ShouldFire { holder, elapsed_secs } => (holder, elapsed_secs),
+        _ => return,
+    };
+    // Fire the ping: mark stall_ping_sent_at + post notification.
+    let now_iso = utc_now_iso();
+    let mut updated = disc.clone();
+    if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+        obj.insert("stall_ping_sent_at".to_string(), serde_json::json!(now_iso.clone()));
+    }
+    let _ = write_discussion_state(project_dir, &updated);
+    let msg_id = next_message_id(project_dir);
+    let stall_msg = serde_json::json!({
+        "id": msg_id,
+        "from": "system:0",
+        "to": "all",
+        "type": "system",
+        "timestamp": now_iso,
+        "subject": format!("Sequence stalled — {} silent for {}s", current_holder, elapsed),
+        "body": format!(
+            "Notice: {} has held the turn for {}s with no end_of_turn message. \
+            No action taken — sequence remains strictly sequential. Moderator \
+            or human can assign_turn / pass_turn / remove_role / pause_sequence / \
+            end_sequence to unblock.",
+            current_holder, elapsed
+        ),
+        "metadata": {
+            "sequence_action": "stall_notification",
+            "current_holder": current_holder,
+            "elapsed_secs": elapsed,
+            "non_destructive": true
+        }
+    });
+    let _ = append_to_board(project_dir, &stall_msg);
 }
 
 /// Pipeline turn-ack watchdog (pr-pipeline-turn-ack-p2). If the current pipeline
