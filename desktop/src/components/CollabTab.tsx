@@ -2580,6 +2580,17 @@ When multiple instances of this role are active:
     }
   };
 
+  const handleSetWatchdogEnabled = async (enabled: boolean) => {
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("set_watchdog_respawn_enabled", { dir: projectDir, enabled });
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to set watchdog:", e);
+    }
+  };
+
   // Auto-apply workflow when majority reached
   useEffect(() => {
     if (!project?.messages || !project?.sessions) return;
@@ -3234,6 +3245,20 @@ When multiple instances of this role are active:
                 <option value={14}>14 days</option>
                 <option value={30}>30 days</option>
                 <option value={0}>Never</option>
+              </select>
+            </div>
+            <div className="settings-row">
+              <div>
+                <div className="settings-label-text">Auto-restart crashed agents</div>
+                <div className="settings-label-hint">Respawn team members if their process dies mid-session. Off keeps the human in control; on recovers from PowerShell-only crashes.</div>
+              </div>
+              <select
+                className="settings-select"
+                value={project?.config?.settings?.watchdog_respawn_dead_agents === true ? "on" : "off"}
+                onChange={(e) => handleSetWatchdogEnabled(e.target.value === "on")}
+              >
+                <option value="off">Off</option>
+                <option value="on">On</option>
               </select>
             </div>
             <div className="settings-row">
