@@ -1202,6 +1202,56 @@ fn watchdog_respawn_enabled(project_dir: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Explicit human-triggered relaunch of every dead entry in `spawned.json`.
+///
+/// pr-relaunch-spawned (2026-04-18). Paired with PR2's reconnect-only
+/// `repopulate_spawned`: alive entries are skipped (they're already in-memory
+/// via reconnect); dead entries get `do_spawn_member` with a 2s stagger,
+/// matching the proven cadence from `launch_team`. Runs on a background
+/// thread so the command returns promptly — UI shows the spinner for the
+/// queue length, not the wall-clock of all spawns.
+///
+/// Returns the number of dead entries queued for relaunch. Zero means the
+/// manifest is empty or everyone is already alive.
+#[tauri::command]
+pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) -> Result<u32, String> {
+    *state.project_dir.lock() = Some(project_dir.clone());
+    let disk_agents = load_spawned_from_disk(&project_dir);
+    let spawned_now = state.spawned.lock();
+
+    let to_relaunch: Vec<SpawnedAgent> = disk_agents
+        .into_iter()
+        .filter(|a| !spawned_now.iter().any(|m| m.role == a.role && m.instance == a.instance))
+        .filter(|a| !is_pid_alive(a.pid))
+        .collect();
+    drop(spawned_now);
+
+    if to_relaunch.is_empty() {
+        return Ok(0);
+    }
+
+    let queued = to_relaunch.len() as u32;
+    let dir_clone = project_dir.clone();
+    let spawned_clone = Arc::clone(&state.spawned);
+    std::thread::spawn(move || {
+        let bg_state = LauncherState {
+            spawned: spawned_clone,
+            project_dir: Mutex::new(Some(dir_clone.clone())),
+        };
+        for (i, agent) in to_relaunch.iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            eprintln!("[launcher] Relaunching {}:{} (human-triggered)", agent.role, agent.instance);
+            if let Err(e) = do_spawn_member(&dir_clone, &agent.role, Some(agent.instance as i32), &bg_state) {
+                eprintln!("[launcher] Failed to relaunch {}:{}: {}", agent.role, agent.instance, e);
+            }
+        }
+    });
+
+    Ok(queued)
+}
+
 /// Re-populate the in-memory spawned list from disk on app startup.
 ///
 /// Reconnect-only (pr-repopulate-reconnect-only, 2026-04-18). Alive PIDs are
