@@ -13,6 +13,7 @@ import { QuickLaunchBar } from "./QuickLaunchBar";
 import { BuildIdentityFooter } from "./BuildIdentityFooter";
 import PreviousTeamBanner from "./PreviousTeamBanner";
 import SequenceBanner, { type SequenceTurnState } from "./SequenceBanner";
+import QueueVisualization from "./QueueVisualization";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -4464,6 +4465,7 @@ When multiple instances of this role are active:
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
 
         <SequenceBanner turn={sequenceTurn} selfRoleInstance={null} />
+        <QueueVisualization turn={sequenceTurn} />
 
         <PreviousTeamBanner
           projectDir={projectDir}
