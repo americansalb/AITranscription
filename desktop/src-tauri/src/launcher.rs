@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 
 /// A Claude agent spawned from the Team Launcher UI
@@ -17,6 +18,15 @@ pub struct SpawnedAgent {
 pub struct LauncherState {
     pub spawned: Arc<Mutex<Vec<SpawnedAgent>>>,
     pub project_dir: Mutex<Option<String>>,
+    /// Guard against concurrent `relaunch_spawned` invocations (tester:1 msg 168).
+    /// Rapid double-click would otherwise snapshot in-memory before the first
+    /// batch had pushed all its new PIDs, producing double-spawns of whichever
+    /// dead entries hadn't been processed yet. Set true on entry, cleared
+    /// when the bg stagger thread finishes. Bg-thread LauncherState clones
+    /// constructed inside other spawn paths initialize this to false — they
+    /// don't coordinate with the real Tauri state, so their value doesn't
+    /// matter.
+    pub relaunch_in_progress: Arc<AtomicBool>,
 }
 
 impl Default for LauncherState {
@@ -24,6 +34,7 @@ impl Default for LauncherState {
         Self {
             spawned: Arc::new(Mutex::new(Vec::new())),
             project_dir: Mutex::new(None),
+            relaunch_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -459,6 +470,7 @@ pub fn launch_team_member(
                     let bg_state = LauncherState {
                         spawned: spawned_clone,
                         project_dir: Mutex::new(Some(dir_clone)),
+                        relaunch_in_progress: Arc::new(AtomicBool::new(false)),
                     };
                     if let Err(e) = do_spawn_member(&dir, &slug, None, &bg_state) {
                         eprintln!("[launcher] Failed to launch companion '{}': {}", slug, e);
@@ -496,6 +508,7 @@ pub fn launch_team(
             let bg_state = LauncherState {
                 spawned: spawned_clone,
                 project_dir: Mutex::new(Some(dir_clone)),
+                relaunch_in_progress: Arc::new(AtomicBool::new(false)),
             };
             for role in &remaining_roles {
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1219,6 +1232,22 @@ pub(crate) fn watchdog_respawn_enabled(project_dir: &str) -> bool {
 /// manifest is empty or everyone is already alive.
 #[tauri::command]
 pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) -> Result<u32, String> {
+    // Double-click race gate (tester:1 msg 168). A second invocation that
+    // arrives before the first stagger finishes would snapshot in-memory
+    // before the first batch's new PIDs land — and the disk PIDs for the
+    // not-yet-processed entries are still dead — so the second call would
+    // queue the same roles again, producing 2x spawns. compare_exchange
+    // returns Err if already true; we return Ok(0) so the UI treats this
+    // as "nothing to do" rather than surfacing an error.
+    if state
+        .relaunch_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        eprintln!("[launcher] relaunch_spawned: already in progress, ignoring");
+        return Ok(0);
+    }
+
     *state.project_dir.lock() = Some(project_dir.clone());
     let disk_agents = load_spawned_from_disk(&project_dir);
     let spawned_now = state.spawned.lock();
@@ -1231,16 +1260,19 @@ pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) ->
     drop(spawned_now);
 
     if to_relaunch.is_empty() {
+        state.relaunch_in_progress.store(false, Ordering::Release);
         return Ok(0);
     }
 
     let queued = to_relaunch.len() as u32;
     let dir_clone = project_dir.clone();
     let spawned_clone = Arc::clone(&state.spawned);
+    let gate_clone = Arc::clone(&state.relaunch_in_progress);
     std::thread::spawn(move || {
         let bg_state = LauncherState {
             spawned: spawned_clone,
             project_dir: Mutex::new(Some(dir_clone.clone())),
+            relaunch_in_progress: Arc::new(AtomicBool::new(false)),
         };
         for (i, agent) in to_relaunch.iter().enumerate() {
             if i > 0 {
@@ -1251,6 +1283,7 @@ pub fn relaunch_spawned(project_dir: String, state: State<'_, LauncherState>) ->
                 eprintln!("[launcher] Failed to relaunch {}:{}: {}", agent.role, agent.instance, e);
             }
         }
+        gate_clone.store(false, Ordering::Release);
     });
 
     Ok(queued)
@@ -1409,6 +1442,7 @@ pub fn check_and_respawn_dead_agents(
         let bg_state = LauncherState {
             spawned: spawned_clone,
             project_dir: Mutex::new(Some(dir_clone.clone())),
+            relaunch_in_progress: Arc::new(AtomicBool::new(false)),
         };
         for (i, agent) in to_respawn.iter().enumerate() {
             if i > 0 {
