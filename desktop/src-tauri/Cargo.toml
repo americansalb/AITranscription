@@ -69,6 +69,9 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 name = "vaak_desktop"
 path = "src/lib.rs"

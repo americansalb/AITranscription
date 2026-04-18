@@ -1168,7 +1168,7 @@ pub fn kill_tracked_agent(role: &str, instance: i32, state: &LauncherState) -> b
 }
 
 /// Persist spawned agents to .vaak/spawned.json so PIDs survive app restarts.
-fn save_spawned_to_disk(project_dir: &str, agents: &[SpawnedAgent]) {
+pub(crate) fn save_spawned_to_disk(project_dir: &str, agents: &[SpawnedAgent]) {
     let path = std::path::Path::new(project_dir)
         .join(".vaak")
         .join("spawned.json");
@@ -1178,7 +1178,7 @@ fn save_spawned_to_disk(project_dir: &str, agents: &[SpawnedAgent]) {
 }
 
 /// Load spawned agents from .vaak/spawned.json (fallback for after app restart).
-fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
+pub(crate) fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
     let path = std::path::Path::new(project_dir)
         .join(".vaak")
         .join("spawned.json");
@@ -1191,7 +1191,11 @@ fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
 /// Opt-in gate for the dead-agent watchdog. Default: disabled.
 /// Set `settings.watchdog_respawn_dead_agents = true` in project.json to
 /// re-enable the auto-respawn loop. See `check_and_respawn_dead_agents`.
-fn watchdog_respawn_enabled(project_dir: &str) -> bool {
+///
+/// Pure helper — reads project.json and returns the effective bool. Exposed
+/// as `pub(crate)` so tests can drive it with fixture project directories
+/// without instantiating the full Tauri state.
+pub(crate) fn watchdog_respawn_enabled(project_dir: &str) -> bool {
     let path = std::path::Path::new(project_dir)
         .join(".vaak")
         .join("project.json");
