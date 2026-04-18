@@ -4347,7 +4347,183 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             Ok(serde_json::json!({"status": "turn_assigned", "new_holder": target}))
         }
 
-        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control, start_sequence, pass_turn, end_sequence, pause_sequence, resume_sequence, assign_turn", action))
+        // ── Sequential-turn queue mutators (pr-seq-5) ──
+        // All require human/moderator/manager. Moderator needs reason;
+        // human/manager exempt per feedback_human_authority_vs_agent_audit.
+        "reorder_queue" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can reorder_queue".to_string());
+            }
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            if state.role == "moderator" && audit_reason.is_empty() {
+                return Err("ERR_REASON_REQUIRED: moderator reorder_queue requires a reason".to_string());
+            }
+            let new_order = participants.ok_or("ERR_MISSING_ORDER: reorder_queue requires new order in `participants`")?;
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            let current_remaining: std::collections::HashSet<String> = seq
+                .get("queue_remaining").and_then(|q| q.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let proposed: std::collections::HashSet<String> = new_order.iter().cloned().collect();
+            if proposed != current_remaining {
+                return Err(format!("ERR_NOT_A_PERMUTATION: new order must match current queue_remaining. Current: {:?}, proposed: {:?}", current_remaining, proposed));
+            }
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                obj.insert("queue_remaining".to_string(), serde_json::json!(new_order));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now, "subject": "Queue reordered",
+                "body": format!("Queue reordered by {}. New order: {:?}. Reason: {}", my_label, new_order,
+                    if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
+                "metadata": {
+                    "sequence_action": "reorder_queue",
+                    "new_order": new_order,
+                    "reason": audit_reason
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "queue_reordered", "queue": new_order}))
+        }
+
+        "insert_role" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can insert_role".to_string());
+            }
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            if state.role == "moderator" && audit_reason.is_empty() {
+                return Err("ERR_REASON_REQUIRED: moderator insert_role requires a reason".to_string());
+            }
+            let target = topic.ok_or("ERR_MISSING_TARGET: insert_role requires role label in `topic` (role:instance)")?.to_string();
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            let current_remaining: Vec<String> = seq
+                .get("queue_remaining").and_then(|q| q.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("");
+            if current_remaining.contains(&target) || current_holder == target {
+                return Err(format!("ERR_DUPLICATE_ROLE: {} is already in queue or is current holder", target));
+            }
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            let mut new_queue = current_remaining.clone();
+            new_queue.push(target.clone());
+            if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                obj.insert("queue_remaining".to_string(), serde_json::json!(new_queue));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now, "subject": "Role inserted into queue",
+                "body": format!("{} added {} to the queue (position {}). Reason: {}",
+                    my_label, target, new_queue.len(),
+                    if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
+                "metadata": {
+                    "sequence_action": "insert_role",
+                    "inserted_role": target.clone(),
+                    "reason": audit_reason
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "role_inserted", "role": target, "queue_len": new_queue.len()}))
+        }
+
+        "remove_role" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can remove_role".to_string());
+            }
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            if state.role == "moderator" && audit_reason.is_empty() {
+                return Err("ERR_REASON_REQUIRED: moderator remove_role requires a reason".to_string());
+            }
+            let target = topic.ok_or("ERR_MISSING_TARGET: remove_role requires role label in `topic` (role:instance)")?.to_string();
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            let current_remaining: Vec<String> = seq
+                .get("queue_remaining").and_then(|q| q.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            let removed_via: &str;
+            if target == current_holder {
+                let (next_holder, new_remaining) = if current_remaining.is_empty() {
+                    (None, vec![])
+                } else {
+                    let n = current_remaining[0].clone();
+                    (Some(n), current_remaining[1..].to_vec())
+                };
+                if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                    let mut completed: Vec<serde_json::Value> = obj.get("queue_completed").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+                    completed.push(serde_json::json!({
+                        "role": current_holder, "turn_ended_at": now.clone(),
+                        "end_message_id": 0, "ended_via": "remove_role"
+                    }));
+                    obj.insert("queue_completed".to_string(), serde_json::json!(completed));
+                    obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining));
+                    obj.insert("paused_for_human".to_string(), serde_json::json!(false));
+                    match next_holder {
+                        Some(ref nh) => {
+                            obj.insert("current_holder".to_string(), serde_json::json!(nh));
+                            obj.insert("turn_started_at".to_string(), serde_json::json!(now.clone()));
+                        }
+                        None => {
+                            obj.insert("active".to_string(), serde_json::json!(false));
+                            obj.insert("current_holder".to_string(), serde_json::json!(""));
+                            obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
+                            obj.insert("ended_by".to_string(), serde_json::json!("remove_role_exhausted"));
+                        }
+                    }
+                }
+                removed_via = "removed_current_holder";
+            } else if current_remaining.iter().any(|r| r == &target) {
+                let new_remaining: Vec<String> = current_remaining.into_iter().filter(|r| r != &target).collect();
+                if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                    obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining));
+                }
+                removed_via = "removed_from_queue";
+            } else {
+                return Err(format!("ERR_NOT_IN_QUEUE: {} is neither the current holder nor in queue_remaining", target));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now, "subject": "Role removed from sequence",
+                "body": format!("{} removed {} ({}). Reason: {}", my_label, target, removed_via,
+                    if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
+                "metadata": {
+                    "sequence_action": "remove_role",
+                    "removed_role": target.clone(),
+                    "via": removed_via,
+                    "reason": audit_reason
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "role_removed", "role": target, "via": removed_via}))
+        }
+
+        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control, start_sequence, pass_turn, end_sequence, pause_sequence, resume_sequence, assign_turn, reorder_queue, insert_role, remove_role", action))
     }
 }
 
