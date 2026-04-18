@@ -4062,7 +4062,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                 "started_at": now.clone(),
                 "current_holder": first.clone(),
                 "queue_remaining": kept,
-                "queue_completed": [] as [String; 0],
+                "queue_completed": serde_json::json!([]),
                 "queue_dropped_at_start": dropped.clone(),
                 "turn_started_at": now.clone(),
                 "paused_for_human": false,
@@ -4218,7 +4218,136 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             Ok(serde_json::json!({"status": "sequence_ended", "topic": topic_str}))
         }
 
-        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control, start_sequence, pass_turn, end_sequence", action))
+        // ── Sequential-turn power tools (pr-seq-4) ──
+        "pause_sequence" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can pause a sequence".to_string());
+            }
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            if seq.get("paused_for_human").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_ALREADY_PAUSED".to_string());
+            }
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                obj.insert("paused_for_human".to_string(), serde_json::json!(true));
+                obj.insert("paused_at".to_string(), serde_json::json!(now.clone()));
+                obj.insert("paused_by".to_string(), serde_json::json!(my_label.clone()));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now, "subject": "Sequence paused",
+                "body": format!("Sequence paused by {}. Only the current holder's next message, or human/manager override, can resume.", my_label),
+                "metadata": {"sequence_action": "pause", "paused_by": my_label}
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "paused"}))
+        }
+
+        "resume_sequence" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can resume a sequence".to_string());
+            }
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            if !seq.get("paused_for_human").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NOT_PAUSED".to_string());
+            }
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                obj.insert("paused_for_human".to_string(), serde_json::json!(false));
+                obj.remove("paused_at");
+                obj.remove("paused_by");
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now, "subject": "Sequence resumed",
+                "body": format!("Sequence resumed by {}. Current holder can post again.", my_label),
+                "metadata": {"sequence_action": "resume", "resumed_by": my_label}
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "resumed"}))
+        }
+
+        "assign_turn" => {
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can assign_turn".to_string());
+            }
+            let target = topic
+                .map(String::from)
+                .ok_or("ERR_MISSING_TARGET: assign_turn requires target role in `topic` field (role:instance)")?;
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            if state.role == "moderator" && audit_reason.is_empty() {
+                return Err("ERR_REASON_REQUIRED: moderator assign_turn requires a reason".to_string());
+            }
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_NO_ACTIVE_SEQUENCE".to_string());
+            }
+            let previous_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            if let Some(obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                if !previous_holder.is_empty() {
+                    let mut completed: Vec<serde_json::Value> = obj.get("queue_completed").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+                    completed.push(serde_json::json!({
+                        "role": previous_holder,
+                        "turn_ended_at": now.clone(),
+                        "end_message_id": 0,
+                        "ended_via": "assign_turn_override"
+                    }));
+                    obj.insert("queue_completed".to_string(), serde_json::json!(completed));
+                }
+                obj.insert("current_holder".to_string(), serde_json::json!(target.clone()));
+                obj.insert("turn_started_at".to_string(), serde_json::json!(now.clone()));
+                obj.insert("paused_for_human".to_string(), serde_json::json!(false));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id, "from": my_label.clone(), "to": "all", "type": "moderation",
+                "timestamp": now.clone(), "subject": "Turn reassigned",
+                "body": format!("Turn reassigned by {} from {} to {}. Reason: {}", my_label,
+                    if previous_holder.is_empty() { "(none)".to_string() } else { previous_holder.clone() },
+                    target,
+                    if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
+                "metadata": {
+                    "sequence_action": "assign_turn",
+                    "previous_holder": previous_holder,
+                    "new_holder": target.clone(),
+                    "reason": audit_reason
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            let wake = serde_json::json!({
+                "id": next_message_id(&state.project_dir),
+                "from": "system:0", "to": target.clone(), "type": "system",
+                "subject": "Your sequential turn",
+                "body": format!("It is now your turn. Assigned by {}. Post with metadata.end_of_turn=true to advance.", my_label),
+                "timestamp": now,
+                "metadata": {"sequence_notification": true, "assigned_by": my_label.clone()}
+            });
+            let _ = append_to_board(&state.project_dir, &wake);
+            notify_desktop();
+            Ok(serde_json::json!({"status": "turn_assigned", "new_holder": target}))
+        }
+
+        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control, start_sequence, pass_turn, end_sequence, pause_sequence, resume_sequence, assign_turn", action))
     }
 }
 
@@ -9448,5 +9577,229 @@ mod tests {
         });
         assert!(!has_active_session_for_label(&sessions, "moderator")); // no colon
         assert!(!has_active_session_for_label(&sessions, "")); // empty
+    }
+
+    // ── evaluate_sequence_gate (PR-SEQ-3 extractions per manager msg 425 +   ──
+    //    tester:0 msg 438 + moderator:0 msg 437 regression guards)           ──
+    //
+    // Locks section 9.1 of the spec against the pure fn. Every case that can
+    // produce a message on the board in an active sequence has a green test.
+    // Two tests specifically encode moderator:0 msg 437 findings so the
+    // pre-fix buggy behavior can never reappear.
+
+    fn active_seq_fixture(current_holder: &str, paused: bool) -> serde_json::Value {
+        serde_json::json!({
+            "active_sequence": {
+                "active": true,
+                "current_holder": current_holder,
+                "queue_remaining": ["tester:0", "manager:0"],
+                "queue_completed": [],
+                "paused_for_human": paused
+            }
+        })
+    }
+
+    #[test]
+    fn gate_allows_current_holder() {
+        let disc = active_seq_fixture("developer:0", false);
+        assert!(evaluate_sequence_gate(&disc, "developer", "developer:0", "all", "status", None).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_non_holder_with_holder_in_error() {
+        let disc = active_seq_fixture("developer:0", false);
+        let err = evaluate_sequence_gate(&disc, "tester", "tester:0", "all", "status", None).unwrap_err();
+        assert!(err.contains("ERR_NOT_YOUR_TURN"), "error code present: {}", err);
+        assert!(err.contains("developer:0"), "error names current holder: {}", err);
+        assert!(err.contains("tester:0"), "error names sender: {}", err);
+    }
+
+    #[test]
+    fn gate_passes_through_when_no_active_sequence_block() {
+        let disc = serde_json::json!({}); // no active_sequence at all
+        assert!(evaluate_sequence_gate(&disc, "tester", "tester:0", "all", "status", None).is_ok());
+    }
+
+    #[test]
+    fn gate_passes_through_when_active_false() {
+        let disc = serde_json::json!({
+            "active_sequence": { "active": false, "current_holder": "developer:0" }
+        });
+        assert!(evaluate_sequence_gate(&disc, "tester", "tester:0", "all", "status", None).is_ok());
+    }
+
+    #[test]
+    fn gate_human_bypasses_unconditionally() {
+        let disc = active_seq_fixture("developer:0", false);
+        assert!(evaluate_sequence_gate(&disc, "human", "human:0", "all", "directive", None).is_ok(),
+                "human role bypasses per feedback_human_authority_vs_agent_audit");
+    }
+
+    #[test]
+    fn gate_manager_bypasses_unconditionally_no_flag_required() {
+        // Per manager msg 439: manager is treated as human-equivalent. No
+        // moderator_override flag required for manager posts.
+        let disc = active_seq_fixture("developer:0", false);
+        assert!(evaluate_sequence_gate(&disc, "manager", "manager:0", "all", "directive", None).is_ok());
+    }
+
+    #[test]
+    fn gate_allows_moderator_with_explicit_override_flag() {
+        let disc = active_seq_fixture("developer:0", false);
+        let md = serde_json::json!({ "moderator_override": true });
+        assert!(evaluate_sequence_gate(&disc, "moderator", "moderator:0", "all", "broadcast", Some(&md)).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_moderator_without_override_flag_on_non_moderation_type() {
+        // Moderator trying to post a regular message without the override flag —
+        // must be gated like any other non-holder.
+        let disc = active_seq_fixture("developer:0", false);
+        let err = evaluate_sequence_gate(&disc, "moderator", "moderator:0", "all", "broadcast", None).unwrap_err();
+        assert!(err.contains("ERR_NOT_YOUR_TURN"));
+    }
+
+    #[test]
+    fn gate_auto_grants_override_for_moderator_type_moderation() {
+        // Moderator's type=moderation messages get auto-override (moderator:0
+        // msg 437 ergonomic ask, manager msg 440 approval). No flag needed.
+        let disc = active_seq_fixture("developer:0", false);
+        assert!(evaluate_sequence_gate(&disc, "moderator", "moderator:0", "all", "moderation", None).is_ok());
+    }
+
+    #[test]
+    fn gate_allows_to_human_escalation_for_any_sender() {
+        // Escalation to human is always allowed — that's the override path
+        // agents can always pull when stuck.
+        let disc = active_seq_fixture("developer:0", false);
+        assert!(evaluate_sequence_gate(&disc, "tester", "tester:0", "human", "question", None).is_ok());
+    }
+
+    #[test]
+    fn gate_during_paused_for_human_still_rejects_non_holder() {
+        // REGRESSION GUARD — moderator:0 msg 437 finding #2.
+        // Pre-PR-SEQ-3, paused_for_human=true skipped the gate entirely,
+        // meaning any role could post during a pause. The fix is to keep
+        // the gate enforcing even when paused; only holder / human /
+        // moderator-override pass.
+        let disc = active_seq_fixture("developer:0", true); // paused_for_human = true
+        let err = evaluate_sequence_gate(&disc, "tester", "tester:0", "all", "status", None).unwrap_err();
+        assert!(err.contains("ERR_NOT_YOUR_TURN"),
+                "paused pause must still gate non-holders: {}", err);
+    }
+
+    #[test]
+    fn gate_during_paused_for_human_still_allows_holder_and_human() {
+        let disc = active_seq_fixture("developer:0", true);
+        assert!(evaluate_sequence_gate(&disc, "developer", "developer:0", "all", "status", None).is_ok(),
+                "holder post during pause is how the pause gets cleared — must be allowed");
+        assert!(evaluate_sequence_gate(&disc, "human", "human:0", "all", "directive", None).is_ok(),
+                "human bypass works regardless of pause");
+    }
+
+    // ── advance_sequence_on_end_of_turn (PR-SEQ-3 pure fn) ───────────────
+
+    fn active_seq_with_queue(current_holder: &str, queue: &[&str], paused: bool) -> serde_json::Value {
+        serde_json::json!({
+            "active_sequence": {
+                "active": true,
+                "current_holder": current_holder,
+                "queue_remaining": queue,
+                "queue_completed": [],
+                "paused_for_human": paused
+            }
+        })
+    }
+
+    #[test]
+    fn advance_promotes_next_holder_from_queue() {
+        let mut disc = active_seq_with_queue("developer:0", &["tester:0", "manager:0"], false);
+        let result = advance_sequence_on_end_of_turn(&mut disc, "developer:0", 42, "2026-04-18T23:30:00Z").unwrap();
+        assert_eq!(result.next_holder.as_deref(), Some("tester:0"));
+        assert_eq!(result.previous_holder, "developer:0");
+        assert_eq!(result.queue_remaining_len, 1);
+        assert!(!result.ended_by_exhaustion);
+
+        let seq = disc.get("active_sequence").unwrap();
+        assert_eq!(seq["current_holder"], "tester:0");
+        assert_eq!(seq["queue_remaining"].as_array().unwrap().len(), 1);
+        assert_eq!(seq["queue_remaining"][0], "manager:0");
+        assert_eq!(seq["active"], true);
+    }
+
+    #[test]
+    fn advance_writes_queue_completed_entry_with_required_shape() {
+        // Per tech-leader:0 msg 431 + moderator:0 msg 437 #4: queue_completed
+        // entries are objects {role, turn_ended_at, end_message_id}, not
+        // bare strings. Tests lock the shape so future refactors can't break
+        // the audit-trail contract.
+        let mut disc = active_seq_with_queue("developer:0", &["tester:0"], false);
+        advance_sequence_on_end_of_turn(&mut disc, "developer:0", 9999, "2026-04-18T23:35:00Z").unwrap();
+        let completed = disc.get("active_sequence").unwrap()
+            .get("queue_completed").unwrap().as_array().unwrap();
+        assert_eq!(completed.len(), 1);
+        let entry = &completed[0];
+        assert_eq!(entry["role"], "developer:0");
+        assert_eq!(entry["turn_ended_at"], "2026-04-18T23:35:00Z");
+        assert_eq!(entry["end_message_id"], 9999);
+    }
+
+    #[test]
+    fn advance_ends_sequence_when_queue_exhausted() {
+        let mut disc = active_seq_with_queue("tester:0", &[], false);
+        let result = advance_sequence_on_end_of_turn(&mut disc, "tester:0", 50, "2026-04-18T23:40:00Z").unwrap();
+        assert!(result.ended_by_exhaustion);
+        assert!(result.next_holder.is_none());
+        assert_eq!(result.queue_remaining_len, 0);
+
+        let seq = disc.get("active_sequence").unwrap();
+        assert_eq!(seq["active"], false);
+        assert_eq!(seq["current_holder"], "");
+        assert_eq!(seq["ended_by"], "queue_exhausted");
+        assert_eq!(seq["ended_at"], "2026-04-18T23:40:00Z");
+    }
+
+    #[test]
+    fn advance_clears_paused_for_human_on_successful_advance() {
+        // REGRESSION GUARD — moderator:0 msg 437 finding #3.
+        // Pre-PR-SEQ-3, a pause set while the old holder was composing their
+        // end_of_turn message would persist into the next holder's turn,
+        // stranding them behind a permanently-open gate. The fix: advance
+        // unconditionally clears the pause.
+        let mut disc = active_seq_with_queue("developer:0", &["tester:0"], true); // paused = true
+        advance_sequence_on_end_of_turn(&mut disc, "developer:0", 100, "2026-04-18T23:45:00Z").unwrap();
+        let seq = disc.get("active_sequence").unwrap();
+        assert_eq!(seq["paused_for_human"], false,
+                   "advance must unconditionally clear pause — otherwise next holder is stranded");
+        assert_eq!(seq["current_holder"], "tester:0", "advance still happens despite initial pause");
+    }
+
+    #[test]
+    fn advance_noop_when_sender_is_not_current_holder() {
+        let mut disc = active_seq_with_queue("developer:0", &["tester:0"], false);
+        let result = advance_sequence_on_end_of_turn(&mut disc, "tester:0", 10, "2026-04-18T23:50:00Z");
+        assert!(result.is_none(), "non-holder end_of_turn must not advance");
+        // State unchanged.
+        assert_eq!(disc.get("active_sequence").unwrap()["current_holder"], "developer:0");
+    }
+
+    #[test]
+    fn advance_noop_when_sequence_inactive() {
+        let mut disc = serde_json::json!({
+            "active_sequence": {
+                "active": false,
+                "current_holder": "developer:0",
+                "queue_remaining": ["tester:0"]
+            }
+        });
+        let result = advance_sequence_on_end_of_turn(&mut disc, "developer:0", 1, "2026-04-18T23:55:00Z");
+        assert!(result.is_none(), "inactive sequence must not advance on end_of_turn");
+    }
+
+    #[test]
+    fn advance_noop_when_no_active_sequence_block() {
+        let mut disc = serde_json::json!({});
+        let result = advance_sequence_on_end_of_turn(&mut disc, "developer:0", 1, "2026-04-18T23:59:00Z");
+        assert!(result.is_none());
     }
 }
