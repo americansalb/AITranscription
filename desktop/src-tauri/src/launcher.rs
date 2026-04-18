@@ -2436,4 +2436,266 @@ mod tests {
         let loaded: Vec<SpawnedAgent> = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.len(), 2);
     }
+
+    // ── watchdog_respawn_enabled (PR1.5 — pr-watchdog-opt-in, commit 7f73972) ──
+    //
+    // The watchdog gate is the difference between "app quietly does nothing on a
+    // 60s tick" and "app auto-spawns 10 PowerShell windows every 60s until the
+    // user closes it." Every fallback path here must collapse to `false` —
+    // default-off is the contract the human's msg 71 directive rests on.
+
+    fn write_project_json(vaak_dir: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(vaak_dir).unwrap();
+        std::fs::write(vaak_dir.join("project.json"), body).unwrap();
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // .vaak/ doesn't exist — simulate fresh install.
+        assert!(!watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "missing project.json must collapse to false (default-off contract)");
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_on_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_json(&tmp.path().join(".vaak"), "{ not valid json");
+        assert!(!watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "garbage project.json must not panic and must fall back to false");
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_when_settings_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_json(&tmp.path().join(".vaak"), r#"{"project_name": "x"}"#);
+        assert!(!watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "valid project.json with no settings block → false");
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_when_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_json(
+            &tmp.path().join(".vaak"),
+            r#"{"settings": {"some_other_flag": true}}"#,
+        );
+        assert!(!watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "settings block present but key absent → false");
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_for_non_bool_values() {
+        // Paranoid coverage: truthy-but-not-bool values must NOT flip the gate on.
+        // serde_json's `.as_bool()` returns None for strings and numbers; paired
+        // with `.unwrap_or(false)` in the helper, every case lands on false.
+        let tmp = tempfile::tempdir().unwrap();
+        let vaak = tmp.path().join(".vaak");
+
+        for body in [
+            r#"{"settings": {"watchdog_respawn_dead_agents": "true"}}"#,
+            r#"{"settings": {"watchdog_respawn_dead_agents": 1}}"#,
+            r#"{"settings": {"watchdog_respawn_dead_agents": "yes"}}"#,
+            r#"{"settings": {"watchdog_respawn_dead_agents": null}}"#,
+        ] {
+            write_project_json(&vaak, body);
+            assert!(
+                !watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "non-bool value {} must not enable the watchdog",
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_false_when_explicitly_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_json(
+            &tmp.path().join(".vaak"),
+            r#"{"settings": {"watchdog_respawn_dead_agents": false}}"#,
+        );
+        assert!(!watchdog_respawn_enabled(tmp.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn watchdog_respawn_enabled_returns_true_only_on_explicit_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_project_json(
+            &tmp.path().join(".vaak"),
+            r#"{"settings": {"watchdog_respawn_dead_agents": true}}"#,
+        );
+        assert!(watchdog_respawn_enabled(tmp.path().to_str().unwrap()),
+                "explicit true must enable — legacy users who want the old behavior");
+    }
+
+    // ── spawned.json round-trip via load/save helpers ──────────────────────
+    //
+    // Baseline guarantees that the dev-challenger:1 msg 161 repro test below
+    // can trust as invariants.
+
+    #[test]
+    fn load_spawned_from_disk_returns_empty_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = load_spawned_from_disk(tmp.path().to_str().unwrap());
+        assert!(agents.is_empty(), "missing file → empty Vec, never panics");
+    }
+
+    #[test]
+    fn load_spawned_from_disk_handles_malformed_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vaak = tmp.path().join(".vaak");
+        std::fs::create_dir_all(&vaak).unwrap();
+        std::fs::write(vaak.join("spawned.json"), "not json").unwrap();
+        let agents = load_spawned_from_disk(tmp.path().to_str().unwrap());
+        assert!(agents.is_empty(),
+                "corrupt spawned.json must not panic Tauri startup");
+    }
+
+    #[test]
+    fn save_and_load_spawned_round_trips_multiple_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vaak")).unwrap();
+        let original = vec![
+            SpawnedAgent { pid: 100, role: "developer".into(), instance: 0, spawned_at: "2026-04-18T20:00:00Z".into() },
+            SpawnedAgent { pid: 200, role: "tester".into(),    instance: 1, spawned_at: "2026-04-18T20:01:00Z".into() },
+        ];
+        save_spawned_to_disk(tmp.path().to_str().unwrap(), &original);
+        let loaded = load_spawned_from_disk(tmp.path().to_str().unwrap());
+        // Dedupe-on-load sorts by spawned_at DESC — assert by lookup, not position.
+        assert_eq!(loaded.len(), 2);
+        let dev = loaded.iter().find(|a| a.role == "developer").unwrap();
+        assert_eq!(dev.pid, 100);
+        let tester = loaded.iter().find(|a| a.role == "tester").unwrap();
+        assert_eq!(tester.instance, 1);
+    }
+
+    // ── dev-challenger:1 msg 161 / tech-leader:0 msg 191 — manifest-wipe regression guards ──
+    //
+    // Post-PR2 (cd97ee5, repopulate reconnect-only), `repopulate_spawned` leaves
+    // dead entries in `spawned.json` for PR3's "Relaunch last team" button.
+    // pr-manifest-durability (e06a32e) then fixed `do_spawn_member` to load
+    // existing disk entries, dedupe on (role, instance), and write back —
+    // preserving dead entries across user launches. The tests below lock those
+    // invariants so a future refactor of either function doesn't silently
+    // regress to the pre-fix behavior.
+    //
+    // NOTE: these tests do not invoke the real `do_spawn_member` (which shells
+    // out to PowerShell). They model the DISK contract — what every caller of
+    // `save_spawned_to_disk` must assume — which is the surface that had the
+    // defect.
+
+    #[test]
+    fn save_spawned_to_disk_unconditionally_overwrites_contents() {
+        // Documents the pitfall pr-manifest-durability guards against: if any
+        // caller writes an alive-only Vec without first reading-and-merging
+        // the existing disk state, dead entries are lost. This test locks that
+        // behavior into the test suite so anyone reintroducing the old pattern
+        // (spawned.clone() → save) knows exactly what they're throwing away.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vaak")).unwrap();
+
+        // Prior session left 3 dead entries on disk. Post-PR2, repopulate_spawned
+        // loads them into… nothing: it pushes only alive PIDs into in-memory,
+        // and these PIDs are dead, so in-memory stays empty.
+        let prior_session_dead = vec![
+            SpawnedAgent { pid: 1001, role: "developer".into(), instance: 0, spawned_at: "2026-04-17T10:00:00Z".into() },
+            SpawnedAgent { pid: 1002, role: "tester".into(),    instance: 0, spawned_at: "2026-04-17T10:01:00Z".into() },
+            SpawnedAgent { pid: 1003, role: "manager".into(),   instance: 0, spawned_at: "2026-04-17T10:02:00Z".into() },
+        ];
+        save_spawned_to_disk(dir, &prior_session_dead);
+
+        // Simulate post-restart in-memory state: empty (no alive reconnects).
+        let mut in_memory: Vec<SpawnedAgent> = Vec::new();
+
+        // User clicks "Launch Team Member → moderator:0". do_spawn_member
+        // pushes the new alive entry into in-memory, then writes the clone.
+        in_memory.push(SpawnedAgent {
+            pid: 9999,
+            role: "moderator".into(),
+            instance: 0,
+            spawned_at: "2026-04-18T20:30:00Z".into(),
+        });
+        save_spawned_to_disk(dir, &in_memory);
+
+        let on_disk = load_spawned_from_disk(dir);
+
+        // Calling `save_spawned_to_disk` with an alive-only Vec is an
+        // unconditional overwrite — the 3 prior-session dead entries are
+        // gone. This is the raw disk contract; the caller (`do_spawn_member`)
+        // is responsible for reading-and-merging before calling. See the
+        // read-merge-write block in do_spawn_member for the safe pattern.
+        assert_eq!(
+            on_disk.len(),
+            1,
+            "save_spawned_to_disk overwrites — callers MUST merge disk state first. \
+             Regression guard per dev-challenger:1 msg 161 / tech-leader:0 msg 191."
+        );
+        assert_eq!(on_disk[0].role, "moderator");
+    }
+
+    // The actual read-merge-write contract that `do_spawn_member` now follows
+    // (pr-manifest-durability e06a32e). Models the exact pattern at
+    // launcher.rs:441-456: load disk → retain-not-same-key → push new → save.
+    #[test]
+    fn do_spawn_member_read_merge_write_preserves_dead_entries_from_prior_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vaak")).unwrap();
+
+        let prior_dead = vec![
+            SpawnedAgent { pid: 1001, role: "developer".into(), instance: 0, spawned_at: "2026-04-17T10:00:00Z".into() },
+            SpawnedAgent { pid: 1002, role: "tester".into(),    instance: 0, spawned_at: "2026-04-17T10:01:00Z".into() },
+        ];
+        save_spawned_to_disk(dir, &prior_dead);
+
+        // When B-narrow ships, do_spawn_member will load-disk, merge the new
+        // entry (deduping on role+instance), and write. Simulate the target
+        // behavior here as a specification:
+        let mut on_disk = load_spawned_from_disk(dir);
+        let new_entry = SpawnedAgent {
+            pid: 9999,
+            role: "moderator".into(),
+            instance: 0,
+            spawned_at: "2026-04-18T20:30:00Z".into(),
+        };
+        on_disk.retain(|a| !(a.role == new_entry.role && a.instance == new_entry.instance));
+        on_disk.push(new_entry);
+        save_spawned_to_disk(dir, &on_disk);
+
+        let final_state = load_spawned_from_disk(dir);
+        assert_eq!(final_state.len(), 3, "B-narrow must preserve prior dead entries");
+        let roles: std::collections::HashSet<&str> = final_state.iter().map(|a| a.role.as_str()).collect();
+        assert!(roles.contains("developer"));
+        assert!(roles.contains("tester"));
+        assert!(roles.contains("moderator"));
+    }
+
+    // Dedupe-on-load contract (pr-manifest-durability e06a32e).
+    // Historical contamination: the watchdog-era code wrote a fresh entry on
+    // every respawn, so a real user's spawned.json accumulated dozens of
+    // duplicate (role, instance) rows. Without dedupe, `relaunch_spawned`
+    // would spawn N copies per click. Sort-desc + HashSet-keyed retain
+    // collapses to newest-wins.
+    #[test]
+    fn load_spawned_from_disk_dedupes_by_role_instance_newest_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vaak")).unwrap();
+
+        // A polluted manifest from days of watchdog activity: same (role, instance)
+        // appearing multiple times with ascending spawned_at.
+        let polluted = vec![
+            SpawnedAgent { pid: 1, role: "developer".into(), instance: 0, spawned_at: "2026-04-15T00:00:00Z".into() },
+            SpawnedAgent { pid: 2, role: "developer".into(), instance: 0, spawned_at: "2026-04-16T00:00:00Z".into() },
+            SpawnedAgent { pid: 3, role: "developer".into(), instance: 0, spawned_at: "2026-04-17T00:00:00Z".into() },
+            SpawnedAgent { pid: 4, role: "tester".into(),    instance: 0, spawned_at: "2026-04-17T00:00:00Z".into() },
+        ];
+        save_spawned_to_disk(dir, &polluted);
+
+        let loaded = load_spawned_from_disk(dir);
+        assert_eq!(loaded.len(), 2, "dedupe: 3 developer:0 entries collapse to 1");
+        let dev = loaded.iter().find(|a| a.role == "developer" && a.instance == 0).unwrap();
+        assert_eq!(dev.pid, 3, "newest-wins: pid=3 (2026-04-17) beats pid=1,2");
+    }
 }
