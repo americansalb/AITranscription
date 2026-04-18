@@ -1260,7 +1260,7 @@ pub(crate) fn watchdog_respawn_enabled(project_dir: &str) -> bool {
 
 /// Disk manifest entry enriched with a server-side `alive` probe.
 ///
-/// Returned by `list_spawned_manifest` so the frontend can render the
+/// Returned by `peek_spawned_manifest` so the frontend can render the
 /// PreviousTeamBanner (ux-engineer:0) without calling `is_pid_alive` from
 /// JS (it can't). Shape matches ux-engineer:0 msg 155 / msg 179 spec.
 #[derive(serde::Serialize, Clone, Debug)]
@@ -1283,7 +1283,7 @@ pub struct SpawnedManifestEntry {
 /// possible. Full coverage via a disk-level file lock is tracked as tech
 /// debt (evil-architect:0 msg 243 Option 3).
 #[tauri::command]
-pub fn list_spawned_manifest(
+pub fn peek_spawned_manifest(
     project_dir: String,
     state: State<'_, LauncherState>,
 ) -> Vec<SpawnedManifestEntry> {
@@ -1304,7 +1304,7 @@ pub fn list_spawned_manifest(
 /// action on ux-engineer:0's PreviousTeamBanner (msg 179). Writes an empty
 /// Vec; the file is kept rather than deleted so path-based watchers don't
 /// fire a gone-then-recreated churn. Holds `spawned.lock()` for the same
-/// reason as `list_spawned_manifest` above.
+/// reason as `peek_spawned_manifest` above.
 #[tauri::command]
 pub fn discard_spawned_manifest(
     project_dir: String,

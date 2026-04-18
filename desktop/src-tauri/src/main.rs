@@ -5654,7 +5654,7 @@ fn main() {
             launcher::get_role_companions,
             launcher::repopulate_spawned,
             launcher::relaunch_spawned,
-            launcher::list_spawned_manifest,
+            launcher::peek_spawned_manifest,
             launcher::discard_spawned_manifest,
             launcher::check_and_respawn_dead_agents,
             launcher::focus_agent_window,
