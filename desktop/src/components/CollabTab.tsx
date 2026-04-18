@@ -12,6 +12,7 @@ import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import { BuildIdentityFooter } from "./BuildIdentityFooter";
 import PreviousTeamBanner from "./PreviousTeamBanner";
+import SequenceBanner, { type SequenceTurnState } from "./SequenceBanner";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -832,6 +833,7 @@ export function CollabTab() {
   // Team Launcher state
   const [launching, setLaunching] = useState(false);
   const [npmInstalled, setNpmInstalled] = useState<boolean | null>(null);
+  const [sequenceTurn, setSequenceTurn] = useState<SequenceTurnState | null>(null);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [installingCli, setInstallingCli] = useState(false);
   const [installingNode, setInstallingNode] = useState(false);
@@ -1492,6 +1494,32 @@ When multiple instances of this role are active:
     const interval = setInterval(tickRespawn, 60_000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir, watchdogEnabled]);
+
+  useEffect(() => {
+    const discussionTurn = (project?.discussion as unknown as { turn?: SequenceTurnState })?.turn ?? null;
+    setSequenceTurn(discussionTurn);
+  }, [project?.discussion]);
+
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<SequenceTurnState | null>("sequence-state-changed", (evt) => {
+          if (cancelled) return;
+          setSequenceTurn(evt.payload ?? null);
+        });
+      } catch (e) {
+        console.error("[sequence] event listen failed:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   const handleCreateSection = async () => {
     if (!newSectionName.trim() || !projectDir || sectionLoading) return;
@@ -4434,6 +4462,8 @@ When multiple instances of this role are active:
         )}
 
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
+
+        <SequenceBanner turn={sequenceTurn} selfRoleInstance={null} />
 
         <PreviousTeamBanner
           projectDir={projectDir}

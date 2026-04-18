@@ -2262,6 +2262,138 @@
   font-size: 12px;
 }
 
+.sequence-banner {
+  background: rgba(29, 161, 242, 0.06);
+  border: 1px solid rgba(29, 161, 242, 0.2);
+  border-left: 4px solid var(--collab-accent);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.sequence-banner-self-turn {
+  background: rgba(23, 191, 99, 0.1);
+  border-color: rgba(23, 191, 99, 0.4);
+  box-shadow: 0 0 0 1px rgba(23, 191, 99, 0.35);
+}
+
+.sequence-banner-paused {
+  background: rgba(232, 147, 90, 0.08);
+  border-color: rgba(232, 147, 90, 0.3);
+}
+
+.sequence-banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.sequence-banner-row:last-of-type {
+  margin-bottom: 0;
+}
+
+.sequence-banner-topic {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.sequence-banner-topic-text {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--collab-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sequence-banner-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--collab-text-secondary);
+  font-weight: 600;
+}
+
+.sequence-banner-stage {
+  font-size: 12px;
+  color: var(--collab-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sequence-banner-holder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sequence-banner-role-badge {
+  color: #fff;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 12px;
+  font-family: var(--collab-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
+  white-space: nowrap;
+}
+
+.sequence-banner-turn-elapsed {
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.sequence-banner-self-hint {
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sequence-banner-self-hint-now {
+  color: #17bf63;
+  animation: sequence-banner-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes sequence-banner-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.sequence-banner-pause-note {
+  font-size: 12px;
+  color: #e8935a;
+  margin-top: 4px;
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+.sequence-banner-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sequence-banner-dot {
+  opacity: 0.5;
+}
+
 .previous-team-banner {
   background: rgba(232, 147, 90, 0.08);
   border: 1px solid rgba(232, 147, 90, 0.25);
