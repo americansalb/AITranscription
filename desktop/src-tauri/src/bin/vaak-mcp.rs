@@ -10092,4 +10092,158 @@ mod tests {
         let result = advance_sequence_on_end_of_turn(&mut disc, "developer:0", 1, "2026-04-18T23:59:00Z");
         assert!(result.is_none());
     }
+
+    // ── decide_sequence_stall (PR-SEQ-6 — 5-min stall watchdog, manager msg 384 amendment 2) ──
+    //
+    // Non-destructive per the spec: no state mutation by this pure fn. The
+    // caller only acts on ShouldFire. Every other variant is a short-circuit.
+    // Tests inject `now_unix` to avoid any `thread::sleep` — per tester:0
+    // msg 438 ask #2.
+
+    fn seq_with_turn_start(current_holder: &str, turn_started_at: &str, stall_ping_sent_at: Option<&str>) -> serde_json::Value {
+        let mut obj = serde_json::json!({
+            "active_sequence": {
+                "active": true,
+                "current_holder": current_holder,
+                "queue_remaining": ["tester:0"],
+                "turn_started_at": turn_started_at,
+                "paused_for_human": false
+            }
+        });
+        if let Some(ping) = stall_ping_sent_at {
+            obj["active_sequence"]["stall_ping_sent_at"] = serde_json::json!(ping);
+        }
+        obj
+    }
+
+    // Helper: returns a unix timestamp N seconds after a fixed base.
+    const BASE_ISO: &str = "2026-04-18T23:00:00Z";
+    fn base_unix() -> i64 {
+        chrono_iso_to_unix(BASE_ISO).unwrap()
+    }
+
+    #[test]
+    fn stall_no_active_sequence_when_block_missing() {
+        let disc = serde_json::json!({});
+        let dec = decide_sequence_stall(&disc, base_unix() + 3600, 300);
+        assert!(matches!(dec, StallDecision::NoActiveSequence));
+    }
+
+    #[test]
+    fn stall_no_active_sequence_when_active_false() {
+        let disc = serde_json::json!({
+            "active_sequence": { "active": false, "current_holder": "developer:0" }
+        });
+        let dec = decide_sequence_stall(&disc, base_unix() + 3600, 300);
+        assert!(matches!(dec, StallDecision::NoActiveSequence));
+    }
+
+    #[test]
+    fn stall_paused_short_circuits_regardless_of_elapsed_time() {
+        // Paused sequences never stall-fire. Paused pauses the elapsed clock
+        // from the watchdog's perspective.
+        let mut disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        disc["active_sequence"]["paused_for_human"] = serde_json::json!(true);
+        let dec = decide_sequence_stall(&disc, base_unix() + 99_999, 300); // way past threshold
+        assert!(matches!(dec, StallDecision::Paused));
+    }
+
+    #[test]
+    fn stall_no_holder_when_current_holder_empty() {
+        let disc = seq_with_turn_start("", BASE_ISO, None);
+        let dec = decide_sequence_stall(&disc, base_unix() + 600, 300);
+        assert!(matches!(dec, StallDecision::NoHolder));
+    }
+
+    #[test]
+    fn stall_unparseable_when_turn_started_at_missing_or_bad() {
+        // Missing field.
+        let mut disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        disc["active_sequence"].as_object_mut().unwrap().remove("turn_started_at");
+        let dec = decide_sequence_stall(&disc, base_unix() + 600, 300);
+        assert!(matches!(dec, StallDecision::UnparseableTurnStart));
+
+        // Malformed timestamp.
+        let disc2 = seq_with_turn_start("developer:0", "not-a-date", None);
+        let dec2 = decide_sequence_stall(&disc2, base_unix() + 600, 300);
+        assert!(matches!(dec2, StallDecision::UnparseableTurnStart));
+    }
+
+    #[test]
+    fn stall_not_yet_elapsed_reports_elapsed_seconds() {
+        // Turn started at base, now is base+299 (1 second before threshold).
+        let disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        let dec = decide_sequence_stall(&disc, base_unix() + 299, 300);
+        match dec {
+            StallDecision::NotYetElapsed { elapsed_secs } => assert_eq!(elapsed_secs, 299),
+            other => panic!("expected NotYetElapsed(299), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stall_should_fire_at_exactly_threshold() {
+        // Edge case: elapsed == threshold. Per the impl (`elapsed < threshold`
+        // branch to NotYetElapsed), equality fires. Locks the boundary behavior.
+        let disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        let dec = decide_sequence_stall(&disc, base_unix() + 300, 300);
+        match dec {
+            StallDecision::ShouldFire { holder, elapsed_secs } => {
+                assert_eq!(holder, "developer:0");
+                assert_eq!(elapsed_secs, 300);
+            }
+            other => panic!("expected ShouldFire at exactly threshold, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stall_should_fire_after_threshold() {
+        // Way past threshold — fires with accurate elapsed.
+        let disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        let dec = decide_sequence_stall(&disc, base_unix() + 1234, 300);
+        match dec {
+            StallDecision::ShouldFire { holder, elapsed_secs } => {
+                assert_eq!(holder, "developer:0");
+                assert_eq!(elapsed_secs, 1234);
+            }
+            other => panic!("expected ShouldFire(1234), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stall_already_pinged_when_ping_after_turn_start() {
+        // Ping was sent during this turn → rate-limit fires once per turn.
+        let disc = seq_with_turn_start(
+            "developer:0",
+            BASE_ISO,
+            Some("2026-04-18T23:05:00Z"), // ping 5 min after base (during this turn)
+        );
+        let dec = decide_sequence_stall(&disc, base_unix() + 900, 300);
+        assert!(matches!(dec, StallDecision::AlreadyPinged));
+    }
+
+    #[test]
+    fn stall_fires_again_when_ping_from_prior_turn() {
+        // Ping was sent BEFORE the current turn started → not applicable to
+        // this turn; should fire fresh. Locks the per-turn rate-limit scope.
+        let disc = seq_with_turn_start(
+            "developer:0",
+            BASE_ISO,
+            Some("2026-04-18T22:00:00Z"), // ping 1 hour BEFORE turn start
+        );
+        let dec = decide_sequence_stall(&disc, base_unix() + 600, 300);
+        assert!(matches!(dec, StallDecision::ShouldFire { .. }),
+                "stale ping from a prior turn must not suppress current-turn stall");
+    }
+
+    #[test]
+    fn stall_configurable_threshold_respected() {
+        // Test uses a non-default threshold to lock the parameter.
+        let disc = seq_with_turn_start("developer:0", BASE_ISO, None);
+        // 30-second threshold, 45 seconds elapsed → fires.
+        let dec = decide_sequence_stall(&disc, base_unix() + 45, 30);
+        assert!(matches!(dec, StallDecision::ShouldFire { .. }));
+        // 30-second threshold, 20 seconds elapsed → not yet.
+        let dec2 = decide_sequence_stall(&disc, base_unix() + 20, 30);
+        assert!(matches!(dec2, StallDecision::NotYetElapsed { elapsed_secs: 20 }));
+    }
 }
