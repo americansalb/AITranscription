@@ -2789,6 +2789,146 @@
   background: rgba(255, 255, 255, 0.05);
 }
 
+.pending-turn-requests {
+  background: rgba(245, 166, 35, 0.06);
+  border: 1px solid rgba(245, 166, 35, 0.25);
+  border-left: 3px solid #f5a623;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.pending-turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pending-turn-hand {
+  font-size: 14px;
+}
+
+.pending-turn-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f5a623;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pending-turn-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pending-turn-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+}
+
+.pending-turn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.pending-turn-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.pending-turn-who {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  font-family: var(--collab-mono, ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace);
+}
+
+.pending-turn-role {
+  color: var(--collab-text);
+  font-weight: 600;
+}
+
+.pending-turn-instance {
+  color: var(--collab-text-secondary);
+  font-size: 11px;
+}
+
+.pending-turn-age {
+  margin-left: auto;
+  color: var(--collab-text-secondary);
+  font-size: 11px;
+  font-family: initial;
+}
+
+.pending-turn-reason {
+  font-size: 12px;
+  color: var(--collab-text-secondary);
+  margin-top: 2px;
+  font-style: italic;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.pending-turn-actions {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.pending-turn-accept {
+  background: rgba(23, 191, 99, 0.15);
+  color: #17bf63;
+  border: 1px solid rgba(23, 191, 99, 0.35);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pending-turn-accept:hover:not(:disabled) {
+  background: rgba(23, 191, 99, 0.25);
+}
+
+.pending-turn-accept:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pending-turn-dismiss {
+  background: transparent;
+  color: var(--collab-text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pending-turn-dismiss:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--collab-text);
+}
+
+.pending-turn-dismiss:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .previous-team-banner {
   background: rgba(232, 147, 90, 0.08);
   border: 1px solid rgba(232, 147, 90, 0.25);

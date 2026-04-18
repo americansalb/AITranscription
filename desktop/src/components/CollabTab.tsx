@@ -18,6 +18,7 @@ import ModeratorSequencePanel, {
   type ModeratorSequencePanelRosterEntry,
 } from "./ModeratorSequencePanel";
 import HumanSequenceOverrideBar from "./HumanSequenceOverrideBar";
+import PendingTurnRequests from "./PendingTurnRequests";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -4471,6 +4472,7 @@ When multiple instances of this role are active:
         <SequenceBanner turn={sequenceTurn} selfRoleInstance={null} />
         <QueueVisualization turn={sequenceTurn} />
         <HumanSequenceOverrideBar turn={sequenceTurn} projectDir={projectDir} />
+        <PendingTurnRequests turn={sequenceTurn} projectDir={projectDir} />
         <ModeratorSequencePanel
           turn={sequenceTurn}
           projectDir={projectDir}

@@ -15,6 +15,12 @@ import { getRoleColor } from "../utils/roleColors";
  * not here — banner is presentational.
  */
 
+export interface SequenceTurnRequest {
+  requester: string;
+  reason?: string;
+  requested_at: string;
+}
+
 export interface SequenceTurnState {
   current_holder: string | null;
   queue_remaining: string[];
@@ -24,6 +30,7 @@ export interface SequenceTurnState {
   initiator: string;
   topic: string;
   paused_for_human?: boolean;
+  pending_requests?: SequenceTurnRequest[];
 }
 
 interface Props {
