@@ -1203,27 +1203,27 @@ fn watchdog_respawn_enabled(project_dir: &str) -> bool {
 }
 
 /// Re-populate the in-memory spawned list from disk on app startup.
-/// Keeps entries whose PIDs are still alive, and auto-respawns dead agents
-/// so team members survive app restarts.
 ///
-/// Per human msg 512/515 (pr-respawn-dead-agents): the prior version logged
-/// "not respawning" when dead PIDs were detected, forcing the human to open
-/// PowerShell and manually relaunch each one. The launcher already knows the
-/// role+instance for every dead agent — calling `do_spawn_member` for each is
-/// strictly an improvement. A 2-second stagger between respawns matches the
-/// existing `launch_team` cadence so the system isn't slammed by simultaneous
-/// PowerShell spawns when several roles died together.
+/// Reconnect-only (pr-repopulate-reconnect-only, 2026-04-18). Alive PIDs are
+/// attached to in-memory state so kill/status keep working across app
+/// restarts. Dead entries are left in `spawned.json` as-is so a future
+/// "Relaunch last team" button can offer them to the human. Nothing spawns
+/// here — the old pr-respawn-dead-agents auto-restart was producing new
+/// PowerShell windows on every app start without human consent.
 ///
-/// Returns the count of alive agents (existing + freshly respawned) found at
-/// startup. Respawn errors are logged and don't fail the call — partial
-/// success is better than a hard failure that leaves the human with no team.
+/// Disk is not rewritten in this function. Alive and dead entries in the
+/// existing file remain untouched; launch/kill paths update the file on
+/// their own actions. Removing the in-function write also closes the
+/// TOCTOU window evil-architect:0 flagged in msg 67 — dead entries are
+/// never transiently dropped.
+///
+/// Returns the count of alive agents reconnected from disk.
 #[tauri::command]
 pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) -> Result<u32, String> {
     *state.project_dir.lock() = Some(project_dir.clone());
     let disk_agents = load_spawned_from_disk(&project_dir);
     let mut spawned = state.spawned.lock();
     let mut alive_count = 0u32;
-    let mut dead_agents: Vec<SpawnedAgent> = Vec::new();
 
     for agent in disk_agents {
         if is_pid_alive(agent.pid) {
@@ -1233,39 +1233,8 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
                 alive_count += 1;
             }
         } else {
-            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — queuing respawn", agent.role, agent.instance, agent.pid);
-            dead_agents.push(agent);
+            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — leaving in manifest for Relaunch", agent.role, agent.instance, agent.pid);
         }
-    }
-
-    // Update disk with only alive agents (remove dead ones) before respawn so
-    // the about-to-respawn entries don't double-up if respawn succeeds quickly.
-    let all: Vec<SpawnedAgent> = spawned.clone();
-    drop(spawned);
-    save_spawned_to_disk(&project_dir, &all);
-
-    // Auto-respawn dead agents in a background thread so the Tauri command
-    // returns promptly. Each respawn opens a PowerShell window via
-    // do_spawn_member; staggering by 2s keeps the system responsive.
-    if !dead_agents.is_empty() {
-        eprintln!("[launcher] Auto-respawning {} dead agent(s)", dead_agents.len());
-        let dir_clone = project_dir.clone();
-        let spawned_clone = Arc::clone(&state.spawned);
-        std::thread::spawn(move || {
-            let bg_state = LauncherState {
-                spawned: spawned_clone,
-                project_dir: Mutex::new(Some(dir_clone.clone())),
-            };
-            for (i, agent) in dead_agents.iter().enumerate() {
-                if i > 0 {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-                eprintln!("[launcher] Respawning {}:{}", agent.role, agent.instance);
-                if let Err(e) = do_spawn_member(&dir_clone, &agent.role, Some(agent.instance as i32), &bg_state) {
-                    eprintln!("[launcher] Failed to respawn {}:{}: {}", agent.role, agent.instance, e);
-                }
-            }
-        });
     }
 
     Ok(alive_count)
