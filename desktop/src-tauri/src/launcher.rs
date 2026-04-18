@@ -2714,4 +2714,68 @@ mod tests {
         let dev = loaded.iter().find(|a| a.role == "developer" && a.instance == 0).unwrap();
         assert_eq!(dev.pid, 3, "newest-wins: pid=3 (2026-04-17) beats pid=1,2");
     }
+
+    // ── RelaunchGate RAII drop semantics (manager msg 219 panic-safety slate) ──
+    //
+    // Pre-bb1616f the explicit `store(false)` in the bg stagger thread was
+    // unreachable under panic — gate stuck true forever, Relaunch silently dead
+    // until app restart. tech-leader:1 msg 215 + evil-architect:0 msg 217 +
+    // dev-challenger:1 msg 221 converged on a Drop-based RAII guard. These tests
+    // lock that contract: normal exit clears, panic unwind clears, early-return
+    // clears, and drop is write-false (not toggle).
+
+    #[test]
+    fn relaunch_gate_clears_atomic_on_normal_drop() {
+        let flag = Arc::new(AtomicBool::new(true));
+        {
+            let _gate = RelaunchGate(Arc::clone(&flag));
+        }
+        assert!(!flag.load(Ordering::Acquire),
+                "gate must clear atomic via Drop on normal scope exit");
+    }
+
+    #[test]
+    fn relaunch_gate_clears_atomic_on_panic_unwind() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let flag_for_panic = Arc::clone(&flag);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _gate = RelaunchGate(Arc::clone(&flag_for_panic));
+            panic!("simulated do_spawn_member panic mid-stagger");
+        }));
+
+        assert!(result.is_err(), "inner closure must have panicked");
+        assert!(!flag.load(Ordering::Acquire),
+                "gate must clear atomic during panic unwind — this is the whole point of the Drop impl");
+    }
+
+    #[test]
+    fn relaunch_gate_clears_atomic_on_early_return() {
+        fn helper(flag: Arc<AtomicBool>, early: bool) -> Result<u32, String> {
+            let _gate = RelaunchGate(Arc::clone(&flag));
+            if early {
+                return Ok(0);
+            }
+            Ok(42)
+        }
+        let flag = Arc::new(AtomicBool::new(true));
+        let _ = helper(Arc::clone(&flag), true);
+        assert!(!flag.load(Ordering::Acquire),
+                "gate must clear on early-return path");
+
+        flag.store(true, Ordering::Release);
+        let _ = helper(Arc::clone(&flag), false);
+        assert!(!flag.load(Ordering::Acquire),
+                "gate must clear on fall-through path too");
+    }
+
+    #[test]
+    fn relaunch_gate_does_not_disturb_fresh_false_atomic() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _gate = RelaunchGate(Arc::clone(&flag));
+        }
+        assert!(!flag.load(Ordering::Acquire),
+                "dropping a gate must leave atomic false, not toggle it to true");
+    }
 }
