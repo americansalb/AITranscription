@@ -5146,7 +5146,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "timestamp": utc_now_iso(),
             "subject": subject,
             "body": body,
-            "metadata": metadata.unwrap_or(serde_json::json!({}))
+            "metadata": metadata.clone().unwrap_or(serde_json::json!({}))
         });
         append_to_board(&state.project_dir, &message)?;
 
