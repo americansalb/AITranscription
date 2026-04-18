@@ -10,6 +10,7 @@ import { trimVoiceAssignments } from "../lib/storageManager";
 import { DiscussionPanel } from "./DiscussionPanel";
 import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
+import { BuildIdentityFooter } from "./BuildIdentityFooter";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -1461,14 +1462,16 @@ When multiple instances of this role are active:
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
-  // pr-respawn-dead-agents wiring (developer msg 527 + human msgs 512/515):
-  // agents die silently — sometimes the PowerShell stays open but Claude
-  // exits, sometimes the whole process is gone. The new Tauri command
-  // `check_and_respawn_dead_agents` inspects both cases (dead PID +
-  // alive-PID-with-stale-heartbeat) and relaunches what's missing. Running
-  // the check every 60s keeps the team alive without hammering tasklist.
+  // pr-watchdog-opt-in (2026-04-18): the dead-agent watchdog is now
+  // disabled by default and gated on `settings.watchdog_respawn_dead_agents`.
+  // The human reported auto-spawn of new PowerShells every ~1-2 minutes —
+  // this effect was the cause. Interval still runs (cheap) but the invoke is
+  // skipped when the setting is off, and the Rust side also early-returns
+  // as a defense-in-depth. To re-enable, set the flag true in project.json.
+  const watchdogEnabled = project?.config?.settings?.watchdog_respawn_dead_agents === true;
   useEffect(() => {
     if (!window.__TAURI__ || !projectDir) return;
+    if (!watchdogEnabled) return;
     let cancelled = false;
     const tickRespawn = async () => {
       try {
@@ -1484,12 +1487,10 @@ When multiple instances of this role are active:
         if (!cancelled) console.error("[respawn-watchdog] tick failed:", e);
       }
     };
-    // One-shot on mount catches the case where repopulate_spawned fired
-    // before the team launcher panel was visible.
     tickRespawn();
     const interval = setInterval(tickRespawn, 60_000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [projectDir]);
+  }, [projectDir, watchdogEnabled]);
 
   const handleCreateSection = async () => {
     if (!newSectionName.trim() || !projectDir || sectionLoading) return;
@@ -2455,7 +2456,7 @@ When multiple instances of this role are active:
         }
       } else {
         console.error("[handleStartDiscussion] window.__TAURI__ is falsy — Tauri runtime not available. Running in browser-only mode?");
-        alert("Cannot start discussion: Tauri runtime not available. Make sure you're running the desktop app (npm run tauri dev), not just the web server.");
+        alert("Cannot start session: Tauri runtime not available. Make sure you're running the desktop app (npm run tauri dev), not just the web server.");
       }
     } catch (e) {
       console.error("[CollabTab] Failed to start discussion:", e);
@@ -2859,7 +2860,7 @@ When multiple instances of this role are active:
 
         const topic = format === "continuous"
           ? "Continuous review — auto-triggered micro-rounds"
-          : parts.slice(topicStart).join(" ") || "Open discussion";
+          : parts.slice(topicStart).join(" ") || "Open session";
 
         setSending(true);
         try {
@@ -3190,6 +3191,10 @@ When multiple instances of this role are active:
           >
             &#9881;
           </button>
+          {/* Build identity footer — proves what's actually running, quiet unless
+              SHAs diverge. Auto-detects Tauri vs browser; renders "unknown"
+              when get_build_info is missing (older binary). */}
+          <BuildIdentityFooter />
         </div>
 
         {/* Settings Panel */}
@@ -3373,6 +3378,7 @@ When multiple instances of this role are active:
           <DiscussionPanel
             discussionState={discussionState}
             messages={project?.messages || []}
+            sessions={project?.sessions || []}
             closingRound={closingRound}
             continuousTimeout={continuousTimeout}
             autoModActive={!!etherealSettings["moderator"]}
@@ -4601,7 +4607,7 @@ When multiple instances of this role are active:
                         {isStart ? "\uD83D\uDDE3\uFE0F" : isEnd ? "\uD83C\uDFC1" : isAggregate ? "\uD83D\uDCCA" : "\u2139\uFE0F"}
                       </span>
                       <span className="discussion-event-label">
-                        {isStart ? "Discussion Started" : isEnd ? "Discussion Ended" : isAggregate ? `Round ${msg.metadata.round || "?"} Aggregate` : msg.subject}
+                        {isStart ? "Session Started" : isEnd ? "Session Ended" : isAggregate ? `Round ${msg.metadata.round || "?"} Aggregate` : msg.subject}
                       </span>
                       <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
                       <button className="message-play-btn" onClick={(e) => { e.stopPropagation(); playMessage(msg.id, `${msg.subject || ""}. ${msg.body}`, msg.from.split(":")[0]); }} title={playingMsgId === msg.id ? "Stop" : "Play"}>{playingMsgId === msg.id ? "\u23F9" : "\u25B6"}</button>
@@ -5488,8 +5494,8 @@ When multiple instances of this role are active:
                 </>
               )}
 
-              {/* Background Agents — auto-start with discussion */}
-              <div className="sd-section-label">Background Agents (auto-start with discussion)</div>
+              {/* Background Agents — auto-start with session */}
+              <div className="sd-section-label">Background Agents (auto-start with session)</div>
               <div className="sd-agents-config">
                 <div className="sd-agent-row">
                   <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
@@ -5500,10 +5506,10 @@ When multiple instances of this role are active:
                     />
                     <span className="sd-agent-dot" style={{ background: sdModeratorEnabled ? "#9b59b6" : "#657786" }} />
                     <div className="sd-agent-info">
-                      <span className="sd-agent-name">Discussion Moderator</span>
+                      <span className="sd-agent-name">Session Moderator</span>
                       <span className="sd-agent-desc">{sdModeratorEnabled
                         ? "Guides conversation, manages rounds, enforces turn order, and produces decision records."
-                        : "Disabled — discussion will run without moderation. No stall detection, no synthesis, no round management."
+                        : "Disabled — session will run without moderation. No stall detection, no synthesis, no round management."
                       }</span>
                     </div>
                   </label>

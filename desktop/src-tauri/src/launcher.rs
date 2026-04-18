@@ -1188,6 +1188,20 @@ fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
         .unwrap_or_default()
 }
 
+/// Opt-in gate for the dead-agent watchdog. Default: disabled.
+/// Set `settings.watchdog_respawn_dead_agents = true` in project.json to
+/// re-enable the auto-respawn loop. See `check_and_respawn_dead_agents`.
+fn watchdog_respawn_enabled(project_dir: &str) -> bool {
+    let path = std::path::Path::new(project_dir)
+        .join(".vaak")
+        .join("project.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("settings")?.get("watchdog_respawn_dead_agents")?.as_bool())
+        .unwrap_or(false)
+}
+
 /// Re-populate the in-memory spawned list from disk on app startup.
 /// Keeps entries whose PIDs are still alive, and auto-respawns dead agents
 /// so team members survive app restarts.
@@ -1274,12 +1288,23 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
 ///
 /// Returns the count of agents respawned this call. Frontend should call
 /// on a setInterval (recommended ~60s).
+///
+/// pr-watchdog-opt-in (2026-04-18): the watchdog now early-returns unless
+/// `settings.watchdog_respawn_dead_agents == true` in project.json. The human
+/// reported the app was spawning new PowerShells every ~1-2 minutes because
+/// this watchdog kept respawning last-session's dead entries. New rule:
+/// roles only launch when the human clicks. Keep the detection code intact
+/// so a future "Relaunch dead" button can reuse it on demand.
 #[tauri::command]
 pub fn check_and_respawn_dead_agents(
     project_dir: String,
     stale_threshold_secs: Option<u64>,
     state: State<'_, LauncherState>,
 ) -> Result<u32, String> {
+    if !watchdog_respawn_enabled(&project_dir) {
+        return Ok(0);
+    }
+
     let threshold = stale_threshold_secs.unwrap_or(90);
     *state.project_dir.lock() = Some(project_dir.clone());
 

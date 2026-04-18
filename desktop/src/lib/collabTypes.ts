@@ -41,6 +41,11 @@ export interface ProjectConfig {
      *  pre-rename still typecheck. */
     discussion_mode?: string;
     work_mode?: string;
+    /** Opt-in gate for the dead-agent watchdog (pr-watchdog-opt-in, 2026-04-18).
+     *  When undefined or false, check_and_respawn_dead_agents no-ops and the
+     *  frontend skips its 60s setInterval invoke. Roles only launch on
+     *  explicit human action. */
+    watchdog_respawn_dead_agents?: boolean;
   };
 }
 
