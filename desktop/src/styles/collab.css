@@ -2262,6 +2262,62 @@
   font-size: 12px;
 }
 
+.previous-team-banner {
+  background: rgba(232, 147, 90, 0.08);
+  border: 1px solid rgba(232, 147, 90, 0.25);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+
+.previous-team-banner-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #e8935a;
+  margin-bottom: 6px;
+}
+
+.previous-team-banner-body {
+  font-size: 13px;
+  color: var(--collab-text-secondary);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.previous-team-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.previous-team-relaunch-btn {
+  padding: 8px 18px;
+  font-size: 13px;
+}
+
+.previous-team-dismiss-btn {
+  background: transparent;
+  color: var(--collab-text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.previous-team-dismiss-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.previous-team-dismiss-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .project-code-example {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);

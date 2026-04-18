@@ -11,6 +11,7 @@ import { DiscussionPanel } from "./DiscussionPanel";
 import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import { BuildIdentityFooter } from "./BuildIdentityFooter";
+import PreviousTeamBanner from "./PreviousTeamBanner";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -1830,6 +1831,23 @@ When multiple instances of this role are active:
       console.error("[CollabTab] Failed to launch team member:", e);
     }
     setTimeout(() => setLaunchCooldown(false), 3000);
+  };
+
+  const handleRequestPreviousTeamLaunch = (count: number, execute: () => Promise<number>) => {
+    if (spawnConsented) {
+      void execute();
+      return;
+    }
+    setConfirmAction({
+      title: "Relaunch Previous Team",
+      message: `This will launch ${count} Claude Code agent${count === 1 ? "" : "s"} with full autonomous permissions (--dangerously-skip-permissions) in new terminal windows. Continue?`,
+      confirmLabel: "Relaunch",
+      onConfirm: async () => {
+        setSpawnConsented(true);
+        setConfirmAction(null);
+        await execute();
+      },
+    });
   };
 
   const handleCompanionLaunchConfirm = async () => {
@@ -4391,6 +4409,12 @@ When multiple instances of this role are active:
         )}
 
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
+
+        <PreviousTeamBanner
+          projectDir={projectDir}
+          claudeInstalled={claudeInstalled}
+          onRequestLaunch={handleRequestPreviousTeamLaunch}
+        />
 
         {/* Contextual hint when no sessions */}
         {hasNoSessions && (
