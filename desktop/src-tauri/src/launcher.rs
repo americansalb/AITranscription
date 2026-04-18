@@ -429,11 +429,27 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         spawned_at: now.clone(),
     });
 
-    // Persist PIDs to disk so they survive app restarts
-    let all: Vec<SpawnedAgent> = spawned.clone();
+    // Persist PIDs to disk so they survive app restarts.
+    //
+    // pr-manifest-durability (2026-04-18): read the existing disk manifest,
+    // replace any prior entry for this role+instance, and write back. Preserves
+    // dead entries from prior sessions that only exist on disk (PR2 made
+    // `repopulate_spawned` reconnect-only, so dead entries are never loaded
+    // into in-memory `spawned`). Without this merge, any launch would clobber
+    // the last-team manifest and break PR3's Relaunch button. Mirrors the
+    // read-merge-write pattern already in `kill_team_member` (see line 546+).
+    let new_entry = SpawnedAgent {
+        pid,
+        role: role.to_string(),
+        instance,
+        spawned_at: now.clone(),
+    };
     drop(spawned);
     if let Some(dir) = launcher.project_dir.lock().as_ref() {
-        save_spawned_to_disk(dir, &all);
+        let mut disk_agents = load_spawned_from_disk(dir);
+        disk_agents.retain(|a| !(a.role == new_entry.role && a.instance == new_entry.instance));
+        disk_agents.push(new_entry);
+        save_spawned_to_disk(dir, &disk_agents);
     }
 
     Ok(())
@@ -1191,14 +1207,26 @@ pub(crate) fn save_spawned_to_disk(project_dir: &str, agents: &[SpawnedAgent]) {
 }
 
 /// Load spawned agents from .vaak/spawned.json (fallback for after app restart).
+///
+/// pr-manifest-durability (2026-04-18): dedupe by `(role, instance)`, keeping
+/// the entry with the newest `spawned_at`. The manifest accumulates over many
+/// watchdog-era respawns (historical bug, fixed by PR1+PR2) and would
+/// otherwise cause `relaunch_spawned` to spawn N copies of the same role on
+/// a single click. Dedupe runs on every read so callers can assume the
+/// returned list has at most one entry per `(role, instance)` key.
 pub(crate) fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
     let path = std::path::Path::new(project_dir)
         .join(".vaak")
         .join("spawned.json");
-    std::fs::read_to_string(path)
+    let raw: Vec<SpawnedAgent> = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let mut sorted = raw;
+    sorted.sort_by(|a, b| b.spawned_at.cmp(&a.spawned_at));
+    let mut seen: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
+    sorted.retain(|a| seen.insert((a.role.clone(), a.instance)));
+    sorted
 }
 
 /// Opt-in gate for the dead-agent watchdog. Default: disabled.
@@ -1217,6 +1245,47 @@ pub(crate) fn watchdog_respawn_enabled(project_dir: &str) -> bool {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("settings")?.get("watchdog_respawn_dead_agents")?.as_bool())
         .unwrap_or(false)
+}
+
+/// Disk manifest entry enriched with a server-side `alive` probe.
+///
+/// Returned by `list_spawned_manifest` so the frontend can render the
+/// PreviousTeamBanner (ux-engineer:0) without calling `is_pid_alive` from
+/// JS (it can't). Shape matches ux-engineer:0 msg 155 / msg 179 spec.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SpawnedManifestEntry {
+    pub role: String,
+    pub instance: i32,
+    pub pid: u32,
+    pub spawned_at: String,
+    pub alive: bool,
+}
+
+/// Return the deduped `spawned.json` manifest with a fresh PID-alive probe
+/// per entry. Pure read — no mutation. Frontend uses the `alive` flag to
+/// decide whether a given role needs the Relaunch affordance.
+#[tauri::command]
+pub fn list_spawned_manifest(project_dir: String) -> Vec<SpawnedManifestEntry> {
+    load_spawned_from_disk(&project_dir)
+        .into_iter()
+        .map(|a| SpawnedManifestEntry {
+            alive: is_pid_alive(a.pid),
+            role: a.role,
+            instance: a.instance,
+            pid: a.pid,
+            spawned_at: a.spawned_at,
+        })
+        .collect()
+}
+
+/// Clear the `spawned.json` manifest on human request. Wired to the Dismiss
+/// action on ux-engineer:0's PreviousTeamBanner (msg 179). Writes an empty
+/// Vec; the file is kept rather than deleted so path-based watchers don't
+/// fire a gone-then-recreated churn.
+#[tauri::command]
+pub fn discard_spawned_manifest(project_dir: String) -> Result<(), String> {
+    save_spawned_to_disk(&project_dir, &[]);
+    Ok(())
 }
 
 /// Explicit human-triggered relaunch of every dead entry in `spawned.json`.
