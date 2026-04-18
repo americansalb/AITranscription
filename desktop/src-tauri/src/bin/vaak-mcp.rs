@@ -4369,6 +4369,45 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
     let disc_format = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
 
+    // ── Sequential-turn gate (pr-seq-1, per manager msg 377 + 384) ──
+    //
+    // When `discussion.json` has an `active_sequence.current_holder`, only that
+    // role (or human/manager) can post to the board. Everyone else gets
+    // ERR_NOT_YOUR_TURN. This is the strict-sequential enforcement point per
+    // `feedback_pipeline_mode_strict` — gate at project_send layer, no soft
+    // exceptions. Escalation to human (`to == "human"`) is always allowed
+    // since that's the override path the human can always pull.
+    let my_label_seq = format!("{}:{}", state.role, state.instance);
+    if let Some(seq) = disc.get("active_sequence") {
+        let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let paused = seq.get("paused_for_human").and_then(|v| v.as_bool()).unwrap_or(false);
+        if seq_active && !paused {
+            let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("");
+            let is_current = my_label_seq == current_holder;
+            let is_human = state.role == "human";
+            let is_manager_override = state.role == "manager" && metadata
+                .as_ref()
+                .and_then(|m| m.get("moderator_override"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_moderator_override = state.role == "moderator" && metadata
+                .as_ref()
+                .and_then(|m| m.get("moderator_override"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let to_human = to == "human";
+            if !is_current && !is_human && !is_manager_override && !is_moderator_override && !to_human {
+                return Err(format!(
+                    "ERR_NOT_YOUR_TURN: sequential-turn gate active, current holder is {}. \
+                    Sender {} is not the turn-holder. Escalate to human via to=\"human\", \
+                    or wait for your turn. Moderator/manager bypass requires \
+                    metadata.moderator_override=true.",
+                    current_holder, my_label_seq
+                ));
+            }
+        }
+    }
+
     // Broadcast permission: all roles can broadcast by default.
     // Noise control is handled by work mode (consecutive/simultaneous) and
     // communication mode (directed/open), not by permission flags.
@@ -4943,6 +4982,92 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         if to == "all" && state.role != "human" {
             let is_pass = body.trim().to_uppercase().starts_with("PASS:");
             let _ = advance_turn(&state.project_dir, &from_label, is_pass);
+        }
+    }
+
+    // ── Sequential-turn advance (pr-seq-1) ──
+    //
+    // When the current turn-holder posts a message tagged `metadata.end_of_turn == true`,
+    // move them to `queue_completed` and promote the next entry in `queue_remaining`.
+    // If the queue is empty, mark the sequence inactive — no auto-restart, per
+    // manager msg 377 (explicit end only). A system message records the advance
+    // so the board has an audit trail. See `feedback_pipeline_checkin_first`:
+    // only messages tagged `end_of_turn: true` close the turn; all other
+    // messages are treated as in-progress (multi-message turns supported).
+    {
+        let disc = read_discussion_state(&state.project_dir);
+        let is_end_of_turn = metadata
+            .as_ref()
+            .and_then(|m| m.get("end_of_turn"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_end_of_turn {
+            if let Some(seq) = disc.get("active_sequence") {
+                let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let from_label = format!("{}:{}", state.role, state.instance);
+                if seq_active && current_holder == from_label {
+                    let mut updated = disc.clone();
+                    let queue_remaining: Vec<serde_json::Value> = updated
+                        .get("active_sequence")
+                        .and_then(|s| s.get("queue_remaining"))
+                        .and_then(|q| q.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut queue_completed: Vec<serde_json::Value> = updated
+                        .get("active_sequence")
+                        .and_then(|s| s.get("queue_completed"))
+                        .and_then(|q| q.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    queue_completed.push(serde_json::json!(current_holder));
+                    let (next_holder, new_remaining) = if queue_remaining.is_empty() {
+                        (String::new(), vec![])
+                    } else {
+                        let next = queue_remaining[0].as_str().unwrap_or("").to_string();
+                        let rest = queue_remaining[1..].to_vec();
+                        (next, rest)
+                    };
+                    let now_iso = utc_now_iso();
+                    if let Some(seq_obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                        seq_obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining));
+                        seq_obj.insert("queue_completed".to_string(), serde_json::json!(queue_completed));
+                        if next_holder.is_empty() {
+                            seq_obj.insert("active".to_string(), serde_json::json!(false));
+                            seq_obj.insert("current_holder".to_string(), serde_json::json!(""));
+                            seq_obj.insert("ended_at".to_string(), serde_json::json!(now_iso.clone()));
+                            seq_obj.insert("ended_by".to_string(), serde_json::json!("queue_exhausted"));
+                        } else {
+                            seq_obj.insert("current_holder".to_string(), serde_json::json!(next_holder.clone()));
+                            seq_obj.insert("turn_started_at".to_string(), serde_json::json!(now_iso.clone()));
+                        }
+                    }
+                    let _ = write_discussion_state(&state.project_dir, &updated);
+                    if next_holder.is_empty() {
+                        post_turn_system_message(
+                            &state.project_dir,
+                            &format!("Sequence ended — {} completed the final turn. Queue exhausted.", from_label),
+                        );
+                    } else {
+                        post_turn_system_message(
+                            &state.project_dir,
+                            &format!("Turn advanced — {} → {} (end_of_turn). {} remaining in queue.",
+                                from_label, next_holder, new_remaining.len()),
+                        );
+                        let wake_msg = serde_json::json!({
+                            "id": next_message_id(&state.project_dir),
+                            "from": "system:0",
+                            "to": next_holder,
+                            "type": "system",
+                            "subject": "Your sequential turn",
+                            "body": format!("It is now your turn in the sequential sequence. Previous holder: {}. When you finish, post with metadata.end_of_turn=true to advance.", from_label),
+                            "timestamp": now_iso,
+                            "metadata": {"sequence_notification": true, "previous_holder": from_label}
+                        });
+                        let _ = append_to_board(&state.project_dir, &wake_msg);
+                    }
+                }
+            }
         }
     }
 
