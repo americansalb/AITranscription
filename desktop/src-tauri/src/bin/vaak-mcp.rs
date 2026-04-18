@@ -3856,7 +3856,205 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             }))
         }
 
-        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control", action))
+        // ── Sequential-turn actions (pr-seq-2) ──
+        //
+        // Minimum viable trio: start / pass / end. reorder / insert / remove /
+        // pause / resume / assign_turn land in PR-SEQ-3+. Human and moderator
+        // both authorized to start and end; only the current holder can
+        // voluntarily pass. Reason required for moderator end; human exempt
+        // per feedback_human_authority_vs_agent_audit + dont_overgate_moderator_ux.
+        "start_sequence" => {
+            let topic = topic.ok_or("topic is required for start_sequence")?;
+            let participant_list = participants.ok_or("participants (queue) required for start_sequence")?;
+            if participant_list.is_empty() {
+                return Err("participants queue must not be empty".to_string());
+            }
+            let existing = read_discussion_state(&state.project_dir);
+            if existing.get("active_sequence").and_then(|s| s.get("active")).and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Err("ERR_SEQUENCE_ALREADY_ACTIVE: end the current sequence before starting another".to_string());
+            }
+            // Filter out vacant roles (not in sessions.json as active/idle) — keep audit trail.
+            let sessions = read_sessions(&state.project_dir);
+            let active_labels: std::collections::HashSet<String> = sessions.get("bindings")
+                .and_then(|b| b.as_array())
+                .map(|arr| arr.iter().filter_map(|b| {
+                    let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    if status != "active" && status != "idle" { return None; }
+                    let role = b.get("role").and_then(|r| r.as_str())?;
+                    let inst = b.get("instance").and_then(|i| i.as_u64())?;
+                    Some(format!("{}:{}", role, inst))
+                }).collect())
+                .unwrap_or_default();
+            let mut kept: Vec<String> = Vec::new();
+            let mut dropped: Vec<String> = Vec::new();
+            for p in &participant_list {
+                if active_labels.contains(p) || p == "human:0" {
+                    kept.push(p.clone());
+                } else {
+                    dropped.push(p.clone());
+                }
+            }
+            if kept.is_empty() {
+                return Err("ERR_QUEUE_ALL_VACANT: every participant is vacant, nothing to start".to_string());
+            }
+            let first = kept.remove(0);
+            let now = utc_now_iso();
+            let mut updated = existing.clone();
+            updated["active_sequence"] = serde_json::json!({
+                "active": true,
+                "topic": topic,
+                "goal": serde_json::Value::Null,
+                "initiator": my_label.clone(),
+                "started_at": now.clone(),
+                "current_holder": first.clone(),
+                "queue_remaining": kept,
+                "queue_completed": [] as [String; 0],
+                "queue_dropped_at_start": dropped.clone(),
+                "turn_started_at": now.clone(),
+                "paused_for_human": false,
+                "mode": "strict-sequential"
+            });
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id,
+                "from": my_label.clone(),
+                "to": "all",
+                "type": "moderation",
+                "timestamp": now.clone(),
+                "subject": format!("Sequence started: {}", topic),
+                "body": format!("Sequential-turn sequence started. Topic: {}. First holder: {}. Dropped (vacant): {:?}.", topic, first, dropped),
+                "metadata": {
+                    "sequence_action": "start",
+                    "current_holder": first,
+                    "initiator": my_label
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "sequence_started", "topic": topic, "dropped": dropped}))
+        }
+
+        "pass_turn" => {
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !seq_active {
+                return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to pass turn in".to_string());
+            }
+            let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if my_label != current_holder && state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err(format!("ERR_NOT_YOUR_TURN: pass_turn requires you to be the current holder. Current: {}, you: {}", current_holder, my_label));
+            }
+            let queue_remaining: Vec<serde_json::Value> = seq.get("queue_remaining").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+            let mut queue_completed: Vec<serde_json::Value> = seq.get("queue_completed").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+            queue_completed.push(serde_json::json!(current_holder));
+            let (next_holder, new_remaining) = if queue_remaining.is_empty() {
+                (String::new(), vec![])
+            } else {
+                let n = queue_remaining[0].as_str().unwrap_or("").to_string();
+                (n, queue_remaining[1..].to_vec())
+            };
+            let now = utc_now_iso();
+            let mut updated = disc.clone();
+            if let Some(seq_obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                seq_obj.insert("queue_completed".to_string(), serde_json::json!(queue_completed));
+                seq_obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining));
+                if next_holder.is_empty() {
+                    seq_obj.insert("active".to_string(), serde_json::json!(false));
+                    seq_obj.insert("current_holder".to_string(), serde_json::json!(""));
+                    seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
+                    seq_obj.insert("ended_by".to_string(), serde_json::json!("queue_exhausted"));
+                } else {
+                    seq_obj.insert("current_holder".to_string(), serde_json::json!(next_holder.clone()));
+                    seq_obj.insert("turn_started_at".to_string(), serde_json::json!(now.clone()));
+                }
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let body = if next_holder.is_empty() {
+                format!("Turn passed — {} was the last in queue. Sequence ended.", current_holder)
+            } else {
+                format!("Turn passed: {} → {}. {} remaining.", current_holder, next_holder, new_remaining.len())
+            };
+            let announcement = serde_json::json!({
+                "id": msg_id,
+                "from": my_label.clone(),
+                "to": "all",
+                "type": "system",
+                "timestamp": now.clone(),
+                "subject": "Turn passed",
+                "body": body,
+                "metadata": {
+                    "sequence_action": "pass_turn",
+                    "from_holder": current_holder,
+                    "to_holder": next_holder.clone()
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            if !next_holder.is_empty() {
+                let wake = serde_json::json!({
+                    "id": next_message_id(&state.project_dir),
+                    "from": "system:0",
+                    "to": next_holder.clone(),
+                    "type": "system",
+                    "subject": "Your sequential turn",
+                    "body": format!("It is your turn in the sequence. Post with metadata.end_of_turn=true to advance."),
+                    "timestamp": now.clone(),
+                    "metadata": {"sequence_notification": true}
+                });
+                let _ = append_to_board(&state.project_dir, &wake);
+            }
+            notify_desktop();
+            Ok(serde_json::json!({"status": "turn_passed", "next_holder": next_holder}))
+        }
+
+        "end_sequence" => {
+            let disc = read_discussion_state(&state.project_dir);
+            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+            let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !seq_active {
+                return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to end".to_string());
+            }
+            // Authorization: human or moderator only. Moderator requires reason; human exempt.
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human or moderator can end the sequence".to_string());
+            }
+            let audit_reason = reason.unwrap_or("").trim().to_string();
+            if state.role != "human" && audit_reason.is_empty() {
+                return Err("ERR_REASON_REQUIRED: moderator end_sequence requires a reason".to_string());
+            }
+            let now = utc_now_iso();
+            let topic_str = seq.get("topic").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string();
+            let mut updated = disc.clone();
+            if let Some(seq_obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+                seq_obj.insert("active".to_string(), serde_json::json!(false));
+                seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
+                seq_obj.insert("ended_by".to_string(), serde_json::json!(my_label.clone()));
+                seq_obj.insert("end_reason".to_string(), serde_json::json!(audit_reason.clone()));
+            }
+            write_discussion_state(&state.project_dir, &updated)?;
+            let msg_id = next_message_id(&state.project_dir);
+            let announcement = serde_json::json!({
+                "id": msg_id,
+                "from": my_label.clone(),
+                "to": "all",
+                "type": "moderation",
+                "timestamp": now,
+                "subject": format!("Sequence ended: {}", topic_str),
+                "body": format!("The sequential-turn sequence on \"{}\" has ended. Reason: {}", topic_str, if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
+                "metadata": {
+                    "sequence_action": "end",
+                    "ended_by": my_label,
+                    "reason": audit_reason
+                }
+            });
+            append_to_board(&state.project_dir, &announcement)?;
+            notify_desktop();
+            Ok(serde_json::json!({"status": "sequence_ended", "topic": topic_str}))
+        }
+
+        _ => Err(format!("Unknown discussion action: '{}'. Valid: start_discussion, close_round, open_next_round, end_discussion, get_state, set_teams, create_review_round, audience_control, start_sequence, pass_turn, end_sequence", action))
     }
 }
 
