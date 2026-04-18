@@ -2610,6 +2610,68 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     set_session_mode(dir, discussion_mode)
 }
 
+/// Toggle the dead-agent watchdog (pr-watchdog-opt-in). The backend reads
+/// `settings.watchdog_respawn_dead_agents` from project.json per invocation
+/// of `check_and_respawn_dead_agents` (see launcher.rs), so this command
+/// takes effect immediately — no app restart required. The frontend
+/// `setInterval` that gates on the same flag picks up the new value on
+/// next render (dependent on `project` state being re-fetched after write,
+/// which happens via `notify_collab_change`).
+///
+/// Per ux-engineer:0 msg 155: needed to wire the opt-in toggle UI. Uses
+/// the same atomic-write + notify pattern as `set_workflow_type` so the
+/// read/write contract is consistent across settings mutators.
+#[tauri::command]
+fn set_watchdog_respawn_enabled(dir: String, enabled: bool) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if let Some(settings) = config.get_mut("settings") {
+        settings["watchdog_respawn_dead_agents"] = serde_json::Value::Bool(enabled);
+    }
+
+    let now = {
+        let dur = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = dur.as_secs();
+        let hours = (secs % 86400) / 3600;
+        let mins = (secs % 3600) / 60;
+        let s = secs % 60;
+        let days = secs / 86400;
+        let mut y = 1970u64;
+        let mut remaining = days;
+        loop {
+            let diy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+            if remaining < diy { break; }
+            remaining -= diy;
+            y += 1;
+        }
+        let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut m = 0u64;
+        for i in 0..12 {
+            if remaining < month_days[i] { break; }
+            remaining -= month_days[i];
+            m = i as u64 + 1;
+        }
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
+    };
+    config["updated_at"] = serde_json::Value::String(now);
+
+    let pretty = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    collab::atomic_write(&config_path, pretty.as_bytes())
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    notify_collab_change();
+    Ok(())
+}
+
 #[tauri::command]
 fn set_session_mode(dir: String, discussion_mode: Option<String>) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
@@ -5533,6 +5595,7 @@ fn main() {
             read_role_briefing,
             send_team_message,
             set_workflow_type,
+            set_watchdog_respawn_enabled,
             set_discussion_mode,
             set_session_mode,
             set_work_mode,

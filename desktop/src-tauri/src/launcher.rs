@@ -11,6 +11,12 @@ pub struct SpawnedAgent {
     pub pid: u32,
     pub role: String,
     pub instance: i32,
+    /// Format contract: fixed-width ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). All
+    /// writers in this module use `format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", ...)`.
+    /// `load_spawned_from_disk` sorts lexicographically and relies on that
+    /// equaling chronological order. Introducing timezone offsets or
+    /// fractional seconds silently breaks dedupe. (dev-challenger:1 msg 241
+    /// Finding 2.)
     pub spawned_at: String,
 }
 
@@ -422,6 +428,11 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
     let instance = roster_instance.unwrap_or_else(|| {
         spawned.iter().filter(|a| a.role == role).count() as i32
     });
+    // Dedupe in-memory on the same (role, instance) key the disk merge below
+    // uses. Keeps in-memory and disk consistent if a stale entry slipped in
+    // from a concurrent kill/relaunch edge or a future caller that forgot
+    // cleanup. (dev-challenger:1 msg 241 Finding 3.)
+    spawned.retain(|a| !(a.role == role && a.instance == instance));
     spawned.push(SpawnedAgent {
         pid,
         role: role.to_string(),
