@@ -4010,6 +4010,14 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         // voluntarily pass. Reason required for moderator end; human exempt
         // per feedback_human_authority_vs_agent_audit + dont_overgate_moderator_ux.
         "start_sequence" => {
+            // Authorization: only human, manager, or moderator can start a
+            // sequence. Per human msg 346 core principle: "agents can't
+            // self-activate." dev-challenger:1 msg 450 + manager msg 454
+            // flagged this as a BLOCKING bug in PR-SEQ-2 — any agent could
+            // force the team into sequential mode by calling start_sequence.
+            if state.role != "human" && state.role != "moderator" && state.role != "manager" {
+                return Err("ERR_UNAUTHORIZED: only human, manager, or moderator can start a sequence".to_string());
+            }
             let topic = topic.ok_or("topic is required for start_sequence")?;
             let participant_list = participants.ok_or("participants (queue) required for start_sequence")?;
             if participant_list.is_empty() {
