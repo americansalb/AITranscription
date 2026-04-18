@@ -68,13 +68,13 @@ export default function PreviousTeamBanner({
     const fetchManifest = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const list = await invoke<PreviousTeamEntry[]>("list_spawned_manifest", {
+        const list = await invoke<PreviousTeamEntry[]>("peek_spawned_manifest", {
           projectDir,
         });
         if (!cancelled) setEntries(Array.isArray(list) ? list : []);
       } catch (e) {
         if (!cancelled) {
-          console.error("[PreviousTeamBanner] list_spawned_manifest failed:", e);
+          console.error("[PreviousTeamBanner] peek_spawned_manifest failed:", e);
           setEntries([]);
         }
       }
