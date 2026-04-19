@@ -2926,6 +2926,22 @@ fn start_discussion(
         eprintln!("[start_discussion] WARNING: No moderator available. Discussion will run unmoderated.");
     }
 
+    // pr-pipeline-outside-moderator (2026-04-19): the designated moderator
+    // stands OUTSIDE the participant queue per human msg 867 ("moderator that
+    // can stand outside of the pipeline and control the pipeline"). Filter
+    // them out of `participants` before pipeline_order is built so they
+    // never get a stage slot. Their authority comes from the moderator-gate
+    // auth path at vaak-mcp.rs:3236 (already wired); they don't need to be
+    // a participant to control the pipeline.
+    let participants: Vec<String> = if let Some(mod_label) = &moderator {
+        participants.into_iter().filter(|p| p != mod_label).collect()
+    } else {
+        participants
+    };
+    if let Some(mod_label) = &moderator {
+        eprintln!("[start_discussion] moderator '{}' filtered out of participants (outside-queue invariant)", mod_label);
+    }
+
     let now = iso_now();
     let is_continuous = mode == "continuous";
     let is_pipeline = mode == "pipeline";
@@ -6493,5 +6509,144 @@ mod tests {
         let result = super::dismiss_turn_request("/tmp/whatever".to_string(), "developer:0".to_string());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("ERR_NOT_IMPLEMENTED"));
+    }
+
+    // ── pr-pipeline-outside-moderator (PR-1) tests ─────────────────────
+    // Per human msg 867: "I want to designate a moderator that can stand
+    // outside of the pipeline and control the pipeline." The invariant:
+    // when start_discussion is invoked with a moderator value, that role
+    // MUST NOT appear in the resulting pipeline_order — they get the
+    // moderator-control authority via the existing gate at vaak-mcp.rs:3236
+    // without taking a stage slot.
+
+    fn fixture_for_outside_moderator(test_name: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir()
+            .join(format!("vaak-test-outside-moderator-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        // Minimal project + sessions for the start_discussion happy path.
+        std::fs::write(vaak.join("project.json"), r#"{"settings":{"heartbeat_timeout_seconds":3600},"roles":{"moderator":{},"tech-leader":{},"developer":{},"tester":{}}}"#).expect("project");
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role": "moderator", "instance": 0, "status": "active"},
+                {"role": "tech-leader", "instance": 1, "status": "active"},
+                {"role": "developer", "instance": 0, "status": "active"},
+                {"role": "tester", "instance": 0, "status": "active"}
+            ]
+        }"#).expect("sessions");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        tmp
+    }
+
+    #[test]
+    fn outside_moderator_filters_designated_role_from_pipeline_order() {
+        // Designate tech-leader:1 as moderator. They appear in participants
+        // but MUST NOT appear in the resulting discussion.json's pipeline_order.
+        let tmp = fixture_for_outside_moderator("filter-designated");
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::start_discussion(
+            dir.clone(),
+            "pipeline".to_string(),
+            "outside-moderator test topic".to_string(),
+            Some("tech-leader:1".to_string()),
+            vec![
+                "tech-leader:1".to_string(),
+                "developer:0".to_string(),
+                "tester:0".to_string(),
+            ],
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "start_discussion must succeed; got: {:?}", result);
+
+        let disc_path = vaak_desktop::collab::active_discussion_path(&dir);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&disc_path).expect("discussion.json should exist")
+        ).expect("parse discussion.json");
+        let pipeline_order: Vec<&str> = disc["pipeline_order"]
+            .as_array().expect("pipeline_order array")
+            .iter().filter_map(|v| v.as_str()).collect();
+        assert!(!pipeline_order.contains(&"tech-leader:1"),
+            "designated moderator must NOT appear in pipeline_order; got: {:?}", pipeline_order);
+        assert!(pipeline_order.contains(&"developer:0"),
+            "non-moderator participants must remain in pipeline_order; got: {:?}", pipeline_order);
+        assert!(pipeline_order.contains(&"tester:0"),
+            "non-moderator participants must remain in pipeline_order; got: {:?}", pipeline_order);
+        assert_eq!(disc["moderator"], "tech-leader:1",
+            "discussion.moderator field must record the designated role");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn outside_moderator_filters_auto_detected_moderator_from_pipeline_order() {
+        // Without explicit designation, start_discussion auto-detects from the
+        // roster (moderator:0 in this fixture). That auto-detected role must
+        // also be filtered out of pipeline_order — the invariant is universal.
+        let tmp = fixture_for_outside_moderator("filter-auto");
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::start_discussion(
+            dir.clone(),
+            "pipeline".to_string(),
+            "auto-detect test".to_string(),
+            None, // no explicit moderator -> auto-detect moderator:0
+            vec![
+                "moderator:0".to_string(),
+                "developer:0".to_string(),
+                "tester:0".to_string(),
+            ],
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "start_discussion must succeed; got: {:?}", result);
+
+        let disc_path = vaak_desktop::collab::active_discussion_path(&dir);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&disc_path).expect("discussion.json should exist")
+        ).expect("parse discussion.json");
+        let pipeline_order: Vec<&str> = disc["pipeline_order"]
+            .as_array().expect("pipeline_order array")
+            .iter().filter_map(|v| v.as_str()).collect();
+        assert!(!pipeline_order.contains(&"moderator:0"),
+            "auto-detected moderator must NOT appear in pipeline_order; got: {:?}", pipeline_order);
+        assert_eq!(disc["moderator"], "moderator:0",
+            "discussion.moderator must record the auto-detected role");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn outside_moderator_invariant_holds_when_moderator_not_in_participants() {
+        // If the designated moderator was already excluded from participants,
+        // the filter is a no-op and pipeline_order contains everyone passed in.
+        let tmp = fixture_for_outside_moderator("not-in-list");
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::start_discussion(
+            dir.clone(),
+            "pipeline".to_string(),
+            "moderator-not-in-list test".to_string(),
+            Some("tech-leader:1".to_string()),
+            vec![
+                "developer:0".to_string(),
+                "tester:0".to_string(),
+            ],
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "start_discussion must succeed; got: {:?}", result);
+
+        let disc_path = vaak_desktop::collab::active_discussion_path(&dir);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&disc_path).expect("discussion.json should exist")
+        ).expect("parse discussion.json");
+        let pipeline_order: Vec<&str> = disc["pipeline_order"]
+            .as_array().expect("pipeline_order array")
+            .iter().filter_map(|v| v.as_str()).collect();
+        assert!(!pipeline_order.contains(&"tech-leader:1"),
+            "moderator must not appear even when wasn't in participants; got: {:?}", pipeline_order);
+        assert_eq!(pipeline_order.len(), 2,
+            "all 2 non-moderator participants should remain; got: {:?}", pipeline_order);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

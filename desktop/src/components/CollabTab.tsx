@@ -653,6 +653,14 @@ export function CollabTab() {
   const [sdParticipants, setSdParticipants] = useState<Record<string, boolean>>({});
   const [sdStarting, setSdStarting] = useState(false);
   const [sdModeratorEnabled, setSdModeratorEnabled] = useState(true);
+  // pr-pipeline-outside-moderator: explicit picker for the session moderator.
+  // "" = auto-detect from roster (legacy behavior). "role:instance" = designate
+  // that specific role as the outside-the-queue moderator. Per human msg 867:
+  // "I want to designate a moderator that can stand outside of the pipeline
+  // and control the pipeline... I want the technical project lead to be able
+  // to do that, for example, but I don't even have the ability to designate
+  // that." This dropdown is that ability.
+  const [sdModeratorPick, setSdModeratorPick] = useState<string>("");
   const [sdAudienceEnabled, setSdAudienceEnabled] = useState(false);
   const [sdPipelineRounds, setSdPipelineRounds] = useState<string>("5");
   const [sdPipelineMode, setSdPipelineMode] = useState<"discussion" | "action">("discussion");
@@ -2402,12 +2410,18 @@ When multiple instances of this role are active:
         const topic = sdFormat === "continuous"
           ? "Continuous review — auto-triggered micro-rounds"
           : sdTopic.trim();
-        const modSession = sdModeratorEnabled
-          ? project?.sessions?.find(s => s.role === "moderator" && s.status === "active")
-          : null;
-        const moderator = modSession
-          ? `moderator:${modSession.instance}`
-          : undefined;  // let backend auto-detect from roster (or no moderator if disabled)
+        // pr-pipeline-outside-moderator: explicit picker takes priority over the
+        // legacy auto-detect. If the user picked a specific role, send it; otherwise
+        // fall back to the moderator-enabled toggle's auto-detect behavior.
+        let moderator: string | undefined;
+        if (sdModeratorPick) {
+          moderator = sdModeratorPick;
+        } else if (sdModeratorEnabled) {
+          const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
+          moderator = modSession ? `moderator:${modSession.instance}` : undefined;
+        } else {
+          moderator = undefined;
+        }
         console.log("[handleStartDiscussion] Invoking start_session:", { dir: projectDir, mode: sdFormat, topic, moderator, participants });
         let startDiscussionError: string | null = null;
         try {
@@ -5625,13 +5639,42 @@ When multiple instances of this role are active:
                     <div className="sd-agent-info">
                       <span className="sd-agent-name">Session Moderator</span>
                       <span className="sd-agent-desc">{sdModeratorEnabled
-                        ? "Guides conversation, manages rounds, enforces turn order, and produces decision records."
+                        ? "Guides conversation, manages rounds, enforces turn order, and produces decision records. Stands outside the participant queue — can pass turns, end the session, and reorder without taking a stage slot."
                         : "Disabled — session will run without moderation. No stall detection, no synthesis, no round management."
                       }</span>
                     </div>
                   </label>
                   <span className="sd-agent-badge" style={{ opacity: sdModeratorEnabled ? 1 : 0.4 }}>{sdModeratorEnabled ? "Auto" : "Off"}</span>
                 </div>
+                {/* pr-pipeline-outside-moderator: designation dropdown. Visible only
+                    when moderator is enabled. Defaults to "Auto" (legacy behavior:
+                    pick the first active moderator role from the roster). User can
+                    explicitly pick any active role to designate them as the
+                    outside-the-queue moderator (e.g., tech-leader:0). The chosen
+                    role is filtered out of pipeline_order at launch. */}
+                {sdModeratorEnabled && project?.sessions && (
+                  <div className="sd-agent-row" style={{ paddingLeft: "26px", paddingTop: "0" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, fontSize: "12px", color: "#8899a6" }}>
+                      <span>Designate moderator:</span>
+                      <select
+                        value={sdModeratorPick}
+                        onChange={(e) => setSdModeratorPick(e.target.value)}
+                        aria-label="Designate session moderator"
+                        style={{ flex: 1, padding: "4px 8px", fontSize: "12px" }}
+                      >
+                        <option value="">Auto (first active moderator role)</option>
+                        {project.sessions
+                          .filter(s => s.status === "active" || s.status === "idle")
+                          .map(s => `${s.role}:${s.instance}`)
+                          .filter((label, i, arr) => arr.indexOf(label) === i)
+                          .sort()
+                          .map(label => (
+                            <option key={label} value={label}>{label}</option>
+                          ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
                 <div className="sd-agent-row">
                   <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
                     <input
