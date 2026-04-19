@@ -21,7 +21,7 @@ interface Props {
   projectDir: string | null;
 }
 
-type BusyAction = null | "insert" | "end";
+type BusyAction = null | "insert" | "end" | "pass";
 
 export default function HumanSequenceOverrideBar({ turn, projectDir }: Props) {
   const [busy, setBusy] = useState<BusyAction>(null);
@@ -46,23 +46,41 @@ export default function HumanSequenceOverrideBar({ turn, projectDir }: Props) {
     void invoke("human_insert_next", {}, "insert");
   };
 
+  const passMyTurn = () => {
+    void invoke("pass_turn", {}, "pass");
+  };
+
   const endSession = () => {
     setConfirmingEnd(false);
     void invoke("end_sequence", {}, "end");
   };
 
+  const isHumanTurn = turn.current_holder === "human:0";
+
   return (
     <div className="human-override-bar" role="region" aria-label="Human controls for active sequence">
       <div className="human-override-label">You</div>
-      <button
-        type="button"
-        className="human-override-btn"
-        onClick={insertMeNext}
-        disabled={busy !== null}
-        aria-label="Jump to the front of the queue for your next turn"
-      >
-        Insert me next
-      </button>
+      {isHumanTurn ? (
+        <button
+          type="button"
+          className="human-override-btn human-override-btn-primary"
+          onClick={passMyTurn}
+          disabled={busy !== null}
+          aria-label="End your current turn and advance to the next participant"
+        >
+          End my turn
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="human-override-btn"
+          onClick={insertMeNext}
+          disabled={busy !== null}
+          aria-label="Jump to the front of the queue for your next turn"
+        >
+          Insert me next
+        </button>
+      )}
       {!confirmingEnd ? (
         <button
           type="button"

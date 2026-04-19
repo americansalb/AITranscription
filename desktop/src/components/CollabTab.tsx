@@ -19,6 +19,7 @@ import ModeratorSequencePanel, {
 } from "./ModeratorSequencePanel";
 import HumanSequenceOverrideBar from "./HumanSequenceOverrideBar";
 import PendingTurnRequests from "./PendingTurnRequests";
+import StartSequenceModal, { type StartSequenceCandidate } from "./StartSequenceModal";
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -840,6 +841,7 @@ export function CollabTab() {
   const [launching, setLaunching] = useState(false);
   const [npmInstalled, setNpmInstalled] = useState<boolean | null>(null);
   const [sequenceTurn, setSequenceTurn] = useState<SequenceTurnState | null>(null);
+  const [startSequenceOpen, setStartSequenceOpen] = useState(false);
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [installingCli, setInstallingCli] = useState(false);
   const [installingNode, setInstallingNode] = useState(false);
@@ -3247,6 +3249,16 @@ When multiple instances of this role are active:
               &#9998; Start Session
             </button>
           )}
+          {!discussionState?.active && !sequenceTurn && (
+            <button
+              className="start-sequence-header-btn"
+              onClick={() => setStartSequenceOpen(true)}
+              title="Start a strict sequential-turn session where agents take turns one at a time"
+              aria-label="Start sequence"
+            >
+              &#8680; Start Sequence
+            </button>
+          )}
           <button
             className="project-settings-btn"
             onClick={() => setSettingsOpen(!settingsOpen)}
@@ -5479,6 +5491,20 @@ When multiple instances of this role are active:
             </div>
           </div>
         )}
+
+        <StartSequenceModal
+          open={startSequenceOpen}
+          onClose={() => setStartSequenceOpen(false)}
+          projectDir={projectDir}
+          candidates={
+            ((project?.sessions || [])
+              .filter((s) => s.status === "active")
+              .map<StartSequenceCandidate>((s) => ({
+                id: `${s.role}:${s.instance}`,
+                title: project?.config?.roles?.[s.role]?.title ?? s.role,
+              })))
+          }
+        />
 
         {/* Start Session Dialog (session = pipeline / delphi / oxford / red_team / continuous) */}
         {startDiscussionOpen && (

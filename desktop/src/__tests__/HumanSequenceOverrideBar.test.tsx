@@ -133,3 +133,40 @@ describe("HumanSequenceOverrideBar accessibility", () => {
     expect(screen.getByRole("region", { name: /human controls for active sequence/i })).toBeInTheDocument();
   });
 });
+
+describe("HumanSequenceOverrideBar end-my-turn branch (PR-H)", () => {
+  it('swaps "Insert me next" for "End my turn" when human is current_holder', () => {
+    render(
+      <HumanSequenceOverrideBar
+        turn={turnFixture({ current_holder: "human:0" })}
+        projectDir={PROJECT_DIR}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /end your current turn/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /jump to the front/i })).toBeNull();
+  });
+
+  it("End my turn invokes pass_turn", async () => {
+    const mockInvoke = installMockInvoke();
+    render(
+      <HumanSequenceOverrideBar
+        turn={turnFixture({ current_holder: "human:0" })}
+        projectDir={PROJECT_DIR}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /end your current turn/i }));
+    await flushMicrotasks();
+    expect(mockInvoke).toHaveBeenCalledWith("pass_turn", { projectDir: PROJECT_DIR });
+  });
+
+  it("still shows Insert me next when current_holder is another role", () => {
+    render(
+      <HumanSequenceOverrideBar
+        turn={turnFixture({ current_holder: "developer:0" })}
+        projectDir={PROJECT_DIR}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /jump to the front/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /end your current turn/i })).toBeNull();
+  });
+});
