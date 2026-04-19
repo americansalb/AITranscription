@@ -332,12 +332,7 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
         || holder_session_status == "";
     let bypass_silence_for_disconnect = holder_disconnected && elapsed >= 30;
     if elapsed < timeout && !bypass_silence_for_disconnect { return; }
-    // pr-pipeline-ack-no-advance: only SUBSTANTIVE messages (not bare acks)
-    // suppress the stall watchdog. Previously, posting a short ack would
-    // short-circuit this check forever, letting an agent livelock the stage.
-    // Now the watchdog fires after `timeout` unless the holder has posted
-    // stage-output-grade content. Matches the advance-on-broadcast path.
-    if board_has_substantive_message_from_since(project_dir, &current_role, started_at_str) { return; }
+    if board_has_message_from_since(project_dir, &current_role, started_at_str) { return; }
 
     // Force-advance past the silent (or disconnected) role.
     let skip_reason = if bypass_silence_for_disconnect {
@@ -578,40 +573,36 @@ fn read_active_section(project_dir: &str) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
-/// pr-pipeline-ack-no-advance: body-length threshold that separates bare-ack
-/// status messages from substantive stage outputs. Acks like
-/// "[role] Stage N ack — investigating, will post findings" are typically
-/// 100-400 chars; real adversarial reviews / code analyses are 1000+ chars.
-/// 500 is chosen to sit safely above the observed ack tail (max ~400 chars in
-/// the 2026-04-19 out-of-turn pipeline) and well below substantive output floor.
-const PIPELINE_SUBSTANTIVE_MIN_CHARS: usize = 500;
-
-/// pr-pipeline-ack-no-advance: predicate for "is this message the stage's
-/// substantive output (completes the stage) or just a bare ack?".
-/// Used by both the advance-on-broadcast path (vaak-mcp.rs:~5790) and the
-/// auto-skip short-circuit (vaak-mcp.rs:~335) so both paths agree on what
-/// counts as stage work. Bare acks MUST NOT advance the stage
-/// (feedback_ack_is_one_sentence.md) and MUST NOT short-circuit the
-/// stall-watchdog.
-fn is_substantive_pipeline_output(body: &str, metadata: Option<&serde_json::Value>) -> bool {
-    // Explicit override: `metadata.ack = true` forces not-substantive.
-    if let Some(md) = metadata {
-        if md.get("ack").and_then(|v| v.as_bool()) == Some(true) {
-            return false;
-        }
-        // Explicit opt-in: `metadata.pipeline_stage_output = true` forces substantive.
-        if md.get("pipeline_stage_output").and_then(|v| v.as_bool()) == Some(true) {
-            return true;
-        }
-    }
-    body.trim().chars().count() >= PIPELINE_SUBSTANTIVE_MIN_CHARS
+/// pr-pipeline-end-of-stage-flag (supersedes pr-pipeline-ack-no-advance).
+///
+/// Team converged (manager:0 msg 1159, architect:0 msg 1155, tech-leader:0
+/// msg 1151, tech-leader:1 msg 1157) on: **pipeline advance gates on an
+/// explicit `metadata.end_of_stage: true` flag — no length fallback, no
+/// type-based inference, no soft heuristics.** The agent is the authority on
+/// "my stage is done"; the system trusts the flag and nothing else.
+///
+/// Why this shape (vs the length-500 heuristic I shipped in commit 8ae4141):
+/// 1. No accidental advance on verbose acks or long planning posts.
+/// 2. No permission surgery vs the handoff-type alternative (6 roles lack it).
+/// 3. Cross-stage message taxonomy stays clean — `status`/`review`/`submission`
+///    mean what they mean; advance is orthogonal workflow metadata.
+/// 4. Mirrors the sequence system's `metadata.end_of_turn` — one consistent
+///    "I'm done" signal across both turn-taking substrates.
+fn is_end_of_stage(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|m| m.get("end_of_stage"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
-/// pr-pipeline-ack-no-advance: substantive-only variant of
-/// board_has_message_from_since. Scans the board for messages from `role`
-/// posted after `since_iso` whose body passes is_substantive_pipeline_output.
-/// The stall watchdog uses this so bare acks don't suppress the auto-skip.
-fn board_has_substantive_message_from_since(project_dir: &str, role: &str, since_iso: &str) -> bool {
+/// Original "any message from role since timestamp" predicate, used by the
+/// stall watchdog. Kept at pre-ack-no-advance semantics: any message (ack,
+/// status, or end_of_stage) counts as "agent is alive, don't auto-skip".
+/// That's fine now that advance itself is gated on the flag — an ack-spammer
+/// can keep their stage alive forever, but they CANNOT advance without the
+/// flag, and the human can always intervene. Stale = no message at all,
+/// which is the only case the watchdog needs to cover.
+fn board_has_message_from_since(project_dir: &str, role: &str, since_iso: &str) -> bool {
     let since_unix = chrono_iso_to_unix(since_iso).unwrap_or(0);
     let path = vaak_dir(project_dir).join("sections").join(read_active_section(project_dir)).join("board.jsonl");
     let path = if path.exists() { path } else { vaak_dir(project_dir).join("board.jsonl") };
@@ -621,10 +612,7 @@ fn board_has_substantive_message_from_since(project_dir: &str, role: &str, since
             let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
             if from != role { continue; }
             let ts = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
-            if chrono_iso_to_unix(ts).unwrap_or(0) <= since_unix { continue; }
-            let body = msg.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            let metadata = msg.get("metadata");
-            if is_substantive_pipeline_output(body, metadata) { return true; }
+            if chrono_iso_to_unix(ts).unwrap_or(0) > since_unix { return true; }
         }
     }
     false
@@ -3550,7 +3538,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                         .unwrap_or_default();
                     let first = new_state.get("pipeline_order").and_then(|o| o.as_array())
                         .and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("?");
-                    format!("Pipeline started.\n\n**Topic:** {}\n**Pipeline order:** {}\n**Current stage:** {} (1/{})\n\nEach agent processes in order, seeing all previous outputs. Respond with a broadcast when your stage is complete.",
+                    format!("Pipeline started.\n\n**Topic:** {}\n**Pipeline order:** {}\n**Current stage:** {} (1/{})\n\nEach agent processes in order, seeing all previous outputs. To advance the pipeline to the next stage, set `metadata: {{end_of_stage: true}}` on your FINAL broadcast. Ack/interim broadcasts without the flag do NOT advance the pipeline.",
                         topic, order, first, participant_list.len())
                 } else if mode == "continuous" {
                     format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / neutral / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
@@ -5833,22 +5821,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             let from_label = format!("{}:{}", state.role, state.instance);
             let current_agent = pipeline_order.get(current_stage).and_then(|v| v.as_str()).unwrap_or("");
 
-            if from_label == current_agent {
-                // pr-pipeline-ack-no-advance: bare acks do NOT advance the stage.
-                // Previously, ANY broadcast from the current-stage agent recorded a
-                // pipeline_output and moved to the next stage, which meant
-                // "[role] Stage N ack — will post substance shortly" would end the
-                // stage before the substance arrived (observed 2026-04-19 pipeline
-                // on the out-of-turn bug — 5 agents acked, 0 posted substance, the
-                // human ended the session with "PIPELINE NOT WORKIGN AT ALL").
-                // Gate per manager msg 1127 directive.
-                if !is_substantive_pipeline_output(body, metadata.as_ref()) {
-                    // Not substantive — leave stage open, watchdog still runs.
-                    return Ok(serde_json::json!({
-                        "message_id": result,
-                        "delivered_to": [to]
-                    }));
-                }
+            if from_label == current_agent && is_end_of_stage(metadata.as_ref()) {
                 let mut updated_disc = disc.clone();
                 // Record this stage's output
                 let mut outputs = updated_disc.get("pipeline_outputs").and_then(|o| o.as_array()).cloned().unwrap_or_default();
@@ -6000,7 +5973,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                             "to": next_agent,
                             "type": "system",
                             "subject": "Your pipeline stage",
-                            "body": format!("It is now your turn in the pipeline (stage {}/{}). Review previous outputs and broadcast your response.", next_stage + 1, pipeline_order.len()),
+                            "body": format!("It is now your turn in the pipeline (stage {}/{}). Review previous outputs and broadcast your response. To advance the pipeline, set `metadata: {{end_of_stage: true}}` on your FINAL broadcast.", next_stage + 1, pipeline_order.len()),
                             "timestamp": utc_now_iso(),
                             "metadata": {"pipeline_notification": true}
                         });
@@ -6892,7 +6865,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
                     output.push_str(&format!("\n  - Stage {}: {} (msg #{})", po.get("stage").and_then(|s| s.as_u64()).map(|s| s + 1).unwrap_or(0), agent, msg_id));
                 }
             }
-            output.push_str("\n\nBroadcast your response when ready. Your output becomes input for the next stage.");
+            output.push_str("\n\nBroadcast your response when ready. Your output becomes input for the next stage.\n\nTO ADVANCE THE PIPELINE: set `metadata: {end_of_stage: true}` on your FINAL broadcast. Earlier broadcasts (ack, interim status, review) are interim outputs and do NOT advance the pipeline. Pattern: send a one-sentence ack first (no flag), do the work, then your final broadcast with the flag.");
         } else if my_role == "moderator" || my_role == "manager" {
             output.push_str(&format!("\n\nPIPELINE ORCHESTRATOR VIEW [{}] — Current stage: {} ({}/{}). Topic: \"{}\"\nOrder: {}",
                 pipeline_mode.to_uppercase(), current_agent, current_stage + 1, pipeline_order.len(), disc_topic, order_display));
@@ -10432,119 +10405,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // ── pr-pipeline-ack-no-advance ──
+    // ── pr-pipeline-end-of-stage-flag ──
     //
-    // Bare ack messages must not (a) advance the pipeline stage on broadcast,
-    // (b) short-circuit the stall watchdog. These tests pin the predicate and
-    // the stall-watchdog behavior. The advance-on-broadcast path lives inside
-    // handle_project_send which is not easily unit-testable, so it's covered
-    // by the predicate test + a live-click verification in the PR description.
+    // Pipeline advance gates on `metadata.end_of_stage: true` ONLY. No length
+    // fallback, no type inference. These tests pin the predicate and the
+    // watchdog regression. The advance-on-broadcast path lives in
+    // handle_project_send which isn't easily unit-testable; covered by the
+    // predicate test + live-click in the PR description.
 
     #[test]
-    fn is_substantive_pipeline_output_short_ack_is_not_substantive() {
-        // Real ack bodies observed in the 2026-04-19 "out-of-turn bug" pipeline
-        // (developer:0 msg 1106 ~260 chars, architect:0 msg 1111 ~136 chars,
-        // evil-architect:0 msg 1118 ~277 chars, moderator:1 msg 1121 ~368 chars).
-        let short_ack = "Ack. Topic: agents speaking out of turn in pipeline mode. \
-                         Starting root-cause investigation of the pipeline gate. \
-                         Will post findings in a separate send.";
-        assert!(!super::is_substantive_pipeline_output(short_ack, None),
-            "bodies under 500 chars must count as bare acks, not stage outputs");
+    fn is_end_of_stage_false_without_metadata() {
+        assert!(!super::is_end_of_stage(None),
+            "no metadata → not end of stage");
     }
 
     #[test]
-    fn is_substantive_pipeline_output_long_substance_is_substantive() {
-        // 600 chars of "real" content.
-        let long = "a".repeat(600);
-        assert!(super::is_substantive_pipeline_output(&long, None),
-            "bodies >= 500 chars are treated as stage-output substance");
+    fn is_end_of_stage_false_when_flag_absent() {
+        let md = serde_json::json!({"other": "value"});
+        assert!(!super::is_end_of_stage(Some(&md)),
+            "metadata without end_of_stage key → not end of stage");
     }
 
     #[test]
-    fn is_substantive_pipeline_output_explicit_ack_metadata_forces_false() {
-        // Agent posts a long verbose ack and explicitly flags it as non-stage-output.
-        let long = "a".repeat(2000);
-        let md = serde_json::json!({"ack": true});
-        assert!(!super::is_substantive_pipeline_output(&long, Some(&md)),
-            "metadata.ack=true must override the length heuristic to keep stage open");
+    fn is_end_of_stage_false_when_flag_not_bool_true() {
+        let md_false = serde_json::json!({"end_of_stage": false});
+        assert!(!super::is_end_of_stage(Some(&md_false)),
+            "end_of_stage=false must not advance");
+        let md_string = serde_json::json!({"end_of_stage": "true"});
+        assert!(!super::is_end_of_stage(Some(&md_string)),
+            "end_of_stage must be boolean true (strings don't count)");
     }
 
     #[test]
-    fn is_substantive_pipeline_output_explicit_opt_in_overrides_length() {
-        // Agent posts genuinely short but substantive content (e.g. a terse
-        // "APPROVED" stage vote) and flags it as stage output.
-        let short = "APPROVED";
-        let md = serde_json::json!({"pipeline_stage_output": true});
-        assert!(super::is_substantive_pipeline_output(short, Some(&md)),
-            "metadata.pipeline_stage_output=true must force advance even for short bodies");
+    fn is_end_of_stage_true_only_when_flag_is_bool_true() {
+        let md = serde_json::json!({"end_of_stage": true});
+        assert!(super::is_end_of_stage(Some(&md)),
+            "metadata.end_of_stage=true → end of stage");
     }
 
     #[test]
-    fn pipeline_auto_skip_fires_despite_short_ack() {
-        // Regression pin for the main bug: agent posts a short ack, stall
-        // watchdog should still fire at timeout. Before pr-pipeline-ack-no-advance,
-        // board_has_message_from_since returned true for the ack and the watchdog
-        // bailed out, leaving the stage open forever when the agent never followed
-        // up with substance.
+    fn pipeline_auto_skip_still_suppressed_by_any_message_regression_pin() {
+        // Per manager msg 1159 unit test #4: stall watchdog regression pin.
+        // With the flag-based advance, an active agent posting interim status
+        // (without the flag) is still "alive" — watchdog stands down. Only
+        // true silence (no messages at all) triggers the skip.
         let started_at = "2020-01-01T00:00:00Z"; // far past -> timeout elapsed
-        let disc = format!(r#"{{
-            "active": true,
-            "mode": "pipeline",
-            "pipeline_order": ["ackspammer:0", "nextup:0"],
-            "pipeline_stage": 0,
-            "pipeline_stage_started_at": "{}",
-            "current_round": 0,
-            "settings": {{
-                "termination": {{ "type": "unlimited" }},
-                "max_rounds": 999,
-                "auto_close_timeout_seconds": 30,
-                "expire_paused_after_minutes": 60,
-                "timeout_minutes": 15
-            }}
-        }}"#, started_at);
-        let sessions = r#"{
-            "bindings": [
-                {"role": "ackspammer", "instance": 0, "status": "active"},
-                {"role": "nextup", "instance": 0, "status": "active"}
-            ]
-        }"#;
-        let tmp = fixture_for_pipeline_stall("ack-no-suppress", &disc, sessions);
-
-        // Plant a short ack from the current holder AFTER started_at.
-        // Pre-fix: this made board_has_message_from_since return true
-        // and the watchdog exited early. Post-fix: the ack's body is <500 chars
-        // so board_has_substantive_message_from_since returns false and the
-        // watchdog proceeds to skip.
-        let short_ack = serde_json::json!({
-            "id": 1,
-            "from": "ackspammer:0",
-            "to": "all",
-            "type": "status",
-            "subject": "[ackspammer:0] Stage 1 ack",
-            "body": "Ack. Working on it. Will post findings separately.",
-            "timestamp": "2024-06-01T00:00:00Z"
-        });
-        std::fs::write(
-            tmp.join(".vaak/board.jsonl"),
-            format!("{}\n", short_ack.to_string())
-        ).expect("write board");
-
-        let dir = tmp.to_str().unwrap();
-        super::check_pipeline_ack_timeout_and_skip(dir);
-
-        let after: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
-        ).unwrap();
-        assert_eq!(after["pipeline_stage"], 1,
-            "short ack must not suppress the stall watchdog — stage should advance");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn pipeline_auto_skip_suppressed_by_substantive_post() {
-        // Converse of the above: if the holder HAS posted substantive content,
-        // the watchdog must stand down (the stage is doing real work).
-        let started_at = "2020-01-01T00:00:00Z";
         let disc = format!(r#"{{
             "active": true,
             "mode": "pipeline",
@@ -10566,22 +10471,21 @@ mod tests {
                 {"role": "nextup", "instance": 0, "status": "active"}
             ]
         }"#;
-        let tmp = fixture_for_pipeline_stall("substance-suppresses", &disc, sessions);
+        let tmp = fixture_for_pipeline_stall("interim-post-suppresses", &disc, sessions);
 
-        // Plant a substantive post (>500 chars) from the current holder.
-        let long_body = "x".repeat(600);
-        let substantive = serde_json::json!({
+        // Interim status from the holder (no end_of_stage flag).
+        let interim = serde_json::json!({
             "id": 1,
             "from": "worker:0",
             "to": "all",
             "type": "status",
-            "subject": "[worker:0] Stage 1 output",
-            "body": long_body,
+            "subject": "[worker:0] interim progress",
+            "body": "Still working. No findings yet.",
             "timestamp": "2024-06-01T00:00:00Z"
         });
         std::fs::write(
             tmp.join(".vaak/board.jsonl"),
-            format!("{}\n", substantive.to_string())
+            format!("{}\n", interim.to_string())
         ).expect("write board");
 
         let dir = tmp.to_str().unwrap();
@@ -10591,7 +10495,7 @@ mod tests {
             &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
         ).unwrap();
         assert_eq!(after["pipeline_stage"], 0,
-            "substantive post must suppress the stall watchdog — stage stays at 0");
+            "holder posted interim status → watchdog stands down, stage stays open");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

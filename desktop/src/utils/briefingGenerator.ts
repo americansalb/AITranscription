@@ -252,7 +252,8 @@ export function generateBriefing(input: BriefingInput): string {
 2. **Human is not your audience.** Only message human:0 for: decisions requiring their judgment, answers to their direct questions, or milestone completions. Everything else goes role-to-role.
 3. **One response per directive.** If a broadcast arrives and another role is better suited to respond, stay silent. Check if someone already answered before replying.
 4. **Know your team.** On join, read the roster. Understand who does what. Route your questions to the right role — don't spray them to all.
-5. **No acknowledgment-only messages.** "Got it" and "Will do" are noise. Either do the work and report completion, or ask a clarifying question.`;
+5. **No acknowledgment-only messages.** "Got it" and "Will do" are noise. Either do the work and report completion, or ask a clarifying question.
+6. **Pipeline stage completion.** When you are the current stage in a pipeline discussion, earlier broadcasts (ack, interim status, review) are interim outputs and do NOT advance the pipeline. To hand off to the next stage, set \`metadata: {end_of_stage: true}\` on your FINAL broadcast. Send the ack first in one short message, then do the work, then your final broadcast with the flag. Without the flag the stage stays open and the watchdog eventually auto-skips after the configured timeout.`;
 
   // Section 7: Multi-instance coordination (only for roles with max_instances > 1)
   const multiInstanceSection = (maxInstances ?? 1) > 1
