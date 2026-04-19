@@ -15,7 +15,7 @@ import PreviousTeamBanner from "./PreviousTeamBanner";
 import { type SequenceTurnState } from "./SequenceBanner";
 import { type ModeratorSequencePanelRosterEntry } from "./ModeratorSequencePanel";
 import SequenceSessionCard from "./SequenceSessionCard";
-import StartSequenceModal, { type StartSequenceCandidate } from "./StartSequenceModal";
+// pr-pipeline-sequence-cleanup PR-4: StartSequenceModal import removed (component deleted).
 import "../styles/collab.css";
 
 // pr-reason-params + pr-reason-relax: shared contract with the Rust
@@ -845,7 +845,7 @@ export function CollabTab() {
   const [launching, setLaunching] = useState(false);
   const [npmInstalled, setNpmInstalled] = useState<boolean | null>(null);
   const [sequenceTurn, setSequenceTurn] = useState<SequenceTurnState | null>(null);
-  const [startSequenceOpen, setStartSequenceOpen] = useState(false);
+  // pr-pipeline-sequence-cleanup PR-4: startSequenceOpen state removed with the modal.
   const [claudeInstalled, setClaudeInstalled] = useState<boolean | null>(null);
   const [installingCli, setInstallingCli] = useState(false);
   const [installingNode, setInstallingNode] = useState(false);
@@ -3286,16 +3286,13 @@ When multiple instances of this role are active:
               &#9998; Start Session
             </button>
           )}
-          {!discussionState?.active && !sequenceTurn && (
-            <button
-              className="start-sequence-header-btn"
-              onClick={() => setStartSequenceOpen(true)}
-              title="Start a strict sequential-turn session where agents take turns one at a time"
-              aria-label="Start sequence"
-            >
-              &#8680; Start Sequence
-            </button>
-          )}
+          {/* pr-pipeline-sequence-cleanup PR-4 (2026-04-19): Start Sequence button
+              removed per human msg 867 ("the start sequence mode is entirely
+              useless"). Pipeline mode (via QuickLaunchBar pill or gear-icon
+              Start Session popup) now provides equivalent turn-taking — with
+              the safer mechanics from PR-1 + PR-2 + PR-3 (designatable outside
+              moderator, multi-round, non-destructive 300s stall, override-bar
+              buttons). */}
           <button
             className="project-settings-btn"
             onClick={() => setSettingsOpen(!settingsOpen)}
@@ -5531,19 +5528,10 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        <StartSequenceModal
-          open={startSequenceOpen}
-          onClose={() => setStartSequenceOpen(false)}
-          projectDir={projectDir}
-          candidates={
-            ((project?.sessions || [])
-              .filter((s) => s.status === "active")
-              .map<StartSequenceCandidate>((s) => ({
-                id: `${s.role}:${s.instance}`,
-                title: project?.config?.roles?.[s.role]?.title ?? s.role,
-              })))
-          }
-        />
+        {/* pr-pipeline-sequence-cleanup PR-4: StartSequenceModal removed per
+            human msg 867. Equivalent functionality lives in the gear-icon
+            Start Session modal (Pipeline format) + QuickLaunchBar Pipeline
+            pill. */}
 
         {/* Start Session Dialog (session = pipeline / delphi / oxford / red_team / continuous) */}
         {startDiscussionOpen && (
