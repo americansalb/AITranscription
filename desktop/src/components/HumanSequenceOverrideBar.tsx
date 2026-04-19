@@ -19,11 +19,19 @@ import type { SequenceTurnState } from "./SequenceBanner";
 interface Props {
   turn: SequenceTurnState | null | undefined;
   projectDir: string | null;
+  /**
+   * pr-pipeline-unified-controls PR-3b (2026-04-19): when true, route button
+   * handlers to the pipeline-equivalent Tauri commands (pipeline_advance,
+   * pipeline_insert_self_next, end_discussion) instead of the sequence-side
+   * (pass_turn, human_insert_next, end_sequence). The visible UI is identical
+   * — only the backend dispatch differs. Defaults to false (sequence mode).
+   */
+  isPipelineMode?: boolean;
 }
 
 type BusyAction = null | "insert" | "end" | "pass";
 
-export default function HumanSequenceOverrideBar({ turn, projectDir }: Props) {
+export default function HumanSequenceOverrideBar({ turn, projectDir, isPipelineMode = false }: Props) {
   const [busy, setBusy] = useState<BusyAction>(null);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
 
@@ -43,16 +51,21 @@ export default function HumanSequenceOverrideBar({ turn, projectDir }: Props) {
   };
 
   const insertMeNext = () => {
-    void invoke("human_insert_next", {}, "insert");
+    void invoke(isPipelineMode ? "pipeline_insert_self_next" : "human_insert_next", {}, "insert");
   };
 
   const passMyTurn = () => {
-    void invoke("pass_turn", {}, "pass");
+    void invoke(isPipelineMode ? "pipeline_advance" : "pass_turn", {}, "pass");
   };
 
   const endSession = () => {
     setConfirmingEnd(false);
-    void invoke("end_sequence", {}, "end");
+    if (isPipelineMode) {
+      // end_discussion's signature is (dir, reason: Option<String>) — pass null reason.
+      void invoke("end_discussion", { reason: null }, "end");
+    } else {
+      void invoke("end_sequence", {}, "end");
+    }
   };
 
   const isHumanTurn = turn.current_holder === "human:0";

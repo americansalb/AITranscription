@@ -62,7 +62,11 @@ describe("SequenceSessionCard pipeline-mode rendering", () => {
     expect(screen.getAllByText(/developer:0/).length).toBeGreaterThan(0);
   });
 
-  it("HIDES HumanSequenceOverrideBar in pipeline mode", () => {
+  it("RENDERS HumanSequenceOverrideBar in pipeline mode (PR-3b)", () => {
+    // PR-3b updated: the override bar now renders in pipeline mode too. Its
+    // button handlers detect isPipelineMode and route to pipeline_advance /
+    // pipeline_insert_self_next / end_discussion instead of the sequence
+    // commands. Mode is opaque to the user — buttons look identical.
     render(
       <SequenceSessionCard
         turn={turn()}
@@ -71,10 +75,7 @@ describe("SequenceSessionCard pipeline-mode rendering", () => {
         isPipelineMode={true}
       />
     );
-    // HumanSequenceOverrideBar wraps its buttons in a region with aria-label
-    // "Human controls for active sequence". Probe that to confirm the entire
-    // bar is gone, not just one button.
-    expect(screen.queryByLabelText(/human controls for active sequence/i)).toBeNull();
+    expect(screen.getByLabelText(/human controls for active sequence/i)).toBeTruthy();
   });
 
   it("HIDES ModeratorSequencePanel in pipeline mode", () => {

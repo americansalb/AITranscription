@@ -3946,6 +3946,23 @@ fn human_insert_next(dir: String) -> Result<serde_json::Value, String> {
     collab::human_insert_next(&dir, "human:0")
 }
 
+/// pr-pipeline-unified-controls PR-3b (2026-04-19): UI bridge for
+/// HumanSequenceOverrideBar's "End my turn" button when the active discussion
+/// is in pipeline mode (instead of the sequence-side `pass_turn`). Calls the
+/// shared collab::pipeline_advance helper.
+#[tauri::command]
+fn pipeline_advance(dir: String) -> Result<serde_json::Value, String> {
+    collab::pipeline_advance(&dir, "human:0")
+}
+
+/// pr-pipeline-unified-controls PR-3b (2026-04-19): UI bridge for
+/// HumanSequenceOverrideBar's "Insert me next" button in pipeline mode (instead
+/// of the sequence-side `human_insert_next`). Always inserts "human:0".
+#[tauri::command]
+fn pipeline_insert_self_next(dir: String) -> Result<serde_json::Value, String> {
+    collab::pipeline_insert_self_next(&dir, "human:0")
+}
+
 /// pr-seq-tauri-sequence-commands batch 2: STUB for
 /// PendingTurnRequests.tsx's Accept button. The turn-request feature has
 /// no backend implementation yet (no MCP-side handler, no data structure
@@ -5726,6 +5743,9 @@ fn main() {
             human_insert_next,
             accept_turn_request,
             dismiss_turn_request,
+            // pr-pipeline-unified-controls PR-3b: pipeline equivalents
+            pipeline_advance,
+            pipeline_insert_self_next,
             delete_message,
             clear_all_messages,
             set_message_retention,

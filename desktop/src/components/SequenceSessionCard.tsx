@@ -46,9 +46,16 @@ export default function SequenceSessionCard({
     <div className="sequence-session-card" aria-label="Active turn-sequence session">
       <SequenceBanner turn={turn} selfRoleInstance={null} />
       <QueueVisualization turn={turn} />
+      {/* PR-3b: HumanSequenceOverrideBar renders in BOTH sequence and pipeline
+          modes. The mode prop routes button clicks to the right backend. */}
+      <HumanSequenceOverrideBar turn={turn} projectDir={projectDir} isPipelineMode={isPipelineMode} />
+      {/* PR-3b deferred: PendingTurnRequests + ModeratorSequencePanel still
+          hidden in pipeline mode. PendingTurnRequests' backends are stubs;
+          ModeratorSequencePanel needs ~6 pipeline equivalents (pause/resume/
+          assign/reorder/insert/remove) which exceed the 250 LOC envelope.
+          Future PR can wire those when the human asks for them. */}
       {!isPipelineMode && (
         <>
-          <HumanSequenceOverrideBar turn={turn} projectDir={projectDir} />
           <PendingTurnRequests turn={turn} projectDir={projectDir} />
           <ModeratorSequencePanel
             turn={turn}

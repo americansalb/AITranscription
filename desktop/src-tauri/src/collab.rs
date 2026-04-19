@@ -1095,6 +1095,178 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> Result<(
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+/// pr-pipeline-unified-controls PR-3b (2026-04-19): advance the current
+/// pipeline holder by 1 stage. Used by HumanSequenceOverrideBar's "End my turn"
+/// button when the active discussion is in pipeline mode (instead of the
+/// sequence-side pass_turn). Honors multi-round termination strategy: when at
+/// the end of pipeline_order, loops back to stage 0 + bumps current_round if
+/// FixedRounds allows, else terminates the discussion with
+/// terminated_by="max_rounds_reached".
+///
+/// actor_label is the role:instance of the caller (e.g., "human:0"). Used in
+/// the board announcement metadata; auth check is the caller's responsibility.
+pub fn pipeline_advance(
+    dir: &str,
+    actor_label: &str,
+) -> Result<serde_json::Value, String> {
+    let disc_path = active_discussion_path(dir);
+    let mut disc: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("ERR_NO_ACTIVE_DISCUSSION".to_string());
+    }
+    if disc.get("mode").and_then(|v| v.as_str()) != Some("pipeline") {
+        return Err("ERR_NOT_PIPELINE_MODE: this command operates on pipeline-mode discussions only".to_string());
+    }
+    let pipeline_order: Vec<String> = disc.get("pipeline_order")
+        .and_then(|o| o.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if pipeline_order.is_empty() {
+        return Err("ERR_EMPTY_PIPELINE_ORDER".to_string());
+    }
+    let current_stage = disc.get("pipeline_stage").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let current_role = pipeline_order.get(current_stage).cloned().unwrap_or_default();
+    let next_stage = current_stage + 1;
+
+    if next_stage < pipeline_order.len() {
+        // Mid-round advance: just bump stage.
+        let now = iso_now();
+        disc["pipeline_stage"] = serde_json::json!(next_stage);
+        disc["pipeline_stage_started_at"] = serde_json::json!(now.clone());
+        let content = serde_json::to_string_pretty(&disc)
+            .map_err(|e| format!("serialize discussion state: {}", e))?;
+        atomic_write(&disc_path, content.as_bytes())
+            .map_err(|e| format!("write {}: {}", disc_path.display(), e))?;
+        let next_agent = pipeline_order.get(next_stage).cloned().unwrap_or_default();
+        append_sequence_announcement(dir, actor_label, "Turn ended",
+            &format!("{} ended their turn (advanced by {}). Next: {}.", current_role, actor_label, next_agent),
+            "system",
+            serde_json::json!({
+                "sequence_action": "pipeline_advance",
+                "from_holder": current_role,
+                "to_holder": next_agent,
+            }))?;
+        return Ok(serde_json::json!({
+            "status": "advanced",
+            "next_holder": next_agent,
+            "current_round": disc.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0)
+        }));
+    }
+
+    // End-of-round: check termination per FixedRounds / Unlimited / etc.
+    let typed_disc: DiscussionState = serde_json::from_value(disc.clone()).unwrap_or_default();
+    let termination = typed_disc.settings.effective_termination();
+    let current_round = disc.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
+    let should_loop = match &termination {
+        TerminationStrategy::FixedRounds { rounds } => current_round + 1 < *rounds as u64,
+        TerminationStrategy::Unlimited => true,
+        TerminationStrategy::Consensus { .. } => true,
+        TerminationStrategy::ModeratorCall => true,
+        TerminationStrategy::TimeBound { .. } => true,
+    };
+    if should_loop {
+        let next_round = current_round + 1;
+        let now = iso_now();
+        disc["pipeline_stage"] = serde_json::json!(0);
+        disc["pipeline_stage_started_at"] = serde_json::json!(now.clone());
+        disc["current_round"] = serde_json::json!(next_round);
+        let content = serde_json::to_string_pretty(&disc)
+            .map_err(|e| format!("serialize: {}", e))?;
+        atomic_write(&disc_path, content.as_bytes())
+            .map_err(|e| format!("write: {}", e))?;
+        let first_agent = pipeline_order.first().cloned().unwrap_or_default();
+        append_sequence_announcement(dir, actor_label, "Round complete — starting next round",
+            &format!("{} ended their turn (advanced by {}). Round {} complete; starting round {}. Next: {}.", current_role, actor_label, current_round + 1, next_round + 1, first_agent),
+            "system",
+            serde_json::json!({
+                "sequence_action": "pipeline_advance",
+                "round_started": next_round + 1,
+                "to_holder": first_agent,
+            }))?;
+        return Ok(serde_json::json!({
+            "status": "round_complete_advanced",
+            "next_holder": first_agent,
+            "current_round": next_round
+        }));
+    }
+    // Termination reached.
+    disc["active"] = serde_json::json!(false);
+    disc["phase"] = serde_json::json!("pipeline_complete");
+    disc["terminated_by"] = serde_json::json!("max_rounds_reached");
+    let content = serde_json::to_string_pretty(&disc)
+        .map_err(|e| format!("serialize: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write: {}", e))?;
+    append_sequence_announcement(dir, actor_label, "Pipeline complete",
+        &format!("{} ended their turn (advanced by {}). Final round complete; pipeline ended.", current_role, actor_label),
+        "moderation",
+        serde_json::json!({"sequence_action": "pipeline_advance", "terminated_by": "max_rounds_reached"}))?;
+    Ok(serde_json::json!({
+        "status": "pipeline_ended",
+        "terminated_by": "max_rounds_reached"
+    }))
+}
+
+/// pr-pipeline-unified-controls PR-3b (2026-04-19): insert role_label at the
+/// next position in pipeline_order. Used by HumanSequenceOverrideBar's "Insert
+/// me next" button when the active discussion is in pipeline mode (instead of
+/// the sequence-side human_insert_next).
+///
+/// Idempotency: if role_label is already the current holder OR the immediately-
+/// next stage, no-op. If they're elsewhere in the queue, move them to the next
+/// position (don't duplicate).
+pub fn pipeline_insert_self_next(
+    dir: &str,
+    role_label: &str,
+) -> Result<serde_json::Value, String> {
+    let disc_path = active_discussion_path(dir);
+    let mut disc: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("ERR_NO_ACTIVE_DISCUSSION".to_string());
+    }
+    if disc.get("mode").and_then(|v| v.as_str()) != Some("pipeline") {
+        return Err("ERR_NOT_PIPELINE_MODE: this command operates on pipeline-mode discussions only".to_string());
+    }
+    let mut pipeline_order: Vec<String> = disc.get("pipeline_order")
+        .and_then(|o| o.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let current_stage = disc.get("pipeline_stage").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+    // Already current holder? No-op.
+    if pipeline_order.get(current_stage).map(|s| s.as_str()) == Some(role_label) {
+        return Ok(serde_json::json!({"status": "noop_already_holder", "role": role_label}));
+    }
+    // Already immediately-next? No-op.
+    if pipeline_order.get(current_stage + 1).map(|s| s.as_str()) == Some(role_label) {
+        return Ok(serde_json::json!({"status": "noop_already_next", "role": role_label}));
+    }
+    // Remove existing occurrences (move semantics).
+    pipeline_order.retain(|r| r != role_label);
+    // Recompute current_stage in case removal shifted indices.
+    let recomputed_stage = std::cmp::min(current_stage, pipeline_order.len());
+    pipeline_order.insert(recomputed_stage + 1, role_label.to_string());
+    disc["pipeline_order"] = serde_json::json!(pipeline_order);
+    if recomputed_stage != current_stage {
+        disc["pipeline_stage"] = serde_json::json!(recomputed_stage);
+    }
+    let content = serde_json::to_string_pretty(&disc)
+        .map_err(|e| format!("serialize: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write: {}", e))?;
+    append_sequence_announcement(dir, role_label, "Inserted next in pipeline",
+        &format!("{} inserted themselves as the next pipeline stage.", role_label),
+        "system",
+        serde_json::json!({"sequence_action": "pipeline_insert_self_next", "role": role_label}))?;
+    Ok(serde_json::json!({"status": "inserted", "role": role_label}))
+}
+
 /// pr-seq-tauri-sequence-commands (2026-04-19): start a sequential-turn
 /// sequence. Shared between MCP sidecar (vaak-mcp.rs handle_discussion_control
 /// action=start_sequence) and the Tauri-side discussion_control command —
@@ -4559,6 +4731,119 @@ mod tests {
             .expect("setup");
         let result = super::human_insert_next(dir, "human:0").expect("noop ok");
         assert_eq!(result["status"], "noop_already_holder");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── pr-pipeline-unified-controls PR-3b helper tests ──
+
+    fn fixture_for_pipeline_helpers(test_name: &str, pipeline_order: Vec<&str>, current_stage: u64, current_round: u64, max_rounds: u64) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("vaak-test-pipeline-helpers-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"), r#"{"settings":{"heartbeat_timeout_seconds":3600}}"#).expect("project");
+        std::fs::write(vaak.join("sessions.json"), r#"{"bindings":[]}"#).expect("sess");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        let order_json: Vec<String> = pipeline_order.iter().map(|s| s.to_string()).collect();
+        let disc = serde_json::json!({
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": order_json,
+            "pipeline_stage": current_stage,
+            "current_round": current_round,
+            "settings": {
+                "termination": { "type": "fixed_rounds", "rounds": max_rounds },
+                "max_rounds": max_rounds,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }
+        });
+        std::fs::write(vaak.join("discussion.json"),
+            serde_json::to_string_pretty(&disc).unwrap()).expect("disc");
+        tmp
+    }
+
+    #[test]
+    fn pipeline_advance_mid_round_advances_stage() {
+        let tmp = fixture_for_pipeline_helpers("mid-round", vec!["dev:0", "tester:0", "manager:0"], 0, 0, 3);
+        let dir = tmp.to_str().unwrap();
+        let result = super::pipeline_advance(dir, "human:0").expect("advance ok");
+        assert_eq!(result["status"], "advanced");
+        assert_eq!(result["next_holder"], "tester:0");
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["pipeline_stage"], 1);
+        assert_eq!(after["active"], true);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_advance_end_of_round_loops_when_max_rounds_allows() {
+        let tmp = fixture_for_pipeline_helpers("end-loop", vec!["dev:0", "tester:0"], 1, 0, 3);
+        let dir = tmp.to_str().unwrap();
+        let result = super::pipeline_advance(dir, "human:0").expect("advance ok");
+        assert_eq!(result["status"], "round_complete_advanced");
+        assert_eq!(result["current_round"], 1);
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["pipeline_stage"], 0);
+        assert_eq!(after["current_round"], 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_advance_end_of_final_round_terminates() {
+        let tmp = fixture_for_pipeline_helpers("end-terminate", vec!["dev:0", "tester:0"], 1, 2, 3);
+        let dir = tmp.to_str().unwrap();
+        let result = super::pipeline_advance(dir, "human:0").expect("advance ok");
+        assert_eq!(result["status"], "pipeline_ended");
+        assert_eq!(result["terminated_by"], "max_rounds_reached");
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["active"], false);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_advance_rejects_when_not_pipeline_mode() {
+        let tmp = std::env::temp_dir().join(format!("vaak-test-pipeline-not-mode-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"), r#"{}"#).expect("p");
+        std::fs::write(vaak.join("sessions.json"), r#"{"bindings":[]}"#).expect("s");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("b");
+        std::fs::write(vaak.join("discussion.json"), r#"{"active":true,"mode":"delphi"}"#).expect("d");
+        let result = super::pipeline_advance(tmp.to_str().unwrap(), "human:0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ERR_NOT_PIPELINE_MODE"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_insert_self_next_inserts_at_position_after_holder() {
+        let tmp = fixture_for_pipeline_helpers("insert-self", vec!["dev:0", "tester:0", "manager:0"], 0, 0, 3);
+        let dir = tmp.to_str().unwrap();
+        let result = super::pipeline_insert_self_next(dir, "human:0").expect("insert ok");
+        assert_eq!(result["status"], "inserted");
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        let order: Vec<&str> = after["pipeline_order"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(order[0], "dev:0", "current holder unchanged");
+        assert_eq!(order[1], "human:0", "human:0 inserted right after holder");
+        assert_eq!(order[2], "tester:0", "rest of queue preserved");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_insert_self_next_noop_if_already_next() {
+        let tmp = fixture_for_pipeline_helpers("noop-next", vec!["dev:0", "human:0", "tester:0"], 0, 0, 3);
+        let dir = tmp.to_str().unwrap();
+        let result = super::pipeline_insert_self_next(dir, "human:0").expect("noop ok");
+        assert_eq!(result["status"], "noop_already_next");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
