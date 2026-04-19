@@ -4206,97 +4206,28 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
         }
 
         "pass_turn" => {
+            // pr-seq-tauri-sequence-commands batch 2: shared with Tauri-side
+            // pass_turn command via collab::pass_turn. MCP keeps the auth
+            // check (you must be the current holder OR a privileged role).
             let disc = read_discussion_state(&state.project_dir);
             let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
-            let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-            if !seq_active {
+            if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
                 return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to pass turn in".to_string());
             }
             let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if my_label != current_holder && state.role != "human" && state.role != "moderator" && state.role != "manager" {
                 return Err(format!("ERR_NOT_YOUR_TURN: pass_turn requires you to be the current holder. Current: {}, you: {}", current_holder, my_label));
             }
-            let queue_remaining: Vec<serde_json::Value> = seq.get("queue_remaining").and_then(|q| q.as_array()).cloned().unwrap_or_default();
-            let mut queue_completed: Vec<serde_json::Value> = seq.get("queue_completed").and_then(|q| q.as_array()).cloned().unwrap_or_default();
-            let now = utc_now_iso();
-            // Object schema per tech-leader:0 msg 431 + moderator msg 437.
-            // end_message_id=0 for explicit pass_turn (no message) distinguishes
-            // from end_of_turn-driven advance.
-            queue_completed.push(serde_json::json!({
-                "role": current_holder,
-                "turn_ended_at": now.clone(),
-                "end_message_id": 0,
-                "ended_via": "pass_turn"
-            }));
-            let (next_holder, new_remaining) = if queue_remaining.is_empty() {
-                (String::new(), vec![])
-            } else {
-                let n = queue_remaining[0].as_str().unwrap_or("").to_string();
-                (n, queue_remaining[1..].to_vec())
-            };
-            let mut updated = disc.clone();
-            if let Some(seq_obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
-                seq_obj.insert("queue_completed".to_string(), serde_json::json!(queue_completed));
-                seq_obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining));
-                // Clear pause on advance per manager msg 439 #6.
-                seq_obj.insert("paused_for_human".to_string(), serde_json::json!(false));
-                if next_holder.is_empty() {
-                    seq_obj.insert("active".to_string(), serde_json::json!(false));
-                    seq_obj.insert("current_holder".to_string(), serde_json::json!(""));
-                    seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
-                    seq_obj.insert("ended_by".to_string(), serde_json::json!("queue_exhausted"));
-                } else {
-                    seq_obj.insert("current_holder".to_string(), serde_json::json!(next_holder.clone()));
-                    seq_obj.insert("turn_started_at".to_string(), serde_json::json!(now.clone()));
-                }
-            }
-            write_discussion_state(&state.project_dir, &updated)?;
-            let msg_id = next_message_id(&state.project_dir);
-            let body = if next_holder.is_empty() {
-                format!("Turn passed — {} was the last in queue. Sequence ended.", current_holder)
-            } else {
-                format!("Turn passed: {} → {}. {} remaining.", current_holder, next_holder, new_remaining.len())
-            };
-            let announcement = serde_json::json!({
-                "id": msg_id,
-                "from": my_label.clone(),
-                "to": "all",
-                "type": "system",
-                "timestamp": now.clone(),
-                "subject": "Turn passed",
-                "body": body,
-                "metadata": {
-                    "sequence_action": "pass_turn",
-                    "from_holder": current_holder,
-                    "to_holder": next_holder.clone()
-                }
-            });
-            append_to_board(&state.project_dir, &announcement)?;
-            if !next_holder.is_empty() {
-                let wake = serde_json::json!({
-                    "id": next_message_id(&state.project_dir),
-                    "from": "system:0",
-                    "to": next_holder.clone(),
-                    "type": "system",
-                    "subject": "Your sequential turn",
-                    "body": format!("It is your turn in the sequence. Post with metadata.end_of_turn=true to advance."),
-                    "timestamp": now.clone(),
-                    "metadata": {"sequence_notification": true}
-                });
-                let _ = append_to_board(&state.project_dir, &wake);
-            }
+            let result = collab::pass_turn(&state.project_dir, &my_label)?;
             notify_desktop();
-            Ok(serde_json::json!({"status": "turn_passed", "next_holder": next_holder}))
+            Ok(result)
         }
 
         "end_sequence" => {
-            let disc = read_discussion_state(&state.project_dir);
-            let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
-            let seq_active = seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-            if !seq_active {
-                return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to end".to_string());
-            }
-            // Authorization: human or moderator only. Moderator requires reason; human exempt.
+            // pr-seq-tauri-sequence-commands batch 2: shared with Tauri-side
+            // end_sequence command via collab::end_sequence. MCP keeps the
+            // role-based authorization (human/manager/moderator only;
+            // moderator requires reason).
             if state.role != "human" && state.role != "moderator" && state.role != "manager" {
                 return Err("ERR_UNAUTHORIZED: only human or moderator can end the sequence".to_string());
             }
@@ -4304,34 +4235,9 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             if state.role != "human" && audit_reason.is_empty() {
                 return Err("ERR_REASON_REQUIRED: moderator end_sequence requires a reason".to_string());
             }
-            let now = utc_now_iso();
-            let topic_str = seq.get("topic").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string();
-            let mut updated = disc.clone();
-            if let Some(seq_obj) = updated.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
-                seq_obj.insert("active".to_string(), serde_json::json!(false));
-                seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
-                seq_obj.insert("ended_by".to_string(), serde_json::json!(my_label.clone()));
-                seq_obj.insert("end_reason".to_string(), serde_json::json!(audit_reason.clone()));
-            }
-            write_discussion_state(&state.project_dir, &updated)?;
-            let msg_id = next_message_id(&state.project_dir);
-            let announcement = serde_json::json!({
-                "id": msg_id,
-                "from": my_label.clone(),
-                "to": "all",
-                "type": "moderation",
-                "timestamp": now,
-                "subject": format!("Sequence ended: {}", topic_str),
-                "body": format!("The sequential-turn sequence on \"{}\" has ended. Reason: {}", topic_str, if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() }),
-                "metadata": {
-                    "sequence_action": "end",
-                    "ended_by": my_label,
-                    "reason": audit_reason
-                }
-            });
-            append_to_board(&state.project_dir, &announcement)?;
+            let result = collab::end_sequence(&state.project_dir, &my_label, Some(&audit_reason))?;
             notify_desktop();
-            Ok(serde_json::json!({"status": "sequence_ended", "topic": topic_str}))
+            Ok(result)
         }
 
         // ── Sequential-turn power tools (pr-seq-4) ──

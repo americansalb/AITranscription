@@ -3910,6 +3910,54 @@ fn discussion_control(
     }
 }
 
+/// pr-seq-tauri-sequence-commands batch 2 (2026-04-19): UI bridge for
+/// HumanSequenceOverrideBar's "End my turn" button. Mirrors MCP-side
+/// pass_turn action via collab::pass_turn helper. UI caller is the human.
+#[tauri::command]
+fn pass_turn(dir: String) -> Result<serde_json::Value, String> {
+    collab::pass_turn(&dir, "human:0")
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: UI bridge for
+/// HumanSequenceOverrideBar's "End session" button. Mirrors MCP-side
+/// end_sequence action via collab::end_sequence helper.
+#[tauri::command]
+fn end_sequence(dir: String, reason: Option<String>) -> Result<serde_json::Value, String> {
+    collab::end_sequence(&dir, "human:0", reason.as_deref())
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: UI bridge for
+/// HumanSequenceOverrideBar's "Insert me next" button. Always inserts
+/// "human:0" at the front of the queue.
+#[tauri::command]
+fn human_insert_next(dir: String) -> Result<serde_json::Value, String> {
+    collab::human_insert_next(&dir, "human:0")
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: STUB for
+/// PendingTurnRequests.tsx's Accept button. The turn-request feature has
+/// no backend implementation yet (no MCP-side handler, no data structure
+/// in discussion.json). Returns a clear "not yet implemented" error so
+/// the UI gets actionable feedback instead of "Command not found".
+/// Architect/manager scope decision needed before this can be implemented:
+/// where do pending turn requests live? How do agents request a turn?
+#[tauri::command]
+fn accept_turn_request(_dir: String, _requester: String) -> Result<serde_json::Value, String> {
+    Err("ERR_NOT_IMPLEMENTED: Turn-request acceptance is not yet implemented in the backend. \
+        The PendingTurnRequests UI shipped ahead of its data layer. \
+        Pending design: where do turn requests live (discussion.json subtree?), \
+        how do agents express them, who can accept/dismiss them. \
+        File a scope ticket to architect:0 / manager:0 to design this feature.".to_string())
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: STUB for
+/// PendingTurnRequests.tsx's Dismiss button. See accept_turn_request above.
+#[tauri::command]
+fn dismiss_turn_request(_dir: String, _requester: String) -> Result<serde_json::Value, String> {
+    Err("ERR_NOT_IMPLEMENTED: Turn-request dismissal is not yet implemented in the backend. \
+        See accept_turn_request error message.".to_string())
+}
+
 #[tauri::command]
 fn close_session_round(dir: String) -> Result<String, String> {
     close_discussion_round(dir)
@@ -5660,6 +5708,12 @@ fn main() {
             get_session_state,
             // pr-seq-tauri-sequence-commands: UI bridge to sequence actions
             discussion_control,
+            // pr-seq-tauri-sequence-commands batch 2: full sequence UI surface
+            pass_turn,
+            end_sequence,
+            human_insert_next,
+            accept_turn_request,
+            dismiss_turn_request,
             delete_message,
             clear_all_messages,
             set_message_retention,
@@ -6476,5 +6530,85 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("participants is required"));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── pr-seq-tauri-sequence-commands batch 2 Tauri commands ──
+    // Pin the 5 new Tauri commands the UI invokes (HumanSequenceOverrideBar
+    // + PendingTurnRequests). Ensures the registered name resolves AND the
+    // semantic behavior is correct.
+
+    fn fixture_with_active_sequence(test_name: &str, participants: Vec<&str>) -> std::path::PathBuf {
+        let tmp = fixture_for_discussion_control(test_name);
+        let dir = tmp.to_str().unwrap().to_string();
+        let p_strs: Vec<String> = participants.iter().map(|s| s.to_string()).collect();
+        super::discussion_control(
+            dir,
+            "start_sequence".to_string(),
+            Some(format!("setup topic for {}", test_name)),
+            None,
+            Some(p_strs),
+        ).expect("setup: sequence should start");
+        tmp
+    }
+
+    #[test]
+    fn tauri_pass_turn_advances_holder() {
+        let tmp = fixture_with_active_sequence("pass-turn", vec!["human:0", "developer:0"]);
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::pass_turn(dir.clone());
+        assert!(result.is_ok(), "pass_turn must succeed; got: {:?}", result);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vaak_desktop::collab::active_discussion_path(&dir)).unwrap()
+        ).unwrap();
+        assert_eq!(disc["active_sequence"]["current_holder"], "developer:0");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tauri_end_sequence_marks_inactive() {
+        let tmp = fixture_with_active_sequence("end-seq", vec!["human:0", "developer:0"]);
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::end_sequence(dir.clone(), Some("done testing".to_string()));
+        assert!(result.is_ok(), "end_sequence must succeed; got: {:?}", result);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vaak_desktop::collab::active_discussion_path(&dir)).unwrap()
+        ).unwrap();
+        assert_eq!(disc["active_sequence"]["active"], false);
+        assert_eq!(disc["active_sequence"]["ended_by"], "human:0");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tauri_human_insert_next_puts_human_at_front() {
+        let tmp = fixture_with_active_sequence("insert-front", vec!["developer:0"]);
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::human_insert_next(dir.clone());
+        assert!(result.is_ok(), "human_insert_next must succeed; got: {:?}", result);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(vaak_desktop::collab::active_discussion_path(&dir)).unwrap()
+        ).unwrap();
+        let queue = disc["active_sequence"]["queue_remaining"].as_array().unwrap();
+        assert_eq!(queue[0], "human:0", "human:0 should be at front of queue");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tauri_accept_turn_request_returns_clear_not_implemented() {
+        // Stub command — backend doesn't exist yet. Must fail with a
+        // user-actionable error, not "Command not found".
+        let result = super::accept_turn_request("/tmp/whatever".to_string(), "developer:0".to_string());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("ERR_NOT_IMPLEMENTED"),
+            "must use ERR_NOT_IMPLEMENTED prefix; got: {}", err);
+        assert!(err.contains("not yet implemented"),
+            "must say 'not yet implemented' so the user understands; got: {}", err);
+    }
+
+    #[test]
+    fn tauri_dismiss_turn_request_returns_clear_not_implemented() {
+        let result = super::dismiss_turn_request("/tmp/whatever".to_string(), "developer:0".to_string());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ERR_NOT_IMPLEMENTED"));
     }
 }

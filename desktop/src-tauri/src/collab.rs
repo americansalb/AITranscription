@@ -1231,6 +1231,233 @@ pub fn start_sequence(
     }))
 }
 
+/// pr-seq-tauri-sequence-commands batch 2: pass the current turn to the
+/// next role in the sequence queue. Mirrors vaak-mcp.rs handle_discussion_control
+/// "pass_turn" action.
+///
+/// Authorization is the caller's responsibility. The MCP path enforces
+/// "you must be the current holder OR human/manager/moderator." The Tauri
+/// path is human-only by convention (UI is the human).
+///
+/// Returns Ok({status, next_holder, queue_remaining}) on success; Err on
+/// no-active-sequence or empty-queue end-of-sequence handled inline.
+pub fn pass_turn(
+    dir: &str,
+    actor_label: &str,
+) -> Result<serde_json::Value, String> {
+    let disc_path = active_discussion_path(dir);
+    let mut disc: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+    if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to pass turn in".to_string());
+    }
+    let current_holder = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let queue_remaining: Vec<serde_json::Value> = seq.get("queue_remaining")
+        .and_then(|q| q.as_array()).cloned().unwrap_or_default();
+    let mut queue_completed: Vec<serde_json::Value> = seq.get("queue_completed")
+        .and_then(|q| q.as_array()).cloned().unwrap_or_default();
+    let now = iso_now();
+    queue_completed.push(serde_json::json!({
+        "role": current_holder,
+        "turn_ended_at": now.clone(),
+        "end_message_id": 0,
+        "ended_via": "pass_turn"
+    }));
+    let (next_holder, new_remaining) = if queue_remaining.is_empty() {
+        (String::new(), vec![])
+    } else {
+        let n = queue_remaining[0].as_str().unwrap_or("").to_string();
+        (n, queue_remaining[1..].to_vec())
+    };
+    if let Some(seq_obj) = disc.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+        seq_obj.insert("queue_completed".to_string(), serde_json::json!(queue_completed));
+        seq_obj.insert("queue_remaining".to_string(), serde_json::json!(new_remaining.clone()));
+        seq_obj.insert("paused_for_human".to_string(), serde_json::json!(false));
+        if next_holder.is_empty() {
+            seq_obj.insert("active".to_string(), serde_json::json!(false));
+            seq_obj.insert("current_holder".to_string(), serde_json::json!(""));
+            seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
+            seq_obj.insert("ended_by".to_string(), serde_json::json!("queue_exhausted"));
+        } else {
+            seq_obj.insert("current_holder".to_string(), serde_json::json!(next_holder.clone()));
+            seq_obj.insert("turn_started_at".to_string(), serde_json::json!(now.clone()));
+        }
+    }
+    let content = serde_json::to_string_pretty(&disc)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write {}: {}", disc_path.display(), e))?;
+
+    let body = if next_holder.is_empty() {
+        format!("Turn passed — {} was the last in queue. Sequence ended.", current_holder)
+    } else {
+        format!("Turn passed: {} → {}. {} remaining.", current_holder, next_holder, new_remaining.len())
+    };
+    append_sequence_announcement(dir, actor_label, "Turn passed", &body, "system", serde_json::json!({
+        "sequence_action": "pass_turn",
+        "from_holder": current_holder,
+        "to_holder": next_holder.clone()
+    }))?;
+
+    if !next_holder.is_empty() {
+        append_sequence_announcement(dir, "system:0", "Your sequential turn",
+            &format!("It is your turn in the sequence. Post with metadata.end_of_turn=true to advance."),
+            "system",
+            serde_json::json!({"sequence_notification": true, "to": next_holder.clone()}))?;
+    }
+
+    Ok(serde_json::json!({
+        "status": "turn_passed",
+        "next_holder": next_holder,
+        "queue_remaining_count": new_remaining.len()
+    }))
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: end the active sequence.
+/// Mirrors vaak-mcp.rs handle_discussion_control "end_sequence" action.
+/// Caller is responsible for authorization. Reason is required for non-human
+/// actors at the MCP layer; Tauri path always passes the human label.
+pub fn end_sequence(
+    dir: &str,
+    actor_label: &str,
+    reason: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let disc_path = active_discussion_path(dir);
+    let mut disc: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+    if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to end".to_string());
+    }
+    let now = iso_now();
+    let topic_str = seq.get("topic").and_then(|v| v.as_str()).unwrap_or("(untitled)").to_string();
+    let audit_reason = reason.unwrap_or("").trim().to_string();
+    if let Some(seq_obj) = disc.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+        seq_obj.insert("active".to_string(), serde_json::json!(false));
+        seq_obj.insert("ended_at".to_string(), serde_json::json!(now.clone()));
+        seq_obj.insert("ended_by".to_string(), serde_json::json!(actor_label));
+        seq_obj.insert("end_reason".to_string(), serde_json::json!(audit_reason.clone()));
+    }
+    let content = serde_json::to_string_pretty(&disc)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write {}: {}", disc_path.display(), e))?;
+
+    let body = format!("The sequential-turn sequence on \"{}\" has ended. Reason: {}",
+        topic_str, if audit_reason.is_empty() { "(none)".to_string() } else { audit_reason.clone() });
+    append_sequence_announcement(dir, actor_label, &format!("Sequence ended: {}", topic_str),
+        &body, "moderation",
+        serde_json::json!({
+            "sequence_action": "end",
+            "ended_by": actor_label,
+            "reason": audit_reason
+        }))?;
+
+    Ok(serde_json::json!({"status": "sequence_ended", "topic": topic_str}))
+}
+
+/// pr-seq-tauri-sequence-commands batch 2: insert a role at the front of
+/// the sequence queue (skip ahead). Used by HumanSequenceOverrideBar's
+/// "Insert me next" button (which always inserts "human:0"). Mirrors the
+/// MCP-side insert_role action restricted to the human:0 role for safety.
+///
+/// If role_label is already the current holder or already in the queue, a
+/// no-op success is returned.
+pub fn human_insert_next(
+    dir: &str,
+    role_label: &str,
+) -> Result<serde_json::Value, String> {
+    let disc_path = active_discussion_path(dir);
+    let mut disc: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let seq = disc.get("active_sequence").cloned().unwrap_or(serde_json::Value::Null);
+    if !seq.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err("ERR_NO_ACTIVE_SEQUENCE: no sequence to insert into".to_string());
+    }
+    let current = seq.get("current_holder").and_then(|v| v.as_str()).unwrap_or("");
+    if current == role_label {
+        return Ok(serde_json::json!({"status": "noop_already_holder", "role": role_label}));
+    }
+    let mut queue: Vec<String> = seq.get("queue_remaining")
+        .and_then(|q| q.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if queue.iter().any(|r| r == role_label) {
+        return Ok(serde_json::json!({"status": "noop_already_queued", "role": role_label}));
+    }
+    queue.insert(0, role_label.to_string());
+    if let Some(seq_obj) = disc.get_mut("active_sequence").and_then(|s| s.as_object_mut()) {
+        seq_obj.insert("queue_remaining".to_string(), serde_json::json!(queue));
+    }
+    let content = serde_json::to_string_pretty(&disc)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write {}: {}", disc_path.display(), e))?;
+
+    append_sequence_announcement(dir, role_label, "Inserted at front of queue",
+        &format!("{} inserted themselves next in the sequence queue.", role_label),
+        "system",
+        serde_json::json!({"sequence_action": "human_insert_next", "role": role_label}))?;
+
+    Ok(serde_json::json!({"status": "inserted", "role": role_label}))
+}
+
+/// Internal: append a sequence-related announcement to board.jsonl.
+/// Computes next message id from board contents.
+fn append_sequence_announcement(
+    dir: &str,
+    from_label: &str,
+    subject: &str,
+    body: &str,
+    msg_type: &str,
+    metadata: serde_json::Value,
+) -> Result<u64, String> {
+    let board_path = active_board_path(dir);
+    let next_id = std::fs::read_to_string(&board_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+        .max()
+        .unwrap_or(0) + 1;
+    let now = iso_now();
+    // The "to" field defaults to "all" but a metadata.to override (used by
+    // pass_turn's wake-up notification) overrides it.
+    let to_target = metadata.get("to").and_then(|v| v.as_str()).unwrap_or("all").to_string();
+    let msg = serde_json::json!({
+        "id": next_id,
+        "from": from_label,
+        "to": to_target,
+        "type": msg_type,
+        "timestamp": now,
+        "subject": subject,
+        "body": body,
+        "metadata": metadata
+    });
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+        .map_err(|e| format!("open board.jsonl: {}", e))?;
+    let line = serde_json::to_string(&msg)
+        .map_err(|e| format!("serialize announcement: {}", e))?;
+    writeln!(f, "{}", line)
+        .map_err(|e| format!("write announcement: {}", e))?;
+    Ok(next_id)
+}
+
 /// Compact board.jsonl by removing messages older than `max_age_days`.
 /// Keeps the last `min_keep` messages regardless of age to preserve context.
 /// Returns (kept, removed) counts. Uses board lock for safety.
@@ -4225,6 +4452,113 @@ mod tests {
         let result = super::start_sequence(dir, "topic", None, &[], "human:0");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("participants queue must not be empty"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── pr-seq-tauri-sequence-commands batch 2 helpers ──
+
+    #[test]
+    fn pass_turn_advances_holder_and_pops_queue() {
+        let tmp = fixture_start_sequence("pass-turn-advance");
+        let dir = tmp.to_str().unwrap();
+        super::start_sequence(dir, "t", None,
+            &["human:0".to_string(), "developer:0".to_string()], "human:0")
+            .expect("setup: start sequence");
+        let result = super::pass_turn(dir, "human:0").expect("pass_turn should succeed");
+        assert_eq!(result["status"], "turn_passed");
+        assert_eq!(result["next_holder"], "developer:0");
+
+        // discussion.json should reflect the new holder.
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(active_discussion_path(dir)).unwrap()
+        ).unwrap();
+        assert_eq!(disc["active_sequence"]["current_holder"], "developer:0");
+        assert_eq!(disc["active_sequence"]["queue_completed"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pass_turn_at_end_of_queue_ends_sequence() {
+        let tmp = fixture_start_sequence("pass-turn-end");
+        let dir = tmp.to_str().unwrap();
+        super::start_sequence(dir, "t", None, &["human:0".to_string()], "human:0").expect("setup");
+        let result = super::pass_turn(dir, "human:0").expect("pass_turn should succeed");
+        assert_eq!(result["status"], "turn_passed");
+        assert_eq!(result["next_holder"], "");
+
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(active_discussion_path(dir)).unwrap()
+        ).unwrap();
+        assert_eq!(disc["active_sequence"]["active"], false,
+            "queue exhaustion must end the sequence");
+        assert_eq!(disc["active_sequence"]["ended_by"], "queue_exhausted");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pass_turn_rejects_when_no_active_sequence() {
+        let tmp = fixture_start_sequence("pass-turn-no-seq");
+        let dir = tmp.to_str().unwrap();
+        let result = super::pass_turn(dir, "human:0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ERR_NO_ACTIVE_SEQUENCE"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn end_sequence_marks_inactive_with_audit_fields() {
+        let tmp = fixture_start_sequence("end-seq");
+        let dir = tmp.to_str().unwrap();
+        super::start_sequence(dir, "t", None, &["human:0".to_string(), "developer:0".to_string()], "human:0")
+            .expect("setup");
+        let result = super::end_sequence(dir, "human:0", Some("user closed it")).expect("end ok");
+        assert_eq!(result["status"], "sequence_ended");
+
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(active_discussion_path(dir)).unwrap()
+        ).unwrap();
+        assert_eq!(disc["active_sequence"]["active"], false);
+        assert_eq!(disc["active_sequence"]["ended_by"], "human:0");
+        assert_eq!(disc["active_sequence"]["end_reason"], "user closed it");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn end_sequence_rejects_when_no_active_sequence() {
+        let tmp = fixture_start_sequence("end-no-seq");
+        let dir = tmp.to_str().unwrap();
+        let result = super::end_sequence(dir, "human:0", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("ERR_NO_ACTIVE_SEQUENCE"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn human_insert_next_inserts_at_queue_front() {
+        let tmp = fixture_start_sequence("insert-next");
+        let dir = tmp.to_str().unwrap();
+        // Sequence with developer:0 holding, no human in queue.
+        super::start_sequence(dir, "t", None, &["developer:0".to_string()], "human:0")
+            .expect("setup");
+        let result = super::human_insert_next(dir, "human:0").expect("insert ok");
+        assert_eq!(result["status"], "inserted");
+
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(active_discussion_path(dir)).unwrap()
+        ).unwrap();
+        let queue = disc["active_sequence"]["queue_remaining"].as_array().unwrap();
+        assert_eq!(queue[0], "human:0", "human:0 should be at front of queue");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn human_insert_next_noop_if_already_current_holder() {
+        let tmp = fixture_start_sequence("insert-noop-holder");
+        let dir = tmp.to_str().unwrap();
+        super::start_sequence(dir, "t", None, &["human:0".to_string(), "developer:0".to_string()], "human:0")
+            .expect("setup");
+        let result = super::human_insert_next(dir, "human:0").expect("noop ok");
+        assert_eq!(result["status"], "noop_already_holder");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
