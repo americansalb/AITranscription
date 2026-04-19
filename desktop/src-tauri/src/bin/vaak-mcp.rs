@@ -188,9 +188,48 @@ pub(crate) fn decide_sequence_stall(
     StallDecision::ShouldFire { holder, elapsed_secs: elapsed }
 }
 
+/// Per-turn monotonic anchor for the stall watchdog. Maps the disk-stored
+/// `turn_started_at` ISO string to the `Instant` at which we first observed
+/// it. Subsequent ticks compute elapsed via `Instant::elapsed()` instead of
+/// wall-clock subtraction, so NTP sync, DST transitions, manual clock edits,
+/// and VM suspends don't misfire the stall ping.
+///
+/// pr-seq-stall-monotonic-fix per platform-engineer:0 msg 488 + spec §5.3 +
+/// manager msg 610. Wall-clock retained on disk for audit/display; monotonic
+/// only governs the stall decision.
+static STALL_MONOTONIC_ANCHOR: parking_lot::Mutex<Option<(String, std::time::Instant)>> =
+    parking_lot::Mutex::new(None);
+
 pub(crate) fn check_sequence_stall_and_notify(project_dir: &str) {
     let disc = read_discussion_state_raw(project_dir);
-    let decision = decide_sequence_stall(&disc, utc_now_unix(), SEQUENCE_STALL_SECS);
+    // Compute elapsed via monotonic anchor instead of wall-clock subtraction.
+    // The decide_sequence_stall pure fn still uses now_unix for testability;
+    // here in the live path we override its elapsed result with a monotonic
+    // measurement when we have an anchor for the same turn_started_at.
+    let monotonic_now_unix = {
+        let turn_started_at_opt = disc
+            .get("active_sequence")
+            .and_then(|s| s.get("turn_started_at"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        match turn_started_at_opt {
+            Some(turn_at) => {
+                let mut anchor = STALL_MONOTONIC_ANCHOR.lock();
+                let observed = anchor.as_ref().map(|(s, _)| s.clone());
+                if observed.as_deref() != Some(turn_at.as_str()) {
+                    *anchor = Some((turn_at.clone(), std::time::Instant::now()));
+                }
+                let started_unix = chrono_iso_to_unix(&turn_at).unwrap_or(0);
+                let elapsed_mono = anchor
+                    .as_ref()
+                    .map(|(_, inst)| inst.elapsed().as_secs() as i64)
+                    .unwrap_or(0);
+                started_unix + elapsed_mono
+            }
+            None => utc_now_unix(),
+        }
+    };
+    let decision = decide_sequence_stall(&disc, monotonic_now_unix, SEQUENCE_STALL_SECS);
     let (current_holder, elapsed) = match decision {
         StallDecision::ShouldFire { holder, elapsed_secs } => (holder, elapsed_secs),
         _ => return,
