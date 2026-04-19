@@ -108,6 +108,7 @@ fn ensure_heartbeat_ticker_started() {
             if let Some(state) = bound {
                 update_session_heartbeat_in_file();
                 check_pipeline_ack_timeout_and_skip(&state.project_dir);
+                check_pipeline_stall_warning(&state.project_dir);
                 check_sequence_stall_and_notify(&state.project_dir);
             }
         }
@@ -288,6 +289,124 @@ fn pipeline_ack_timeout_secs(project_dir: &str) -> i64 {
         .filter(|&t| t > 0 && t <= 3600)
         .unwrap_or(PIPELINE_ACK_TIMEOUT_DEFAULT)
 }
+
+/// pr-pipeline-gate-observability Item B. Complementary to the silence watchdog:
+/// fires a one-shot warning broadcast when a pipeline stage has been active
+/// longer than the stall threshold, regardless of whether the holder is silent
+/// or chatty. Closes the "chatty-flagless stall" gap the sandbox documented
+/// (developer:0 msg 1250 step 8): an agent posting interim messages without
+/// the end_of_stage flag keeps resetting the silence timer, so the 300s ack
+/// watchdog never fires — but the pipeline is still stalled because advance
+/// only happens on the flag.
+///
+/// Design (architect:0 msg 1240):
+/// - Default 900s (15 min), configurable via project.json > settings >
+///   pipeline_stall_warn_secs.
+/// - Monotonic timing via Instant-based anchor (same pattern as
+///   check_sequence_stall_and_notify / STALL_MONOTONIC_ANCHOR). NTP drift,
+///   DST transitions, and VM suspends do not misfire the warning.
+/// - Dedup latch: disc.stall_warning_sent=true suppresses further warnings
+///   on this stage; the latch clears on stage advance (where we rewrite
+///   pipeline_stage_started_at).
+/// - Does NOT mutate pipeline state — purely observability, not auto-skip.
+/// - Warning goes to BOTH stderr (warn! → eprintln!) AND a visible board
+///   broadcast (type=system, from=system:0) so the human sees the stall in
+///   the UI, not just in MCP logs.
+const PIPELINE_STALL_WARN_DEFAULT: i64 = 900; // 15 min
+fn pipeline_stall_warn_secs(project_dir: &str) -> i64 {
+    std::fs::read_to_string(project_json_path(project_dir)).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("settings")?.get("pipeline_stall_warn_secs")?.as_i64())
+        .filter(|&t| t > 0 && t <= 86400) // cap at 24h; reject 0/negative/absurd
+        .unwrap_or(PIPELINE_STALL_WARN_DEFAULT)
+}
+
+/// Per-stage monotonic anchor for the pipeline stall watchdog. Keyed by the
+/// disk-stored `pipeline_stage_started_at` ISO string. Each stage advance
+/// rewrites that field; the next tick observes the key change and reinits
+/// the Instant anchor. Follows the STALL_MONOTONIC_ANCHOR pattern at line ~201.
+///
+/// Dedup latch is NOT kept here — it lives on disk in
+/// `discussion.stall_warning_sent_for`, keyed on the same ISO so it naturally
+/// clears on stage advance AND survives MCP restart. Keeping the latch on disk
+/// also makes the warn-once guarantee work across parallel test runs.
+static PIPELINE_STALL_ANCHOR: parking_lot::Mutex<Option<(String, std::time::Instant)>> =
+    parking_lot::Mutex::new(None);
+
+fn check_pipeline_stall_warning(project_dir: &str) {
+    let disc = read_discussion_state_raw(project_dir);
+    if disc.get("active").and_then(|v| v.as_bool()) != Some(true) { return; }
+    if disc.get("mode").and_then(|v| v.as_str()) != Some("pipeline") { return; }
+    if disc.get("paused_at").and_then(|v| v.as_str()).is_some() { return; }
+
+    let started_at_str = match disc.get("pipeline_stage_started_at").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(), None => return,
+    };
+    // Dedup latch: if we've already warned for this exact stage-start, skip.
+    // The field clears naturally because every stage advance rewrites
+    // pipeline_stage_started_at to the new utc_now_iso().
+    if disc.get("stall_warning_sent_for").and_then(|v| v.as_str()) == Some(started_at_str.as_str()) {
+        return;
+    }
+
+    let pipeline_order = match disc.get("pipeline_order").and_then(|v| v.as_array()) {
+        Some(a) => a.clone(), None => return,
+    };
+    let current_stage = disc.get("pipeline_stage").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let current_role = match pipeline_order.get(current_stage).and_then(|v| v.as_str()) {
+        Some(r) => r.to_string(), None => return,
+    };
+
+    // Monotonic elapsed: anchor on first observation of this started_at, then
+    // measure via Instant::elapsed. Seeding respects any wall-clock time that
+    // already elapsed before this process saw the stage (e.g. after a mid-stage
+    // MCP restart), so a restart doesn't reset the countdown back to 0.
+    let elapsed_secs: i64 = {
+        let mut anchor = PIPELINE_STALL_ANCHOR.lock();
+        let observed_key = anchor.as_ref().map(|(s, _)| s.clone());
+        if observed_key.as_deref() != Some(started_at_str.as_str()) {
+            let wall_elapsed = (utc_now_unix() - chrono_iso_to_unix(&started_at_str).unwrap_or(utc_now_unix())).max(0);
+            let seed = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(wall_elapsed as u64))
+                .unwrap_or_else(std::time::Instant::now);
+            *anchor = Some((started_at_str.clone(), seed));
+        }
+        anchor.as_ref().map(|(_, inst)| inst.elapsed().as_secs() as i64).unwrap_or(0)
+    };
+
+    let threshold = pipeline_stall_warn_secs(project_dir);
+    if elapsed_secs < threshold { return; }
+
+    let elapsed_min = elapsed_secs / 60;
+    eprintln!("[vaak-mcp] pipeline stall: stage {} ({}) active {}m without advancing — expected metadata.end_of_stage=true on holder's final broadcast",
+        current_stage + 1, current_role, elapsed_min);
+
+    let warn_body = format!(
+        "⚠️ Stage {} ({}) has been active for {} minutes without advancing. The holder has posted interim messages but has not flagged the stage complete. Remediation: the holder should set `metadata: {{end_of_stage: true}}` on their next broadcast, OR the human can pause/skip the stage via the UI. This warning fires once per stage.",
+        current_stage + 1, current_role, elapsed_min
+    );
+    let warn_msg = serde_json::json!({
+        "id": next_message_id(project_dir),
+        "from": "system:0",
+        "to": "all",
+        "type": "system",
+        "subject": format!("⚠️ Pipeline stage {} stalled", current_stage + 1),
+        "body": warn_body,
+        "timestamp": utc_now_iso(),
+        "metadata": {
+            "pipeline_stall_warning": true,
+            "stalled_role": current_role,
+            "stage": current_stage,
+            "elapsed_seconds": elapsed_secs,
+        }
+    });
+    let _ = append_to_board(project_dir, &warn_msg);
+
+    // Set the disk latch so future ticks on the same stage skip early.
+    let mut updated = disc.clone();
+    updated["stall_warning_sent_for"] = serde_json::json!(started_at_str);
+    let _ = write_discussion_state(project_dir, &updated);
+}
 fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
     let disc = read_discussion_state_raw(project_dir);
     if disc.get("active").and_then(|v| v.as_bool()) != Some(true) { return; }
@@ -376,7 +495,7 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
                 "to": first_agent,
                 "type": "system",
                 "subject": "Your pipeline stage",
-                "body": format!("Round {} has started. It is now your turn in the pipeline (stage 1/{}). Previous round closed by auto-skip on {}.", next_round + 1, pipeline_order.len(), current_role),
+                "body": format!("Round {} has started. It is now your turn in the pipeline (stage 1/{}). Previous round closed by auto-skip on {}. {}", next_round + 1, pipeline_order.len(), current_role, PIPELINE_ADVANCE_INSTRUCTION),
                 "timestamp": utc_now_iso(),
                 "metadata": {"pipeline_notification": true, "round_started": next_round + 1}
             });
@@ -404,7 +523,7 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
         "to": next_agent,
         "type": "system",
         "subject": "Your pipeline stage",
-        "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped: {}.", next_stage + 1, pipeline_order.len(), skip_reason),
+        "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped: {}. {}", next_stage + 1, pipeline_order.len(), skip_reason, PIPELINE_ADVANCE_INSTRUCTION),
         "timestamp": utc_now_iso(),
         "metadata": {"pipeline_notification": true, "auto_skip_predecessor": current_role}
     });
@@ -589,11 +708,26 @@ fn read_active_section(project_dir: &str) -> String {
 /// 4. Mirrors the sequence system's `metadata.end_of_turn` — one consistent
 ///    "I'm done" signal across both turn-taking substrates.
 fn is_end_of_stage(metadata: Option<&serde_json::Value>) -> bool {
-    metadata
-        .and_then(|m| m.get("end_of_stage"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+    match metadata.and_then(|m| m.get("end_of_stage")) {
+        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+        Some(v) => {
+            // pr-pipeline-gate-observability Item A: the predicate correctly
+            // rejects wrong-type flags, but without a log the sender gets no
+            // feedback that their `"true"` string / `1` number silently failed.
+            // Emit to MCP stderr so the mistype is visible in a tail.
+            eprintln!("[vaak-mcp] end_of_stage metadata present but not bool ({}) — stage will NOT advance", v);
+            false
+        }
+        None => false,
+    }
 }
+
+/// pr-pipeline-gate-observability Item C (SoT constant) + Item D (text expansion):
+/// canonical instruction for pipeline-stage advance. All three in-Rust briefing
+/// surfaces (pipeline-announce, wake-next, MCP hook) embed this constant so the
+/// wording can never drift across locations. Matches the `communicationProtocol`
+/// section emitted by `briefingGenerator.ts` for the TS briefing surface.
+const PIPELINE_ADVANCE_INSTRUCTION: &str = "To advance the pipeline, set `metadata: {end_of_stage: true}` on your FINAL broadcast ONLY. Earlier broadcasts (ack, interim status, review) must NOT have the flag and do NOT advance the pipeline. Pattern: one-sentence ack first (no flag), do the work, then your final broadcast with the flag.";
 
 /// Original "any message from role since timestamp" predicate, used by the
 /// stall watchdog. Kept at pre-ack-no-advance semantics: any message (ack,
@@ -3538,8 +3672,8 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                         .unwrap_or_default();
                     let first = new_state.get("pipeline_order").and_then(|o| o.as_array())
                         .and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("?");
-                    format!("Pipeline started.\n\n**Topic:** {}\n**Pipeline order:** {}\n**Current stage:** {} (1/{})\n\nEach agent processes in order, seeing all previous outputs. To advance the pipeline to the next stage, set `metadata: {{end_of_stage: true}}` on your FINAL broadcast. Ack/interim broadcasts without the flag do NOT advance the pipeline.",
-                        topic, order, first, participant_list.len())
+                    format!("Pipeline started.\n\n**Topic:** {}\n**Pipeline order:** {}\n**Current stage:** {} (1/{})\n\nEach agent processes in order, seeing all previous outputs. {}",
+                        topic, order, first, participant_list.len(), PIPELINE_ADVANCE_INSTRUCTION)
                 } else if mode == "continuous" {
                     format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / neutral / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
                         topic, discussion_moderator, participant_list.join(", "))
@@ -5973,7 +6107,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                             "to": next_agent,
                             "type": "system",
                             "subject": "Your pipeline stage",
-                            "body": format!("It is now your turn in the pipeline (stage {}/{}). Review previous outputs and broadcast your response. To advance the pipeline, set `metadata: {{end_of_stage: true}}` on your FINAL broadcast.", next_stage + 1, pipeline_order.len()),
+                            "body": format!("It is now your turn in the pipeline (stage {}/{}). Review previous outputs and broadcast your response. {}", next_stage + 1, pipeline_order.len(), PIPELINE_ADVANCE_INSTRUCTION),
                             "timestamp": utc_now_iso(),
                             "metadata": {"pipeline_notification": true}
                         });
@@ -6865,7 +6999,8 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
                     output.push_str(&format!("\n  - Stage {}: {} (msg #{})", po.get("stage").and_then(|s| s.as_u64()).map(|s| s + 1).unwrap_or(0), agent, msg_id));
                 }
             }
-            output.push_str("\n\nBroadcast your response when ready. Your output becomes input for the next stage.\n\nTO ADVANCE THE PIPELINE: set `metadata: {end_of_stage: true}` on your FINAL broadcast. Earlier broadcasts (ack, interim status, review) are interim outputs and do NOT advance the pipeline. Pattern: send a one-sentence ack first (no flag), do the work, then your final broadcast with the flag.");
+            output.push_str("\n\nBroadcast your response when ready. Your output becomes input for the next stage.\n\n");
+            output.push_str(PIPELINE_ADVANCE_INSTRUCTION);
         } else if my_role == "moderator" || my_role == "manager" {
             output.push_str(&format!("\n\nPIPELINE ORCHESTRATOR VIEW [{}] — Current stage: {} ({}/{}). Topic: \"{}\"\nOrder: {}",
                 pipeline_mode.to_uppercase(), current_agent, current_stage + 1, pipeline_order.len(), disc_topic, order_display));
@@ -10434,6 +10569,17 @@ mod tests {
         let md_string = serde_json::json!({"end_of_stage": "true"});
         assert!(!super::is_end_of_stage(Some(&md_string)),
             "end_of_stage must be boolean true (strings don't count)");
+        // pr-pipeline-gate-observability Item A: also pin number + null +
+        // object so every non-bool variant the sandbox exercised stays rejected.
+        let md_number = serde_json::json!({"end_of_stage": 1});
+        assert!(!super::is_end_of_stage(Some(&md_number)),
+            "end_of_stage=1 (number) must not advance");
+        let md_null = serde_json::json!({"end_of_stage": null});
+        assert!(!super::is_end_of_stage(Some(&md_null)),
+            "end_of_stage=null must not advance");
+        let md_object = serde_json::json!({"end_of_stage": {"nested": true}});
+        assert!(!super::is_end_of_stage(Some(&md_object)),
+            "end_of_stage=object must not advance");
     }
 
     #[test]
@@ -10441,6 +10587,24 @@ mod tests {
         let md = serde_json::json!({"end_of_stage": true});
         assert!(super::is_end_of_stage(Some(&md)),
             "metadata.end_of_stage=true → end of stage");
+    }
+
+    #[test]
+    fn pipeline_advance_instruction_contains_canonical_phrases() {
+        // pr-pipeline-gate-observability Item C: single-source-of-truth test.
+        // All Rust briefing surfaces embed PIPELINE_ADVANCE_INSTRUCTION; if the
+        // canonical text ever drifts away from the key name or the core pattern,
+        // this fails loudly before a rebuilt binary ships an agent-confusing
+        // instruction.
+        let s = super::PIPELINE_ADVANCE_INSTRUCTION;
+        assert!(s.contains("end_of_stage"),
+            "instruction must name the canonical metadata key `end_of_stage`");
+        assert!(s.contains("FINAL broadcast"),
+            "instruction must say FINAL broadcast to prevent early-flag mistakes");
+        assert!(s.contains("ack") || s.contains("Ack"),
+            "instruction must describe the ack-first / interim pattern");
+        assert!(s.contains("do NOT advance") || s.contains("NOT advance"),
+            "instruction must state that unflagged broadcasts do NOT advance");
     }
 
     #[test]
@@ -10496,6 +10660,161 @@ mod tests {
         ).unwrap();
         assert_eq!(after["pipeline_stage"], 0,
             "holder posted interim status → watchdog stands down, stage stays open");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── pr-pipeline-gate-observability Item B: stage-age stall warning ──
+    //
+    // check_pipeline_stall_warning fires a one-shot notification (stderr + board
+    // broadcast) when a pipeline stage has been active longer than the configured
+    // threshold, without mutating pipeline state. Covers the chatty-flagless
+    // stall the sandbox documented: an agent posts interim messages but never
+    // flags end_of_stage, so the silence watchdog can't fire but the pipeline
+    // is still effectively hung. These tests pin (a) firing above threshold,
+    // (b) silence below threshold, (c) dedup latch prevents re-firing.
+
+    #[test]
+    fn pipeline_stall_warning_fires_and_dedupes_above_threshold() {
+        // pipeline_stage_started_at = 1200s in the past, threshold 900s
+        // (default). Warning should fire once and latch.
+        let started_at = unix_to_iso(utc_now_unix() - 1200);
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["stuckdev:0", "nextup:0"],
+            "pipeline_stage": 0,
+            "pipeline_stage_started_at": "{}",
+            "current_round": 0,
+            "settings": {{
+                "termination": {{ "type": "unlimited" }},
+                "max_rounds": 999,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{
+            "bindings": [
+                {"role": "stuckdev", "instance": 0, "status": "active"},
+                {"role": "nextup", "instance": 0, "status": "active"}
+            ]
+        }"#;
+        let tmp = fixture_for_pipeline_stall("stall-warn-fires", &disc, sessions);
+        // Default stall-warn threshold (900s) applies — override project.json
+        // to ensure pipeline_ack_timeout_secs doesn't race us into an auto-skip.
+        std::fs::write(tmp.join(".vaak/project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600,"pipeline_ack_timeout_secs":3600}}"#)
+            .expect("update project");
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_stall_warning(dir);
+
+        // First call: warning should have been appended to the board.
+        let board_after: String = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        let lines_after: Vec<&str> = board_after.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines_after.len(), 1,
+            "exactly one stall-warning message should have been appended, got {}: {:?}",
+            lines_after.len(), lines_after);
+        let warn: serde_json::Value = serde_json::from_str(lines_after[0]).unwrap();
+        assert_eq!(warn["from"], "system:0");
+        assert_eq!(warn["type"], "system");
+        assert_eq!(warn["metadata"]["pipeline_stall_warning"], true);
+        assert_eq!(warn["metadata"]["stalled_role"], "stuckdev:0");
+        let subject = warn["subject"].as_str().unwrap();
+        assert!(subject.contains("stalled"), "subject should name the stall: {}", subject);
+        let body = warn["body"].as_str().unwrap();
+        assert!(body.contains("end_of_stage"),
+            "body must instruct the holder to use the canonical flag: {}", body);
+
+        // Second call: dedup latch should suppress a repeat warning.
+        super::check_pipeline_stall_warning(dir);
+        let board_after_2: String = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        let lines_after_2: Vec<&str> = board_after_2.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines_after_2.len(), 1,
+            "second tick must be suppressed by the dedup latch — got {} total messages",
+            lines_after_2.len());
+
+        // Pipeline state must NOT have been mutated — this is observability-only.
+        let disc_after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(disc_after["pipeline_stage"], 0,
+            "stall warning must not auto-advance the pipeline");
+        assert_eq!(disc_after["active"], true,
+            "stall warning must not close the pipeline");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_stall_warning_silent_below_threshold() {
+        // Stage started 500s ago — well under the 900s default. No warning.
+        let started_at = unix_to_iso(utc_now_unix() - 500);
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["fresh:0", "next:0"],
+            "pipeline_stage": 0,
+            "pipeline_stage_started_at": "{}",
+            "current_round": 0,
+            "settings": {{
+                "termination": {{ "type": "unlimited" }},
+                "max_rounds": 999,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{"bindings": [{"role": "fresh", "instance": 0, "status": "active"}]}"#;
+        let tmp = fixture_for_pipeline_stall("stall-warn-silent", &disc, sessions);
+        std::fs::write(tmp.join(".vaak/project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600,"pipeline_ack_timeout_secs":3600}}"#)
+            .expect("update project");
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_stall_warning(dir);
+
+        let board_after: String = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        let lines: Vec<&str> = board_after.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 0,
+            "below-threshold stage must not produce a stall warning: {:?}", lines);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_stall_warning_respects_paused_at() {
+        // Stage is technically over threshold but the pipeline is paused —
+        // paused time shouldn't trigger stall warnings (human is in the loop).
+        let started_at = unix_to_iso(utc_now_unix() - 1200);
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["paused:0", "next:0"],
+            "pipeline_stage": 0,
+            "pipeline_stage_started_at": "{}",
+            "paused_at": "2025-01-01T00:00:00Z",
+            "current_round": 0,
+            "settings": {{
+                "termination": {{ "type": "unlimited" }},
+                "max_rounds": 999,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{"bindings": [{"role": "paused", "instance": 0, "status": "active"}]}"#;
+        let tmp = fixture_for_pipeline_stall("stall-warn-paused", &disc, sessions);
+        std::fs::write(tmp.join(".vaak/project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600,"pipeline_ack_timeout_secs":3600}}"#)
+            .expect("update project");
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_stall_warning(dir);
+
+        let board_after: String = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        let lines: Vec<&str> = board_after.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 0,
+            "paused pipeline must not produce stall warnings: {:?}", lines);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
