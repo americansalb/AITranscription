@@ -2262,6 +2262,70 @@
   font-size: 12px;
 }
 
+.sequence-session-card {
+  background: rgba(29, 161, 242, 0.04);
+  border: 1px solid rgba(29, 161, 242, 0.18);
+  border-left: 4px solid var(--collab-accent);
+  border-radius: 10px;
+  padding: 0;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.sequence-session-card > .sequence-banner,
+.sequence-session-card > .queue-visualization,
+.sequence-session-card > .human-override-bar,
+.sequence-session-card > .pending-turn-requests,
+.sequence-session-card > .sequence-mod-panel {
+  background: transparent;
+  border: 0;
+  border-left: 0;
+  border-radius: 0;
+  margin-bottom: 0;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.sequence-session-card > *:not(:last-child) {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sequence-session-card > .sequence-banner {
+  padding-top: 12px;
+  padding-bottom: 10px;
+}
+
+.sequence-session-card > .queue-visualization {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+.sequence-session-card > .human-override-bar {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: transparent;
+}
+
+.sequence-session-card > .pending-turn-requests {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  border-left: 0;
+}
+
+.sequence-session-card > .sequence-mod-panel {
+  padding: 0;
+}
+
+.sequence-session-card > .sequence-mod-panel .sequence-mod-panel-toggle {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.sequence-session-card > .sequence-mod-panel .sequence-mod-panel-body {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
 .sequence-banner {
   background: rgba(29, 161, 242, 0.06);
   border: 1px solid rgba(29, 161, 242, 0.2);

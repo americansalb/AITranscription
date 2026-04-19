@@ -12,13 +12,9 @@ import { EndSessionConfirmModal } from "./EndSessionConfirmModal";
 import { QuickLaunchBar } from "./QuickLaunchBar";
 import { BuildIdentityFooter } from "./BuildIdentityFooter";
 import PreviousTeamBanner from "./PreviousTeamBanner";
-import SequenceBanner, { type SequenceTurnState } from "./SequenceBanner";
-import QueueVisualization from "./QueueVisualization";
-import ModeratorSequencePanel, {
-  type ModeratorSequencePanelRosterEntry,
-} from "./ModeratorSequencePanel";
-import HumanSequenceOverrideBar from "./HumanSequenceOverrideBar";
-import PendingTurnRequests from "./PendingTurnRequests";
+import { type SequenceTurnState } from "./SequenceBanner";
+import { type ModeratorSequencePanelRosterEntry } from "./ModeratorSequencePanel";
+import SequenceSessionCard from "./SequenceSessionCard";
 import StartSequenceModal, { type StartSequenceCandidate } from "./StartSequenceModal";
 import "../styles/collab.css";
 
@@ -3176,8 +3172,8 @@ When multiple instances of this role are active:
               </div>
             );
           })()}
-          {/* Work Mode Selector — also hidden during active discussions */}
-          {!discussionState?.active && (() => {
+          {/* Work Mode Selector — hidden during any active discussion or sequence */}
+          {!discussionState?.active && !sequenceTurn && (() => {
             const currentWorkMode = project?.config?.settings?.work_mode || "simultaneous";
             const workModes: Record<string, { label: string; color: string; desc: string }> = {
               simultaneous: { label: "Simultaneous", color: "#17bf63", desc: "All agents work in parallel" },
@@ -3239,11 +3235,11 @@ When multiple instances of this role are active:
               <span className="turn-indicator-name">Round complete</span>
             </span>
           )}
-          {!discussionState?.active && (
+          {!discussionState?.active && !sequenceTurn && (
             <button
               className="start-discussion-btn"
               onClick={handleOpenStartDiscussion}
-              title="Start a structured session (Pipeline, Delphi, Oxford, Red Team, or Continuous)"
+              title="Start a structured session (Delphi, Oxford, Red Team, or Continuous)"
               aria-label="Start session"
             >
               &#9998; Start Session
@@ -4481,11 +4477,7 @@ When multiple instances of this role are active:
 
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
 
-        <SequenceBanner turn={sequenceTurn} selfRoleInstance={null} />
-        <QueueVisualization turn={sequenceTurn} />
-        <HumanSequenceOverrideBar turn={sequenceTurn} projectDir={projectDir} />
-        <PendingTurnRequests turn={sequenceTurn} projectDir={projectDir} />
-        <ModeratorSequencePanel
+        <SequenceSessionCard
           turn={sequenceTurn}
           projectDir={projectDir}
           availableRoleInstances={
@@ -5520,7 +5512,6 @@ When multiple instances of this role are active:
                   ["oxford", "Oxford", "Public adversarial debate with FOR/AGAINST teams. Best for stress-testing ideas."],
                   ["red_team", "Red Team", "All participants attack a proposal. Best for finding weaknesses."],
                   ["continuous", "Continuous", "Auto-triggered micro-reviews from status messages. Best for ongoing code review."],
-                  ["pipeline", "Pipeline", "Sequential processing — each agent builds on the previous output. Best for assembly-line workflows."],
                 ] as const).map(([id, label, desc]) => (
                   <button
                     key={id}
