@@ -2872,13 +2872,9 @@ fn start_discussion(
     let _ = std::fs::write(&diag_path, format!("ENTRY: mode={} topic={} dir={}\n", mode, topic, dir));
     eprintln!("[start_discussion] DIAGNOSTIC: function entered, mode={}, topic={}", mode, topic);
 
-    let valid_modes = ["delphi", "oxford", "red_team", "continuous"];
+    let valid_modes = ["delphi", "oxford", "red_team", "continuous", "pipeline"];
     if !valid_modes.contains(&mode.as_str()) {
-        return Err(format!(
-            "Invalid discussion mode '{}'. Must be one of: {}. \
-            Pipeline mode is removed — use start_session (Start Sequence) for strict-sequential turn-taking.",
-            mode, valid_modes.join(", ")
-        ));
+        return Err(format!("Invalid discussion mode '{}'. Must be one of: {}", mode, valid_modes.join(", ")));
     }
     if topic.trim().is_empty() {
         return Err("Topic cannot be empty.".to_string());
