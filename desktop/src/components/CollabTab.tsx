@@ -648,14 +648,12 @@ export function CollabTab() {
   const [closingRound, setClosingRound] = useState(false);
   const [continuousTimeout, setContinuousTimeout] = useState(60);
   const [startDiscussionOpen, setStartDiscussionOpen] = useState(false);
-  const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous" | "pipeline">("delphi");
+  const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous">("delphi");
   const [sdTopic, setSdTopic] = useState("");
   const [sdParticipants, setSdParticipants] = useState<Record<string, boolean>>({});
   const [sdStarting, setSdStarting] = useState(false);
   const [sdModeratorEnabled, setSdModeratorEnabled] = useState(true);
   const [sdAudienceEnabled, setSdAudienceEnabled] = useState(false);
-  const [sdPipelineRounds, setSdPipelineRounds] = useState<string>("5");
-  const [sdPipelineMode, setSdPipelineMode] = useState<"discussion" | "action">("discussion");
   const [sdAudiencePool, setSdAudiencePool] = useState("");
   const [sdAudienceSize, setSdAudienceSize] = useState(5);
   const [tauriPools, setTauriPools] = useState<Array<{ id: string; name: string; persona_count: number; providers: string[] }>>([]);
@@ -2417,8 +2415,8 @@ When multiple instances of this role are active:
             topic,
             moderator,
             participants,
-            rounds: sdFormat === "pipeline" && sdPipelineRounds !== "unlimited" ? parseInt(sdPipelineRounds) : null,
-            pipelineMode: sdFormat === "pipeline" ? sdPipelineMode : null,
+            rounds: null,
+            pipelineMode: null,
           });
           console.log("[handleStartDiscussion] invoke succeeded");
         } catch (sdErr) {
@@ -2432,22 +2430,8 @@ When multiple instances of this role are active:
         // Immediately show the announcement in the board, regardless of whether
         // the file write succeeds. This fixes the UX bug where the user clicks
         // "Start Discussion" and sees nothing happen due to board lock contention.
-        // Read back the actual pipeline order from the discussion state (scored by build_pipeline_order)
-        // instead of using the raw participant list which has a different order.
-        let pipelineOrder = "";
-        if (sdFormat === "pipeline") {
-          try {
-            const discState = await invoke<Record<string, unknown> | null>("get_session_state", { dir: projectDir });
-            const scoredOrder = discState?.pipeline_order as string[] | undefined;
-            pipelineOrder = scoredOrder ? scoredOrder.join(" \u2192 ") : participants.join(" \u2192 ");
-          } catch {
-            pipelineOrder = participants.join(" \u2192 ");
-          }
-        }
         const annBody = sdFormat === "continuous"
           ? `Continuous Review mode activated.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}`
-          : sdFormat === "pipeline"
-          ? `A pipeline discussion has been started.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nPipeline Order: ${pipelineOrder}`
           : `A ${sdFormat} discussion has been started.\n\nTopic: ${topic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}\nRound: 1`;
 
         const optimisticId = (project?.messages?.length ? Math.max(...project.messages.map(m => m.id)) : 0) + 1;
@@ -3422,21 +3406,9 @@ When multiple instances of this role are active:
                 } catch (e) {
                   console.warn("[QuickLaunch] start_session error (will post announcement):", e);
                 }
-                // Post announcement to board — read actual scored pipeline order from discussion state
-                let pipelineOrder = "";
-                if (format === "pipeline") {
-                  try {
-                    const discState = await invoke<Record<string, unknown> | null>("get_session_state", { dir: projectDir });
-                    const scoredOrder = discState?.pipeline_order as string[] | undefined;
-                    pipelineOrder = scoredOrder ? scoredOrder.join(" → ") : participants.join(" → ");
-                  } catch {
-                    pipelineOrder = participants.join(" → ");
-                  }
-                }
+                // Post announcement to board.
                 const annBody = format === "continuous"
                   ? `Continuous Review mode activated.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}`
-                  : format === "pipeline"
-                  ? `A pipeline discussion has been started.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nPipeline Order: ${pipelineOrder}`
                   : `A ${format} discussion has been started.\n\nTopic: ${effectiveTopic}\nModerator: ${moderator || "auto"}\nParticipants: ${participants.join(", ")}\nRound: 1`;
                 try {
                   await invoke("send_team_message", {
@@ -5565,51 +5537,6 @@ When multiple instances of this role are active:
                   <span className="sd-no-participants">No active team members. Launch agents first.</span>
                 )}
               </div>
-
-              {/* Pipeline Settings — rounds + mode (only for pipeline format) */}
-              {sdFormat === "pipeline" && (
-                <>
-                  <div className="sd-section-label">Pipeline Settings</div>
-                  <div className="sd-pipeline-settings">
-                    <label className="sd-setting-row">
-                      <span className="sd-setting-label">Rounds</span>
-                      <select
-                        className="sd-setting-select"
-                        value={sdPipelineRounds}
-                        onChange={(e) => setSdPipelineRounds(e.target.value)}
-                        style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "4px", color: "#fafafa", padding: "4px 8px", fontSize: "12px" }}
-                      >
-                        <option value="1">1 round</option>
-                        <option value="3">3 rounds</option>
-                        <option value="5">5 rounds</option>
-                        <option value="10">10 rounds</option>
-                        <option value="unlimited">Unlimited (until ended)</option>
-                      </select>
-                    </label>
-                    <label className="sd-setting-row">
-                      <span className="sd-setting-label">Mode</span>
-                      <div style={{ display: "flex", gap: "6px" }}>
-                        <button
-                          type="button"
-                          className="sd-mode-pill"
-                          onClick={() => setSdPipelineMode("discussion")}
-                          style={{ background: sdPipelineMode === "discussion" ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.04)", color: sdPipelineMode === "discussion" ? "#818cf8" : "#a1a1aa", border: `1px solid ${sdPipelineMode === "discussion" ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.08)"}`, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: 600, cursor: "pointer" }}
-                        >
-                          Discussion
-                        </button>
-                        <button
-                          type="button"
-                          className="sd-mode-pill"
-                          onClick={() => setSdPipelineMode("action")}
-                          style={{ background: sdPipelineMode === "action" ? "rgba(249,115,22,0.15)" : "rgba(255,255,255,0.04)", color: sdPipelineMode === "action" ? "#fdba74" : "#a1a1aa", border: `1px solid ${sdPipelineMode === "action" ? "rgba(249,115,22,0.4)" : "rgba(255,255,255,0.08)"}`, padding: "3px 10px", borderRadius: "12px", fontSize: "11px", fontWeight: 600, cursor: "pointer" }}
-                        >
-                          Action
-                        </button>
-                      </div>
-                    </label>
-                  </div>
-                </>
-              )}
 
               {/* Background Agents — auto-start with session */}
               <div className="sd-section-label">Background Agents (auto-start with session)</div>
