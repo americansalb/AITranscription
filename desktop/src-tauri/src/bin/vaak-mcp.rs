@@ -313,12 +313,69 @@ fn pipeline_ack_timeout_secs(project_dir: &str) -> i64 {
 ///   broadcast (type=system, from=system:0) so the human sees the stall in
 ///   the UI, not just in MCP logs.
 const PIPELINE_STALL_WARN_DEFAULT: i64 = 900; // 15 min
+const PIPELINE_STALL_WARN_MIN: i64 = 60;       // 1 min floor (dev-challenger:0 msg 1269 #3)
+const PIPELINE_STALL_WARN_MAX: i64 = 86_400;   // 24 h cap
 fn pipeline_stall_warn_secs(project_dir: &str) -> i64 {
+    // Floor at PIPELINE_STALL_WARN_MIN to prevent misconfiguration from flooding
+    // the board on every heartbeat tick. Upper cap rejects absurd values. Out of
+    // range falls back to the default rather than clamping — mirrors
+    // pipeline_ack_timeout_secs's strict validation style.
     std::fs::read_to_string(project_json_path(project_dir)).ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("settings")?.get("pipeline_stall_warn_secs")?.as_i64())
-        .filter(|&t| t > 0 && t <= 86400) // cap at 24h; reject 0/negative/absurd
+        .filter(|&t| t >= PIPELINE_STALL_WARN_MIN && t <= PIPELINE_STALL_WARN_MAX)
         .unwrap_or(PIPELINE_STALL_WARN_DEFAULT)
+}
+
+/// pr-pipeline-gate-observability follow-up (dev-challenger:0 msg 1275 R4).
+/// Dedup latch for the stall warning, keyed on the stage's start timestamp and
+/// stage index. Scans board.jsonl backwards for a prior `from=system:0`
+/// stall-warning broadcast with matching stage metadata, stopping once we walk
+/// past the stage's start timestamp.
+///
+/// Why board-scan rather than a disk latch in discussion.json:
+///   - The broadcast itself becomes the latch: if the broadcast succeeded
+///     (entry exists on board.jsonl), the scan finds it. If the broadcast
+///     failed (no entry), the scan returns false, next tick retries naturally.
+///   - Eliminates the dual-lock surface (board.lock + discussion.lock) that
+///     dev-challenger:0 msg 1269 #1 flagged against platform-engineer:0 msg
+///     1222 #4. Only board.lock is touched per stall firing.
+///   - Atomicity is by construction — the "silent-swallow" failure mode
+///     dev-challenger:1 msg 1267 described is unexpressible here.
+///   - Naturally clears on stage advance: a new `pipeline_stage_started_at`
+///     moves the scan floor forward past the old warning's timestamp.
+///
+/// Cost: O(messages since stage start). On a long session, board.jsonl may
+/// grow; the reverse scan with early break on timestamp keeps typical ticks
+/// cheap (walk at most a few dozen messages until we cross stage boundary).
+fn pipeline_stall_warning_already_posted(project_dir: &str, started_at_iso: &str, stage: usize) -> bool {
+    let started_unix = chrono_iso_to_unix(started_at_iso).unwrap_or(0);
+    let path = vaak_dir(project_dir)
+        .join("sections")
+        .join(read_active_section(project_dir))
+        .join("board.jsonl");
+    let path = if path.exists() { path } else { vaak_dir(project_dir).join("board.jsonl") };
+    let content = match std::fs::read_to_string(&path) { Ok(s) => s, Err(_) => return false };
+    for line in content.lines().rev() {
+        let msg: serde_json::Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
+        let ts = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let ts_unix = chrono_iso_to_unix(ts).unwrap_or(0);
+        // Board is append-only + timestamped; once we walk past stage-start,
+        // nothing earlier can be a latch for this stage. Break early.
+        if ts_unix < started_unix { break; }
+        let from = msg.get("from").and_then(|v| v.as_str()).unwrap_or("");
+        if from != "system:0" { continue; }
+        let is_stall = msg.get("metadata")
+            .and_then(|m| m.get("pipeline_stall_warning"))
+            .and_then(|v| v.as_bool()) == Some(true);
+        if !is_stall { continue; }
+        let msg_stage = msg.get("metadata")
+            .and_then(|m| m.get("stage"))
+            .and_then(|v| v.as_u64())
+            .map(|s| s as usize);
+        if msg_stage == Some(stage) { return true; }
+    }
+    false
 }
 
 /// Per-stage monotonic anchor for the pipeline stall watchdog. Keyed by the
@@ -342,13 +399,6 @@ fn check_pipeline_stall_warning(project_dir: &str) {
     let started_at_str = match disc.get("pipeline_stage_started_at").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(), None => return,
     };
-    // Dedup latch: if we've already warned for this exact stage-start, skip.
-    // The field clears naturally because every stage advance rewrites
-    // pipeline_stage_started_at to the new utc_now_iso().
-    if disc.get("stall_warning_sent_for").and_then(|v| v.as_str()) == Some(started_at_str.as_str()) {
-        return;
-    }
-
     let pipeline_order = match disc.get("pipeline_order").and_then(|v| v.as_array()) {
         Some(a) => a.clone(), None => return,
     };
@@ -356,6 +406,14 @@ fn check_pipeline_stall_warning(project_dir: &str) {
     let current_role = match pipeline_order.get(current_stage).and_then(|v| v.as_str()) {
         Some(r) => r.to_string(), None => return,
     };
+
+    // Dedup latch: scan board.jsonl for a prior stall-warning broadcast on this
+    // stage. R4 per dev-challenger:0 msg 1275 + manager:0 msg 1274 preference —
+    // the broadcast IS the latch, so atomicity is guaranteed by construction
+    // and we touch only board.lock (not discussion.lock).
+    if pipeline_stall_warning_already_posted(project_dir, &started_at_str, current_stage) {
+        return;
+    }
 
     // Monotonic elapsed: anchor on first observation of this started_at, then
     // measure via Instant::elapsed. Seeding respects any wall-clock time that
@@ -401,11 +459,9 @@ fn check_pipeline_stall_warning(project_dir: &str) {
         }
     });
     let _ = append_to_board(project_dir, &warn_msg);
-
-    // Set the disk latch so future ticks on the same stage skip early.
-    let mut updated = disc.clone();
-    updated["stall_warning_sent_for"] = serde_json::json!(started_at_str);
-    let _ = write_discussion_state(project_dir, &updated);
+    // No second write to discussion.json — the broadcast above IS the dedup
+    // latch. pipeline_stall_warning_already_posted will observe it on the next
+    // tick and short-circuit.
 }
 fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
     let disc = read_discussion_state_raw(project_dir);
@@ -708,6 +764,19 @@ fn read_active_section(project_dir: &str) -> String {
 /// 4. Mirrors the sequence system's `metadata.end_of_turn` — one consistent
 ///    "I'm done" signal across both turn-taking substrates.
 fn is_end_of_stage(metadata: Option<&serde_json::Value>) -> bool {
+    is_end_of_stage_with_logger(metadata, |msg| eprintln!("{}", msg))
+}
+
+/// Inner variant that takes a logger closure so tests can capture the
+/// wrong-type warning message without redirecting process stderr. The public
+/// `is_end_of_stage` delegates here with an `eprintln!` logger; tests supply
+/// a capturing closure. Split per manager:0 msg 1268 to give Item A's Item A
+/// log the same test-level coverage the other 88 tests have — without pulling
+/// in a new crate dependency for stderr interception.
+fn is_end_of_stage_with_logger<F: FnMut(&str)>(
+    metadata: Option<&serde_json::Value>,
+    mut log: F,
+) -> bool {
     match metadata.and_then(|m| m.get("end_of_stage")) {
         Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
         Some(v) => {
@@ -715,7 +784,7 @@ fn is_end_of_stage(metadata: Option<&serde_json::Value>) -> bool {
             // rejects wrong-type flags, but without a log the sender gets no
             // feedback that their `"true"` string / `1` number silently failed.
             // Emit to MCP stderr so the mistype is visible in a tail.
-            eprintln!("[vaak-mcp] end_of_stage metadata present but not bool ({}) — stage will NOT advance", v);
+            log(&format!("[vaak-mcp] end_of_stage metadata present but not bool ({}) — stage will NOT advance", v));
             false
         }
         None => false,
@@ -10778,6 +10847,110 @@ mod tests {
         let lines: Vec<&str> = board_after.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 0,
             "below-threshold stage must not produce a stall warning: {:?}", lines);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn is_end_of_stage_logs_warning_on_wrong_type() {
+        // pr-pipeline-gate-observability follow-up per manager:0 msg 1268:
+        // the Item A eprintln! was tester-blind because stderr isn't visible
+        // from the board-observer seat. Via the logger-closure split, tests
+        // can capture the warning without a stderr crate dep.
+        use std::cell::RefCell;
+        let captured: RefCell<Vec<String>> = RefCell::new(Vec::new());
+
+        // Correct bool true: no warning.
+        let md = serde_json::json!({"end_of_stage": true});
+        let result = super::is_end_of_stage_with_logger(Some(&md), |m| captured.borrow_mut().push(m.to_string()));
+        assert!(result, "bool true must return true");
+        assert!(captured.borrow().is_empty(),
+            "no log should fire on a correctly-typed flag");
+
+        // Wrong type string: warning should fire, predicate returns false.
+        let md_string = serde_json::json!({"end_of_stage": "true"});
+        let result = super::is_end_of_stage_with_logger(Some(&md_string), |m| captured.borrow_mut().push(m.to_string()));
+        assert!(!result, "string 'true' must not advance the stage");
+        let logs = captured.borrow();
+        assert_eq!(logs.len(), 1, "exactly one log line on wrong-type");
+        assert!(logs[0].contains("not bool"),
+            "log must explain the mistype: {}", logs[0]);
+        assert!(logs[0].contains("will NOT advance"),
+            "log must say the stage will not advance: {}", logs[0]);
+        assert!(logs[0].contains("\"true\""),
+            "log must include the offending value for debuggability: {}", logs[0]);
+        drop(logs);
+
+        // Wrong type number: also warns.
+        let md_number = serde_json::json!({"end_of_stage": 1});
+        super::is_end_of_stage_with_logger(Some(&md_number), |m| captured.borrow_mut().push(m.to_string()));
+        assert_eq!(captured.borrow().len(), 2, "second wrong-type call should also log");
+
+        // Absent key: no warning.
+        captured.borrow_mut().clear();
+        let md_absent = serde_json::json!({"other": "field"});
+        super::is_end_of_stage_with_logger(Some(&md_absent), |m| captured.borrow_mut().push(m.to_string()));
+        assert!(captured.borrow().is_empty(),
+            "missing key is not a mistype — no log should fire");
+    }
+
+    #[test]
+    fn pipeline_stall_warn_config_floor_rejects_below_60s() {
+        // Follow-up to dev-challenger:0 msg 1269 #3: the config bound must
+        // reject sub-60s values to prevent misconfiguration from flooding the
+        // board with stall warnings every heartbeat tick.
+        let tmp = std::env::temp_dir().join(format!("vaak-test-stall-cfg-{}", std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+
+        // 1: below floor — must fall back to default.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 1}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()),
+            super::PIPELINE_STALL_WARN_DEFAULT,
+            "1s config must be rejected (< 60s floor); fall back to default");
+
+        // 59: just below floor — must fall back.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 59}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()),
+            super::PIPELINE_STALL_WARN_DEFAULT,
+            "59s config must be rejected (< 60s floor); fall back to default");
+
+        // 60: at floor — must be accepted.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 60}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()), 60,
+            "60s config at floor must be accepted");
+
+        // 900: typical value — accepted.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 900}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()), 900);
+
+        // 86400: at cap — accepted.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 86400}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()), 86400);
+
+        // 86401: above cap — must fall back.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": 86401}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()),
+            super::PIPELINE_STALL_WARN_DEFAULT,
+            "above 24h cap must be rejected");
+
+        // Negative: must fall back.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"pipeline_stall_warn_secs": -100}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()),
+            super::PIPELINE_STALL_WARN_DEFAULT);
+
+        // Missing key: falls back to default.
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{}}"#).unwrap();
+        assert_eq!(super::pipeline_stall_warn_secs(tmp.to_str().unwrap()),
+            super::PIPELINE_STALL_WARN_DEFAULT);
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
