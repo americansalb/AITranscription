@@ -1095,6 +1095,17 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> Result<(
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+// pr-pipeline-sequence-cleanup PR-5 narrative note (2026-04-19):
+// "Pipeline" in the user-facing UI is implemented as a sequence-mode preset.
+// QuickLaunchBar Pipeline pill / gear-icon Start Session modal both write
+// mode="pipeline" to discussion.json. The visual surface (SequenceSessionCard
+// + children) is shared between pipeline and the deprecated sequence path.
+// PR-4 deleted the user-facing Start Sequence button + StartSequenceModal;
+// the only remaining sequence entry point is the MCP discussion_control
+// start_sequence action (programmatic agent calls). All UI-driven turn
+// management goes through pipeline_advance / pipeline_insert_self_next
+// (Tauri commands) which call the helpers below.
+
 /// pr-pipeline-unified-controls PR-3b (2026-04-19): advance the current
 /// pipeline holder by 1 stage. Used by HumanSequenceOverrideBar's "End my turn"
 /// button when the active discussion is in pipeline mode (instead of the

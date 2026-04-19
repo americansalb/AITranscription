@@ -78,6 +78,32 @@ describe("SequenceSessionCard pipeline-mode rendering", () => {
     expect(screen.getByLabelText(/human controls for active sequence/i)).toBeTruthy();
   });
 
+  it("PR-5: shows the auto-advance indicator in pipeline mode", () => {
+    render(
+      <SequenceSessionCard
+        turn={turn()}
+        projectDir="/tmp"
+        availableRoleInstances={[]}
+        isPipelineMode={true}
+      />
+    );
+    expect(screen.getByLabelText(/auto-advance behavior/i)).toBeTruthy();
+    expect(screen.getByText(/auto-advance:/i)).toBeTruthy();
+    expect(screen.getByText(/300s/i)).toBeTruthy();
+  });
+
+  it("PR-5: hides the auto-advance indicator in sequence mode", () => {
+    render(
+      <SequenceSessionCard
+        turn={turn()}
+        projectDir="/tmp"
+        availableRoleInstances={[]}
+        isPipelineMode={false}
+      />
+    );
+    expect(screen.queryByLabelText(/auto-advance behavior/i)).toBeNull();
+  });
+
   it("HIDES ModeratorSequencePanel in pipeline mode", () => {
     render(
       <SequenceSessionCard
