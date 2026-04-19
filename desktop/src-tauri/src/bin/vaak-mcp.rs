@@ -23,31 +23,33 @@ use std::sync::Mutex;
 use vaak_desktop::collab::{self, DiscussionState};
 use vaak_desktop::build_info;
 
-/// Atomic file write. On Windows, writes directly (rename over open files fails).
-/// On Unix, uses tmp+rename for atomicity. All callers use file locking for concurrency.
+/// Atomic file write. Unified across all platforms (pr-mcp-atomic-write-windows,
+/// per platform-engineer:0 msg 451 + manager msg 610).
+///
+/// Pre-fix history: Windows used direct `fs::write` with the rationale "rename
+/// over open files fails." That rationale is incorrect — Rust's `std::fs::rename`
+/// on Windows uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` automatically,
+/// which DOES handle replacing an existing file even when it's open for read.
+/// The original direct-write left a Windows crash window where a partial write
+/// could leave `discussion.json` corrupted, silently disengaging the
+/// sequential-turn gate. Now that the gate is in production this matters.
+///
+/// Post-fix: tmp+rename on every platform. The tmp file is written, fsynced,
+/// then renamed onto the final path atomically. Concurrent readers either
+/// see the old file or the complete new file — never a partial write.
+///
+/// Callers still use file locking for cross-process serialization; this
+/// function only addresses crash-safety of the write itself.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        std::fs::write(path, content)
-            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-        if let Ok(f) = std::fs::File::open(path) {
-            let _ = f.sync_all();
-        }
-        return Ok(());
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, content)
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Ok(f) = std::fs::File::open(&tmp_path) {
+        let _ = f.sync_all();
     }
-
-    #[cfg(not(windows))]
-    {
-        let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, content)
-            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-        if let Ok(f) = std::fs::File::open(&tmp_path) {
-            let _ = f.sync_all();
-        }
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
-        Ok(())
-    }
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("Failed to rename {} -> {}: {}", tmp_path.display(), path.display(), e))?;
+    Ok(())
 }
 
 /// Backend API base URL. Override via VAAK_BACKEND_URL env var; defaults to localhost:19836.
