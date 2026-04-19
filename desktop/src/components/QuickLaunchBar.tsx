@@ -2,12 +2,11 @@ import { useState } from "react";
 import type { DiscussionMode } from "../lib/collabTypes";
 import { getModeColor } from "../utils/roleColors";
 
-/** Discussion formats available in the quick-launch bar.
- *  Pipeline removed — sequential turn-taking lives in Start Sequence (header button).
- *  Launching `mode: "pipeline"` is now rejected by both MCP and Tauri gates. */
+/** Discussion formats available in the quick-launch bar */
 const FORMATS: Array<{ mode: DiscussionMode; label: string; desc: string }> = [
   { mode: "delphi", label: "Delphi", desc: "Blind consensus" },
   { mode: "oxford", label: "Oxford", desc: "Structured debate" },
+  { mode: "pipeline", label: "Pipeline", desc: "Sequential turns" },
   { mode: "red_team" as DiscussionMode, label: "Red Team", desc: "Attack/defend" },
   { mode: "continuous", label: "Continuous", desc: "Ambient review" },
 ];
@@ -35,7 +34,7 @@ interface QuickLaunchBarProps {
  * Hidden when a discussion is already active.
  */
 export function QuickLaunchBar({ discussionActive, launching, onLaunch, onOpenAdvanced }: QuickLaunchBarProps) {
-  const [selectedFormat, setSelectedFormat] = useState<string>("delphi");
+  const [selectedFormat, setSelectedFormat] = useState<string>("pipeline");
   const [topic, setTopic] = useState("");
 
   if (discussionActive) return null;
