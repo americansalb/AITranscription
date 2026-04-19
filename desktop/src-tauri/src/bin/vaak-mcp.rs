@@ -3265,23 +3265,9 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             let mode = mode.ok_or("mode is required for start_discussion")?;
             let topic = topic.ok_or("topic is required for start_discussion")?;
 
-            // Validate mode — only discussion formats, not communication modes.
-            // pr-seq-7-pipeline-removal (2026-04-19): "pipeline" mode removed
-            // per manager msg 608 + human msg 602. Old pipeline mode is the
-            // 30s-auto-skip mechanism the human got burned by; replaced by the
-            // strict-sequential `start_sequence` action (PR-SEQ-1 through -6).
-            // Existing pipeline-related code paths remain as dead code that
-            // only activates when discussion.json already has mode==\"pipeline\";
-            // since this validation now blocks creating new ones, the dead
-            // paths drain naturally as in-flight pipelines close. Direct
-            // human/moderator path forward is `discussion_control action=start_sequence`.
-            if !["delphi", "oxford", "red_team", "continuous"].contains(&mode) {
-                return Err(format!(
-                    "Invalid discussion format '{}'. Must be one of: delphi, oxford, red_team, continuous. \
-                    Pipeline mode is removed — use action=start_sequence for strict-sequential turn-taking. \
-                    (Communication modes 'open'/'directed' are set separately via set_discussion_mode.)",
-                    mode
-                ));
+            // Validate mode — only discussion formats, not communication modes
+            if !["delphi", "oxford", "red_team", "continuous", "pipeline"].contains(&mode) {
+                return Err(format!("Invalid discussion format '{}'. Must be: delphi, oxford, red_team, continuous, pipeline. (Communication modes 'open'/'directed' are set separately via set_discussion_mode.)", mode));
             }
 
             // Check no active discussion
