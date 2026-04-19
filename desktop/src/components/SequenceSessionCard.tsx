@@ -23,12 +23,22 @@ interface Props {
   turn: SequenceTurnState | null | undefined;
   projectDir: string | null;
   availableRoleInstances: ModeratorSequencePanelRosterEntry[];
+  /**
+   * pr-pipeline-unified-controls (PR-3a, 2026-04-19): when the active discussion
+   * is in pipeline mode, render the read-only visualization (banner + queue) but
+   * hide the interactive children (HumanSequenceOverrideBar, PendingTurnRequests,
+   * ModeratorSequencePanel) — those buttons invoke active_sequence-specific Tauri
+   * commands that don't operate on pipeline state. PR-3b will rewire them per
+   * architect msg 974's Option A. Defaults to false (sequence mode behavior).
+   */
+  isPipelineMode?: boolean;
 }
 
 export default function SequenceSessionCard({
   turn,
   projectDir,
   availableRoleInstances,
+  isPipelineMode = false,
 }: Props) {
   if (!turn) return null;
 
@@ -36,13 +46,17 @@ export default function SequenceSessionCard({
     <div className="sequence-session-card" aria-label="Active turn-sequence session">
       <SequenceBanner turn={turn} selfRoleInstance={null} />
       <QueueVisualization turn={turn} />
-      <HumanSequenceOverrideBar turn={turn} projectDir={projectDir} />
-      <PendingTurnRequests turn={turn} projectDir={projectDir} />
-      <ModeratorSequencePanel
-        turn={turn}
-        projectDir={projectDir}
-        availableRoleInstances={availableRoleInstances}
-      />
+      {!isPipelineMode && (
+        <>
+          <HumanSequenceOverrideBar turn={turn} projectDir={projectDir} />
+          <PendingTurnRequests turn={turn} projectDir={projectDir} />
+          <ModeratorSequencePanel
+            turn={turn}
+            projectDir={projectDir}
+            availableRoleInstances={availableRoleInstances}
+          />
+        </>
+      )}
     </div>
   );
 }

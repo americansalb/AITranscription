@@ -1509,8 +1509,35 @@ When multiple instances of this role are active:
 
   useEffect(() => {
     const discussionTurn = (project?.discussion as unknown as { turn?: SequenceTurnState })?.turn ?? null;
-    setSequenceTurn(discussionTurn);
-  }, [project?.discussion]);
+    if (discussionTurn) {
+      setSequenceTurn(discussionTurn);
+      return;
+    }
+    // pr-pipeline-unified-controls PR-3a (2026-04-19): derive a SequenceTurnState
+    // from pipeline_* fields when no active_sequence is present. Renders the
+    // read-only queue visualization (SequenceBanner + QueueVisualization) for
+    // pipeline-mode sessions per human msg 867. Interactive children
+    // (override bar, moderator panel) are hidden via isPipelineMode prop until
+    // PR-3b wires their button handlers to pipeline operations per architect
+    // msg 974 Option A.
+    if (discussionState?.active && discussionState.mode === "pipeline" && discussionState.pipeline_order) {
+      const order = discussionState.pipeline_order;
+      const stage = discussionState.pipeline_stage ?? 0;
+      const derivedTurn: SequenceTurnState = {
+        current_holder: order[stage] ?? null,
+        queue_remaining: order.slice(stage + 1),
+        queue_completed: order.slice(0, stage),
+        started_at: discussionState.started_at ?? "",
+        turn_started_at: (discussionState as unknown as { pipeline_stage_started_at?: string }).pipeline_stage_started_at ?? discussionState.started_at ?? "",
+        initiator: "human:0",
+        topic: discussionState.topic ?? "",
+        paused_for_human: !!discussionState.paused_at,
+      };
+      setSequenceTurn(derivedTurn);
+      return;
+    }
+    setSequenceTurn(null);
+  }, [project?.discussion, discussionState]);
 
   useEffect(() => {
     if (!window.__TAURI__) return;
@@ -4507,6 +4534,7 @@ When multiple instances of this role are active:
                 title: project?.config?.roles?.[s.role]?.title ?? s.role,
               })))
           }
+          isPipelineMode={discussionState?.active && discussionState.mode === "pipeline"}
         />
 
         <PreviousTeamBanner
