@@ -1,7 +1,10 @@
 import { useState } from "react";
 import type { DiscussionState, BoardMessage } from "../lib/collabTypes";
 import { getTerminationStrategy, getAutomationLevel, getAudienceConfig } from "../lib/collabTypes";
-import { PipelineStepper } from "./PipelineStepper";
+// pr-pipeline-discussionpanel-dedupe PR-7: PipelineStepper import removed;
+// pipeline visualization moved to SequenceSessionCard. Component file kept
+// for now to avoid breaking any out-of-tree references; will be deleted in
+// a future cleanup PR after a grep window confirms no callers.
 import { OxfordView } from "./OxfordView";
 import { DelphiView } from "./DelphiView";
 import { RedTeamView } from "./RedTeamView";
@@ -155,36 +158,21 @@ export function DiscussionPanel({
             {modeLabel}
           </span>
 
-          {/* Pipeline sub-mode indicator (Review / Action). "Review" displayed
-              in place of the internal "discussion" pipeline_mode to avoid
-              collision with the top-level session-format terminology. */}
-          {discussionState.mode === "pipeline" && discussionState.pipeline_mode && (
-            <span
-              className="discussion-panel-pipeline-mode"
-              style={{
-                background: discussionState.pipeline_mode === "action" ? "rgba(249, 115, 22, 0.15)" : "rgba(99, 102, 241, 0.15)",
-                color: discussionState.pipeline_mode === "action" ? "#fb923c" : "#818cf8",
-                borderColor: discussionState.pipeline_mode === "action" ? "rgba(249, 115, 22, 0.4)" : "rgba(99, 102, 241, 0.4)",
-              }}
-            >
-              {discussionState.pipeline_mode === "action" ? "Action" : "Review"}
-            </span>
-          )}
+          {/* pr-pipeline-discussionpanel-dedupe (PR-7, 2026-04-19): pipeline
+              sub-mode badge + pipeline turn-info badge removed. Pipeline status
+              is now rendered exclusively via SequenceSessionCard
+              (SequenceBanner + QueueVisualization + auto-advance indicator)
+              per architect msg 1034 + tech-leader msg 1054. Avoids the 2-UI
+              overlap the human reported in msg 1023. */}
 
           {/* Phase badge */}
           <span className={`discussion-panel-phase-badge${discussionState.paused_at ? " discussion-panel-paused" : ""}`}>
             {discussionState.paused_at ? "Paused" : phaseLabel}
           </span>
 
-          {/* Round counter or pipeline turn info */}
-          {discussionState.mode === "pipeline" && discussionState.pipeline_order && discussionState.phase === "pipeline_active" ? (
-            <span className="discussion-panel-turn-info">
-              Turn:{" "}
-              <span style={{ color: getRoleColor((discussionState.pipeline_order[discussionState.pipeline_stage ?? 0] ?? "").split(":")[0]) }}>
-                {discussionState.pipeline_order[discussionState.pipeline_stage ?? 0] ?? "—"}
-              </span>
-            </span>
-          ) : (
+          {/* Round counter (non-pipeline modes only — pipeline shows holder
+              + queue via SequenceSessionCard now). */}
+          {discussionState.mode !== "pipeline" && (
             <span className="discussion-panel-round-info">
               Round {(discussionState.current_round ?? 0) + 1}
               {discussionState.settings?.max_rounds && discussionState.settings.max_rounds < 900 ? ` / ${discussionState.settings.max_rounds}` : ""}
@@ -336,10 +324,13 @@ export function DiscussionPanel({
         </div>
       )}
 
-      {/* Format-specific views */}
-      {discussionState.mode === "pipeline" && (
-        <PipelineStepper discussionState={discussionState} messages={messages} compact />
-      )}
+      {/* Format-specific views.
+          pr-pipeline-discussionpanel-dedupe (PR-7, 2026-04-19): PipelineStepper
+          rendering removed. Pipeline mode's stage-by-stage visualization lives
+          in SequenceSessionCard's QueueVisualization now (renders the same
+          pipeline_order data as a horizontal chip strip with done/current/
+          upcoming states). Eliminates the 2-UI overlap the human reported in
+          msg 1023. */}
       {discussionState.mode === "oxford" && discussionState.oxford_teams && (
         <OxfordView discussionState={discussionState} messages={messages} />
       )}
