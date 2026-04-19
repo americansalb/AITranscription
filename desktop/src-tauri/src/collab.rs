@@ -1095,6 +1095,142 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> Result<(
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+/// pr-seq-tauri-sequence-commands (2026-04-19): start a sequential-turn
+/// sequence. Shared between MCP sidecar (vaak-mcp.rs handle_discussion_control
+/// action=start_sequence) and the Tauri-side discussion_control command —
+/// both call this helper so the two IPC entrypoints can't drift apart, the
+/// same drift class that produced the pipeline-removal gap (msgs 666-708).
+///
+/// Reads discussion.json as raw JSON to preserve the active_sequence subtree
+/// (not modeled in the typed DiscussionState struct). Filters vacant
+/// participants against sessions.json and posts a board announcement.
+///
+/// Caller is responsible for authorization (the MCP path enforces
+/// human/manager/moderator-only via state.role; the Tauri path is human-only
+/// by convention since the UI is the human).
+pub fn start_sequence(
+    dir: &str,
+    topic: &str,
+    goal: Option<&str>,
+    participants: &[String],
+    initiator_label: &str,
+) -> Result<serde_json::Value, String> {
+    if topic.trim().is_empty() {
+        return Err("topic must not be empty".to_string());
+    }
+    if participants.is_empty() {
+        return Err("participants queue must not be empty".to_string());
+    }
+
+    let disc_path = active_discussion_path(dir);
+    let mut existing: serde_json::Value = std::fs::read_to_string(&disc_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if existing.get("active_sequence")
+        .and_then(|s| s.get("active"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err("ERR_SEQUENCE_ALREADY_ACTIVE: end the current sequence before starting another".to_string());
+    }
+
+    let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");
+    let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+    let active_labels: std::collections::HashSet<String> = sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|arr| arr.iter().filter_map(|b| {
+            let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if status != "active" && status != "idle" { return None; }
+            let role = b.get("role").and_then(|r| r.as_str())?;
+            let inst = b.get("instance").and_then(|i| i.as_u64())?;
+            Some(format!("{}:{}", role, inst))
+        }).collect())
+        .unwrap_or_default();
+
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for p in participants {
+        if active_labels.contains(p) || p == "human:0" {
+            kept.push(p.clone());
+        } else {
+            dropped.push(p.clone());
+        }
+    }
+    if kept.is_empty() {
+        return Err("ERR_QUEUE_ALL_VACANT: every participant is vacant, nothing to start".to_string());
+    }
+
+    let first = kept.remove(0);
+    let now = iso_now();
+    existing["active_sequence"] = serde_json::json!({
+        "active": true,
+        "topic": topic,
+        "goal": goal,
+        "initiator": initiator_label,
+        "started_at": now.clone(),
+        "current_holder": first.clone(),
+        "queue_remaining": kept.clone(),
+        "queue_completed": [],
+        "queue_dropped_at_start": dropped.clone(),
+        "turn_started_at": now.clone(),
+        "paused_for_human": false,
+        "mode": "strict-sequential"
+    });
+
+    let content = serde_json::to_string_pretty(&existing)
+        .map_err(|e| format!("serialize discussion state: {}", e))?;
+    atomic_write(&disc_path, content.as_bytes())
+        .map_err(|e| format!("write {}: {}", disc_path.display(), e))?;
+
+    let board_path = active_board_path(dir);
+    let next_id = std::fs::read_to_string(&board_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+        .max()
+        .unwrap_or(0) + 1;
+    let announcement = serde_json::json!({
+        "id": next_id,
+        "from": initiator_label,
+        "to": "all",
+        "type": "moderation",
+        "timestamp": now,
+        "subject": format!("Sequence started: {}", topic),
+        "body": format!("Sequential-turn sequence started. Topic: {}. First holder: {}. Dropped (vacant): {:?}.", topic, first, dropped),
+        "metadata": {
+            "sequence_action": "start",
+            "current_holder": first,
+            "initiator": initiator_label
+        }
+    });
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+        .map_err(|e| format!("open board.jsonl: {}", e))?;
+    let line = serde_json::to_string(&announcement)
+        .map_err(|e| format!("serialize announcement: {}", e))?;
+    writeln!(f, "{}", line)
+        .map_err(|e| format!("write announcement: {}", e))?;
+
+    Ok(serde_json::json!({
+        "status": "sequence_started",
+        "topic": topic,
+        "current_holder": first,
+        "queue_remaining": kept,
+        "dropped": dropped,
+        "announcement_message_id": next_id
+    }))
+}
+
 /// Compact board.jsonl by removing messages older than `max_age_days`.
 /// Keeps the last `min_keep` messages regardless of age to preserve context.
 /// Returns (kept, removed) counts. Uses board lock for safety.
@@ -3977,5 +4113,118 @@ mod tests {
         };
         assert!(matches!(settings.effective_termination(), TerminationStrategy::Unlimited));
         assert_eq!(settings.max_rounds, 999);
+    }
+
+    // ── pr-seq-tauri-sequence-commands: collab::start_sequence helper ──
+    // The shared helper that both vaak-mcp.rs (handle_discussion_control
+    // start_sequence) and main.rs (Tauri discussion_control command) call
+    // into. Tests below pin pure-logic behavior — no IPC layer needed.
+
+    fn fixture_start_sequence(test_name: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir()
+            .join(format!("vaak-test-start-sequence-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        // Sessions: human:0 + dev:0 + tester:0 active; vacant_role:0 not present.
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role": "human", "instance": 0, "status": "active"},
+                {"role": "developer", "instance": 0, "status": "active"},
+                {"role": "tester", "instance": 0, "status": "idle"}
+            ]
+        }"#).expect("sessions");
+        std::fs::write(vaak.join("project.json"), r#"{}"#).expect("project");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        // No discussion.json initially — start_sequence creates it.
+        tmp
+    }
+
+    #[test]
+    fn start_sequence_happy_path_writes_active_sequence() {
+        let tmp = fixture_start_sequence("happy");
+        let dir = tmp.to_str().unwrap();
+        let participants = vec!["human:0".to_string(), "developer:0".to_string(), "tester:0".to_string()];
+        let result = super::start_sequence(dir, "test topic", Some("test goal"), &participants, "human:0");
+        assert!(result.is_ok(), "happy path must succeed; got: {:?}", result);
+        let response = result.unwrap();
+        assert_eq!(response["status"], "sequence_started");
+        assert_eq!(response["current_holder"], "human:0");
+        assert_eq!(response["topic"], "test topic");
+        assert!(response["dropped"].as_array().unwrap().is_empty(),
+            "no participants should be dropped (all are active)");
+
+        // Verify discussion.json now contains active_sequence with the right shape.
+        let disc_path = active_discussion_path(dir);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&disc_path).expect("discussion.json should exist")
+        ).expect("discussion.json should parse");
+        let seq = &disc["active_sequence"];
+        assert_eq!(seq["active"], true);
+        assert_eq!(seq["topic"], "test topic");
+        assert_eq!(seq["goal"], "test goal");
+        assert_eq!(seq["initiator"], "human:0");
+        assert_eq!(seq["current_holder"], "human:0");
+        assert_eq!(seq["mode"], "strict-sequential");
+        assert_eq!(seq["queue_remaining"].as_array().unwrap().len(), 2);
+        assert_eq!(seq["paused_for_human"], false);
+
+        // Verify announcement was appended to board.jsonl.
+        let board_path = active_board_path(dir);
+        let board = std::fs::read_to_string(&board_path).expect("board.jsonl should exist");
+        assert!(board.contains("Sequence started"),
+            "board should contain announcement; got: {}", board);
+        assert!(board.contains(r#""sequence_action":"start""#),
+            "board should contain sequence_action metadata; got: {}", board);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn start_sequence_rejects_when_already_active() {
+        let tmp = fixture_start_sequence("already-active");
+        let dir = tmp.to_str().unwrap();
+        let participants = vec!["human:0".to_string(), "developer:0".to_string()];
+
+        // First start: succeeds.
+        super::start_sequence(dir, "first topic", None, &participants, "human:0")
+            .expect("first start should succeed");
+
+        // Second start: must fail with ALREADY_ACTIVE.
+        let result = super::start_sequence(dir, "second topic", None, &participants, "human:0");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("ERR_SEQUENCE_ALREADY_ACTIVE"),
+            "second start should fail with ALREADY_ACTIVE; got: {}", err);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn start_sequence_filters_vacant_participants() {
+        let tmp = fixture_start_sequence("filter-vacant");
+        let dir = tmp.to_str().unwrap();
+        // Mix of active (human:0, developer:0) and vacant (vacant_role:99).
+        let participants = vec![
+            "human:0".to_string(),
+            "vacant_role:99".to_string(),
+            "developer:0".to_string(),
+        ];
+        let result = super::start_sequence(dir, "filter test", None, &participants, "human:0")
+            .expect("filtering should succeed");
+        let dropped: Vec<&str> = result["dropped"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(dropped, vec!["vacant_role:99"], "only vacant_role:99 should be dropped");
+        assert_eq!(result["current_holder"], "human:0");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn start_sequence_rejects_empty_participants() {
+        let tmp = fixture_start_sequence("empty");
+        let dir = tmp.to_str().unwrap();
+        let result = super::start_sequence(dir, "topic", None, &[], "human:0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("participants queue must not be empty"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

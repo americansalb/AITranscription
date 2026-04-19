@@ -3874,6 +3874,42 @@ fn start_session(
     start_discussion(dir, mode, topic, moderator, participants, rounds, pipeline_mode)
 }
 
+/// pr-seq-tauri-sequence-commands (2026-04-19): UI bridge for sequence
+/// actions. Mirrors the MCP-side `discussion_control` tool surface so the
+/// UI can use a single command name across both IPC layers. Currently
+/// bridges only `start_sequence` (the action StartSequenceModal needs to
+/// stop hitting "Command discussion_control not found" — see human msg
+/// 716). Other actions (pass_turn, end_sequence, etc.) will be bridged
+/// in follow-up PRs, one helper per action per architect msg 730.
+///
+/// The Tauri caller is the human (the UI is a human-only surface), so
+/// the initiator label is hardcoded "human:0". The MCP-side handler
+/// enforces role-based authorization via state.role; the Tauri-side
+/// equivalent is "you can only get here from a human-clicked button."
+#[tauri::command]
+fn discussion_control(
+    dir: String,
+    action: String,
+    topic: Option<String>,
+    goal: Option<String>,
+    participants: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    match action.as_str() {
+        "start_sequence" => {
+            let topic = topic.ok_or_else(|| "topic is required for start_sequence".to_string())?;
+            let participants = participants.ok_or_else(|| "participants is required for start_sequence".to_string())?;
+            collab::start_sequence(&dir, &topic, goal.as_deref(), &participants, "human:0")
+        }
+        other => Err(format!(
+            "Tauri discussion_control: action '{}' is not yet bridged to the UI. \
+            Currently bridged: start_sequence. Other actions (pass_turn, end_sequence, \
+            pause_sequence, resume_sequence, assign_turn, reorder_queue, insert_role, \
+            remove_role) still go through the MCP sidecar and must be invoked by an agent.",
+            other
+        )),
+    }
+}
+
 #[tauri::command]
 fn close_session_round(dir: String) -> Result<String, String> {
     close_discussion_round(dir)
@@ -5622,6 +5658,8 @@ fn main() {
             resume_session,
             update_session_settings,
             get_session_state,
+            // pr-seq-tauri-sequence-commands: UI bridge to sequence actions
+            discussion_control,
             delete_message,
             clear_all_messages,
             set_message_retention,
@@ -6335,5 +6373,108 @@ mod tests {
             assert!(name.contains("vaak-mcp"), "sidecar should contain 'vaak-mcp' in name");
         }
         // If None, that's also valid — sidecar may not be built
+    }
+
+    // ── pr-seq-tauri-sequence-commands integration test ────────────────
+    // Bridges human msg 716 ("Command discussion_control not found"). The
+    // failure mode was that the StartSequenceModal called the Tauri command
+    // `discussion_control` which had never been registered. This test
+    // exercises the actual Tauri command function (not a mocked invoke) and
+    // asserts that the start_sequence action writes discussion.json
+    // correctly. If the command is dropped from invoke_handler! again, the
+    // companion command-registration parity test (tester:1 lane) catches it.
+
+    fn fixture_for_discussion_control(test_name: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir()
+            .join(format!("vaak-test-discussion-control-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("sessions.json"), r#"{
+            "bindings": [
+                {"role": "human", "instance": 0, "status": "active"},
+                {"role": "developer", "instance": 0, "status": "active"}
+            ]
+        }"#).expect("sessions");
+        std::fs::write(vaak.join("project.json"), r#"{}"#).expect("project");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        tmp
+    }
+
+    #[test]
+    fn discussion_control_start_sequence_writes_active_sequence() {
+        let tmp = fixture_for_discussion_control("start-seq");
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::discussion_control(
+            dir.clone(),
+            "start_sequence".to_string(),
+            Some("ui-test topic".to_string()),
+            Some("ui-test goal".to_string()),
+            Some(vec!["human:0".to_string(), "developer:0".to_string()]),
+        );
+        assert!(result.is_ok(), "Tauri discussion_control(start_sequence) must succeed; got: {:?}", result);
+        let response = result.unwrap();
+        assert_eq!(response["status"], "sequence_started");
+        assert_eq!(response["current_holder"], "human:0");
+        assert_eq!(response["topic"], "ui-test topic");
+
+        // Confirm discussion.json on disk has the active_sequence subtree.
+        let disc_path = vaak_desktop::collab::active_discussion_path(&dir);
+        let disc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&disc_path).expect("discussion.json should exist")
+        ).expect("discussion.json should parse");
+        assert_eq!(disc["active_sequence"]["active"], true);
+        assert_eq!(disc["active_sequence"]["initiator"], "human:0",
+            "Tauri caller is the human; initiator must be human:0");
+        assert_eq!(disc["active_sequence"]["goal"], "ui-test goal",
+            "goal must thread through (MCP path drops it; UI path preserves it)");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discussion_control_rejects_unbridged_actions_with_clear_message() {
+        let tmp = fixture_for_discussion_control("unbridged");
+        let dir = tmp.to_str().unwrap().to_string();
+        let result = super::discussion_control(
+            dir,
+            "pass_turn".to_string(),
+            None,
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("not yet bridged"),
+            "unbridged action must say so; got: {}", err);
+        assert!(err.contains("start_sequence"),
+            "error must list what IS bridged; got: {}", err);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn discussion_control_start_sequence_requires_topic_and_participants() {
+        let tmp = fixture_for_discussion_control("missing-args");
+        let dir = tmp.to_str().unwrap().to_string();
+        // Missing topic.
+        let result = super::discussion_control(
+            dir.clone(),
+            "start_sequence".to_string(),
+            None,
+            None,
+            Some(vec!["human:0".to_string()]),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("topic is required"));
+        // Missing participants.
+        let result = super::discussion_control(
+            dir,
+            "start_sequence".to_string(),
+            Some("topic".to_string()),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("participants is required"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

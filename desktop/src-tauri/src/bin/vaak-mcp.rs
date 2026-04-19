@@ -4189,73 +4189,20 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             }
             let topic = topic.ok_or("topic is required for start_sequence")?;
             let participant_list = participants.ok_or("participants (queue) required for start_sequence")?;
-            if participant_list.is_empty() {
-                return Err("participants queue must not be empty".to_string());
-            }
-            let existing = read_discussion_state(&state.project_dir);
-            if existing.get("active_sequence").and_then(|s| s.get("active")).and_then(|v| v.as_bool()).unwrap_or(false) {
-                return Err("ERR_SEQUENCE_ALREADY_ACTIVE: end the current sequence before starting another".to_string());
-            }
-            // Filter out vacant roles (not in sessions.json as active/idle) — keep audit trail.
-            let sessions = read_sessions(&state.project_dir);
-            let active_labels: std::collections::HashSet<String> = sessions.get("bindings")
-                .and_then(|b| b.as_array())
-                .map(|arr| arr.iter().filter_map(|b| {
-                    let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                    if status != "active" && status != "idle" { return None; }
-                    let role = b.get("role").and_then(|r| r.as_str())?;
-                    let inst = b.get("instance").and_then(|i| i.as_u64())?;
-                    Some(format!("{}:{}", role, inst))
-                }).collect())
-                .unwrap_or_default();
-            let mut kept: Vec<String> = Vec::new();
-            let mut dropped: Vec<String> = Vec::new();
-            for p in &participant_list {
-                if active_labels.contains(p) || p == "human:0" {
-                    kept.push(p.clone());
-                } else {
-                    dropped.push(p.clone());
-                }
-            }
-            if kept.is_empty() {
-                return Err("ERR_QUEUE_ALL_VACANT: every participant is vacant, nothing to start".to_string());
-            }
-            let first = kept.remove(0);
-            let now = utc_now_iso();
-            let mut updated = existing.clone();
-            updated["active_sequence"] = serde_json::json!({
-                "active": true,
-                "topic": topic,
-                "goal": serde_json::Value::Null,
-                "initiator": my_label.clone(),
-                "started_at": now.clone(),
-                "current_holder": first.clone(),
-                "queue_remaining": kept,
-                "queue_completed": serde_json::json!([]),
-                "queue_dropped_at_start": dropped.clone(),
-                "turn_started_at": now.clone(),
-                "paused_for_human": false,
-                "mode": "strict-sequential"
-            });
-            write_discussion_state(&state.project_dir, &updated)?;
-            let msg_id = next_message_id(&state.project_dir);
-            let announcement = serde_json::json!({
-                "id": msg_id,
-                "from": my_label.clone(),
-                "to": "all",
-                "type": "moderation",
-                "timestamp": now.clone(),
-                "subject": format!("Sequence started: {}", topic),
-                "body": format!("Sequential-turn sequence started. Topic: {}. First holder: {}. Dropped (vacant): {:?}.", topic, first, dropped),
-                "metadata": {
-                    "sequence_action": "start",
-                    "current_holder": first,
-                    "initiator": my_label
-                }
-            });
-            append_to_board(&state.project_dir, &announcement)?;
+            // pr-seq-tauri-sequence-commands (2026-04-19): the heavy lifting
+            // (validation, vacant-filter, write, board announce) lives in
+            // collab::start_sequence so the Tauri command path uses the same
+            // implementation. This avoids the IPC-entrypoint drift that
+            // produced the pipeline-removal gap.
+            let result = collab::start_sequence(
+                &state.project_dir,
+                topic,
+                None,
+                &participant_list,
+                &my_label,
+            )?;
             notify_desktop();
-            Ok(serde_json::json!({"status": "sequence_started", "topic": topic, "dropped": dropped}))
+            Ok(result)
         }
 
         "pass_turn" => {
