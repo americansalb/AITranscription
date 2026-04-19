@@ -3418,7 +3418,7 @@ When multiple instances of this role are active:
         <QuickLaunchBar
           discussionActive={!!discussionState?.active}
           launching={sdStarting}
-          onLaunch={async (format, topic) => {
+          onLaunch={async (format, topic, rounds) => {
             // Quick-launch: auto-include all active participants, then start directly
             setSdStarting(true);
             try {
@@ -3431,8 +3431,13 @@ When multiple instances of this role are active:
                   : topic;
                 const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
                 const moderator = modSession ? `moderator:${modSession.instance}` : undefined;
+                // pr-pipeline-safe-stall: thread the QuickLaunchBar's rounds choice
+                // into start_session. "unlimited" sends null which triggers backend
+                // default (Unlimited termination). Numeric values send as int per the
+                // start_session signature.
+                const roundsArg = format === "pipeline" && rounds && rounds !== "unlimited" ? parseInt(rounds) : null;
                 try {
-                  await invoke("start_session", { dir: projectDir, mode: format, topic: effectiveTopic, moderator, participants });
+                  await invoke("start_session", { dir: projectDir, mode: format, topic: effectiveTopic, moderator, participants, rounds: roundsArg });
                 } catch (e) {
                   console.warn("[QuickLaunch] start_session error (will post announcement):", e);
                 }

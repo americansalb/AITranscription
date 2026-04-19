@@ -271,10 +271,16 @@ pub(crate) fn check_sequence_stall_and_notify(project_dir: &str) {
 /// being notified, force-advance past them. Prevents the "1hr silent agent
 /// stalls everyone" failure mode the human flagged in msg 1111.
 ///
-/// Timeout source: project.json > settings > pipeline_ack_timeout_secs (default 30).
+/// Timeout source: project.json > settings > pipeline_ack_timeout_secs (default 300).
 /// Tester msg 1136 flagged that 30s is aggressive for stages that take minutes
 /// to compose (e.g. an 8000-word architect output). Per-project tunable.
-const PIPELINE_ACK_TIMEOUT_DEFAULT: i64 = 30;
+///
+/// pr-pipeline-safe-stall (2026-04-19): bumped default 30 -> 300 per architect
+/// msg 905 + dev-challenger msg 928. The 30s default was the "destructive auto-skip"
+/// the human kept hitting in 4 of 5 pipelines today (skip rates: 42%, 30%, 75%,
+/// 17%). Substantive adversarial review takes minutes, not seconds. Sequence
+/// uses 300s non-destructive notification; pipeline now matches.
+const PIPELINE_ACK_TIMEOUT_DEFAULT: i64 = 300;
 fn pipeline_ack_timeout_secs(project_dir: &str) -> i64 {
     std::fs::read_to_string(project_json_path(project_dir)).ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -291,9 +297,6 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
         Some(s) => s, None => return,
     };
     let started_at = match chrono_iso_to_unix(started_at_str) { Some(t) => t, None => return };
-    let elapsed = utc_now_unix() - started_at;
-    let timeout = pipeline_ack_timeout_secs(project_dir);
-    if elapsed < timeout { return; }
     let pipeline_order = match disc.get("pipeline_order").and_then(|v| v.as_array()) {
         Some(a) => a.clone(), None => return,
     };
@@ -301,35 +304,111 @@ fn check_pipeline_ack_timeout_and_skip(project_dir: &str) {
     let current_role = match pipeline_order.get(current_stage).and_then(|v| v.as_str()) {
         Some(r) => r.to_string(), None => return,
     };
+    let elapsed = utc_now_unix() - started_at;
+    let timeout = pipeline_ack_timeout_secs(project_dir);
+
+    // pr-pipeline-safe-stall (2026-04-19): disconnect-vs-silence gap fix per
+    // dev-challenger msg 928 + tech-leader msg 947 + platform-engineer msg 944.
+    // Background: in the "Fix everything" pipeline today, architect:0 disconnected
+    // and the pipeline stalled 5 min with no auto-skip because the watchdog only
+    // checked silence-since-started. A disconnected holder should be skipped
+    // immediately (no 300s wait) — there's no agent to wait for. The session
+    // status comes from sessions.json which sweeper-marks idle/disconnected on
+    // heartbeat staleness.
+    let sessions = read_sessions(project_dir);
+    let holder_session_status = sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|b| {
+                let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                format!("{}:{}", role, inst) == current_role
+            })
+        })
+        .and_then(|b| b.get("status").and_then(|s| s.as_str()))
+        .unwrap_or("");
+    let holder_disconnected = holder_session_status == "disconnected"
+        || holder_session_status == "gone"
+        || holder_session_status == "";
+    let bypass_silence_for_disconnect = holder_disconnected && elapsed >= 30;
+    if elapsed < timeout && !bypass_silence_for_disconnect { return; }
     if board_has_message_from_since(project_dir, &current_role, started_at_str) { return; }
-    // Force-advance past the silent role.
+
+    // Force-advance past the silent (or disconnected) role.
+    let skip_reason = if bypass_silence_for_disconnect {
+        format!("session disconnected (no holder to wait for)")
+    } else {
+        format!("did not respond within {}s", timeout)
+    };
     let next_stage = current_stage + 1;
     let mut updated = disc.clone();
+
     if next_stage >= pipeline_order.len() {
-        // End of round — skipped role was the last. Loop or complete handled by the
-        // next broadcast path; for the watchdog, just bump stage and post a system msg.
-        updated["pipeline_stage"] = serde_json::json!(next_stage);
-        updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
-    } else {
-        updated["pipeline_stage"] = serde_json::json!(next_stage);
-        updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
+        // pr-pipeline-safe-stall (2026-04-19): multi-round loop fix per human
+        // msg 961 ("who said it was only doing 1 round i had nowhere to set it")
+        // + tech-leader msg 963. The natural-advance path at vaak-mcp.rs:5817
+        // already implements this loop; the auto-skip path was missing it. Bring
+        // the same termination logic over so the Rounds setting actually works.
+        let typed_disc = read_discussion_typed(project_dir);
+        let termination = typed_disc.settings.effective_termination();
+        let current_round = updated.get("current_round").and_then(|v| v.as_u64()).unwrap_or(0);
+        let should_loop = match &termination {
+            vaak_desktop::collab::TerminationStrategy::FixedRounds { rounds } => current_round + 1 < *rounds as u64,
+            vaak_desktop::collab::TerminationStrategy::Unlimited => true,
+            vaak_desktop::collab::TerminationStrategy::Consensus { .. } => true,
+            vaak_desktop::collab::TerminationStrategy::ModeratorCall => true,
+            vaak_desktop::collab::TerminationStrategy::TimeBound { .. } => true,
+        };
+        if should_loop {
+            let next_round = current_round + 1;
+            updated["pipeline_stage"] = serde_json::json!(0);
+            updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
+            updated["current_round"] = serde_json::json!(next_round);
+            let _ = write_discussion_state(project_dir, &updated);
+            post_turn_system_message(project_dir,
+                &format!("{} {} — pipeline auto-advanced (skipped). Round {} complete; starting round {}.",
+                    current_role, skip_reason, current_round + 1, next_round + 1));
+            // Wake the first agent of the new round.
+            let first_agent = pipeline_order.first().and_then(|v| v.as_str()).unwrap_or("?");
+            let wake_msg = serde_json::json!({
+                "id": next_message_id(project_dir),
+                "from": "system:0",
+                "to": first_agent,
+                "type": "system",
+                "subject": "Your pipeline stage",
+                "body": format!("Round {} has started. It is now your turn in the pipeline (stage 1/{}). Previous round closed by auto-skip on {}.", next_round + 1, pipeline_order.len(), current_role),
+                "timestamp": utc_now_iso(),
+                "metadata": {"pipeline_notification": true, "round_started": next_round + 1}
+            });
+            let _ = append_to_board(project_dir, &wake_msg);
+            return;
+        }
+        // Termination reached (FixedRounds limit hit) — close the pipeline.
+        updated["active"] = serde_json::json!(false);
+        updated["phase"] = serde_json::json!("pipeline_complete");
+        updated["terminated_by"] = serde_json::json!("max_rounds_reached");
+        let _ = write_discussion_state(project_dir, &updated);
+        post_turn_system_message(project_dir,
+            &format!("Pipeline ended: {} {} on the final stage of the final round.", current_role, skip_reason));
+        return;
     }
+
+    updated["pipeline_stage"] = serde_json::json!(next_stage);
+    updated["pipeline_stage_started_at"] = serde_json::json!(utc_now_iso());
     let _ = write_discussion_state(project_dir, &updated);
-    post_turn_system_message(project_dir, &format!("{} did not respond within {}s — pipeline auto-advanced (skipped)", current_role, timeout));
-    if next_stage < pipeline_order.len() {
-        let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
-        let wake_msg = serde_json::json!({
-            "id": next_message_id(project_dir),
-            "from": "system:0",
-            "to": next_agent,
-            "type": "system",
-            "subject": "Your pipeline stage",
-            "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped after {}s no response.", next_stage + 1, pipeline_order.len(), timeout),
-            "timestamp": utc_now_iso(),
-            "metadata": {"pipeline_notification": true, "auto_skip_predecessor": current_role}
-        });
-        let _ = append_to_board(project_dir, &wake_msg);
-    }
+    post_turn_system_message(project_dir, &format!("{} {} — pipeline auto-advanced (skipped)", current_role, skip_reason));
+    let next_agent = pipeline_order.get(next_stage).and_then(|v| v.as_str()).unwrap_or("?");
+    let wake_msg = serde_json::json!({
+        "id": next_message_id(project_dir),
+        "from": "system:0",
+        "to": next_agent,
+        "type": "system",
+        "subject": "Your pipeline stage",
+        "body": format!("It is now your turn in the pipeline (stage {}/{}). Previous role was auto-skipped: {}.", next_stage + 1, pipeline_order.len(), skip_reason),
+        "timestamp": utc_now_iso(),
+        "metadata": {"pipeline_notification": true, "auto_skip_predecessor": current_role}
+    });
+    let _ = append_to_board(project_dir, &wake_msg);
 }
 
 /// Pure-function gate check for the sequential-turn mechanism. Returns Ok(())
@@ -10140,4 +10219,193 @@ mod tests {
         let dec2 = decide_sequence_stall(&disc, base_unix() + 20, 30);
         assert!(matches!(dec2, StallDecision::NotYetElapsed { elapsed_secs: 20 }));
     }
+
+    // ── pr-pipeline-safe-stall (PR-2) tests ────────────────────────────
+    // Per human msg 961 ("who said it was only doing 1 round i had nowhere
+    // to set it") + tech-leader msg 963 + dev-challenger msg 928. The
+    // auto-skip path now (a) honors Rounds settings and loops, and (b)
+    // skips disconnected holders without waiting for the silence timeout.
+
+    fn fixture_for_pipeline_stall(test_name: &str, disc_json: &str, sessions_json: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir()
+            .join(format!("vaak-test-pipeline-stall-{}-{}", test_name, std::process::id()));
+        let vaak = tmp.join(".vaak");
+        let _ = std::fs::create_dir_all(&vaak);
+        std::fs::write(vaak.join("project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600,"pipeline_ack_timeout_secs":1}}"#).expect("project");
+        std::fs::write(vaak.join("discussion.json"), disc_json).expect("disc");
+        std::fs::write(vaak.join("sessions.json"), sessions_json).expect("sess");
+        std::fs::write(vaak.join("board.jsonl"), "").expect("board");
+        tmp
+    }
+
+    #[test]
+    fn pipeline_auto_skip_loops_to_round_2_when_max_rounds_allows() {
+        // Last stage of round 1 of 3 expires. Watchdog should reset to stage 0
+        // and bump current_round to 1 (zero-indexed: round 2 of 3).
+        // Pre-PR-2 behavior: pipeline ended after one pass.
+        let started_at = "2020-01-01T00:00:00Z"; // far in the past -> guaranteed timeout
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["dev:0", "tester:0"],
+            "pipeline_stage": 1,
+            "pipeline_stage_started_at": "{}",
+            "current_round": 0,
+            "settings": {{
+                "termination": {{ "type": "fixed_rounds", "rounds": 3 }},
+                "max_rounds": 3,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{
+            "bindings": [
+                {"role": "dev", "instance": 0, "status": "active"},
+                {"role": "tester", "instance": 0, "status": "active"}
+            ]
+        }"#;
+        let tmp = fixture_for_pipeline_stall("loop-round2", &disc, sessions);
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_ack_timeout_and_skip(dir);
+
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["pipeline_stage"], 0,
+            "after final stage of round 1, stage should reset to 0 for round 2");
+        assert_eq!(after["current_round"], 1, "current_round should advance from 0 to 1");
+        assert_eq!(after["active"], true, "pipeline must remain active");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_auto_skip_ends_when_max_rounds_exhausted() {
+        // Last stage of round 3 of 3 expires. Watchdog should END the pipeline.
+        let started_at = "2020-01-01T00:00:00Z";
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["dev:0", "tester:0"],
+            "pipeline_stage": 1,
+            "pipeline_stage_started_at": "{}",
+            "current_round": 2,
+            "settings": {{
+                "termination": {{ "type": "fixed_rounds", "rounds": 3 }},
+                "max_rounds": 3,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{
+            "bindings": [
+                {"role": "dev", "instance": 0, "status": "active"},
+                {"role": "tester", "instance": 0, "status": "active"}
+            ]
+        }"#;
+        let tmp = fixture_for_pipeline_stall("end-after-max", &disc, sessions);
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_ack_timeout_and_skip(dir);
+
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["active"], false,
+            "pipeline must end when max_rounds reached + final stage skipped");
+        assert_eq!(after["terminated_by"], "max_rounds_reached");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pipeline_auto_skip_immediate_when_holder_disconnected() {
+        // Disconnected holder: skip immediately (after 30s grace) instead of
+        // waiting the full pipeline_ack_timeout. Closes the disconnect-vs-silence
+        // gap that stalled the pipeline 5 min today when architect:0's session
+        // dropped.
+        let started_at_recent = utc_now_iso(); // freshly started (no silence yet)
+        let _started_at_recent_borrow = &started_at_recent;
+        // Use a timestamp ~60s in the past — well under the 300s default but
+        // well over the 30s disconnect-grace.
+        let started_at = {
+            // Subtract 60 seconds from now using the existing iso helpers.
+            let now = utc_now_unix();
+            let past = now - 60;
+            // Crude ISO format inverse — match utc_now_iso shape.
+            unix_to_iso(past)
+        };
+        let disc = format!(r#"{{
+            "active": true,
+            "mode": "pipeline",
+            "pipeline_order": ["ghost:0", "willing:0"],
+            "pipeline_stage": 0,
+            "pipeline_stage_started_at": "{}",
+            "current_round": 0,
+            "settings": {{
+                "termination": {{ "type": "unlimited" }},
+                "max_rounds": 999,
+                "auto_close_timeout_seconds": 30,
+                "expire_paused_after_minutes": 60,
+                "timeout_minutes": 15
+            }}
+        }}"#, started_at);
+        let sessions = r#"{
+            "bindings": [
+                {"role": "ghost", "instance": 0, "status": "disconnected"},
+                {"role": "willing", "instance": 0, "status": "active"}
+            ]
+        }"#;
+        let tmp = fixture_for_pipeline_stall("disconnect-skip", &disc, sessions);
+        // Use the longer pipeline_ack_timeout so we KNOW the skip was triggered
+        // by disconnect-detection, not the silence timeout.
+        std::fs::write(tmp.join(".vaak/project.json"),
+            r#"{"settings":{"heartbeat_timeout_seconds":3600,"pipeline_ack_timeout_secs":3600}}"#)
+            .expect("update project");
+        let dir = tmp.to_str().unwrap();
+
+        super::check_pipeline_ack_timeout_and_skip(dir);
+
+        let after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".vaak/discussion.json")).unwrap()
+        ).unwrap();
+        assert_eq!(after["pipeline_stage"], 1,
+            "disconnected holder should be skipped immediately (advanced past stage 0)");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// Helper for tests: convert a unix timestamp back to ISO 8601 UTC.
+/// Mirrors utc_now_iso's format. Used by pr-pipeline-safe-stall tests
+/// to fabricate "60 seconds ago" started_at timestamps.
+#[cfg(test)]
+fn unix_to_iso(secs: i64) -> String {
+    // Reuse the same encoding logic as utc_now_iso (seconds-since-epoch -> ISO).
+    let total_secs = secs as u64;
+    let s = total_secs % 60;
+    let total_min = total_secs / 60;
+    let m = total_min % 60;
+    let total_hr = total_min / 60;
+    let h = total_hr % 24;
+    let total_days = total_hr / 24;
+    // Convert days-since-epoch (1970-01-01) to (year, month, day).
+    let mut year = 1970u64;
+    let mut days = total_days;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let year_days = if leap { 366 } else { 365 };
+        if days < year_days { break; }
+        days -= year_days;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0u64;
+    while month < 12 && days >= month_days[month as usize] {
+        days -= month_days[month as usize];
+        month += 1;
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month + 1, days + 1, h, m, s)
 }

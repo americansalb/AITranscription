@@ -16,8 +16,10 @@ interface QuickLaunchBarProps {
   discussionActive: boolean;
   /** Whether the launch is in progress */
   launching: boolean;
-  /** Callback to start a discussion with the given format and topic */
-  onLaunch: (format: string, topic: string) => void;
+  /** Callback to start a discussion with the given format and topic.
+   *  rounds: number of rounds for pipeline mode ("unlimited" or "1"/"3"/"5"/"10").
+   *  Ignored by non-pipeline formats. */
+  onLaunch: (format: string, topic: string, rounds?: string) => void;
   /** Callback to open the full advanced settings dialog */
   onOpenAdvanced: () => void;
 }
@@ -36,6 +38,11 @@ interface QuickLaunchBarProps {
 export function QuickLaunchBar({ discussionActive, launching, onLaunch, onOpenAdvanced }: QuickLaunchBarProps) {
   const [selectedFormat, setSelectedFormat] = useState<string>("pipeline");
   const [topic, setTopic] = useState("");
+  // pr-pipeline-safe-stall: surface Rounds inline. Per human msg 961 ("who said
+  // it was only doing 1 round i had nowhere to set it"). Was previously hidden
+  // behind the gear-icon advanced settings; now visible whenever Pipeline format
+  // is selected. Defaults to "5" matching the gear-icon modal default.
+  const [pipelineRounds, setPipelineRounds] = useState<string>("5");
 
   if (discussionActive) return null;
 
@@ -43,7 +50,7 @@ export function QuickLaunchBar({ discussionActive, launching, onLaunch, onOpenAd
 
   const handleGo = () => {
     if (!canLaunch) return;
-    onLaunch(selectedFormat, topic.trim());
+    onLaunch(selectedFormat, topic.trim(), selectedFormat === "pipeline" ? pipelineRounds : undefined);
     setTopic("");
   };
 
@@ -94,6 +101,29 @@ export function QuickLaunchBar({ discussionActive, launching, onLaunch, onOpenAd
           );
         })}
       </div>
+
+      {/* Pipeline rounds selector — only visible when Pipeline is selected */}
+      {selectedFormat === "pipeline" && (
+        <label
+          className="quick-launch-rounds"
+          aria-label="Number of pipeline rounds"
+          style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "12px", color: "#8899a6" }}
+        >
+          <span>Rounds:</span>
+          <select
+            value={pipelineRounds}
+            onChange={(e) => setPipelineRounds(e.target.value)}
+            disabled={launching}
+            style={{ padding: "2px 6px", fontSize: "12px" }}
+          >
+            <option value="1">1</option>
+            <option value="3">3</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="unlimited">Unlimited</option>
+          </select>
+        </label>
+      )}
 
       {/* Go button */}
       <button
