@@ -4,6 +4,7 @@
 mod a11y;
 mod audio;
 mod collab;
+mod collab_v2;
 mod database;
 mod keyboard_hook;
 mod launcher;
@@ -4377,6 +4378,20 @@ fn main() {
                 log_error("[setup] Screen reader ask hotkey Alt+A registered");
             }
 
+            // Collaborate v2: close button hides instead of destroying the window,
+            // so the launcher button in App.tsx can reopen it.
+            // Per §20 of COLLABORATE_V2_SPEC.html: "Closing main does not close
+            // Collaborate and vice versa. Window state persists across app restarts."
+            if let Some(cv2_window) = app.get_webview_window("collaborate-v2") {
+                let cv2_clone = cv2_window.clone();
+                cv2_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = cv2_clone.hide();
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4478,6 +4493,11 @@ fn main() {
             launcher::check_homebrew_installed,
             launcher::install_nodejs,
             launcher::install_claude_cli,
+            // Collaborate v2 commands (P1: standalone window + static roster)
+            collab_v2::show_collaborate_v2_window,
+            collab_v2::toggle_collaborate_v2_window,
+            collab_v2::hide_collaborate_v2_window,
+            collab_v2::get_v2_seats,
         ]);
 
     match builder.build(tauri::generate_context!()) {

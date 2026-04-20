@@ -1042,6 +1042,17 @@ function App() {
             <SunIcon />
             <span className="claude-btn-label">Claude</span>
           </button>
+          <button
+            className="claude-integration-btn"
+            title="Collaborate v2 (P1 shell)"
+            aria-label="Open Collaborate v2 window"
+            onClick={async () => {
+              const { invoke } = await import("@tauri-apps/api/core");
+              await invoke("toggle_collaborate_v2_window");
+            }}
+          >
+            <span className="claude-btn-label">Collaborate ✨</span>
+          </button>
           <button className="settings-btn" title="Settings" aria-label="Open settings" onClick={() => setShowSettings(true)}>
             <GearIcon />
           </button>
