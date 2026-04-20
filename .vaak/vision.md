@@ -1,6 +1,6 @@
 # Vaak - Architectural Vision
 
-**Last Updated:** 2026-02-24
+**Last Updated:** 2026-04-19
 **Architect:** Claude (Architect role, instance 0)
 
 ---
@@ -490,6 +490,55 @@ PRs land in this order:
 5. **PR H2** (Full moderator toolbar: reorder/jump/pause/end/speak-OOT/human-bridge) — UX, ~1-2 days, after PR M
 
 Parity contract (`.vaak/specs/pipeline-parity.md`) scoped to the surface of these 5 PRs only. Wider msg-56 ledger items redrafted after this cycle ships.
+
+### 11.13 Gate parity across process boundaries (2026-04-18)
+
+When the same data file is writable from both the Tauri main process and the MCP sidecar, every validation rule MUST be enforced at both entry points. Asymmetric gating is a latent footgun: any UI, CLI, or agent path inherits the weaker rule. Preferred shape is a shared validator (e.g., `collab::validate_discussion_mode`) that both binaries call; duplicated enum arrays are the drift pattern that ships holes.
+
+- **Why:** `fbf5db9 pr-seq-7-pipeline-removal` patched only `vaak-mcp.rs` and declared DONE. Runtime evidence (human started a pipeline discussion through the UI on 2026-04-18 via `QuickLaunchBar` default → Tauri `start_discussion` → `valid_modes` still accepts `"pipeline"`) proved the UI-origin path was ungated. The sign-off narrative (tech-leader:0 msg 623) reasoned "the human always bypasses the gate anyway" — that's the opposite of what a gate is for. The primary entry point is exactly what must be gated.
+- **How to apply:** Before approving any removal/restriction PR that touches a data file reachable from both processes, trace the call graph from *every* user-visible entry point (button, quick-launch pill, keybind, agent-invoked MCP command) to the final handler and confirm each passes through the validator. Removal ≠ done until every layer enforces. Regression tests live at the Tauri-command level, not only at the MCP-sidecar level.
+
+### 11.14 Pipeline / Sequence convergence — unified surface (2026-04-18, human-ratified)
+
+Pipeline and Sequence coexisted as two overlapping turn-taking features after tier 3 shipped. Human ratified convergence direction in msg 818 ("A" in response to code-interpreter:1 msg 817's A/B question). One state machine, two entry flavors, unified controls.
+
+- **Why:** Redundant UI surfaces confuse users and double the maintenance surface. Pipeline's 30s destructive auto-skip cost work in the "Working yet?" test sequence (msg 741); Sequence's non-destructive stall model (msg 753, 757) is strictly safer. But Pipeline's QuickLaunchBar pill + 1-click muscle memory is real UX value the human defaulted to (msgs 644, 767, 773). The ratified shape: keep Pipeline's entry UX, run Sequence's mechanics underneath, show the same controls regardless of launch path.
+- **How to apply:** Implementation plan spans three PRs in the next session:
+  1. `pr-seq-multi-round-support` — extend `active_sequence` schema with `rounds_remaining` / `current_round` + restart-queue logic + per-round aggregation (dev-challenger:1 msg 807 blocker). ~150 LOC + tests.
+  2. `pr-seq-quicklaunch-pipeline-rewire` — QuickLaunchBar Pipeline pill invokes `discussion_control(action: start_sequence, auto_advance_on_stall: true, participants: <all-active>, ...)`. Delete `mode=pipeline` write paths in MCP + Tauri with a redirect error. DiscussionPanel's defensive pipeline render branches stay (platform-engineer:0 msg 813 Option A: accept staleness, 0 LOC migration). ~100 LOC + tests.
+  3. `pr-seq-unified-surface` — ensure HumanSequenceOverrideBar + ModeratorSequencePanel + SequenceSessionCard render for every active sequence regardless of launch path. No conditional hiding based on `auto_advance_on_stall` or entry cookie-trail. ~50 LOC + vitests.
+- **Non-negotiable constraints** (from the session debate):
+  - `auto_advance_on_stall = true` must use sequence's non-destructive 300s notification model, NOT pipeline's 30s destructive skip. "Auto-advance" means "notify-then-skip after warning window," not "silently drop turn." Evil-architect:0 msg 816 foot-gun #2.
+  - SequenceSessionCard displays the current stall mode visibly ("Auto-skip: ON / 300s" vs "Stall: non-destructive / 300s"). Evil-architect:0 msg 816 foot-gun #2 mitigation.
+  - "Pipeline" survives only as a UI label and a `discussion_control` preset flag. Internal code + state all uses `sequence` / `active_sequence`. One comment in CollabTab.tsx + collab.rs spelling out the aliasing so future contributors don't regrow `pipeline` as a real concept. Evil-architect:0 msg 816 foot-gun #3 mitigation.
+- **Live-click smoke gate** applies per PR (tech-leader:1 msg 732 rule): after each PR lands, someone clicks through on a rebuilt binary before DONE.
+
+### 11.15 Pipeline stage-advance signal (2026-04-19)
+
+Pipeline advance logic at `desktop/src-tauri/src/bin/vaak-mcp.rs:5789-5795` currently advances the stage on **any** broadcast (`to == "all"`) from the current-stage agent. This collides with the team protocol documented in `feedback_ack_is_one_sentence.md` ("Pipeline ack is 1 sentence fired first; substance goes in a separate second send"). The bare ack counts as stage completion, the pipeline advances, and the agent's real substance broadcast is either blocked by the gate or lands after the next stage has already fired. Observed in the 2026-04-19 pipeline run (board msgs 1104–1124): 11 stages elapsed, zero substantive outputs landed on-turn, human ended the discussion.
+
+- **Invariant:** Stage advance MUST be triggered by an explicit signal from the current-stage agent, NOT by mere presence of a broadcast.
+- **Ratified signal (shipped in commit `d759666`):** `is_end_of_stage(metadata)` is true only when `metadata.end_of_stage == bool(true)` — string `"true"`, number `1`, or missing key all evaluate false. A broadcast from the current-stage agent advances the pipeline only when this predicate returns true. Every other broadcast (acks, interim status, reviews) is allowed but does not advance the stage.
+- **Why metadata flag, not `msg_type == "handoff"`:** `handoff` type is permission-guarded (cross-role work assignment); 6 of 11 pipeline-participating roles lack the permission (tech-leader:0 msg 1151 verification). Semantic mismatch — pipeline advance is mechanical turn-passing, not work reassignment. Metadata flag is permission-free and orthogonal to message type, letting agents end their stage with any type (`status`, `review`, `approval`) plus the flag.
+- **Single authoritative signal — no fallbacks.** The shipped implementation (d759666) dropped the 500-char length heuristic that appeared in the superseded 8ae4141. Rationale: length thresholds are brittle (terse substantive messages like "APPROVED — ship it" at <500 chars would have incorrectly stayed open; verbose "still investigating" acks at >500 chars would have incorrectly advanced). Metadata-only is cleaner and teachable.
+- **How to apply:**
+  - Gate the advance block (`vaak-mcp.rs:5824`) on `from_label == current_agent && is_end_of_stage(metadata.as_ref())`.
+  - Update agent briefings via `desktop/src/utils/briefingGenerator.ts` + pipeline announce/wake messages + MCP hook injection (d759666 touches all four surfaces): every pipeline stage ends with a broadcast that includes `metadata: {end_of_stage: true}`. Earlier broadcasts (ack, investigation status, intermediate findings) do not set this flag and therefore do not terminate the stage.
+  - Test coverage (shipped in `8ae4141`): unit tests for (a) short-ack-without-flag no-advance, (b) long-body advance, (c) explicit `metadata.ack: true` opt-out forces no-advance even for long body, (d) explicit `metadata.end_of_stage: true` advances even for short body. Plus watchdog-suppression tests.
+  - **Deploy invariant:** source changes to `vaak-mcp.rs` require a rebuilt binary commit to `desktop/src-tauri/binaries/vaak-mcp-x86_64-pc-windows-msvc.exe` in the same PR. Without this, the fix is source-only and does not run. See § 11.16.
+- **Secondary gate-tightening deferred:** the escape hatches in the non-current-stage gate (manager bypass, to=human, question-to-current by role-slug, answer-to-current-question without uniqueness) are real but did not cause the 2026-04-19 collapse. Close them in a follow-up PR after the advance-signal fix lands and is observed stable. See board msg 1130 (original proposal, superseded) and msg 1133 (correction).
+
+### 11.16 MCP binary deploy invariant (2026-04-19)
+
+The MCP sidecar binary at `desktop/src-tauri/binaries/vaak-mcp-x86_64-pc-windows-msvc.exe` is a **committed artifact**, not a build output. Source changes to `desktop/src-tauri/src/bin/vaak-mcp.rs` (or anything the vaak-mcp binary depends on) do NOT take effect on running Claude Code sessions until the binary is rebuilt AND the new file replaces the committed copy.
+
+- **Problem observed 2026-04-19 (tech-leader:0 msg 1141):** 7 pipeline PRs landed in source between binary builds. Agents and reviewers assumed fixes were running; they were not. The team debated adding an 8th PR on top of stale runtime state.
+- **Invariant:** Every PR that modifies `desktop/src-tauri/src/bin/vaak-mcp.rs` (or non-test source it depends on) MUST include a rebuilt binary commit.
+  - Build: `cd desktop/src-tauri && cargo build --release --bin vaak-mcp`
+  - Deploy: `cp ../../target/release/vaak-mcp.exe binaries/vaak-mcp-x86_64-pc-windows-msvc.exe`
+  - Commit: the updated binary alongside source in the same PR, message prefix `deploy:` or similar. No separate rebuild-only PRs.
+- **Ship discipline:** `git show --stat <sha>` of the ship broadcast must show the binary changed. Peers reviewing a ship claim where the binary is absent should require the binary commit before approving.
+- **Follow-up (separate PR):** add a pre-commit hook or CI step that fails the build if `vaak-mcp.rs` changed without a corresponding binary update. Filename: `pr-mcp-deploy-discipline`.
 
 ---
 
