@@ -4654,6 +4654,49 @@ When multiple instances of this role are active:
           );
         })()}
 
+        {/* Pending Decisions Panel — lifts `type=question, to=human, metadata.choices`
+            messages out of the scrolling timeline into an always-visible section at
+            the top of the inbox. Human frustration in msg 1517: "give me multiple
+            choice popups in a different section… I have no clue what you are waiting
+            for." Inline rendering at the bottom of this file still shows the card so
+            answered history is preserved; the inline path skips unanswered ones to
+            avoid duplication. Zero backend changes — reuses the existing
+            QuestionCard + handleAnswerQuestion contract. */}
+        {(() => {
+          const msgs = project?.messages ?? [];
+          const pending = msgs.filter((m: BoardMessage) =>
+            m.to === "human"
+            && m.type === "question"
+            && Array.isArray(m.metadata?.choices)
+            && (m.metadata!.choices as unknown[]).length > 0
+            && getAnswerForQuestion(m.id, msgs) === null
+          );
+          if (pending.length === 0) return null;
+          return (
+            <div className="pending-decisions-panel" role="region" aria-label={`${pending.length} pending decisions for you`}>
+              <div className="pending-decisions-header">
+                <span className="pending-decisions-icon" aria-hidden="true">&#9889;</span>
+                <span className="pending-decisions-title">
+                  {pending.length === 1 ? "1 decision waiting for you" : `${pending.length} decisions waiting for you`}
+                </span>
+              </div>
+              <div className="pending-decisions-list">
+                {pending.map((msg: BoardMessage) => (
+                  <QuestionCard
+                    key={msg.id}
+                    msg={msg}
+                    answered={null}
+                    onAnswer={(choiceId, choiceLabel) => handleAnswerQuestion(msg, choiceId, choiceLabel)}
+                    onDelete={handleDeleteMessage}
+                    onPlay={playMessage}
+                    playingMsgId={playingMsgId}
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Message Timeline */}
         <div className="message-timeline" id="inbox-panel" role="tabpanel" aria-labelledby={`inbox-tab-${inboxTab}`} ref={messageTimelineRef}>
           {hasNoMessages ? (
@@ -4794,9 +4837,13 @@ When multiple instances of this role are active:
                 );
               }
 
-              // Interactive question card for human-targeted questions with choices
+              // Interactive question card for human-targeted questions with choices.
+              // Unanswered cards live in the Pending Decisions panel above the inbox
+              // tabs; we only render answered ones inline so the decision history
+              // stays in the timeline where the conversation happened.
               if (msg.to === "human" && msg.type === "question" && msg.metadata?.choices?.length) {
                 const answered = getAnswerForQuestion(msg.id, project!.messages);
+                if (!answered) return null;
                 return (
                   <QuestionCard
                     key={msg.id}
