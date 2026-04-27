@@ -2303,8 +2303,10 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
 // FAILURE MODES (deferred to v1 follow-up):
 //   - Stuck mic if speaker crashes/AFKs: human toggles off (v0 escape hatch).
 //   - All seats die: same.
-//   - New seats joining mid-rotation: queued for next round; existing rotation_order
-//     locked at enable-time, not re-seeded on session changes.
+//   - New seats joining mid-rotation: rotation_order is locked at enable-time and
+//     never re-seeded mid-session. To include a freshly-joined seat, the human
+//     must disable + re-enable. (No `round` counter exists in v0; the spec's
+//     "next round boundary" semantics are deferred along with idle-skip.)
 
 /// Returns the assembly.json path for the active section.
 /// "default" section uses flat .vaak/assembly.json; non-default uses .vaak/sections/{slug}/assembly.json.
@@ -2941,6 +2943,13 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
+    // Per assembly-line spec (#56.1): when assembly_line.active = true, it OWNS the
+    // speech gate; the v1 discussion_control (Pipeline) Delphi-broadcast restriction
+    // below is short-circuited. Read here only to make the short-circuit decision;
+    // the authoritative gate is inside with_file_lock below (atomic with the send).
+    let assembly_active_pre_lock = read_assembly_state(&state.project_dir)
+        .get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+
     // Read discussion state once for broadcast permission and Delphi enforcement
     let disc = read_discussion_state(&state.project_dir);
     let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2993,7 +3002,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
         let from = format!("{}:{}", state.role, state.instance);
 
-        if disc_active && disc_format == "delphi"
+        // Assembly Line owns the speech gate when active — short-circuit the
+        // discussion_control Delphi check entirely (#56.1).
+        if !assembly_active_pre_lock
+            && disc_active && disc_format == "delphi"
             && msg_type != "submission"
             && msg_type != "moderation"
             && to == "all"
@@ -3024,13 +3036,15 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // Assembly Line gate (atomic with the send) — read state, check, reject or proceed.
         // Inside with_file_lock so the gate-check, board append, and post-accept advance
         // all share ONE lock acquire — no TOCTOU window between gate and advance.
-        // Bypasses: human-origin sends and moderation-type messages (state events).
-        // The bypass for `discussion_control` (Pipeline) is intentional: when assembly_line
-        // is active, it OWNS the speech gate; Pipeline's Delphi-broadcast restriction above
-        // still ran as an early reject, which is fine — it only restricts a narrower case.
+        //
+        // ONLY bypass: human-origin sends. We do NOT bypass on caller-supplied msg_type
+        // (e.g. "moderation"); doing so would let any agent skip the mic by sending
+        // type="moderation". Internal system events from handle_assembly_line append
+        // to the board directly via append_to_board(), bypassing this entire function,
+        // so they don't need a gate exemption (#113.A).
         let asm = read_assembly_state(&state.project_dir);
         let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-        if asm_active && state.role != "human" && msg_type != "moderation" {
+        if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
             if cur != from_label {
                 return Err(format!(
@@ -3055,9 +3069,9 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
         // Assembly Line auto-advance (atomic with the append above).
         // Skips standby/disconnected seats; if no live seat exists, mic stays put.
-        // Bypasses: human-origin sends and moderation-type messages — those don't
-        // consume the floor (matches the gate exemption rule above).
-        if asm_active && state.role != "human" && msg_type != "moderation" {
+        // Bypass matches the gate above: ONLY human-origin sends skip the advance
+        // (caller-supplied msg_type is not trusted here either, per #113.A).
+        if asm_active && state.role != "human" {
             if let Some(next) = next_assembly_speaker(&asm, &state.project_dir, &from_label) {
                 let mut updated = asm.clone();
                 updated["current_speaker"] = serde_json::json!(next);
