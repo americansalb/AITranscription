@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
+import { AssemblyBanner } from "./AssemblyBanner";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
@@ -2605,6 +2606,9 @@ When multiple instances of this role are active:
             &#9881;
           </button>
         </div>
+
+        {/* Assembly Line banner — current speaker, next-up, queue chips. Renders only when AL is on. */}
+        <AssemblyBanner state={assemblyState} sessions={project?.sessions} />
 
         {/* Settings Panel */}
         {settingsOpen && (
