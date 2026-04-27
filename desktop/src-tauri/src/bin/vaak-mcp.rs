@@ -2784,6 +2784,27 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 
     let (instance, _is_new) = result;
 
+    // Re-seed assembly rotation_order so a seat that joins after the gate was
+    // enabled can still take the mic. Skip if already present (re-joiner).
+    {
+        let seat = format!("{}:{}", role, instance);
+        let _ = with_file_lock(&normalized, || -> Result<(), String> {
+            let mut asm = read_assembly_state(&normalized);
+            if asm.get("active").and_then(|v| v.as_bool()) != Some(true) {
+                return Ok(());
+            }
+            let arr = match asm.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
+                Some(a) => a,
+                None => return Ok(()),
+            };
+            if arr.iter().any(|v| v.as_str() == Some(&seat)) {
+                return Ok(());
+            }
+            arr.push(serde_json::json!(seat));
+            write_assembly_state_unlocked(&normalized, &asm)
+        });
+    }
+
     // Read role briefing
     let briefing_path = role_briefing_path(&normalized, role);
     let briefing = std::fs::read_to_string(&briefing_path).unwrap_or_default();
