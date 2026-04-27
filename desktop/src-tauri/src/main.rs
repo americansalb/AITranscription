@@ -3108,6 +3108,52 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
     Ok(val)
 }
 
+// ==================== Assembly Line UI commands ====================
+// Tauri-side counterpart to the MCP `assembly_line` tool. Both write the same
+// .vaak/[sections/<s>/]assembly.json file — single source of truth on disk.
+
+#[tauri::command]
+fn get_assembly_state(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    Ok(collab::read_assembly(&dir))
+}
+
+#[tauri::command]
+fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let result = collab::with_board_lock(&dir, || {
+        let new_state = match action.as_str() {
+            "enable" => {
+                let order = collab::active_assembly_seats(&dir);
+                if order.is_empty() {
+                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
+                }
+                let first = order[0].clone();
+                serde_json::json!({
+                    "active": true,
+                    "current_speaker": first,
+                    "rotation_order": order,
+                    "started_at": collab::iso_now(),
+                    "started_by": "human"
+                })
+            }
+            "disable" => {
+                serde_json::json!({
+                    "active": false,
+                    "current_speaker": null,
+                    "rotation_order": [],
+                    "started_at": null,
+                    "started_by": null
+                })
+            }
+            other => return Err(format!("Unknown assembly action: '{}'. Valid: enable, disable", other)),
+        };
+        collab::write_assembly_unlocked(&dir, &new_state)?;
+        Ok(new_state)
+    })?;
+    Ok(result)
+}
+
 #[tauri::command]
 fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
@@ -4447,6 +4493,8 @@ fn main() {
             open_next_round,
             end_discussion,
             get_discussion_state,
+            get_assembly_state,
+            set_assembly_state,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,

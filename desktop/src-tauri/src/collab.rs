@@ -1060,6 +1060,71 @@ pub fn active_discussion_path(dir: &str) -> PathBuf {
     discussion_path_for_section(dir, &get_active_section(dir))
 }
 
+// ==================== Assembly Line state ====================
+// Mirrors vaak-mcp.rs's helpers; the two binaries write to the SAME assembly.json
+// so the Tauri-side toggle and the MCP-side gate share state at the disk level.
+
+pub fn assembly_path_for_section(dir: &str, section: &str) -> PathBuf {
+    if section == "default" {
+        Path::new(dir).join(".vaak").join("assembly.json")
+    } else {
+        Path::new(dir).join(".vaak").join("sections").join(section).join("assembly.json")
+    }
+}
+
+pub fn active_assembly_path(dir: &str) -> PathBuf {
+    assembly_path_for_section(dir, &get_active_section(dir))
+}
+
+pub fn read_assembly(dir: &str) -> serde_json::Value {
+    std::fs::read_to_string(active_assembly_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({
+            "active": false,
+            "current_speaker": null,
+            "rotation_order": [],
+            "started_at": null,
+            "started_by": null
+        }))
+}
+
+pub fn write_assembly_unlocked(dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let path = active_assembly_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize assembly state: {}", e))?;
+    atomic_write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write assembly.json: {}", e))
+}
+
+/// List active+idle session seats as "role:instance" in the order they appear in sessions.json.
+pub fn active_assembly_seats(dir: &str) -> Vec<String> {
+    let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");
+    let json: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    json.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter()
+                .filter(|b| {
+                    let st = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    st == "active" || st == "idle"
+                })
+                .filter_map(|b| {
+                    let role = b.get("role").and_then(|r| r.as_str())?;
+                    let instance = b.get("instance").and_then(|i| i.as_u64())?;
+                    Some(format!("{}:{}", role, instance))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Create a new section. Returns the section info.
 pub fn create_section(dir: &str, name: &str) -> Result<SectionInfo, String> {
     let slug = slugify(name);
