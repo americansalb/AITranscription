@@ -2418,40 +2418,10 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
         return Ok(read_assembly_state(&pd));
     }
 
-    // Single shared mutation impl. Acquires board.lock cross-process internally.
+    // Single shared mutation impl. Posts the moderation board event itself so
+    // both UI (set_assembly_state command) and MCP paths emit one — see
+    // collab.rs::set_assembly_v0.
     let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
-
-    // Post a system event to the board so sessions in project_wait wake up.
-    // Acquire with_file_lock here for the next_message_id + append. Lock ordering:
-    // collab_shared::set_assembly_v0 already released board.lock above; this
-    // re-acquires it independently. The two acquires are sequential, not nested.
-    let _ = with_file_lock(&pd, || {
-        let msg_id = next_message_id(&pd);
-        let body = match action {
-            "enable" => format!("Assembly Line ENABLED by {}. Order: {}. Current speaker: {}.",
-                actor,
-                new_state.get("rotation_order").and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" → "))
-                    .unwrap_or_default(),
-                new_state.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("(none)")),
-            "disable" => format!("Assembly Line DISABLED by {} — back to simultaneous.", actor),
-            _ => String::new(),
-        };
-        let event = serde_json::json!({
-            "id": msg_id,
-            "from": actor,
-            "to": "all",
-            "type": "moderation",
-            "timestamp": utc_now_iso(),
-            "subject": format!("Assembly Line: {}", action),
-            "body": body,
-            "metadata": {
-                "assembly_action": action,
-                "current_speaker": new_state.get("current_speaker").cloned().unwrap_or(serde_json::Value::Null)
-            }
-        });
-        append_to_board(&pd, &event)
-    });
 
     notify_desktop();
     Ok(new_state)
