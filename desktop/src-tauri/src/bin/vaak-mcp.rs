@@ -2943,14 +2943,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
-    // Per assembly-line spec (#56.1): when assembly_line.active = true, it OWNS the
-    // speech gate; the v1 discussion_control (Pipeline) Delphi-broadcast restriction
-    // below is short-circuited. Read here only to make the short-circuit decision;
-    // the authoritative gate is inside with_file_lock below (atomic with the send).
-    let assembly_active_pre_lock = read_assembly_state(&state.project_dir)
-        .get("active").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // Read discussion state once for broadcast permission and Delphi enforcement
+    // Read discussion state once for broadcast permission. The Delphi-broadcast
+    // gate moved INSIDE with_file_lock below so its read of assembly state
+    // is atomic with the assembly gate (closes the pre-lock TOCTOU race
+    // identified in evil-arch #120).
     let disc = read_discussion_state(&state.project_dir);
     let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
     let disc_format = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
@@ -2984,51 +2980,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
-    // Delphi protocol enforcement: block ALL non-procedural broadcasts during active Delphi.
-    // Applies to the ENTIRE Delphi lifecycle (all phases, not just submitting).
-    // Oxford/red_team/continuous allow public broadcasts — only Delphi is restricted.
-    // Directed messages (to specific roles) are always allowed — agents need to coordinate.
-    //
-    // Allowed through:
-    //   - type:"submission" (participant blind submissions to moderator)
-    //   - type:"moderation" (system/moderator procedural announcements)
-    //   - Messages from human (always exempt)
-    //   - Directed messages (to != "all") — not affected by this check
-    //
-    // Blocked:
-    //   - type:"broadcast" from ANYONE including the moderator (prevents leaking reference material)
-    //   - type:"status", "answer", "directive", etc. to "all" from any non-human
-    {
-        let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let from = format!("{}:{}", state.role, state.instance);
-
-        // Assembly Line owns the speech gate when active — short-circuit the
-        // discussion_control Delphi check entirely (#56.1).
-        if !assembly_active_pre_lock
-            && disc_active && disc_format == "delphi"
-            && msg_type != "submission"
-            && msg_type != "moderation"
-            && to == "all"
-            && state.role != "human"
-        {
-            if from == moderator {
-                eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from, msg_type);
-                return Err(
-                    "Active Delphi discussion — moderator broadcasts to \"all\" are blocked. \
-                    Use type: \"moderation\" for procedural round announcements. \
-                    Directed messages to specific participants are still allowed.".to_string()
-                );
-            }
-            let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-            eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from, phase, msg_type);
-            return Err(format!(
-                "Active Delphi discussion — broadcasts to \"all\" are blocked to preserve blind submission integrity. \
-                To submit your position, use type: \"submission\" addressed to the moderator ({}). \
-                Directed messages to specific roles are still allowed.",
-                moderator
-            ));
-        }
-    }
+    // Delphi protocol enforcement moved INSIDE with_file_lock — see #120 race fix.
 
     let result = with_file_lock(&state.project_dir, || {
         let from_label = format!("{}:{}", state.role, state.instance);
@@ -3052,6 +3004,35 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     if cur.is_empty() { "(none)" } else { cur }
                 ));
             }
+        }
+
+        // Delphi-broadcast gate (atomic with the assembly gate above and the append below).
+        // Per #56.1: when assembly_line is active, it OWNS the speech gate — the Delphi
+        // restriction is short-circuited. Both gates now read state inside the same
+        // with_file_lock acquire (closes the pre-lock TOCTOU race in evil-arch #120).
+        if !asm_active && disc_active && disc_format == "delphi"
+            && msg_type != "submission"
+            && msg_type != "moderation"
+            && to == "all"
+            && state.role != "human"
+        {
+            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
+            if from_label == moderator {
+                eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from_label, msg_type);
+                return Err(
+                    "Active Delphi discussion — moderator broadcasts to \"all\" are blocked. \
+                    Use type: \"moderation\" for procedural round announcements. \
+                    Directed messages to specific participants are still allowed.".to_string()
+                );
+            }
+            let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from_label, phase, msg_type);
+            return Err(format!(
+                "Active Delphi discussion — broadcasts to \"all\" are blocked to preserve blind submission integrity. \
+                To submit your position, use type: \"submission\" addressed to the moderator ({}). \
+                Directed messages to specific roles are still allowed.",
+                moderator
+            ));
         }
 
         let msg_id = next_message_id(&state.project_dir);
