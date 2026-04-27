@@ -2410,18 +2410,34 @@ fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: 
 /// Posting the moderation board event stays here because it depends on
 /// `next_message_id` and `append_to_board`, which are MCP-binary helpers.
 fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
+    handle_assembly_line_v2(action, None, None)
+}
+
+fn handle_assembly_line_v2(
+    action: &str,
+    build_mode: Option<bool>,
+    target: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
     let pd = state.project_dir.clone();
     let actor = format!("{}:{}", state.role, state.instance);
 
-    if action == "get_state" {
-        return Ok(read_assembly_state(&pd));
-    }
-
-    // Single shared mutation impl. Posts the moderation board event itself so
-    // both UI (set_assembly_state command) and MCP paths emit one — see
-    // collab.rs::set_assembly_v0.
-    let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
+    let new_state = match action {
+        "get_state" => return Ok(read_assembly_state(&pd)),
+        "enable" | "disable" => collab_shared::set_assembly_v0(&pd, action, &actor)?,
+        "set_build_mode" => {
+            let bm = build_mode.ok_or("set_build_mode requires `build_mode` boolean argument")?;
+            collab_shared::set_build_mode_v0(&pd, bm, &actor)?
+        }
+        "transfer_mic" => {
+            let tgt = target.ok_or("transfer_mic requires `target` (e.g. 'developer:0')")?;
+            collab_shared::transfer_mic_v0(&pd, tgt, &actor)?
+        }
+        other => return Err(format!(
+            "Unknown assembly action: '{}'. Valid: enable, disable, get_state, set_build_mode, transfer_mic",
+            other
+        )),
+    };
 
     notify_desktop();
     Ok(new_state)
@@ -4806,13 +4822,21 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "assembly_line",
-                    "description": "Assembly Line mic control. Two top-level modes: simultaneous (default) ↔ assembly_line (one-speaker-at-a-time, auto-rotate). When enabled, project_send rejects non-speakers with not_your_turn and auto-advances the mic to the next live seat after each accepted send. Independent of discussion_control. Actions: enable (seed rotation_order from active seats), disable (back to simultaneous), get_state (read-only).",
+                    "description": "Assembly Line mic control. Two top-level modes: simultaneous (default) ↔ assembly_line (one-speaker-at-a-time, auto-rotate). When enabled, project_send rejects non-speakers with not_your_turn and auto-advances the mic to the next live seat after each accepted send. Independent of discussion_control. Actions: enable, disable, get_state, set_build_mode (requires build_mode bool), transfer_mic (requires target seat 'role:instance').",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "description": "Action: enable, disable, get_state"
+                                "description": "Action: enable, disable, get_state, set_build_mode, transfer_mic"
+                            },
+                            "build_mode": {
+                                "type": "boolean",
+                                "description": "Required for set_build_mode. true = code-mutating tools allowed; false = discuss-only (Edit/Write/Bash blocked by hook)."
+                            },
+                            "target": {
+                                "type": "string",
+                                "description": "Required for transfer_mic. Seat label 'role:instance' (e.g. 'developer:0'). Must be in rotation_order."
                             }
                         },
                         "required": ["action"]
@@ -4854,6 +4878,15 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
             // (project_wait sets its own "standby" activity)
             if tool_name != "project_wait" {
                 update_session_activity("working");
+                // Per-speaker heartbeat: stamp last_active_at so the UI banner can
+                // distinguish "actively working" from "idle on the mic". Lookup of
+                // current_speaker happens in the UI layer; this is fired for every
+                // tool caller and is cheap (single sessions.json write).
+                if let Ok(guard) = ACTIVE_PROJECT.lock() {
+                    if let Some(ref s) = *guard {
+                        let _ = collab_shared::touch_speaker_active(&s.project_dir, &s.session_id);
+                    }
+                }
             }
 
             if tool_name == "speak" {
@@ -5361,7 +5394,9 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     .and_then(|a| a.get("action"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                match handle_assembly_line(action) {
+                let build_mode_arg = arguments.and_then(|a| a.get("build_mode")).and_then(|v| v.as_bool());
+                let target_arg = arguments.and_then(|a| a.get("target")).and_then(|v| v.as_str()).map(|s| s.to_string());
+                match handle_assembly_line_v2(action, build_mode_arg, target_arg.as_deref()) {
                     Ok(resp) => {
                         serde_json::json!({
                             "content": [{

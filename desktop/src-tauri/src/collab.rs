@@ -1077,7 +1077,7 @@ pub fn active_assembly_path(dir: &str) -> PathBuf {
 }
 
 pub fn read_assembly(dir: &str) -> serde_json::Value {
-    std::fs::read_to_string(active_assembly_path(dir))
+    let mut state: serde_json::Value = std::fs::read_to_string(active_assembly_path(dir))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({
@@ -1085,8 +1085,15 @@ pub fn read_assembly(dir: &str) -> serde_json::Value {
             "current_speaker": null,
             "rotation_order": [],
             "started_at": null,
-            "started_by": null
-        }))
+            "started_by": null,
+            "build_mode": true
+        }));
+    if state.get("build_mode").is_none() {
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("build_mode".to_string(), serde_json::json!(true));
+        }
+    }
+    state
 }
 
 pub fn write_assembly_unlocked(dir: &str, state: &serde_json::Value) -> Result<(), String> {
@@ -1109,6 +1116,12 @@ pub fn write_assembly_unlocked(dir: &str, state: &serde_json::Value) -> Result<(
 /// teammates in `project_wait` and show up in the conversation history.
 pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_json::Value, String> {
     with_board_lock(dir, || {
+        // Preserve build_mode across enable/disable so a prior "discuss-only" choice
+        // sticks even if the gate is toggled off and back on.
+        let prior_build_mode = read_assembly(dir)
+            .get("build_mode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let new_state = match action {
             "enable" => {
                 let order = active_assembly_seats(dir);
@@ -1121,7 +1134,8 @@ pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_jso
                     "current_speaker": first,
                     "rotation_order": order,
                     "started_at": iso_now(),
-                    "started_by": actor
+                    "started_by": actor,
+                    "build_mode": prior_build_mode
                 })
             }
             "disable" => {
@@ -1130,7 +1144,8 @@ pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_jso
                     "current_speaker": null,
                     "rotation_order": [],
                     "started_at": null,
-                    "started_by": null
+                    "started_by": null,
+                    "build_mode": prior_build_mode
                 })
             }
             other => return Err(format!("Unknown assembly action: '{}'. Valid: enable, disable", other)),
@@ -1166,6 +1181,116 @@ pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_jso
 
         Ok(new_state)
     })
+}
+
+/// Toggle build_mode independent of the gate. When false the PreToolUse hook
+/// (.claude/hooks/build-mode-gate.cmd) blocks Edit/Write/Bash/NotebookEdit so
+/// the team can debate without code drift. The gate is enforced by reading
+/// assembly.json on disk — clients can't trust their own state.
+pub fn set_build_mode_v0(dir: &str, build_mode: bool, actor: &str) -> Result<serde_json::Value, String> {
+    with_board_lock(dir, || {
+        let mut new_state = read_assembly(dir);
+        if let Some(obj) = new_state.as_object_mut() {
+            obj.insert("build_mode".to_string(), serde_json::json!(build_mode));
+        }
+        write_assembly_unlocked(dir, &new_state)?;
+
+        let body = if build_mode {
+            format!("Build Mode ENABLED by {} — code-mutating tools allowed.", actor)
+        } else {
+            format!("Build Mode DISABLED by {} — discussion only, Edit/Write/Bash/NotebookEdit blocked.", actor)
+        };
+        let event = serde_json::json!({
+            "id": next_board_message_id(dir),
+            "from": actor,
+            "to": "all",
+            "type": "moderation",
+            "timestamp": iso_now(),
+            "subject": format!("Build Mode: {}", if build_mode { "on" } else { "off" }),
+            "body": body,
+            "metadata": {
+                "assembly_action": "set_build_mode",
+                "build_mode": build_mode
+            }
+        });
+        append_to_board_unlocked(dir, &event)?;
+
+        Ok(new_state)
+    })
+}
+
+/// Manually transfer the mic to a specific seat. Target must already be in
+/// rotation_order. The transfer is unconditional once validated — no consent
+/// from the previous speaker, this is a moderator action.
+pub fn transfer_mic_v0(dir: &str, target: &str, actor: &str) -> Result<serde_json::Value, String> {
+    with_board_lock(dir, || {
+        let mut new_state = read_assembly(dir);
+        if new_state.get("active").and_then(|v| v.as_bool()) != Some(true) {
+            return Err("Assembly Line is not active — enable it before transferring the mic.".to_string());
+        }
+        let in_rotation = new_state.get("rotation_order")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().any(|v| v.as_str() == Some(target)))
+            .unwrap_or(false);
+        if !in_rotation {
+            return Err(format!("Target '{}' is not in rotation_order. Add the seat first.", target));
+        }
+        if let Some(obj) = new_state.as_object_mut() {
+            obj.insert("current_speaker".to_string(), serde_json::json!(target));
+        }
+        write_assembly_unlocked(dir, &new_state)?;
+
+        let event = serde_json::json!({
+            "id": next_board_message_id(dir),
+            "from": actor,
+            "to": "all",
+            "type": "moderation",
+            "timestamp": iso_now(),
+            "subject": format!("Mic transferred to {}", target),
+            "body": format!("{} passed the mic to {}.", actor, target),
+            "metadata": {
+                "assembly_action": "transfer_mic",
+                "current_speaker": target
+            }
+        });
+        append_to_board_unlocked(dir, &event)?;
+
+        Ok(new_state)
+    })
+}
+
+/// Update the per-session `last_active_at` timestamp. Called when the speaker
+/// performs any MCP action so the UI can distinguish "actively working" from
+/// "sitting idle on the mic." Caller need not hold board.lock — the write
+/// uses sessions.json's own atomic-write path.
+pub fn touch_speaker_active(dir: &str, session_id: &str) -> Result<(), String> {
+    let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");
+    let content = match std::fs::read_to_string(&sessions_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    let mut sessions: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let bindings = match sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let mut changed = false;
+    for binding in bindings.iter_mut() {
+        if binding.get("session_id").and_then(|s| s.as_str()) == Some(session_id) {
+            binding["last_active_at"] = serde_json::json!(iso_now());
+            changed = true;
+        }
+    }
+    if changed {
+        let serialized = serde_json::to_string_pretty(&sessions)
+            .map_err(|e| format!("Failed to serialize sessions: {}", e))?;
+        atomic_write(&sessions_path, serialized.as_bytes())
+            .map_err(|e| format!("Failed to write sessions: {}", e))?;
+    }
+    Ok(())
 }
 
 /// Next message ID = count of existing lines in the active board.jsonl + 1.
