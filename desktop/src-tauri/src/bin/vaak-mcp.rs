@@ -3008,15 +3008,20 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
         // Delphi-broadcast gate (atomic with the assembly gate above and the append below).
         // Per #56.1: when assembly_line is active, it OWNS the speech gate — the Delphi
-        // restriction is short-circuited. Both gates now read state inside the same
-        // with_file_lock acquire (closes the pre-lock TOCTOU race in evil-arch #120).
-        if !asm_active && disc_active && disc_format == "delphi"
+        // restriction is short-circuited. Both gates read state inside the SAME
+        // with_file_lock acquire — disc state is re-read here from disk so the check
+        // is atomic with `asm_active` (closes the residual TOCTOU evil-arch #130
+        // flagged on top of the original #120 race).
+        let disc_in_lock = read_discussion_state(&state.project_dir);
+        let disc_active_in_lock = disc_in_lock.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let disc_format_in_lock = disc_in_lock.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        if !asm_active && disc_active_in_lock && disc_format_in_lock == "delphi"
             && msg_type != "submission"
             && msg_type != "moderation"
             && to == "all"
             && state.role != "human"
         {
-            let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let moderator = disc_in_lock.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
             if from_label == moderator {
                 eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from_label, msg_type);
                 return Err(
@@ -3025,7 +3030,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     Directed messages to specific participants are still allowed.".to_string()
                 );
             }
-            let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            let phase = disc_in_lock.get("phase").and_then(|v| v.as_str()).unwrap_or("");
             eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from_label, phase, msg_type);
             return Err(format!(
                 "Active Delphi discussion — broadcasts to \"all\" are blocked to preserve blind submission integrity. \
