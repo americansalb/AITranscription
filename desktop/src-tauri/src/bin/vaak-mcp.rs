@@ -2280,6 +2280,195 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
     }
 }
 
+// ==================== Assembly Line ====================
+// Minimum mic-control mechanism per human directives (assembly-line thread).
+// Two top-level modes: simultaneous (default; free-broadcast) ↔ assembly_line.
+// State is section-scoped; mirrors discussion.json layout.
+//
+// SCOPE BOUNDARIES (v0):
+//   - V1-only. project_send_v2 path stays untouched per Ground Rule (don't break v1, don't touch v2).
+//   - Gate applies ONLY to handle_project_send. Floor-consuming "speech" tools.
+//     project_join (announce), project_buzz (wake), audience_vote (audience event),
+//     and the assembly_line tool itself are exempt by design — they are system
+//     events, not speech.
+//   - No human-only enforcement (MCP is not authenticated). Any seat can call
+//     assembly_line(enable|disable). Trust the human via UI, not the wire.
+//
+// LOCK DISCIPLINE:
+//   - assembly state writes happen ONLY inside `with_file_lock` (which holds board.lock).
+//     One critical section per send: read assembly → gate → append → advance → release.
+//   - assembly.json has NO standalone lock file. Gate-check + append + advance share
+//     the existing board.lock acquire — atomic, no TOCTOU, no second lock to order.
+//
+// FAILURE MODES (deferred to v1 follow-up):
+//   - Stuck mic if speaker crashes/AFKs: human toggles off (v0 escape hatch).
+//   - All seats die: same.
+//   - New seats joining mid-rotation: queued for next round; existing rotation_order
+//     locked at enable-time, not re-seeded on session changes.
+
+/// Returns the assembly.json path for the active section.
+/// "default" section uses flat .vaak/assembly.json; non-default uses .vaak/sections/{slug}/assembly.json.
+fn assembly_json_path(project_dir: &str) -> PathBuf {
+    let section = get_active_section(project_dir);
+    if section == "default" {
+        vaak_dir(project_dir).join("assembly.json")
+    } else {
+        vaak_dir(project_dir).join("sections").join(section).join("assembly.json")
+    }
+}
+
+fn read_assembly_state(project_dir: &str) -> serde_json::Value {
+    std::fs::read_to_string(assembly_json_path(project_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({
+            "active": false,
+            "current_speaker": null,
+            "rotation_order": [],
+            "started_at": null,
+            "started_by": null
+        }))
+}
+
+/// Write assembly state. Caller must hold with_file_lock (board.lock) — that lock
+/// already serializes the post-accept advance path inside handle_project_send.
+fn write_assembly_state_unlocked(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let path = assembly_json_path(project_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize assembly state: {}", e))?;
+    atomic_write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write assembly.json: {}", e))
+}
+
+/// List active+idle session seats as "role:instance" strings, in roster order.
+/// Used to seed rotation_order on enable and to find the next live speaker.
+fn active_assembly_seats(project_dir: &str) -> Vec<String> {
+    let sessions = read_sessions(project_dir);
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter()
+                .filter(|b| {
+                    let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    status == "active" || status == "idle"
+                })
+                .filter_map(|b| {
+                    let role = b.get("role").and_then(|r| r.as_str())?;
+                    let instance = b.get("instance").and_then(|i| i.as_u64())?;
+                    Some(format!("{}:{}", role, instance))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Given the current assembly state and the seat that just sent, return the next
+/// speaker in rotation_order — skipping seats that are no longer active/idle.
+/// Returns None if no live seat is found (caller leaves current_speaker as-is).
+fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: &str) -> Option<String> {
+    let order: Vec<String> = asm.get("rotation_order")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    if order.is_empty() {
+        return None;
+    }
+    let live: std::collections::HashSet<String> = active_assembly_seats(project_dir).into_iter().collect();
+    // Find the sender's index, then walk forward (with wrap) until we hit a live seat.
+    let start = order.iter().position(|s| s == just_sent).unwrap_or(0);
+    for offset in 1..=order.len() {
+        let candidate = &order[(start + offset) % order.len()];
+        if live.contains(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+    // No live seat anywhere in rotation — degenerate; mic stays with sender.
+    None
+}
+
+/// Handle the `assembly_line` MCP tool. Auto-advance only — no manual pass_mic
+/// (architect ruling: MCP is not authenticated, so a "human-only" override would
+/// be a lie. Toggle off is the v0 escape hatch). Actions:
+/// - "enable": activate, seed rotation_order from active sessions, current_speaker = order[0]
+/// - "disable": deactivate, clear state
+/// - "get_state": read-only inspect
+fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+    let pd = state.project_dir.clone();
+    let actor = format!("{}:{}", state.role, state.instance);
+
+    let result = with_file_lock(&pd, || {
+        let asm = read_assembly_state(&pd);
+        let new_state = match action {
+            "enable" => {
+                let order = active_assembly_seats(&pd);
+                if order.is_empty() {
+                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
+                }
+                let first = order[0].clone();
+                serde_json::json!({
+                    "active": true,
+                    "current_speaker": first,
+                    "rotation_order": order,
+                    "started_at": utc_now_iso(),
+                    "started_by": actor
+                })
+            }
+            "disable" => {
+                serde_json::json!({
+                    "active": false,
+                    "current_speaker": null,
+                    "rotation_order": [],
+                    "started_at": null,
+                    "started_by": null
+                })
+            }
+            "get_state" => {
+                return Ok(asm);
+            }
+            other => {
+                return Err(format!("Unknown assembly_line action: '{}'. Valid: enable, disable, get_state", other));
+            }
+        };
+        write_assembly_state_unlocked(&pd, &new_state)?;
+
+        // Post a system event to the board so all sessions in project_wait wake up.
+        let msg_id = next_message_id(&pd);
+        let body = match action {
+            "enable" => format!("Assembly Line ENABLED by {}. Order: {}. Current speaker: {}.",
+                actor,
+                new_state.get("rotation_order").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" → "))
+                    .unwrap_or_default(),
+                new_state.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("(none)")),
+            "disable" => format!("Assembly Line DISABLED by {} — back to simultaneous.", actor),
+            _ => String::new(),
+        };
+        let event = serde_json::json!({
+            "id": msg_id,
+            "from": actor,
+            "to": "all",
+            "type": "moderation",
+            "timestamp": utc_now_iso(),
+            "subject": format!("Assembly Line: {}", action),
+            "body": body,
+            "metadata": {
+                "assembly_action": action,
+                "current_speaker": new_state.get("current_speaker").cloned().unwrap_or(serde_json::Value::Null)
+            }
+        });
+        let _ = append_to_board(&pd, &event);
+
+        Ok(new_state)
+    })?;
+
+    notify_desktop();
+    Ok(result)
+}
+
 /// Walk up from CWD to find .vaak/project.json
 fn find_project_root() -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;
@@ -2830,8 +3019,28 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     }
 
     let result = with_file_lock(&state.project_dir, || {
-        let msg_id = next_message_id(&state.project_dir);
         let from_label = format!("{}:{}", state.role, state.instance);
+
+        // Assembly Line gate (atomic with the send) — read state, check, reject or proceed.
+        // Inside with_file_lock so the gate-check, board append, and post-accept advance
+        // all share ONE lock acquire — no TOCTOU window between gate and advance.
+        // Bypasses: human-origin sends and moderation-type messages (state events).
+        // The bypass for `discussion_control` (Pipeline) is intentional: when assembly_line
+        // is active, it OWNS the speech gate; Pipeline's Delphi-broadcast restriction above
+        // still ran as an early reject, which is fine — it only restricts a narrower case.
+        let asm = read_assembly_state(&state.project_dir);
+        let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        if asm_active && state.role != "human" && msg_type != "moderation" {
+            let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
+            if cur != from_label {
+                return Err(format!(
+                    "Assembly Line active — not your turn. Current speaker: {}. The mic will pass to you when it rotates.",
+                    if cur.is_empty() { "(none)" } else { cur }
+                ));
+            }
+        }
+
+        let msg_id = next_message_id(&state.project_dir);
         let message = serde_json::json!({
             "id": msg_id,
             "from": from_label,
@@ -2843,6 +3052,18 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "metadata": metadata.unwrap_or(serde_json::json!({}))
         });
         append_to_board(&state.project_dir, &message)?;
+
+        // Assembly Line auto-advance (atomic with the append above).
+        // Skips standby/disconnected seats; if no live seat exists, mic stays put.
+        // Bypasses: human-origin sends and moderation-type messages — those don't
+        // consume the floor (matches the gate exemption rule above).
+        if asm_active && state.role != "human" && msg_type != "moderation" {
+            if let Some(next) = next_assembly_speaker(&asm, &state.project_dir, &from_label) {
+                let mut updated = asm.clone();
+                updated["current_speaker"] = serde_json::json!(next);
+                let _ = write_assembly_state_unlocked(&state.project_dir, &updated);
+            }
+        }
 
         // Continuous review: auto-create micro-round when developer posts a status
         if msg_type == "status" {
@@ -4599,6 +4820,20 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "assembly_line",
+                    "description": "Assembly Line mic control. Two top-level modes: simultaneous (default) ↔ assembly_line (one-speaker-at-a-time, auto-rotate). When enabled, project_send rejects non-speakers with not_your_turn and auto-advances the mic to the next live seat after each accepted send. Independent of discussion_control. Actions: enable (seed rotation_order from active seats), disable (back to simultaneous), get_state (read-only).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "Action: enable, disable, get_state"
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                },
+                {
                     "name": "audience_vote",
                     "description": "Collect votes from an AI audience pool (27 personas across 3 LLM providers). Results are posted to the collab board as a broadcast so all team members see them simultaneously. Any role can invoke this tool.",
                     "inputSchema": {
@@ -5130,6 +5365,31 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{
                                 "type": "text",
                                 "text": format!("Discussion control failed: {}", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "assembly_line" {
+                let arguments = params.get("arguments").and_then(|a| a.as_object());
+                let action = arguments
+                    .and_then(|a| a.get("action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match handle_assembly_line(action) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp.to_string()
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Assembly Line failed: {}", e)
                             }],
                             "isError": true
                         })
