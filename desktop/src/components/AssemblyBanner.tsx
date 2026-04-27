@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState } from "react";
 import type { SessionBinding } from "../lib/collabTypes";
 
 export interface AssemblyState {
@@ -49,87 +50,75 @@ function isLive(seat: string, sessions: SessionBinding[] | undefined): boolean {
 }
 
 export function AssemblyBanner({ state, sessions }: Props) {
-  if (!state?.active || !state.rotation_order?.length) return null;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const chipRefs = useRef<Record<string, HTMLSpanElement | null>>({});
+  const [micPos, setMicPos] = useState<{ left: number; top: number } | null>(null);
 
-  const order = state.rotation_order;
-  const speaker = state.current_speaker;
-  const speakerIdx = speaker ? order.indexOf(speaker) : -1;
-  const nextUp =
-    speakerIdx >= 0 ? order[(speakerIdx + 1) % order.length] : order[0];
+  const order = state?.rotation_order ?? [];
+  const speaker = state?.current_speaker ?? null;
 
-  const queue: string[] = [];
-  if (speakerIdx >= 0) {
-    for (let i = 2; i < order.length; i++) {
-      queue.push(order[(speakerIdx + i) % order.length]);
+  useLayoutEffect(() => {
+    if (!state?.active || !speaker || !containerRef.current) {
+      setMicPos(null);
+      return;
     }
-  } else {
-    queue.push(...order.slice(1));
-  }
+    const chip = chipRefs.current[speaker];
+    if (!chip) {
+      setMicPos(null);
+      return;
+    }
+    const cRect = containerRef.current.getBoundingClientRect();
+    const chRect = chip.getBoundingClientRect();
+    setMicPos({
+      left: chRect.left - cRect.left + chRect.width / 2,
+      top: chRect.top - cRect.top - 2,
+    });
+  }, [state?.active, speaker, order.join("|")]);
 
-  const speakerLive = speaker ? isLive(speaker, sessions) : false;
-  const speakerColor = speaker ? colorFor(speaker) : "#657786";
-  const nextLive = nextUp ? isLive(nextUp, sessions) : false;
-  const nextColor = nextUp ? colorFor(nextUp) : "#657786";
+  if (!state?.active || order.length === 0) return null;
 
   return (
     <div
       className="al-banner"
       role="status"
       aria-label="Assembly Line — current speaker and queue"
+      ref={containerRef}
     >
-      <span className="al-banner-mic" aria-hidden="true">🎙</span>
-      {speaker ? (
-        <span
-          className="al-banner-speaker"
-          style={{
-            background: speakerColor,
-            opacity: speakerLive ? 1 : 0.5,
-          }}
-          title={`Current speaker: ${speaker}${speakerLive ? "" : " (disconnected)"}`}
-        >
-          {speaker}
-        </span>
-      ) : (
-        <span className="al-banner-speaker al-banner-speaker-empty" title="No current speaker">
-          (none)
-        </span>
-      )}
-      {nextUp && nextUp !== speaker && (
-        <>
-          <span className="al-banner-arrow" aria-hidden="true">→</span>
-          <span
-            className="al-banner-next"
-            style={{
-              borderColor: nextColor,
-              color: nextColor,
-              opacity: nextLive ? 1 : 0.5,
-            }}
-            title={`Next: ${nextUp}${nextLive ? "" : " (disconnected)"}`}
-          >
-            {nextUp}
-          </span>
-        </>
-      )}
-      {queue.length > 0 && (
-        <span className="al-banner-queue-sep" aria-hidden="true">·</span>
-      )}
-      {queue.map((seat) => {
+      <span className="al-banner-label" aria-hidden="true">Assembly:</span>
+      {order.map((seat) => {
         const live = isLive(seat, sessions);
+        const isActive = seat === speaker;
+        const color = colorFor(seat);
         return (
           <span
             key={seat}
-            className="al-banner-chip"
+            ref={(el) => { chipRefs.current[seat] = el; }}
+            className={`al-banner-seat${isActive ? " al-banner-seat-active" : ""}`}
             style={{
-              borderColor: colorFor(seat),
-              color: colorFor(seat),
-              opacity: live ? 0.85 : 0.5,
+              background: isActive ? color : "transparent",
+              borderColor: color,
+              color: isActive ? "#fff" : color,
+              opacity: live ? 1 : 0.5,
             }}
-            title={`Queued: ${seat}${live ? "" : " (disconnected)"}`}
+            title={
+              isActive
+                ? `Current speaker: ${seat}${live ? "" : " (disconnected)"}`
+                : `${seat}${live ? "" : " (disconnected)"}`
+            }
           >
             {seat}
           </span>
         );
       })}
+      {micPos && (
+        <span
+          className="al-banner-floating-mic"
+          aria-hidden="true"
+          style={{ left: micPos.left, top: micPos.top }}
+        >
+          🎙
+        </span>
+      )}
     </div>
   );
 }
