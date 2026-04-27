@@ -2400,6 +2400,14 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         .and_then(|t| t.as_u64())
         .unwrap_or(120);
 
+    // Mirrors collab::cleanup_gone_sessions:868 — when auto_collab is on, sessions
+    // persist indefinitely so quiet seats survive a Vaak restart instead of being
+    // swept by the next joiner.
+    let auto_collab = config.get("settings")
+        .and_then(|s| s.get("auto_collab"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let result = with_file_lock(&normalized, || {
         let mut sessions = read_sessions(&normalized);
         let bindings = sessions.get_mut("bindings")
@@ -2407,7 +2415,7 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
             .ok_or("Invalid sessions.json format")?;
 
         // === GLOBAL STALE SWEEP: remove stale bindings for ALL roles on every join ===
-        {
+        if !auto_collab {
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
