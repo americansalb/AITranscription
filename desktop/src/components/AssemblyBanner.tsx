@@ -1,4 +1,3 @@
-import { useLayoutEffect, useRef, useState } from "react";
 import type { SessionBinding } from "../lib/collabTypes";
 
 export interface AssemblyState {
@@ -50,39 +49,16 @@ function isLive(seat: string, sessions: SessionBinding[] | undefined): boolean {
 }
 
 export function AssemblyBanner({ state, sessions }: Props) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const chipRefs = useRef<Record<string, HTMLSpanElement | null>>({});
-  const [micPos, setMicPos] = useState<{ left: number; top: number } | null>(null);
+  if (!state?.active || !state.rotation_order?.length) return null;
 
-  const order = state?.rotation_order ?? [];
-  const speaker = state?.current_speaker ?? null;
-
-  useLayoutEffect(() => {
-    if (!state?.active || !speaker || !containerRef.current) {
-      setMicPos(null);
-      return;
-    }
-    const chip = chipRefs.current[speaker];
-    if (!chip) {
-      setMicPos(null);
-      return;
-    }
-    const cRect = containerRef.current.getBoundingClientRect();
-    const chRect = chip.getBoundingClientRect();
-    setMicPos({
-      left: chRect.left - cRect.left + chRect.width / 2,
-      top: chRect.top - cRect.top - 2,
-    });
-  }, [state?.active, speaker, order.join("|")]);
-
-  if (!state?.active || order.length === 0) return null;
+  const order = state.rotation_order;
+  const speaker = state.current_speaker;
 
   return (
     <div
       className="al-banner"
       role="status"
       aria-label="Assembly Line — current speaker and queue"
-      ref={containerRef}
     >
       <span className="al-banner-label" aria-hidden="true">Assembly:</span>
       {order.map((seat) => {
@@ -92,7 +68,6 @@ export function AssemblyBanner({ state, sessions }: Props) {
         return (
           <span
             key={seat}
-            ref={(el) => { chipRefs.current[seat] = el; }}
             className={`al-banner-seat${isActive ? " al-banner-seat-active" : ""}`}
             style={{
               background: isActive ? color : "transparent",
@@ -106,19 +81,13 @@ export function AssemblyBanner({ state, sessions }: Props) {
                 : `${seat}${live ? "" : " (disconnected)"}`
             }
           >
+            {isActive && (
+              <span className="al-banner-seat-mic" aria-label="has the mic">🎙</span>
+            )}
             {seat}
           </span>
         );
       })}
-      {micPos && (
-        <span
-          className="al-banner-floating-mic"
-          aria-hidden="true"
-          style={{ left: micPos.left, top: micPos.top }}
-        >
-          🎙
-        </span>
-      )}
     </div>
   );
 }
