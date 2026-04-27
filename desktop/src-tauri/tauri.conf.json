@@ -78,6 +78,19 @@
         "visible": false,
         "decorations": true,
         "url": "index.html#/queue"
+      },
+      {
+        "title": "Collaborate",
+        "label": "collaborate-v2",
+        "width": 1100,
+        "height": 720,
+        "resizable": true,
+        "minWidth": 800,
+        "minHeight": 500,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "url": "index.html#/collaborate-v2"
       }
     ],
     "security": {

@@ -1,0 +1,408 @@
+/* Collaborate v2 — P1 shell styles. Matches §A.2 three-column layout
+ * (team sidebar | feed | placeholder right sidebar). OS chrome via Tauri;
+ * inside the window we just lay out the content. Pure CSS per project
+ * convention (no Tailwind). */
+
+.cv2-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #1a1a1a;
+  background: #ffffff;
+}
+
+.cv2-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  background: #f4f6f9;
+  border-bottom: 1px solid #c8ced6;
+  flex-shrink: 0;
+}
+
+.cv2-header-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cv2-header-title-main {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a1a1a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv2-header-title-sub {
+  font-size: 12px;
+  color: #555;
+}
+
+.cv2-header-title-sub code {
+  background: #e9ecef;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.cv2-phase-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef7e0;
+  color: #9a6600;
+  border: 1px solid #f0d878;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.cv2-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cv2-muted {
+  color: #888;
+}
+
+.cv2-flow-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #eaf3fd;
+  border: 1px solid #bcd6f7;
+  color: #1967d2;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.cv2-flow-pill::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #1967d2;
+}
+
+.cv2-work-pill {
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: #f3e8fd;
+  border: 1px solid #d5b5f2;
+  color: #6b2ea8;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.cv2-header-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #c8ced6;
+  color: #555;
+  font-size: 12px;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.cv2-header-btn:focus {
+  outline: 2px solid #4a90e2;
+}
+
+.cv2-body {
+  display: grid;
+  grid-template-columns: 220px 1fr 266px;
+  flex: 1;
+  min-height: 0;
+}
+
+.cv2-team-sidebar {
+  background: #fafbfc;
+  border-right: 1px solid #c8ced6;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* Applied to h2 in SR-friendly markup; reset UA heading defaults. */
+.cv2-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #666;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px 0;
+  text-transform: uppercase;
+}
+
+/* h3 subheads inside the orientation copy. SR users can jump-by-heading; the
+ * visual styling stays modest since the copy density is already high. */
+.cv2-feed-subhead {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin: 16px 0 6px 0;
+  letter-spacing: 0.02em;
+}
+
+.cv2-seat-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.cv2-seat {
+  padding: 10px 8px;
+  border-bottom: 1px solid #e6e8ec;
+}
+
+.cv2-seat-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.cv2-pill {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.cv2-pill-active {
+  background: #e6f4ea;
+  color: #137333;
+  border-color: #b3d8b8;
+}
+
+.cv2-pill-standby {
+  background: #fef7e0;
+  color: #9a6600;
+  border-color: #f0d878;
+}
+
+.cv2-pill-disconnected {
+  background: #fce8e6;
+  color: #c5221f;
+  border-color: #f4b4b0;
+}
+
+.cv2-empty-roster {
+  color: #888;
+  font-size: 12px;
+  font-style: italic;
+  padding: 10px 8px;
+}
+
+.cv2-feed {
+  border-right: 1px solid #c8ced6;
+  background: #fff;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.cv2-feed-empty {
+  color: #888;
+  font-size: 13px;
+  font-style: italic;
+  text-align: center;
+  margin-top: 40px;
+}
+
+.cv2-feed-orient {
+  margin-top: 12px;
+  color: #333;
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 640px;
+}
+
+.cv2-feed-orient .cv2-feed-h2 {
+  margin: 0 0 12px 0;
+  font-size: 17px;
+  color: #1967d2;
+}
+
+.cv2-feed-orient p {
+  margin: 8px 0;
+}
+
+.cv2-feed-orient ul {
+  margin: 8px 0 8px 20px;
+  padding: 0;
+}
+
+.cv2-feed-orient li {
+  margin: 4px 0;
+}
+
+.cv2-feed-orient code {
+  background: #f0f0f0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.cv2-flow-stubs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.cv2-flow-stub {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #f7f9fc;
+  border: 1px solid #dfe3e8;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #444;
+}
+
+.cv2-flow-stubs {
+  margin: 4px 0 0;
+}
+
+.cv2-flow-stubs dt {
+  display: inline;
+  font-weight: 500;
+}
+
+.cv2-flow-stubs dd {
+  display: inline;
+  margin: 0;
+}
+
+.cv2-right-placeholder p {
+  margin: 8px 0;
+  line-height: 1.5;
+}
+
+.cv2-right-sidebar {
+  background: #fafbfc;
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cv2-right-panel {
+  background: #fff;
+  border: 1px solid #dfe3e8;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.cv2-right-panel .cv2-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.cv2-right-placeholder {
+  color: #888;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.cv2-phase-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #fef7e0;
+  color: #9a6600;
+  border: 1px solid #f0d878;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.cv2-phase-tag-deferred {
+  background: #edeef1;
+  color: #555;
+  border-color: #d0d3d8;
+}
+
+/* Renders as a <button> (disabled in P1, becomes a live 1-click override in
+ * P3a). The disabled cursor + width:100% override the UA button defaults so
+ * the ribbon keeps its visual identity. */
+.cv2-override-ribbon {
+  background: #fdecec;
+  border: 1px solid #e08080;
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #a03030;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  cursor: not-allowed;
+  font-family: inherit;
+}
+
+.cv2-override-ribbon:disabled {
+  opacity: 0.75;
+}
+
+.cv2-override-ribbon-main {
+  display: block;
+}
+
+.cv2-tiny {
+  font-size: 10px;
+  font-weight: 400;
+  margin-top: 3px;
+  font-style: italic;
+}
+
+.cv2-bottom-bar {
+  padding: 12px 16px;
+  background: #f4f6f9;
+  border-top: 1px solid #c8ced6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.cv2-input-disabled {
+  flex: 1;
+  padding: 8px 12px;
+  background: #edeef1;
+  border: 1px solid #d0d3d8;
+  border-radius: 5px;
+  color: #888;
+  font-style: italic;
+  font-size: 12px;
+}
+
+.cv2-send-disabled {
+  padding: 8px 18px;
+  background: #d0d3d8;
+  border: none;
+  border-radius: 5px;
+  color: #8b8e92;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: not-allowed;
+}

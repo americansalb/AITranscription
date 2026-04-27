@@ -6665,3 +6665,50 @@
   background: var(--collab-bg-secondary);
   color: var(--collab-text-primary);
 }
+
+/* ==================== Assembly Line Banner ==================== */
+.al-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 8px 0;
+  background: linear-gradient(90deg, rgba(19, 115, 51, 0.18), rgba(19, 115, 51, 0.06));
+  border: 1px solid rgba(19, 115, 51, 0.45);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.al-banner-label {
+  color: var(--collab-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+  margin-right: 2px;
+}
+.al-banner-seat {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.25s ease, color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease;
+}
+.al-banner-seat-active {
+  font-weight: 700;
+  transform: scale(1.05);
+  box-shadow: 0 0 10px rgba(19, 115, 51, 0.5);
+}
+.al-banner-seat-mic {
+  display: inline-block;
+  margin-right: 5px;
+  font-size: 13px;
+  animation: al-mic-pulse 1.6s ease-in-out infinite;
+}
+@keyframes al-mic-pulse {
+  0%, 100% { transform: scale(1);    filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.6)); }
+  50%      { transform: scale(1.18); filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.95)); }
+}

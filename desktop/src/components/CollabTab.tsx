@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
+import { AssemblyBanner } from "./AssemblyBanner";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
@@ -591,6 +592,14 @@ export function CollabTab() {
   const [workflowDropdownOpen, setWorkflowDropdownOpen] = useState(false);
   const [discussionModeOpen, setDiscussionModeOpen] = useState(false);
   const [discussionState, setDiscussionState] = useState<DiscussionState | null>(null);
+  // Assembly Line state — minimum mic-control mechanism. Reads .vaak/assembly.json
+  // via the get_assembly_state Tauri command; toggled by set_assembly_state.
+  const [assemblyState, setAssemblyState] = useState<{
+    active: boolean;
+    current_speaker: string | null;
+    rotation_order: string[];
+  } | null>(null);
+  const [assemblyToggling, setAssemblyToggling] = useState(false);
   const [closingRound, setClosingRound] = useState(false);
   const [continuousTimeout, setContinuousTimeout] = useState(60);
   const [startDiscussionOpen, setStartDiscussionOpen] = useState(false);
@@ -1323,6 +1332,27 @@ When multiple instances of this role are active:
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
+  // Poll Assembly Line state — current_speaker rotates on every accepted send,
+  // so we re-read frequently enough to keep the indicator fresh.
+  useEffect(() => {
+    if (!window.__TAURI__ || !projectDir) return;
+    let cancelled = false;
+    const pollAssembly = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const state = await invoke<{
+          active: boolean;
+          current_speaker: string | null;
+          rotation_order: string[];
+        }>("get_assembly_state", { dir: projectDir });
+        if (!cancelled) setAssemblyState(state);
+      } catch { /* command may not exist on older binaries */ }
+    };
+    pollAssembly();
+    const interval = setInterval(pollAssembly, 1000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [projectDir]);
+
   // Load settings on mount
   useEffect(() => {
     if (!window.__TAURI__) return;
@@ -1828,6 +1858,28 @@ When multiple instances of this role are active:
       }
     } catch (e) {
       console.error("[CollabTab] Failed to set discussion mode:", e);
+    }
+  };
+
+  const handleToggleAssembly = async () => {
+    if (assemblyToggling || !projectDir) return;
+    setAssemblyToggling(true);
+    try {
+      if (window.__TAURI__) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const action = assemblyState?.active ? "disable" : "enable";
+        const next = await invoke<{
+          active: boolean;
+          current_speaker: string | null;
+          rotation_order: string[];
+        }>("set_assembly_state", { dir: projectDir, action });
+        setAssemblyState(next);
+      }
+    } catch (e) {
+      console.error("[CollabTab] Failed to toggle Assembly Line:", e);
+      setError(typeof e === "string" ? e : "Failed to toggle Assembly Line");
+    } finally {
+      setAssemblyToggling(false);
     }
   };
 
@@ -2516,6 +2568,36 @@ When multiple instances of this role are active:
               &#9998; Discuss
             </button>
           )}
+          {/* Assembly Line toggle — one-speaker-at-a-time mic control. When ON,
+              project_send rejects non-speakers and auto-rotates the mic on
+              each accepted send. Independent of discussion_control / Pipeline. */}
+          <button
+            className="assembly-line-toggle"
+            onClick={handleToggleAssembly}
+            disabled={assemblyToggling}
+            title={
+              assemblyState?.active
+                ? `Assembly Line ON · current speaker: ${assemblyState.current_speaker ?? "(none)"} · click to disable`
+                : "Assembly Line OFF (simultaneous) · click to enable one-speaker-at-a-time"
+            }
+            aria-label={assemblyState?.active ? "Disable Assembly Line" : "Enable Assembly Line"}
+            style={{
+              background: assemblyState?.active ? "#137333" : "transparent",
+              color: assemblyState?.active ? "#fff" : "#137333",
+              border: "1px solid #137333",
+              borderRadius: 6,
+              padding: "4px 10px",
+              marginLeft: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: assemblyToggling ? "wait" : "pointer",
+              opacity: assemblyToggling ? 0.6 : 1,
+            }}
+          >
+            {assemblyState?.active
+              ? `🎙 Assembly: ${assemblyState.current_speaker ?? "—"}`
+              : "Assembly Line"}
+          </button>
           <button
             className="project-settings-btn"
             onClick={() => setSettingsOpen(!settingsOpen)}
@@ -2524,6 +2606,9 @@ When multiple instances of this role are active:
             &#9881;
           </button>
         </div>
+
+        {/* Assembly Line banner — current speaker, next-up, queue chips. Renders only when AL is on. */}
+        <AssemblyBanner state={assemblyState} sessions={project?.sessions} />
 
         {/* Settings Panel */}
         {settingsOpen && (

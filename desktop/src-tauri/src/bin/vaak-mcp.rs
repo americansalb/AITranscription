@@ -17,6 +17,13 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+// Shared with main.rs's collab module: Assembly Line mutation lives in ONE place
+// per architect #156 (two front doors, one impl). Imported via #[path] because
+// vaak-mcp.rs is a separate binary crate from the desktop app and does not share
+// a lib.rs with main.rs.
+#[path = "../collab.rs"]
+mod collab_shared;
+
 /// Atomic file write: write to .tmp, fsync, rename. Prevents partial writes on macOS.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
     let tmp_path = path.with_extension("tmp");
@@ -2280,6 +2287,146 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
     }
 }
 
+// ==================== Assembly Line ====================
+// Minimum mic-control mechanism per human directives (assembly-line thread).
+// Two top-level modes: simultaneous (default; free-broadcast) ↔ assembly_line.
+// State is section-scoped; mirrors discussion.json layout.
+//
+// SCOPE BOUNDARIES (v0):
+//   - V1-only. project_send_v2 path stays untouched per Ground Rule (don't break v1, don't touch v2).
+//   - Gate applies ONLY to handle_project_send. Floor-consuming "speech" tools.
+//     project_join (announce), project_buzz (wake), audience_vote (audience event),
+//     and the assembly_line tool itself are exempt by design — they are system
+//     events, not speech.
+//   - No human-only enforcement (MCP is not authenticated). Any seat can call
+//     assembly_line(enable|disable). Trust the human via UI, not the wire.
+//
+// LOCK DISCIPLINE:
+//   - assembly state writes happen ONLY inside `with_file_lock` (which holds board.lock).
+//     One critical section per send: read assembly → gate → append → advance → release.
+//   - assembly.json has NO standalone lock file. Gate-check + append + advance share
+//     the existing board.lock acquire — atomic, no TOCTOU, no second lock to order.
+//
+// FAILURE MODES (deferred to v1 follow-up):
+//   - Stuck mic if speaker crashes/AFKs: human toggles off (v0 escape hatch).
+//   - All seats die: same.
+//   - New seats joining mid-rotation: rotation_order is locked at enable-time and
+//     never re-seeded mid-session. To include a freshly-joined seat, the human
+//     must disable + re-enable. (No `round` counter exists in v0; the spec's
+//     "next round boundary" semantics are deferred along with idle-skip.)
+
+/// Returns the assembly.json path for the active section.
+/// "default" section uses flat .vaak/assembly.json; non-default uses .vaak/sections/{slug}/assembly.json.
+fn assembly_json_path(project_dir: &str) -> PathBuf {
+    let section = get_active_section(project_dir);
+    if section == "default" {
+        vaak_dir(project_dir).join("assembly.json")
+    } else {
+        vaak_dir(project_dir).join("sections").join(section).join("assembly.json")
+    }
+}
+
+fn read_assembly_state(project_dir: &str) -> serde_json::Value {
+    std::fs::read_to_string(assembly_json_path(project_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({
+            "active": false,
+            "current_speaker": null,
+            "rotation_order": [],
+            "started_at": null,
+            "started_by": null
+        }))
+}
+
+/// Write assembly state. Caller must hold with_file_lock (board.lock) — that lock
+/// already serializes the post-accept advance path inside handle_project_send.
+fn write_assembly_state_unlocked(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let path = assembly_json_path(project_dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize assembly state: {}", e))?;
+    atomic_write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write assembly.json: {}", e))
+}
+
+/// List active+idle session seats as "role:instance" strings, in roster order.
+/// Used to seed rotation_order on enable and to find the next live speaker.
+fn active_assembly_seats(project_dir: &str) -> Vec<String> {
+    let sessions = read_sessions(project_dir);
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter()
+                .filter(|b| {
+                    let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    status == "active" || status == "idle"
+                })
+                .filter_map(|b| {
+                    let role = b.get("role").and_then(|r| r.as_str())?;
+                    let instance = b.get("instance").and_then(|i| i.as_u64())?;
+                    Some(format!("{}:{}", role, instance))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Given the current assembly state and the seat that just sent, return the next
+/// speaker in rotation_order — skipping seats that are no longer active/idle.
+/// Returns None if no live seat is found (caller leaves current_speaker as-is).
+fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: &str) -> Option<String> {
+    let order: Vec<String> = asm.get("rotation_order")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    if order.is_empty() {
+        return None;
+    }
+    let live: std::collections::HashSet<String> = active_assembly_seats(project_dir).into_iter().collect();
+    // Find the sender's index, then walk forward (with wrap) until we hit a live seat.
+    let start = order.iter().position(|s| s == just_sent).unwrap_or(0);
+    for offset in 1..=order.len() {
+        let candidate = &order[(start + offset) % order.len()];
+        if live.contains(candidate) {
+            return Some(candidate.clone());
+        }
+    }
+    // No live seat anywhere in rotation — degenerate; mic stays with sender.
+    None
+}
+
+/// Handle the `assembly_line` MCP tool. Auto-advance only — no manual pass_mic
+/// (architect ruling: MCP is not authenticated, so a "human-only" override would
+/// be a lie. Toggle off is the v0 escape hatch). Actions:
+/// - "enable": activate, seed rotation_order from active sessions, current_speaker = order[0]
+/// - "disable": deactivate, clear state
+/// - "get_state": read-only inspect
+///
+/// The enable/disable mutation calls into `collab_shared::set_assembly_v0` so the
+/// Tauri command path and the MCP path share ONE implementation per #156.
+/// Posting the moderation board event stays here because it depends on
+/// `next_message_id` and `append_to_board`, which are MCP-binary helpers.
+fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+    let pd = state.project_dir.clone();
+    let actor = format!("{}:{}", state.role, state.instance);
+
+    if action == "get_state" {
+        return Ok(read_assembly_state(&pd));
+    }
+
+    // Single shared mutation impl. Posts the moderation board event itself so
+    // both UI (set_assembly_state command) and MCP paths emit one — see
+    // collab.rs::set_assembly_v0.
+    let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
+
+    notify_desktop();
+    Ok(new_state)
+}
+
 /// Walk up from CWD to find .vaak/project.json
 fn find_project_root() -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;
@@ -2400,6 +2547,14 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         .and_then(|t| t.as_u64())
         .unwrap_or(120);
 
+    // Mirrors collab::cleanup_gone_sessions:868 — when auto_collab is on, sessions
+    // persist indefinitely so quiet seats survive a Vaak restart instead of being
+    // swept by the next joiner.
+    let auto_collab = config.get("settings")
+        .and_then(|s| s.get("auto_collab"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let result = with_file_lock(&normalized, || {
         let mut sessions = read_sessions(&normalized);
         let bindings = sessions.get_mut("bindings")
@@ -2407,7 +2562,7 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
             .ok_or("Invalid sessions.json format")?;
 
         // === GLOBAL STALE SWEEP: remove stale bindings for ALL roles on every join ===
-        {
+        if !auto_collab {
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -2607,6 +2762,27 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 
     let (instance, _is_new) = result;
 
+    // Re-seed assembly rotation_order so a seat that joins after the gate was
+    // enabled can still take the mic. Skip if already present (re-joiner).
+    {
+        let seat = format!("{}:{}", role, instance);
+        let _ = with_file_lock(&normalized, || -> Result<(), String> {
+            let mut asm = read_assembly_state(&normalized);
+            if asm.get("active").and_then(|v| v.as_bool()) != Some(true) {
+                return Ok(());
+            }
+            let arr = match asm.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
+                Some(a) => a,
+                None => return Ok(()),
+            };
+            if arr.iter().any(|v| v.as_str() == Some(&seat)) {
+                return Ok(());
+            }
+            arr.push(serde_json::json!(seat));
+            write_assembly_state_unlocked(&normalized, &asm)
+        });
+    }
+
     // Read role briefing
     let briefing_path = role_briefing_path(&normalized, role);
     let briefing = std::fs::read_to_string(&briefing_path).unwrap_or_default();
@@ -2752,7 +2928,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
-    // Read discussion state once for broadcast permission and Delphi enforcement
+    // Read discussion state once for broadcast permission. The Delphi-broadcast
+    // gate moved INSIDE with_file_lock below so its read of assembly state
+    // is atomic with the assembly gate (closes the pre-lock TOCTOU race
+    // identified in evil-arch #120).
     let disc = read_discussion_state(&state.project_dir);
     let disc_active = disc.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
     let disc_format = disc.get("mode").and_then(|v| v.as_str()).unwrap_or("");
@@ -2786,40 +2965,58 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
-    // Delphi protocol enforcement: block ALL non-procedural broadcasts during active Delphi.
-    // Applies to the ENTIRE Delphi lifecycle (all phases, not just submitting).
-    // Oxford/red_team/continuous allow public broadcasts — only Delphi is restricted.
-    // Directed messages (to specific roles) are always allowed — agents need to coordinate.
-    //
-    // Allowed through:
-    //   - type:"submission" (participant blind submissions to moderator)
-    //   - type:"moderation" (system/moderator procedural announcements)
-    //   - Messages from human (always exempt)
-    //   - Directed messages (to != "all") — not affected by this check
-    //
-    // Blocked:
-    //   - type:"broadcast" from ANYONE including the moderator (prevents leaking reference material)
-    //   - type:"status", "answer", "directive", etc. to "all" from any non-human
-    {
-        let moderator = disc.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let from = format!("{}:{}", state.role, state.instance);
+    // Delphi protocol enforcement moved INSIDE with_file_lock — see #120 race fix.
 
-        if disc_active && disc_format == "delphi"
+    let result = with_file_lock(&state.project_dir, || {
+        let from_label = format!("{}:{}", state.role, state.instance);
+
+        // Assembly Line gate (atomic with the send) — read state, check, reject or proceed.
+        // Inside with_file_lock so the gate-check, board append, and post-accept advance
+        // all share ONE lock acquire — no TOCTOU window between gate and advance.
+        //
+        // ONLY bypass: human-origin sends. We do NOT bypass on caller-supplied msg_type
+        // (e.g. "moderation"); doing so would let any agent skip the mic by sending
+        // type="moderation". Internal system events from handle_assembly_line append
+        // to the board directly via append_to_board(), bypassing this entire function,
+        // so they don't need a gate exemption (#113.A).
+        let asm = read_assembly_state(&state.project_dir);
+        let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        if asm_active && state.role != "human" {
+            let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
+            if cur != from_label {
+                return Err(format!(
+                    "Assembly Line active — not your turn. Current speaker: {}. The mic will pass to you when it rotates.",
+                    if cur.is_empty() { "(none)" } else { cur }
+                ));
+            }
+        }
+
+        // Delphi-broadcast gate (atomic with the assembly gate above and the append below).
+        // Per #56.1: when assembly_line is active, it OWNS the speech gate — the Delphi
+        // restriction is short-circuited. Both gates read state inside the SAME
+        // with_file_lock acquire — disc state is re-read here from disk so the check
+        // is atomic with `asm_active` (closes the residual TOCTOU evil-arch #130
+        // flagged on top of the original #120 race).
+        let disc_in_lock = read_discussion_state(&state.project_dir);
+        let disc_active_in_lock = disc_in_lock.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let disc_format_in_lock = disc_in_lock.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        if !asm_active && disc_active_in_lock && disc_format_in_lock == "delphi"
             && msg_type != "submission"
             && msg_type != "moderation"
             && to == "all"
             && state.role != "human"
         {
-            if from == moderator {
-                eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from, msg_type);
+            let moderator = disc_in_lock.get("moderator").and_then(|v| v.as_str()).unwrap_or("unknown");
+            if from_label == moderator {
+                eprintln!("[delphi-reject] Blocked moderator broadcast from {} during active Delphi (type: {}, to: all). Use type: moderation for procedural announcements.", from_label, msg_type);
                 return Err(
                     "Active Delphi discussion — moderator broadcasts to \"all\" are blocked. \
                     Use type: \"moderation\" for procedural round announcements. \
                     Directed messages to specific participants are still allowed.".to_string()
                 );
             }
-            let phase = disc.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-            eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from, phase, msg_type);
+            let phase = disc_in_lock.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+            eprintln!("[delphi-reject] Blocked broadcast from {} during active Delphi (phase: {}, type: {}, to: all)", from_label, phase, msg_type);
             return Err(format!(
                 "Active Delphi discussion — broadcasts to \"all\" are blocked to preserve blind submission integrity. \
                 To submit your position, use type: \"submission\" addressed to the moderator ({}). \
@@ -2827,11 +3024,8 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 moderator
             ));
         }
-    }
 
-    let result = with_file_lock(&state.project_dir, || {
         let msg_id = next_message_id(&state.project_dir);
-        let from_label = format!("{}:{}", state.role, state.instance);
         let message = serde_json::json!({
             "id": msg_id,
             "from": from_label,
@@ -2843,6 +3037,18 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "metadata": metadata.unwrap_or(serde_json::json!({}))
         });
         append_to_board(&state.project_dir, &message)?;
+
+        // Assembly Line auto-advance (atomic with the append above).
+        // Skips standby/disconnected seats; if no live seat exists, mic stays put.
+        // Bypass matches the gate above: ONLY human-origin sends skip the advance
+        // (caller-supplied msg_type is not trusted here either, per #113.A).
+        if asm_active && state.role != "human" {
+            if let Some(next) = next_assembly_speaker(&asm, &state.project_dir, &from_label) {
+                let mut updated = asm.clone();
+                updated["current_speaker"] = serde_json::json!(next);
+                let _ = write_assembly_state_unlocked(&state.project_dir, &updated);
+            }
+        }
 
         // Continuous review: auto-create micro-round when developer posts a status
         if msg_type == "status" {
@@ -4599,6 +4805,20 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "assembly_line",
+                    "description": "Assembly Line mic control. Two top-level modes: simultaneous (default) ↔ assembly_line (one-speaker-at-a-time, auto-rotate). When enabled, project_send rejects non-speakers with not_your_turn and auto-advances the mic to the next live seat after each accepted send. Independent of discussion_control. Actions: enable (seed rotation_order from active seats), disable (back to simultaneous), get_state (read-only).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "Action: enable, disable, get_state"
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                },
+                {
                     "name": "audience_vote",
                     "description": "Collect votes from an AI audience pool (27 personas across 3 LLM providers). Results are posted to the collab board as a broadcast so all team members see them simultaneously. Any role can invoke this tool.",
                     "inputSchema": {
@@ -5130,6 +5350,31 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{
                                 "type": "text",
                                 "text": format!("Discussion control failed: {}", e)
+                            }],
+                            "isError": true
+                        })
+                    }
+                }
+            } else if tool_name == "assembly_line" {
+                let arguments = params.get("arguments").and_then(|a| a.as_object());
+                let action = arguments
+                    .and_then(|a| a.get("action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match handle_assembly_line(action) {
+                    Ok(resp) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": resp.to_string()
+                            }]
+                        })
+                    }
+                    Err(e) => {
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": format!("Assembly Line failed: {}", e)
                             }],
                             "isError": true
                         })

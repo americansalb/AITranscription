@@ -1060,6 +1060,171 @@ pub fn active_discussion_path(dir: &str) -> PathBuf {
     discussion_path_for_section(dir, &get_active_section(dir))
 }
 
+// ==================== Assembly Line state ====================
+// Mirrors vaak-mcp.rs's helpers; the two binaries write to the SAME assembly.json
+// so the Tauri-side toggle and the MCP-side gate share state at the disk level.
+
+pub fn assembly_path_for_section(dir: &str, section: &str) -> PathBuf {
+    if section == "default" {
+        Path::new(dir).join(".vaak").join("assembly.json")
+    } else {
+        Path::new(dir).join(".vaak").join("sections").join(section).join("assembly.json")
+    }
+}
+
+pub fn active_assembly_path(dir: &str) -> PathBuf {
+    assembly_path_for_section(dir, &get_active_section(dir))
+}
+
+pub fn read_assembly(dir: &str) -> serde_json::Value {
+    std::fs::read_to_string(active_assembly_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({
+            "active": false,
+            "current_speaker": null,
+            "rotation_order": [],
+            "started_at": null,
+            "started_by": null
+        }))
+}
+
+pub fn write_assembly_unlocked(dir: &str, state: &serde_json::Value) -> Result<(), String> {
+    let path = active_assembly_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize assembly state: {}", e))?;
+    atomic_write(&path, content.as_bytes())
+        .map_err(|e| format!("Failed to write assembly.json: {}", e))
+}
+
+/// Shared mutation entry point for Assembly Line state. Both the Tauri command
+/// (`set_assembly_state`) and the MCP `assembly_line` tool call this — single
+/// source of truth for the enable/disable semantics. Returns the new state
+/// after writing it to disk under the cross-process board.lock acquire.
+///
+/// Also appends a `type=moderation` board event so both UI and MCP toggles wake
+/// teammates in `project_wait` and show up in the conversation history.
+pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_json::Value, String> {
+    with_board_lock(dir, || {
+        let new_state = match action {
+            "enable" => {
+                let order = active_assembly_seats(dir);
+                if order.is_empty() {
+                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
+                }
+                let first = order[0].clone();
+                serde_json::json!({
+                    "active": true,
+                    "current_speaker": first,
+                    "rotation_order": order,
+                    "started_at": iso_now(),
+                    "started_by": actor
+                })
+            }
+            "disable" => {
+                serde_json::json!({
+                    "active": false,
+                    "current_speaker": null,
+                    "rotation_order": [],
+                    "started_at": null,
+                    "started_by": null
+                })
+            }
+            other => return Err(format!("Unknown assembly action: '{}'. Valid: enable, disable", other)),
+        };
+        write_assembly_unlocked(dir, &new_state)?;
+
+        let body = match action {
+            "enable" => format!(
+                "Assembly Line ENABLED by {}. Order: {}. Current speaker: {}.",
+                actor,
+                new_state.get("rotation_order").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" → "))
+                    .unwrap_or_default(),
+                new_state.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("(none)"),
+            ),
+            "disable" => format!("Assembly Line DISABLED by {} — back to simultaneous.", actor),
+            _ => String::new(),
+        };
+        let event = serde_json::json!({
+            "id": next_board_message_id(dir),
+            "from": actor,
+            "to": "all",
+            "type": "moderation",
+            "timestamp": iso_now(),
+            "subject": format!("Assembly Line: {}", action),
+            "body": body,
+            "metadata": {
+                "assembly_action": action,
+                "current_speaker": new_state.get("current_speaker").cloned().unwrap_or(serde_json::Value::Null)
+            }
+        });
+        append_to_board_unlocked(dir, &event)?;
+
+        Ok(new_state)
+    })
+}
+
+/// Next message ID = count of existing lines in the active board.jsonl + 1.
+/// Caller must hold board.lock.
+pub fn next_board_message_id(dir: &str) -> u64 {
+    let path = active_board_path(dir);
+    let count = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    (count + 1) as u64
+}
+
+/// Append a JSON message as one line to the active board.jsonl.
+/// Caller must hold board.lock.
+pub fn append_to_board_unlocked(dir: &str, message: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+    let path = active_board_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+    let line = serde_json::to_string(message)
+        .map_err(|e| format!("Failed to serialize message: {}", e))?;
+    writeln!(file, "{}", line)
+        .map_err(|e| format!("Failed to write to board.jsonl: {}", e))?;
+    Ok(())
+}
+
+/// List active+idle session seats as "role:instance" in the order they appear in sessions.json.
+pub fn active_assembly_seats(dir: &str) -> Vec<String> {
+    let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");
+    let json: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    json.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter()
+                .filter(|b| {
+                    let st = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    st == "active" || st == "idle"
+                })
+                .filter_map(|b| {
+                    let role = b.get("role").and_then(|r| r.as_str())?;
+                    let instance = b.get("instance").and_then(|i| i.as_u64())?;
+                    Some(format!("{}:{}", role, instance))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Create a new section. Returns the section info.
 pub fn create_section(dir: &str, name: &str) -> Result<SectionInfo, String> {
     let slug = slugify(name);
