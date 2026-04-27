@@ -3121,37 +3121,8 @@ fn get_assembly_state(dir: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, String> {
     let dir = validate_project_dir(&dir)?;
-    let result = collab::with_board_lock(&dir, || {
-        let new_state = match action.as_str() {
-            "enable" => {
-                let order = collab::active_assembly_seats(&dir);
-                if order.is_empty() {
-                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
-                }
-                let first = order[0].clone();
-                serde_json::json!({
-                    "active": true,
-                    "current_speaker": first,
-                    "rotation_order": order,
-                    "started_at": collab::iso_now(),
-                    "started_by": "human"
-                })
-            }
-            "disable" => {
-                serde_json::json!({
-                    "active": false,
-                    "current_speaker": null,
-                    "rotation_order": [],
-                    "started_at": null,
-                    "started_by": null
-                })
-            }
-            other => return Err(format!("Unknown assembly action: '{}'. Valid: enable, disable", other)),
-        };
-        collab::write_assembly_unlocked(&dir, &new_state)?;
-        Ok(new_state)
-    })?;
-    Ok(result)
+    // Per architect #156: single shared impl in collab.rs, both front doors call it.
+    collab::set_assembly_v0(&dir, &action, "human")
 }
 
 #[tauri::command]

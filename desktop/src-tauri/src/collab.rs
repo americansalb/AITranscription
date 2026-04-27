@@ -1100,6 +1100,43 @@ pub fn write_assembly_unlocked(dir: &str, state: &serde_json::Value) -> Result<(
         .map_err(|e| format!("Failed to write assembly.json: {}", e))
 }
 
+/// Shared mutation entry point for Assembly Line state. Both the Tauri command
+/// (`set_assembly_state`) and the MCP `assembly_line` tool call this — single
+/// source of truth for the enable/disable semantics. Returns the new state
+/// after writing it to disk under the cross-process board.lock acquire.
+pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_json::Value, String> {
+    with_board_lock(dir, || {
+        let new_state = match action {
+            "enable" => {
+                let order = active_assembly_seats(dir);
+                if order.is_empty() {
+                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
+                }
+                let first = order[0].clone();
+                serde_json::json!({
+                    "active": true,
+                    "current_speaker": first,
+                    "rotation_order": order,
+                    "started_at": iso_now(),
+                    "started_by": actor
+                })
+            }
+            "disable" => {
+                serde_json::json!({
+                    "active": false,
+                    "current_speaker": null,
+                    "rotation_order": [],
+                    "started_at": null,
+                    "started_by": null
+                })
+            }
+            other => return Err(format!("Unknown assembly action: '{}'. Valid: enable, disable", other)),
+        };
+        write_assembly_unlocked(dir, &new_state)?;
+        Ok(new_state)
+    })
+}
+
 /// List active+idle session seats as "role:instance" in the order they appear in sessions.json.
 pub fn active_assembly_seats(dir: &str) -> Vec<String> {
     let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");

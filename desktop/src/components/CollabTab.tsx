@@ -1348,7 +1348,7 @@ When multiple instances of this role are active:
       } catch { /* command may not exist on older binaries */ }
     };
     pollAssembly();
-    const interval = setInterval(pollAssembly, 2000);
+    const interval = setInterval(pollAssembly, 1000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 

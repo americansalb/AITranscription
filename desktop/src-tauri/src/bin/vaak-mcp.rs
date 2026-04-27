@@ -17,6 +17,13 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+// Shared with main.rs's collab module: Assembly Line mutation lives in ONE place
+// per architect #156 (two front doors, one impl). Imported via #[path] because
+// vaak-mcp.rs is a separate binary crate from the desktop app and does not share
+// a lib.rs with main.rs.
+#[path = "../collab.rs"]
+mod collab_shared;
+
 /// Atomic file write: write to .tmp, fsync, rename. Prevents partial writes on macOS.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
     let tmp_path = path.with_extension("tmp");
@@ -2397,47 +2404,28 @@ fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: 
 /// - "enable": activate, seed rotation_order from active sessions, current_speaker = order[0]
 /// - "disable": deactivate, clear state
 /// - "get_state": read-only inspect
+///
+/// The enable/disable mutation calls into `collab_shared::set_assembly_v0` so the
+/// Tauri command path and the MCP path share ONE implementation per #156.
+/// Posting the moderation board event stays here because it depends on
+/// `next_message_id` and `append_to_board`, which are MCP-binary helpers.
 fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
     let pd = state.project_dir.clone();
     let actor = format!("{}:{}", state.role, state.instance);
 
-    let result = with_file_lock(&pd, || {
-        let asm = read_assembly_state(&pd);
-        let new_state = match action {
-            "enable" => {
-                let order = active_assembly_seats(&pd);
-                if order.is_empty() {
-                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
-                }
-                let first = order[0].clone();
-                serde_json::json!({
-                    "active": true,
-                    "current_speaker": first,
-                    "rotation_order": order,
-                    "started_at": utc_now_iso(),
-                    "started_by": actor
-                })
-            }
-            "disable" => {
-                serde_json::json!({
-                    "active": false,
-                    "current_speaker": null,
-                    "rotation_order": [],
-                    "started_at": null,
-                    "started_by": null
-                })
-            }
-            "get_state" => {
-                return Ok(asm);
-            }
-            other => {
-                return Err(format!("Unknown assembly_line action: '{}'. Valid: enable, disable, get_state", other));
-            }
-        };
-        write_assembly_state_unlocked(&pd, &new_state)?;
+    if action == "get_state" {
+        return Ok(read_assembly_state(&pd));
+    }
 
-        // Post a system event to the board so all sessions in project_wait wake up.
+    // Single shared mutation impl. Acquires board.lock cross-process internally.
+    let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
+
+    // Post a system event to the board so sessions in project_wait wake up.
+    // Acquire with_file_lock here for the next_message_id + append. Lock ordering:
+    // collab_shared::set_assembly_v0 already released board.lock above; this
+    // re-acquires it independently. The two acquires are sequential, not nested.
+    let _ = with_file_lock(&pd, || {
         let msg_id = next_message_id(&pd);
         let body = match action {
             "enable" => format!("Assembly Line ENABLED by {}. Order: {}. Current speaker: {}.",
@@ -2462,13 +2450,11 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
                 "current_speaker": new_state.get("current_speaker").cloned().unwrap_or(serde_json::Value::Null)
             }
         });
-        let _ = append_to_board(&pd, &event);
-
-        Ok(new_state)
-    })?;
+        append_to_board(&pd, &event)
+    });
 
     notify_desktop();
-    Ok(result)
+    Ok(new_state)
 }
 
 /// Walk up from CWD to find .vaak/project.json
