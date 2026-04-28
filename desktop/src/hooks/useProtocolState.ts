@@ -155,11 +155,19 @@ export function useProtocolState(
         const msg = String(e);
         console.warn(`[useProtocolState] mutate('${action}') failed: ${msg}`);
         setLastError(msg);
-        // On [StaleRev] the next push will deliver truth — caller can retry.
+        // [StaleRev] recovery (evil-arch #952 RATIFIED in #954): re-invoke
+        // get_protocol DIRECTLY rather than waiting for the best-effort
+        // protocol_changed push. If the push event was dropped (Tauri IPC
+        // hiccup, hidden tab, OS suspend mid-emit), the local rev would
+        // stay stale forever and every subsequent mutate would StaleRev-
+        // loop with no UI signal. Belt-and-suspenders with the listener.
+        if (msg.includes('[StaleRev]')) {
+          void refresh();
+        }
         return null;
       }
     },
-    [projectDir],
+    [projectDir, refresh],
   );
 
   return { state, heartbeats, loaded, lastError, mutate };

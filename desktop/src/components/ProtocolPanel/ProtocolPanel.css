@@ -223,3 +223,61 @@
 @media (prefers-reduced-motion: reduce) {
   .seat-chip--holding { animation: none; }
 }
+
+/* MicToHint — composer hint UI (spec §4.3). Five variants matching detector
+   classification: resolved / ambiguous / vacant / disconnected / self_target.
+   Plus a "confirmed" pill once user clicks confirm. */
+.mic-to-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  background: #eef2ff;
+  color: #1a1f2e;
+  border-left: 3px solid #4f46e5;
+}
+.mic-to-hint > button {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  font-size: 1rem;
+  cursor: pointer;
+  color: #5b6478;
+  padding: 0 4px;
+}
+.mic-to-hint > button:hover { color: #1a1f2e; }
+.mic-to-hint__confirm,
+.mic-to-hint__pick {
+  background: transparent;
+  border: none;
+  color: #4f46e5;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0 4px;
+  font-size: 0.85rem;
+}
+.mic-to-hint--vacant {
+  background: #fffbeb;
+  border-left-color: #f59e0b;
+}
+.mic-to-hint--disconnected {
+  background: #f1f5f9;
+  border-left-color: #94a3b8;
+}
+.mic-to-hint--self {
+  background: #fef3c7;
+  border-left-color: #f59e0b;
+}
+.mic-to-hint--ambiguous {
+  background: #eff6ff;
+  border-left-color: #3b82f6;
+}
+.mic-to-hint--confirmed {
+  background: #ecfdf5;
+  color: #10b981;
+  border-left-color: #10b981;
+}

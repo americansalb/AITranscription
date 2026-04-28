@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
@@ -8,6 +8,8 @@ import { RoleBriefingModal } from "./RoleBriefingModal";
 // follow-on cleanup commit once Slice 4 composer mic_to lands.
 import { AssemblyBanner } from "./AssemblyBanner";
 import { ProtocolPanel } from "./ProtocolPanel";
+import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
+import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
@@ -593,6 +595,12 @@ export function CollabTab() {
     localStorage.setItem("vaak_compose_draft", capped);
   };
   const [sending, setSending] = useState(false);
+  // Slice 4 — mic_to composer state. Spec §4.3: regex is hint, metadata is
+  // authoritative. micToConfirmed is set ONLY when the user clicks the hint's
+  // confirm button. Without click, message ships with NO mic_to metadata
+  // (the §4.3 defense against "Mic to architect's approach" false positives).
+  const [micToConfirmed, setMicToConfirmed] = useState<string | null>(null);
+  const [micToHintDismissed, setMicToHintDismissed] = useState(false);
   const [workflowDropdownOpen, setWorkflowDropdownOpen] = useState(false);
   const [discussionModeOpen, setDiscussionModeOpen] = useState(false);
   const [discussionState, setDiscussionState] = useState<DiscussionState | null>(null);
@@ -2418,13 +2426,21 @@ When multiple instances of this role are active:
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
+        // Slice 4 spec §10 atomicity: pass mic_to in metadata when the user
+        // has explicitly confirmed the hint. Backend's project_send hook
+        // (Slice 2 vaak-mcp.rs) calls apply_protocol_mic_to_transfer in the
+        // SAME with_file_lock window — board append + floor move atomic.
+        const metadata = micToConfirmed ? { mic_to: micToConfirmed } : undefined;
         await invoke("send_team_message", {
           dir: projectDir,
           to: msgTo,
           subject: "",
           body: trimmed,
+          metadata,
         });
         setMsgBody("");
+        setMicToConfirmed(null);
+        setMicToHintDismissed(false);
       }
     } catch (e) {
       console.error("[CollabTab] Failed to send message:", e);
@@ -2432,6 +2448,23 @@ When multiple instances of this role are active:
       setSending(false);
     }
   };
+
+  // Compute the live mic_to candidate from msgBody. Pure function over the
+  // current body + roster — re-runs each render. The candidate is the HINT
+  // (spec §4.3); it does NOT auto-write metadata. The user must click confirm
+  // (handled by MicToHint below).
+  const micToCandidate = useMemo(() => {
+    if (!msgBody.trim() || micToHintDismissed) return null;
+    const seatList: SeatRef[] = (project?.sessions || []).map((s) => ({
+      role: s.role,
+      instance: s.instance,
+      connected: s.status === "active",
+    }));
+    // selfSeat=null because human view; currentSpeaker is the ProtocolPanel
+    // floor.current_speaker but we don't have it directly here. Use null —
+    // self_target detection runs only when seat-bound, not the human-side UI.
+    return detectMicTo(msgBody, seatList, null, null);
+  }, [msgBody, project?.sessions, micToHintDismissed]);
 
   // ===== WATCHING STATE: Project Dashboard =====
   if (watching) {
@@ -4060,7 +4093,13 @@ When multiple instances of this role are active:
             className="compose-input"
             type="text"
             value={msgBody}
-            onChange={(e) => setMsgBody(e.target.value)}
+            onChange={(e) => {
+              setMsgBody(e.target.value);
+              // Reset confirmation if the body changes — user may have
+              // edited away the mic_to mention. They must confirm again.
+              if (micToConfirmed) setMicToConfirmed(null);
+              if (micToHintDismissed) setMicToHintDismissed(false);
+            }}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
             placeholder={`Message${activeSection ? ` in #${sections.find(s => s.slug === activeSection)?.name || activeSection}` : ""}... (/debate delphi [topic])`}
             disabled={sending}
@@ -4073,6 +4112,21 @@ When multiple instances of this role are active:
             {sending ? "Sending\u2026" : "Send"}
           </button>
         </div>
+
+        {/* Slice 4 \u2014 mic_to hint UI. Spec \u00a74.3 click-to-confirm. */}
+        {micToCandidate && !micToConfirmed && (
+          <MicToHint
+            candidate={micToCandidate}
+            onConfirm={(seat) => setMicToConfirmed(seat)}
+            onDismiss={() => setMicToHintDismissed(true)}
+          />
+        )}
+        {micToConfirmed && (
+          <div className="mic-to-hint mic-to-hint--confirmed" role="note">
+            <span>\u2713 Will pass mic to <b>{micToConfirmed}</b> on send</span>
+            <button type="button" onClick={() => setMicToConfirmed(null)} aria-label="Cancel mic transfer">\u00d7</button>
+          </div>
+        )}
 
         {/* Role Briefing Modal */}
         {selectedRole && (
