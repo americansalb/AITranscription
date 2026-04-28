@@ -108,7 +108,11 @@ while ($true) {
     }
 
     # Decide branch + session-id (architect #648 P3 pivot: wrapper owns session_id, no
-    # dependency on Layer 3 hooks). Pin J degraded to time-only (DC-2): 4h since last_fresh_at.
+    # dependency on Layer 3 hooks). Pin J degraded to time-only (DC-2):
+    # threshold raised to 168h (7 days) per architect #872, human #871 — the prior
+    # 4h gate tripped on any overnight or workday-meeting close, wiping context that
+    # the wrapper otherwise resumes cleanly. 4h was a proxy for "Claude store may
+    # have schema-bumped" but schema bumps require a binary update, not wall-clock.
     #
     # Cross-process continuity (fix #708, dev/architect/evil-arch round of 2026-04-28):
     # the prior `-and $attempt -gt 1` guard meant a NEW wrapper born after vaak.exe
@@ -128,7 +132,7 @@ while ($true) {
 
     if ($seatData -ne $null -and -not $script:dropResumeNextIter) {
         $ageHrs = if ($seatData.last_fresh_at) { (($now - (Get-Date $seatData.last_fresh_at)).TotalHours) } else { 999 }
-        if ($ageHrs -ge 4) {
+        if ($ageHrs -ge 168) {
             $reasonFresh = ("wall_clock_{0:N1}h" -f $ageHrs)
         } elseif ($seatData.session_id) {
             $useResume = $true
