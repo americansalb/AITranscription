@@ -8472,6 +8472,147 @@ fn run_supervise(project_dir: &str) {
     }
 }
 
+/// Per-seat supervisor decision (Slice 8 NACK fix per evil-arch #1028 +
+/// architect #1029 + tech-leader #1032). Pure-function extraction of the
+/// "what should the supervisor do for this seat?" logic so it can be
+/// unit-tested without spawning processes or sleeping.
+///
+/// Returns one of:
+/// - SuperviseDecision::Skip        — seat is healthy, do nothing.
+/// - SuperviseDecision::BuzzAndWait — seat is stale + pid is alive; stamp
+///                                    warning and wait the grace window.
+/// - SuperviseDecision::AbortKill   — seat responded during grace (caller
+///                                    re-read post-grace state).
+/// - SuperviseDecision::Kill { pid }— still hung after grace; kill PID tree.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SuperviseDecision {
+    Skip,
+    BuzzAndWait { pid: u32, age_ms: u64 },
+    AbortKill,
+    Kill { pid: u32 },
+}
+
+/// First-pass decision (called BEFORE the grace-window sleep): checks
+/// freshness threshold + PID liveness.
+pub fn supervise_initial_decide(
+    state: &serde_json::Value,
+    now_ms: u64,
+    threshold_ms: u64,
+) -> SuperviseDecision {
+    let last_alive = state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    if last_alive == 0 { return SuperviseDecision::Skip; }
+    let age_ms = now_ms.saturating_sub(last_alive);
+    if age_ms < threshold_ms { return SuperviseDecision::Skip; }
+    let pid = state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
+    let pid = match pid {
+        Some(p) => p,
+        None => return SuperviseDecision::Skip, // no PID → Layer 1 owns it
+    };
+    if !is_process_alive(pid) { return SuperviseDecision::Skip; }
+    SuperviseDecision::BuzzAndWait { pid, age_ms }
+}
+
+/// Post-grace decision: after the grace-window sleep, did the seat respond?
+/// `pre_state.last_alive_at_ms` should be the value observed BEFORE the
+/// grace, `post_state` is what we read after.
+pub fn supervise_post_grace_decide(
+    pre_state: &serde_json::Value,
+    post_state: &serde_json::Value,
+    pid: u32,
+) -> SuperviseDecision {
+    let pre_alive = pre_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let post_alive = post_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    if post_alive > pre_alive {
+        SuperviseDecision::AbortKill
+    } else {
+        SuperviseDecision::Kill { pid }
+    }
+}
+
+#[cfg(test)]
+mod supervise_tests {
+    use super::*;
+
+    fn seat_state(last_alive_at_ms: u64, pid: Option<u32>) -> serde_json::Value {
+        match pid {
+            Some(p) => serde_json::json!({"last_alive_at_ms": last_alive_at_ms, "pid": p}),
+            None => serde_json::json!({"last_alive_at_ms": last_alive_at_ms}),
+        }
+    }
+
+    /// Healthy seat: recent heartbeat → Skip.
+    #[test]
+    fn healthy_seat_skipped() {
+        let now: u64 = 1_700_000_000_000;
+        let state = seat_state(now - 30_000, Some(12345));
+        assert_eq!(
+            supervise_initial_decide(&state, now, 90_000),
+            SuperviseDecision::Skip,
+        );
+    }
+
+    /// Stale heartbeat but no PID recorded → Skip (Layer 1 owns process exit).
+    #[test]
+    fn stale_no_pid_skipped() {
+        let now: u64 = 1_700_000_000_000;
+        let state = seat_state(now - 200_000, None);
+        assert_eq!(
+            supervise_initial_decide(&state, now, 90_000),
+            SuperviseDecision::Skip,
+        );
+    }
+
+    /// last_alive_at_ms = 0 (never stamped) → Skip.
+    #[test]
+    fn never_stamped_skipped() {
+        let now: u64 = 1_700_000_000_000;
+        let state = seat_state(0, Some(12345));
+        assert_eq!(
+            supervise_initial_decide(&state, now, 90_000),
+            SuperviseDecision::Skip,
+        );
+    }
+
+    /// Stale + PID alive (using std::process::id() so we know it's alive) →
+    /// BuzzAndWait.
+    #[test]
+    fn stale_with_alive_pid_buzz_and_wait() {
+        let now: u64 = 1_700_000_000_000;
+        // Use the test process's own PID — guaranteed alive.
+        let alive_pid = std::process::id();
+        let state = seat_state(now - 120_000, Some(alive_pid));
+        match supervise_initial_decide(&state, now, 90_000) {
+            SuperviseDecision::BuzzAndWait { pid, age_ms } => {
+                assert_eq!(pid, alive_pid);
+                assert_eq!(age_ms, 120_000);
+            }
+            other => panic!("expected BuzzAndWait, got {:?}", other),
+        }
+    }
+
+    /// Post-grace: seat updated last_alive_at_ms (responded to buzz) → AbortKill.
+    #[test]
+    fn post_grace_recovered_aborts_kill() {
+        let pre = seat_state(1_000_000, Some(99999));
+        let post = seat_state(1_005_000, Some(99999));
+        assert_eq!(
+            supervise_post_grace_decide(&pre, &post, 99999),
+            SuperviseDecision::AbortKill,
+        );
+    }
+
+    /// Post-grace: timestamp unchanged → Kill.
+    #[test]
+    fn post_grace_no_response_kills() {
+        let pre = seat_state(1_000_000, Some(99999));
+        let post = seat_state(1_000_000, Some(99999));
+        assert_eq!(
+            supervise_post_grace_decide(&pre, &post, 99999),
+            SuperviseDecision::Kill { pid: 99999 },
+        );
+    }
+}
+
 fn try_acquire_supervisor_lock(lock_path: &std::path::Path) -> bool {
     if let Ok(content) = std::fs::read_to_string(lock_path) {
         // Existing lock: parse PID, verify it's a live vaak-mcp process.

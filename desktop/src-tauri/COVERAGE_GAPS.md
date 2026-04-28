@@ -194,3 +194,85 @@ eprintln; drift is bounded because the bodies route through
 - Gap C: tester:0 property-test PR (board #928/#937)
 - Gap D: v1 i18n cycle, owner future seat
 - Gap E: release-after-MVP cycle, owner developer:0 or maintainer
+
+---
+
+# Slice 8 supervisor known-limitation
+
+## Gap F — Long tool-call false-kill window
+
+**Surface.** `run_supervise` (vaak-mcp.rs::run_supervise) reads only
+`last_alive_at_ms`, which is stamped by Layer 3 hooks
+(PreToolUse + PostToolUse). For a tool call lasting longer than
+`SUPERVISE_HANG_THRESHOLD_MS` (90s), the gap between PreToolUse and
+PostToolUse exceeds the supervisor's threshold, and the supervisor
+fires its 5s buzz + grace + kill cycle.
+
+The 5s grace + buzz CAN rescue if PostToolUse fires during the grace
+window (post_state.last_alive_at_ms > pre_state). But a long bash
+compile, a slow Anthropic API call, or any tool call >90s+5s will
+false-kill.
+
+After kill, Layer 1's `while($true)` wrapper relaunches with
+`--resume <session-id>`, so context is preserved. Lossy in the sense
+that the in-progress tool call is truncated; recoverable in the sense
+that the conversation continues.
+
+Evil-arch #1028 + architect #1029 + tech-leader #1032 raised this as
+a Slice 8 NACK item. This entry formalizes the documented constraint
+per the architect's #1029 "document the limit OR add periodic mid-call
+heartbeats" — we ship the documented limit in this MVP and the
+periodic-heartbeat fix as a follow-on.
+
+**Why deferred to follow-on.** Adding mid-call heartbeats requires
+either (a) a Layer-1 wrapper-level periodic ticker that writes
+`last_alive_at_ms` independent of Claude's hook firing, OR (b) a
+PreToolUse-side timer that fires periodically until PostToolUse.
+Both are real engineering: the wrapper-level ticker requires
+PowerShell wrapper redesign; the PreToolUse timer needs careful
+synchronization with the existing Layer 3 hook script. Either is a
+clean Slice 10 deliverable.
+
+**What closes it.** Slice 10 (post-MVP): wrapper-level periodic
+heartbeat OR PreToolUse-side timer. Either updates
+`last_alive_at_ms` every ~30s during a long tool call, well within
+the 90s threshold.
+
+**Risk while open.** Bounded — long tool calls (rebuilds, large
+file processes, slow API responses) trigger false-kill but Layer 1
+relaunch + `--resume` recovers context. UX impact: a brief flicker
+of the seat's chip + a "system:supervisor" board entry. Operationally
+acceptable for MVP.
+
+**Mitigation in MVP.** The 5s buzz/grace window provides one final
+chance for PostToolUse to fire and update the timestamp. If a tool
+call ends within +5s of the 90s mark, the seat is rescued.
+
+## Gap G — run_supervise full-loop integration test
+
+**Surface.** `run_supervise` is a `loop { sleep; check_seats; }`
+function that's hard to test as a whole (long-running, sleeps, OS
+calls). The Slice 8 closer commit (this) ships behavioral tests for
+the per-iteration DECISION logic via `supervise_initial_decide` +
+`supervise_post_grace_decide` (extracted pure functions, 6 tests),
+but the full loop's lock acquisition + kill ordering + lock release
+on exit is not integration-tested.
+
+**Why deferred.** Full-loop testing requires either a process-tree
+mock or a real-process integration harness — both substantial. The
+extracted decision logic covers the failure-mode space the team
+flagged (healthy/stale/no-pid/never-stamped/responded/timeout); the
+loop wiring is mechanical (read sessions dir, call decide, call
+side-effects).
+
+**What closes it.** Tester:0's `protocol-property.test.mjs` harness
+extension (board #937), which already runs full MCP round-trips
+against a built `vaak-mcp.exe` in a tempdir. Adding a `--supervise`
+mode probe with mocked sessions/*.json + advancing wall-clock + assert
+buzz-then-kill ordering is a natural fit.
+
+**Risk while open.** Bounded — the decision logic IS tested; only
+the orchestration wrapper is not. A regression in the orchestration
+(lock acquire/release, kill ordering) would manifest as an obvious
+production failure (no kills, or double-kills) rather than a subtle
+correctness drift.
