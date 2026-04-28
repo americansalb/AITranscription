@@ -8493,15 +8493,24 @@ pub enum SuperviseDecision {
 }
 
 /// First-pass decision (called BEFORE the grace-window sleep): checks
-/// freshness threshold + PID liveness.
+/// two-source freshness threshold + PID liveness.
+///
+/// Two-source rule (tech-leader #1042 + spec §3.1): "stale" means BOTH
+/// `last_alive_at_ms` AND `last_drafting_at_ms` exceed the threshold.
+/// The seat is fresh if EITHER source is recent — closing the long-bash
+/// false-kill window evil-arch #1028 raised. Composer-keystroke heartbeats
+/// (last_drafting) keep the supervisor from killing a seat whose user is
+/// actively typing even if hooks haven't fired in a while.
 pub fn supervise_initial_decide(
     state: &serde_json::Value,
     now_ms: u64,
     threshold_ms: u64,
 ) -> SuperviseDecision {
     let last_alive = state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    if last_alive == 0 { return SuperviseDecision::Skip; }
-    let age_ms = now_ms.saturating_sub(last_alive);
+    let last_drafting = state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let most_recent = last_alive.max(last_drafting);
+    if most_recent == 0 { return SuperviseDecision::Skip; }
+    let age_ms = now_ms.saturating_sub(most_recent);
     if age_ms < threshold_ms { return SuperviseDecision::Skip; }
     let pid = state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
     let pid = match pid {
@@ -8513,8 +8522,8 @@ pub fn supervise_initial_decide(
 }
 
 /// Post-grace decision: after the grace-window sleep, did the seat respond?
-/// `pre_state.last_alive_at_ms` should be the value observed BEFORE the
-/// grace, `post_state` is what we read after.
+/// Two-source rule mirror: recovery counts if EITHER `last_alive_at_ms`
+/// OR `last_drafting_at_ms` advanced during the grace window.
 pub fn supervise_post_grace_decide(
     pre_state: &serde_json::Value,
     post_state: &serde_json::Value,
@@ -8522,7 +8531,9 @@ pub fn supervise_post_grace_decide(
 ) -> SuperviseDecision {
     let pre_alive = pre_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
     let post_alive = post_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    if post_alive > pre_alive {
+    let pre_draft = pre_state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    let post_draft = post_state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+    if post_alive > pre_alive || post_draft > pre_draft {
         SuperviseDecision::AbortKill
     } else {
         SuperviseDecision::Kill { pid }
@@ -8538,6 +8549,14 @@ mod supervise_tests {
             Some(p) => serde_json::json!({"last_alive_at_ms": last_alive_at_ms, "pid": p}),
             None => serde_json::json!({"last_alive_at_ms": last_alive_at_ms}),
         }
+    }
+
+    fn seat_state_two_source(last_alive_at_ms: u64, last_drafting_at_ms: u64, pid: u32) -> serde_json::Value {
+        serde_json::json!({
+            "last_alive_at_ms": last_alive_at_ms,
+            "last_drafting_at_ms": last_drafting_at_ms,
+            "pid": pid
+        })
     }
 
     /// Healthy seat: recent heartbeat → Skip.
@@ -8609,6 +8628,51 @@ mod supervise_tests {
         assert_eq!(
             supervise_post_grace_decide(&pre, &post, 99999),
             SuperviseDecision::Kill { pid: 99999 },
+        );
+    }
+
+    /// Two-source rule (tech-leader #1042 + spec §3.1): stale `last_alive`
+    /// + fresh `last_drafting` → Skip. Closes the long-tool-call false-kill
+    /// window — composer-keystroke heartbeats keep the seat alive even
+    /// when MCP hooks haven't fired during a long bash.
+    #[test]
+    fn two_source_stale_alive_fresh_drafting_returns_skip() {
+        let now: u64 = 1_700_000_000_000;
+        let alive_pid = std::process::id();
+        // last_alive is 200s old (would normally trigger kill at 90s threshold),
+        // but last_drafting is 30s old — user is actively typing.
+        let state = seat_state_two_source(now - 200_000, now - 30_000, alive_pid);
+        assert_eq!(
+            supervise_initial_decide(&state, now, 90_000),
+            SuperviseDecision::Skip,
+        );
+    }
+
+    /// Two-source rule mirror (tech-leader #1042): both timestamps stale →
+    /// BuzzAndWait. Ensures we don't accidentally weaken the kill path.
+    #[test]
+    fn two_source_both_stale_buzzes() {
+        let now: u64 = 1_700_000_000_000;
+        let alive_pid = std::process::id();
+        let state = seat_state_two_source(now - 200_000, now - 200_000, alive_pid);
+        match supervise_initial_decide(&state, now, 90_000) {
+            SuperviseDecision::BuzzAndWait { pid, age_ms: _ } => {
+                assert_eq!(pid, alive_pid);
+            }
+            other => panic!("expected BuzzAndWait, got {:?}", other),
+        }
+    }
+
+    /// Two-source rule mirror: post-grace recovery counts if EITHER
+    /// last_drafting OR last_alive advanced during the grace window.
+    #[test]
+    fn two_source_post_grace_drafting_advanced_aborts_kill() {
+        let pre = seat_state_two_source(1_000_000, 1_000_000, 99999);
+        // last_alive unchanged, but last_drafting advanced (composer keystroke).
+        let post = seat_state_two_source(1_000_000, 1_005_000, 99999);
+        assert_eq!(
+            supervise_post_grace_decide(&pre, &post, 99999),
+            SuperviseDecision::AbortKill,
         );
     }
 }
