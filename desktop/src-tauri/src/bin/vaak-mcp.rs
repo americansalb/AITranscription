@@ -2006,55 +2006,72 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
 
     let my_label = format!("{}:{}", state.role, state.instance);
 
-    // Slice 6 thin-wrap: mirror start_discussion(continuous) + close_round
-    // into protocol.json BEFORE the legacy path runs. Two-write envelope
-    // matches assembly_line: protocol_mutate first (best-effort), legacy
-    // path always runs (compat). On race / failure, log and continue.
+    // Slice 6 closer (architect #998 PURE thin-wrap): for the continuous
+    // mode + close_round flows, route to protocol_mutate ONLY — no
+    // .vaak/discussion.json write. Other modes (delphi, oxford, red_team)
+    // keep their legacy state machine because their semantics (Delphi
+    // blind-submit gate, Oxford team assignment) exceed the consensus
+    // model's surface; Slice 7 owns wider mapping.
     if action == "start_discussion" && mode == Some("continuous") {
-        if let Some(topic_str) = topic {
-            let pd_for_mirror = state.project_dir.clone();
-            let actor_for_mirror = my_label.clone();
-            let section = get_active_section(&pd_for_mirror);
-            let cur_proto = read_protocol_for_section_value(&pd_for_mirror, &section);
-            let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
-            // Mirror: open_round on protocol.json so UI reading
-            // get_protocol sees the consensus state.
-            if let Err(e) = do_protocol_mutate(
-                &pd_for_mirror,
-                &actor_for_mirror,
-                &section,
-                "open_round",
-                serde_json::json!({"topic": topic_str, "mode": "tally"}),
-                Some(cur_rev),
-            ) {
-                eprintln!("[deprecated] discussion_control(start, continuous) mirror to open_round failed: {} — legacy discussion.json write proceeds", e);
-            }
-        }
+        let topic_str = topic.ok_or("[InvalidArgs] start_discussion(continuous) requires topic")?;
+        let pd = state.project_dir.clone();
+        let actor = my_label.clone();
+        let section = get_active_section(&pd);
+        let cur_proto = read_protocol_for_section_value(&pd, &section);
+        let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        let new_state = do_protocol_mutate(
+            &pd,
+            &actor,
+            &section,
+            "open_round",
+            serde_json::json!({"topic": topic_str, "mode": "tally"}),
+            Some(cur_rev),
+        )?;
+        // Project to legacy shape so old callers' result-handling code
+        // keeps working through the compat tail.
+        return Ok(serde_json::json!({
+            "active": true,
+            "mode": "continuous",
+            "topic": topic_str,
+            "rounds": [{
+                "topic": topic_str,
+                "opened_at": new_state.get("consensus").and_then(|c| c.get("round")).and_then(|r| r.get("opened_at")).cloned().unwrap_or(serde_json::Value::Null),
+                "submissions": []
+            }],
+            "_via": "protocol.json"
+        }));
     }
     if action == "close_round" {
-        let pd_for_mirror = state.project_dir.clone();
-        let actor_for_mirror = my_label.clone();
-        let section = get_active_section(&pd_for_mirror);
-        let cur_proto = read_protocol_for_section_value(&pd_for_mirror, &section);
+        let pd = state.project_dir.clone();
+        let actor = my_label.clone();
+        let section = get_active_section(&pd);
+        let cur_proto = read_protocol_for_section_value(&pd, &section);
         let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
-        // Only mirror if a round is actually open in protocol.json
-        // (avoid the [InvalidArgs] error that close_round on no-round throws).
+        // Check if a round is open in protocol.json. If yes, route through
+        // protocol_mutate ONLY. If no, fall through to legacy (for sections
+        // where the round was opened via delphi/oxford which aren't
+        // mirrored into protocol.json yet).
         let phase = cur_proto.get("consensus")
             .and_then(|c| c.get("phase"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if phase == "submitting" || phase == "reviewing" {
-            if let Err(e) = do_protocol_mutate(
-                &pd_for_mirror,
-                &actor_for_mirror,
+            let new_state = do_protocol_mutate(
+                &pd,
+                &actor,
                 &section,
                 "close_round",
                 serde_json::json!({}),
                 Some(cur_rev),
-            ) {
-                eprintln!("[deprecated] discussion_control(close_round) mirror to protocol.json failed: {} — legacy path proceeds", e);
-            }
+            )?;
+            return Ok(serde_json::json!({
+                "active": false,
+                "closed_at": new_state.get("consensus").and_then(|c| c.get("round")).and_then(|r| r.get("opened_at")).cloned().unwrap_or(serde_json::Value::Null),
+                "_via": "protocol.json"
+            }));
         }
+        // Else: protocol.json had no open round — legacy delphi/oxford
+        // state machine handles via match arm below (unchanged path).
     }
 
     match action {
@@ -2567,11 +2584,15 @@ fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: 
 /// Posting the moderation board event stays here because it depends on
 /// `next_message_id` and `append_to_board`, which are MCP-binary helpers.
 fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
-    // Slice 6 deprecation warning — `assembly_line` is now a thin wrapper
-    // around `protocol_mutate(set_preset, ...)`. Spec §3.3 + architect
-    // #988: kept for one release tail; strict removal is "release after."
+    // Slice 6 deprecation — `assembly_line` is now a PURE thin wrapper
+    // (architect #998 + dev-chall #999): the legacy assembly.json write
+    // is REMOVED. Spec §3.3 verbatim: "calling into protocol_mutate
+    // underneath." The tool name + signature stay live for one release
+    // (so old callers don't get tool-not-found), but persistence is
+    // entirely protocol.json. Strict removal of the entry point is
+    // the release after.
     eprintln!(
-        "[deprecated] assembly_line MCP tool — migrate callers to protocol_mutate(set_preset, \"Assembly Line\"|\"Default chat\"). This tool routes through the same protocol_mutate path under the hood as of Slice 6 closer."
+        "[deprecated:vision-tail] assembly_line MCP tool — migrate callers to protocol_mutate(set_preset, \"Assembly Line\"|\"Default chat\"). The legacy .vaak/assembly.json write was REMOVED in Slice 6 closer; this tool now writes ONLY to .vaak/protocol.json. Get-state projects from protocol.json. Removal of the entry point is next release."
     );
 
     let state = get_or_rejoin_state()?;
@@ -2580,27 +2601,24 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     let section = get_active_section(&pd);
 
     if action == "get_state" {
-        // Slice 6 closer: project protocol.json into the legacy shape so
-        // existing callers see consistent state regardless of which tool
-        // wrote last. Falls back to legacy assembly.json read if
-        // protocol.json missing (Slice 1 migration may not have run yet).
+        // Project protocol.json into the legacy shape — single source of
+        // truth, no fallback to .vaak/assembly.json (which we no longer
+        // write to).
         let proto = read_protocol_for_section_value(&pd, &section);
         let preset = proto.get("preset").and_then(|p| p.as_str()).unwrap_or("");
         let active = preset == "Assembly Line";
-        if active || proto.get("rev").and_then(|v| v.as_u64()).map(|r| r > 0).unwrap_or(false) {
-            return Ok(serde_json::json!({
-                "active": active,
-                "current_speaker": proto.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
-                "rotation_order": proto.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
-                "started_at": proto.get("floor").and_then(|f| f.get("started_at")).cloned().unwrap_or(serde_json::Value::Null),
-                "_via": "protocol.json"
-            }));
-        }
-        return Ok(read_assembly_state(&pd));
+        return Ok(serde_json::json!({
+            "active": active,
+            "current_speaker": proto.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
+            "rotation_order": proto.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
+            "started_at": proto.get("floor").and_then(|f| f.get("started_at")).cloned().unwrap_or(serde_json::Value::Null),
+            "_via": "protocol.json"
+        }));
     }
 
-    // Slice 6 thin-wrap: route enable/disable through protocol_mutate
-    // (spec §6 matrix: Assembly Line preset = round-robin floor).
+    // Pure thin-wrap: route enable/disable through protocol_mutate ONLY
+    // (spec §6 matrix: Assembly Line preset = round-robin floor; Default
+    // chat = none).
     let preset_name = match action {
         "enable" => "Assembly Line",
         "disable" => "Default chat",
@@ -2609,23 +2627,24 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     // CAS read current rev from protocol.json.
     let cur_proto = read_protocol_for_section_value(&pd, &section);
     let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
-    if let Err(e) = do_protocol_mutate(
+    let new_state = do_protocol_mutate(
         &pd,
         &actor,
         &section,
         "set_preset",
         serde_json::json!({"name": preset_name}),
         Some(cur_rev),
-    ) {
-        // Don't let protocol_mutate failure block the legacy path — log
-        // and continue. Legacy assembly.json write will still happen.
-        // This is the "kept for one release" compat envelope.
-        eprintln!("[deprecated] assembly_line: protocol_mutate(set_preset, '{}') failed: {} — falling back to legacy assembly.json only", preset_name, e);
-    }
-
-    // Single shared legacy mutation impl. Acquires board.lock cross-process
-    // internally. Kept for the one-release-tail per spec §3.3.
-    let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
+    )?;
+    // Project the new protocol.json state back into the legacy shape so
+    // old callers' result-handling code keeps working through the
+    // compat tail.
+    let new_state = serde_json::json!({
+        "active": preset_name == "Assembly Line",
+        "current_speaker": new_state.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
+        "rotation_order": new_state.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
+        "started_at": new_state.get("floor").and_then(|f| f.get("started_at")).cloned().unwrap_or(serde_json::Value::Null),
+        "_via": "protocol.json"
+    });
 
     // Post a system event to the board so sessions in project_wait wake up.
     // Acquire with_file_lock here for the next_message_id + append. Lock ordering:
@@ -4467,6 +4486,100 @@ mod protocol_slice2_tests {
         // round to 0, that's expected on a fast test).
         let total = after_resume["phase_plan"]["paused_total_secs"].as_u64().unwrap_or(999);
         assert!(total < 999, "paused_total_secs should be a small accumulator value, got: {}", total);
+    }
+
+    /// Round-trip test for the assembly_line thin-wrap (tech-leader #994):
+    /// the legacy projection of a protocol.json with preset="Assembly Line"
+    /// produces `active=true` + the original rotation_order. The wrapper
+    /// path is `do_protocol_mutate(set_preset, ...)` whose result we
+    /// project the same way the live `handle_assembly_line` does.
+    #[test]
+    fn assembly_line_round_trip_via_protocol_mutate() {
+        let dir = temp_project_with_protocol(
+            "assembly-line-rt",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Default chat",
+                "floor": {"mode": "none", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": [{"role": "architect", "instance": 0, "status": "active"}]}),
+        );
+        // Wrapper path: assembly_line(enable) → set_preset("Assembly Line").
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "set_preset",
+            serde_json::json!({"name": "Assembly Line"}),
+            Some(0),
+        ).unwrap();
+        // Legacy projection: read protocol.json, project to legacy shape.
+        let proto = read_protocol_for_section_value(dir.to_str().unwrap(), "default");
+        assert_eq!(proto["preset"], "Assembly Line");
+        assert_eq!(proto["floor"]["mode"], "round-robin");
+        let active = proto.get("preset").and_then(|p| p.as_str()) == Some("Assembly Line");
+        assert!(active, "legacy projection.active must be true after enable");
+
+        // Wrapper path: assembly_line(disable) → set_preset("Default chat").
+        let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "set_preset",
+            serde_json::json!({"name": "Default chat"}),
+            Some(cur_rev),
+        ).unwrap();
+        let after_disable = read_protocol_for_section_value(dir.to_str().unwrap(), "default");
+        assert_eq!(after_disable["preset"], "Default chat");
+        let still_active = after_disable.get("preset").and_then(|p| p.as_str()) == Some("Assembly Line");
+        assert!(!still_active, "legacy projection.active must be false after disable");
+    }
+
+    /// Round-trip test for discussion_control(continuous) thin-wrap:
+    /// legacy start_discussion(continuous, topic) → protocol_mutate(open_round)
+    /// → consensus.phase=submitting, mode=tally, round.topic preserved.
+    #[test]
+    fn discussion_control_continuous_round_trip_via_protocol_mutate() {
+        let dir = temp_project_with_protocol(
+            "discussion-continuous-rt",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": [{"role": "architect", "instance": 0, "status": "active"}]}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "open_round",
+            serde_json::json!({"topic": "Continuous review starting", "mode": "tally"}),
+            Some(0),
+        ).unwrap();
+        let proto = read_protocol_for_section_value(dir.to_str().unwrap(), "default");
+        assert_eq!(proto["consensus"]["mode"], "tally");
+        assert_eq!(proto["consensus"]["phase"], "submitting");
+        assert_eq!(proto["consensus"]["round"]["topic"], "Continuous review starting");
+
+        // close_round closes phase.
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "close_round",
+            serde_json::json!({}),
+            Some(1),
+        ).unwrap();
+        let after = read_protocol_for_section_value(dir.to_str().unwrap(), "default");
+        assert_eq!(after["consensus"]["phase"], "closed");
     }
 
     /// Normalize-wired test (evil-arch #978 ship-block fix): when
