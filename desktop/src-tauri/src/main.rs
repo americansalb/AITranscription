@@ -4499,6 +4499,7 @@ fn main() {
             launcher::launch_team,
             launcher::kill_team_member,
             launcher::kill_all_team_members,
+            launcher::clear_ghost_seat_rows,
             launcher::get_spawned_agents,
             launcher::get_role_companions,
             launcher::repopulate_spawned,

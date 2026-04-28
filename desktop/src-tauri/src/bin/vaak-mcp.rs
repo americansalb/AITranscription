@@ -857,6 +857,41 @@ fn is_session_revoked(project_dir: &str, session_id: &str) -> bool {
     }
 }
 
+/// Append a sidecar lifecycle event to `.vaak/sidecar-events.jsonl` for post-mortem
+/// diagnosis of "vaak reset killed my agents" complaints. Best-effort, fail-silent.
+/// Captures stdin errors, heartbeat failures, and main-loop exit reasons so the team
+/// can confirm/reject hypothesis (1) (Tauri restart severs MCP heartbeat path) without
+/// guessing.
+fn log_sidecar_event(event_type: &str, details: serde_json::Value) {
+    let state = match ACTIVE_PROJECT.lock() {
+        Ok(g) => g.as_ref().cloned(),
+        Err(_) => None,
+    };
+    let (project_dir, session_id) = match state {
+        Some(s) => (s.project_dir, s.session_id),
+        None => (String::new(), String::new()),
+    };
+    if project_dir.is_empty() { return; }
+
+    let log_path = std::path::Path::new(&project_dir).join(".vaak").join("sidecar-events.jsonl");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let entry = serde_json::json!({
+        "ts_ms": now_ms,
+        "session_id": session_id,
+        "pid": std::process::id(),
+        "event": event_type,
+        "details": details,
+    });
+    let line = format!("{}\n", entry.to_string());
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Update the activity state of this session in sessions.json ("working", "standby", "idle")
 fn update_session_activity(activity: &str) {
     let state = match ACTIVE_PROJECT.lock() {
@@ -4411,7 +4446,12 @@ fn send_heartbeat(session_id: &str) -> Result<(), String> {
         .send_string(&body.to_string())
     {
         Ok(_) => Ok(()),
-        Err(_) => Err("Vaak not running".to_string())
+        Err(e) => {
+            // Distinguish "Tauri app not running" from transient timeouts so post-mortem
+            // can correlate human's "reset vaak" timeline with sidecar's view of it.
+            log_sidecar_event("heartbeat_failed", serde_json::json!({ "error": e.to_string() }));
+            Err("Vaak not running".to_string())
+        }
     }
 }
 
@@ -5582,6 +5622,333 @@ fn run_hook() {
     }
 }
 
+// ==================== Keep-Alive Hook ====================
+
+/// Claude Code Pre/PostToolUse hook: fires before/after every tool call to refresh
+/// session activity so the supervisor doesn't false-positive-kill an agent that's
+/// busy with local-only tools (Edit/Write/Bash) for >90s.
+///
+/// Per architect's #480 contract:
+/// - Reads VAAK_ROLE / VAAK_INSTANCE / VAAK_PROJECT_DIR env vars set by launch-team.ps1
+/// - No-op (exit 0) if any are missing OR `$VAAK_PROJECT_DIR/.vaak/sessions/` doesn't exist
+///   (pin L: don't degrade unrelated CC sessions)
+/// - Stamps three timestamps in `<project_dir>/.vaak/sessions/<role>-<inst>.json`:
+///     * `last_alive_at_ms` — every tool fires this (supervisor consumer)
+///     * `last_active_at_ms` — every tool EXCEPT `project_wait`/`project_check` (mic-gate consumer)
+///     * `last_keystroke_at_ms` — left untouched here; composer fires it via separate path
+/// - Increments `tool_count_since_fresh`
+/// - Records `session_id` on first fire
+/// - atomic_write only; no board.lock; eventually-consistent timestamps
+///
+/// Fail-open on every error — never block a tool call from running. Also fires the
+/// legacy localhost heartbeat as a backup signal for the running Tauri app.
+fn run_keep_alive() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Read the hook payload from stdin (Claude Code passes JSON: tool_name, session_id, etc.)
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+    let payload: serde_json::Value = serde_json::from_str(input.trim())
+        .unwrap_or(serde_json::json!({}));
+    let tool_name = payload.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+    let cc_session_id = payload.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Legacy backup signal: existing Tauri app heartbeat endpoint.
+    let cached_id = read_cached_session_id().unwrap_or_else(get_session_id);
+    let _ = send_heartbeat(&cached_id);
+
+    // Pin L: no-op outside vaak projects.
+    let role = match std::env::var("VAAK_ROLE") { Ok(v) => v, Err(_) => return };
+    let instance = match std::env::var("VAAK_INSTANCE") { Ok(v) => v, Err(_) => return };
+    let project_dir = match std::env::var("VAAK_PROJECT_DIR") { Ok(v) => v, Err(_) => return };
+
+    let sessions_dir = std::path::Path::new(&project_dir).join(".vaak").join("sessions");
+    if !sessions_dir.exists() { return; }
+
+    let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+
+    let mut state = std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let obj = match state.as_object_mut() {
+        Some(o) => o,
+        None => return, // file existed but isn't a JSON object — fail open
+    };
+
+    obj.insert("last_alive_at_ms".to_string(), serde_json::json!(now_ms));
+
+    // last_active_at_ms excludes project_wait + project_check (their MCP names are namespaced).
+    let is_idle_tool = tool_name.ends_with("project_wait") || tool_name.ends_with("project_check");
+    if !is_idle_tool {
+        obj.insert("last_active_at_ms".to_string(), serde_json::json!(now_ms));
+    }
+
+    let prior_count = obj.get("tool_count_since_fresh").and_then(|v| v.as_u64()).unwrap_or(0);
+    obj.insert("tool_count_since_fresh".to_string(), serde_json::json!(prior_count + 1));
+
+    // Record session_id on first fire (used by launch-team.ps1's --resume <session-id>).
+    if !cc_session_id.is_empty() && obj.get("session_id").is_none() {
+        obj.insert("session_id".to_string(), serde_json::json!(cc_session_id));
+    }
+
+    // atomic_write — pin C: no board.lock on heartbeat; eventually-consistent OK.
+    if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+        let _ = atomic_write(&seat_file, serialized.as_bytes());
+    }
+}
+
+// ==================== Supervise (Layer 2) ====================
+
+const SUPERVISE_POLL_INTERVAL_MS: u64 = 10_000;
+const SUPERVISE_HANG_THRESHOLD_MS: u64 = 90_000;
+const SUPERVISE_PRE_KILL_GRACE_MS: u64 = 5_000;
+
+/// Layer 2 supervisor: scans `<project_dir>/.vaak/sessions/*.json` every 10s and
+/// kills any seat whose `last_alive_at_ms` is older than 90s (hung-but-running case).
+/// Pre-kill 5s grace: writes a buzz event and re-reads the timestamp; if the seat
+/// responded in that window, abort the kill (false-positive prevention per evil-arch #458).
+///
+/// Lock: `.vaak/supervisor.pid` with stale-PID recovery — verifies the recorded PID
+/// is still alive AND points at a process whose name contains "vaak-mcp" before
+/// declining to start. Otherwise atomically takes over (per pin #5/#7).
+fn run_supervise(project_dir: &str) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    eprintln!("[vaak-supervise] starting for project_dir={}", project_dir);
+
+    let project_path = std::path::PathBuf::from(project_dir);
+    let vaak_dir = project_path.join(".vaak");
+    let sessions_dir = vaak_dir.join("sessions");
+    let supervisor_pid_path = vaak_dir.join("supervisor.pid");
+
+    if !sessions_dir.exists() {
+        eprintln!("[vaak-supervise] sessions dir missing — exiting (not a vaak project?)");
+        return;
+    }
+
+    // Acquire supervisor lock with stale-PID recovery.
+    if !try_acquire_supervisor_lock(&supervisor_pid_path) {
+        eprintln!("[vaak-supervise] another supervisor already running — exiting");
+        return;
+    }
+    eprintln!("[vaak-supervise] lock acquired at {:?}", supervisor_pid_path);
+
+    // Cleanup lock on exit (best-effort; OS-kill won't run this).
+    let lock_path_for_cleanup = supervisor_pid_path.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctrlc_set_cleanup(lock_path_for_cleanup);
+    }));
+
+    loop {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Enumerate per-seat session files.
+        let entries = match std::fs::read_dir(&sessions_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[vaak-supervise] read_dir failed: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_POLL_INTERVAL_MS));
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            // Skip the by-pid index dir if it exists; only top-level <role>-<inst>.json files.
+            if !path.is_file() { continue; }
+
+            let state = match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+                Some(v) => v,
+                None => continue,
+            };
+
+            let last_alive = state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            let pid = state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
+            let seat_label = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string();
+
+            // Don't trust last_alive=0 (newly created or never stamped) — skip.
+            if last_alive == 0 { continue; }
+
+            let age_ms = now_ms.saturating_sub(last_alive);
+            if age_ms < SUPERVISE_HANG_THRESHOLD_MS { continue; }
+
+            // PID alive? If no PID recorded or process is gone, skip — Layer 1 handles process exit.
+            let pid = match pid {
+                Some(p) => p,
+                None => continue,
+            };
+            if !is_process_alive(pid) { continue; }
+
+            // Pre-kill grace: post a buzz row, sleep 5s, re-check timestamp.
+            eprintln!(
+                "[vaak-supervise] seat {} stale ({}ms) pid={}; pre-kill grace 5s",
+                seat_label, age_ms, pid
+            );
+            stamp_supervisor_warning(&path, now_ms);
+            std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_PRE_KILL_GRACE_MS));
+
+            // Re-read the timestamp; abort if the seat responded.
+            let post_state = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .unwrap_or(serde_json::json!({}));
+            let post_alive = post_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            if post_alive > last_alive {
+                eprintln!("[vaak-supervise] seat {} recovered during grace — abort kill", seat_label);
+                continue;
+            }
+
+            // Kill the process tree (taskkill /F /T on Windows; SIGKILL on unix).
+            eprintln!("[vaak-supervise] seat {} still hung — killing pid={}", seat_label, pid);
+            kill_process_tree(pid);
+            stamp_supervisor_kill(&path, now_ms);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_POLL_INTERVAL_MS));
+    }
+}
+
+fn try_acquire_supervisor_lock(lock_path: &std::path::Path) -> bool {
+    if let Ok(content) = std::fs::read_to_string(lock_path) {
+        // Existing lock: parse PID, verify it's a live vaak-mcp process.
+        if let Ok(prior_pid) = content.trim().parse::<u32>() {
+            if is_process_alive(prior_pid) && process_name_contains(prior_pid, "vaak-mcp") {
+                return false;
+            }
+            eprintln!("[vaak-supervise] stale lock pid={} — taking over", prior_pid);
+        }
+    }
+    let my_pid = std::process::id();
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(lock_path, my_pid.to_string()) {
+        eprintln!("[vaak-supervise] could not write lock: {}", e);
+        return false;
+    }
+    true
+}
+
+fn ctrlc_set_cleanup(lock_path: std::path::PathBuf) {
+    // Best-effort cleanup hook; ignore failures.
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        static LOCK_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let _ = LOCK_PATH.set(lock_path);
+        unsafe extern "system" fn handler(_ctrl: u32) -> i32 {
+            if let Some(p) = LOCK_PATH.get() {
+                let _ = std::fs::remove_file(p);
+            }
+            0
+        }
+        unsafe { SetConsoleCtrlHandler(Some(handler), 1); }
+    }
+    #[cfg(unix)]
+    { let _ = lock_path; }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::Foundation::CloseHandle;
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() { return false; }
+            CloseHandle(h);
+            true
+        }
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+}
+
+fn process_name_contains(pid: u32, needle: &str) -> bool {
+    #[cfg(windows)]
+    {
+        // Best-effort: shell out to tasklist filtered by PID and check its image name.
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            return s.to_lowercase().contains(&needle.to_lowercase());
+        }
+        false
+    }
+    #[cfg(unix)]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output();
+        if let Ok(o) = out {
+            let s = String::from_utf8_lossy(&o.stdout);
+            return s.to_lowercase().contains(&needle.to_lowercase());
+        }
+        false
+    }
+}
+
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    }
+}
+
+fn stamp_supervisor_warning(seat_file: &std::path::Path, now_ms: u64) {
+    let mut state = std::fs::read_to_string(seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("supervisor_warning_at_ms".to_string(), serde_json::json!(now_ms));
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = atomic_write(seat_file, serialized.as_bytes());
+        }
+    }
+}
+
+fn stamp_supervisor_kill(seat_file: &std::path::Path, now_ms: u64) {
+    let mut state = std::fs::read_to_string(seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("supervisor_killed_at_ms".to_string(), serde_json::json!(now_ms));
+        obj.insert("last_writer_action".to_string(), serde_json::json!("layer2_supervisor_kill"));
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = atomic_write(seat_file, serialized.as_bytes());
+        }
+    }
+}
+
 // ==================== Stop Hook ====================
 
 /// Claude Code Stop hook: fires when Claude is about to finish responding.
@@ -5969,6 +6336,21 @@ fn main() {
         run_stop_hook();
         return;
     }
+    if args.iter().any(|a| a == "--keep-alive") {
+        run_keep_alive();
+        return;
+    }
+    if args.iter().any(|a| a == "--supervise") {
+        let project_dir = args.iter().position(|a| a == "--project-dir")
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+            .or_else(|| std::env::var("VAAK_PROJECT_DIR").ok())
+            .unwrap_or_else(|| std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default());
+        run_supervise(&project_dir);
+        return;
+    }
 
     let session_id = get_session_id();
     eprintln!("[vaak-mcp] Session ID: {}", session_id);
@@ -6069,7 +6451,10 @@ fn main() {
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(e) => {
+                log_sidecar_event("stdin_error", serde_json::json!({ "error": e.to_string() }));
+                break;
+            }
         };
 
         if line.trim().is_empty() {
@@ -6101,5 +6486,6 @@ fn main() {
 
     // Cleanup: mark session as disconnected so the UI shows "gone" immediately
     update_session_activity("disconnected");
+    log_sidecar_event("stdin_eof", serde_json::json!({ "reason": "main_loop_exited" }));
     eprintln!("[vaak-mcp] Session ended, marked as disconnected");
 }

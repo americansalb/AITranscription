@@ -185,18 +185,40 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             "claude".to_string()
         };
 
-        // Write temp .ps1 script (same as working launch-team.ps1 approach)
-        // The script uses .current_dir() on the WMI process instead of interpolating
-        // the project_dir into PowerShell, avoiding injection via $(), backticks, etc.
-        // Only the claude path and prompt are interpolated (with single-quote escaping).
+        // Layer 1 wrapper: spawn the per-seat self-healing .ps1 instead of single-shot claude.
+        // The wrapper handles process-exit recovery (#1, #18), sentinel exit (#634(1)),
+        // port-probe (#634(2)), --resume <session-id> (pin M), and JSONL logging (D).
+        // launch-seat.ps1 is the source-of-truth template (src/launch-seat.ps1, embedded
+        // via include_str!); we materialize it to %APPDATA%/Vaak on each spawn, then write
+        // a tiny stub .ps1 to %TEMP% that invokes it with this seat's parameters.
+        let appdata = std::env::var("APPDATA")
+            .map_err(|e| format!("APPDATA env var unavailable: {}", e))?;
+        let vaak_dir = Path::new(&appdata).join("Vaak");
+        std::fs::create_dir_all(&vaak_dir)
+            .map_err(|e| format!("Failed to create Vaak appdata dir: {}", e))?;
+        let wrapper_path = vaak_dir.join("launch-seat.ps1");
+        let wrapper_src: &str = include_str!("launch-seat.ps1");
+        // Write only on content drift to avoid clobbering during in-flight spawn.
+        let needs_write = std::fs::read_to_string(&wrapper_path)
+            .map(|s| s != wrapper_src)
+            .unwrap_or(true);
+        if needs_write {
+            std::fs::write(&wrapper_path, wrapper_src)
+                .map_err(|e| format!("Failed to write launch-seat.ps1: {}", e))?;
+        }
+
+        let inst = roster_instance.unwrap_or(0);
         let temp_dir = std::env::temp_dir();
-        let script_name = format!("vaak-launch-{}-{}.ps1", role, std::process::id());
+        let script_name = format!("vaak-launch-{}-{}-{}.ps1", role, inst, std::process::id());
         let script_path = temp_dir.join(&script_name);
         let safe_claude = claude_path.replace('\'', "''");
         let safe_prompt = join_prompt.replace('\'', "''");
+        let safe_dir = project_dir.replace('\'', "''");
+        let safe_role = role.replace('\'', "''");
+        let safe_wrapper = wrapper_path.to_string_lossy().replace('\'', "''");
         let ps_script = format!(
-            "& '{}' --dangerously-skip-permissions '{}'",
-            safe_claude, safe_prompt
+            "& '{}' -Role '{}' -Instance {} -ProjectDir '{}' -ClaudeExe '{}' -JoinPrompt '{}'",
+            safe_wrapper, safe_role, inst, safe_dir, safe_claude, safe_prompt
         );
         std::fs::write(&script_path, &ps_script)
             .map_err(|e| format!("Failed to write launch script: {}", e))?;
@@ -210,7 +232,10 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
         let script_path_str = script_path.to_str().unwrap_or("").replace("'", "''");
         let safe_dir_ps = project_dir.replace('\'', "''");
         let ps_cmd = format!(
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -NoExit -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
+            // DC-1 (architect #648): drop -NoExit so the powershell host terminates cleanly
+            // when the wrapper's while-loop ends via sentinel, instead of leaving a zombie
+            // window (the smoking-gun pattern dev cited at #632 for the prior single-shot path).
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
             script_path_str, safe_dir_ps
         );
         let ps_args = ["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd];
@@ -579,6 +604,216 @@ pub fn kill_team_member(
             let _ = revoke_session(dir, &companion_slug, 0);
         }
     }
+    Ok(())
+}
+
+/// Result of `reset_team_state_soft`: returns counts of cleared bindings and per-seat
+/// reasons for any binding that was deliberately preserved (the partial-state surface
+/// the UI renders as "N didn't respond" / "N still joining").
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SoftResetReport {
+    pub cleared: usize,
+    pub partial: Vec<SoftResetSkip>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SoftResetSkip {
+    pub role: String,
+    pub instance: u64,
+    /// One of: `"stale_pid_alive"` (heartbeat older than 60s, process still running — needs Hard reset),
+    /// `"absent_pid_alive_newborn"` (joined recently, no heartbeat yet, will rejoin shortly).
+    pub reason: String,
+}
+
+const SOFT_RESET_FRESHNESS_MS: u64 = 60_000;
+
+/// **Debug affordance — NOT the #506 fix.** Per dev-challenger #551 + architect #552
+/// the original soft-reset name overpromised: this primitive only cleans up ghost rows
+/// in `sessions.json` (zombie bindings whose CC processes are dead OR whose heartbeats
+/// are fresh enough that they can rejoin on their own). It does NOT address the root
+/// cause of human #506 ("reset vaak disconnects agents") — that hypothesis is still
+/// pending verification per architect #547 question to human.
+///
+/// Useful for: cleaning up sessions.json after a manual `taskkill`, or after CC
+/// processes have crashed without writing the disconnect marker.
+///
+/// Per the AL session locked at `learn/.vaak/al-architecture-diagram.md` §12:
+/// - 3-way partition: (ABSENT + pid_alive newborn) skip-keep informational, (STALE + pid_alive)
+///   skip-surface needs-hard, (ABSENT + no_pid) ghost clear.
+/// - Single 60s threshold (`MIC_GRAB_THRESHOLD_MS`) shared with the mic gate; one source of
+///   truth on liveness across consumers.
+/// - Buzz each cleared role so a CC instance still in `project_wait` standby wakes up and rejoins.
+#[tauri::command]
+pub fn clear_ghost_seat_rows(state: State<'_, LauncherState>) -> Result<SoftResetReport, String> {
+    let dir = match state.project_dir.lock().clone() {
+        Some(d) => d,
+        None => return Ok(SoftResetReport { cleared: 0, partial: vec![] }),
+    };
+    do_clear_ghost_seat_rows(&dir, is_pid_alive)
+}
+
+/// Pure (modulo I/O on `<project_dir>/.vaak/`) implementation of `clear_ghost_seat_rows`,
+/// extracted from the Tauri command so unit tests can exercise the end-to-end fixture
+/// behavior without mocking Tauri State. The `pid_alive_fn` parameter is injected so tests
+/// can simulate any pid_alive answer deterministically without actually spawning processes.
+///
+/// Invariants enforced (see tests below):
+/// - Never touches `<project_dir>/.vaak/protocol.json`.
+/// - Never touches bindings with `role == "human"`.
+/// - Empty `bindings: []` → `cleared = 0, partial = []`, no panic.
+pub(crate) fn do_clear_ghost_seat_rows(
+    project_dir: &str,
+    pid_alive_fn: fn(u32) -> bool,
+) -> Result<SoftResetReport, String> {
+    let sessions_path = std::path::Path::new(project_dir).join(".vaak").join("sessions.json");
+    let content = std::fs::read_to_string(&sessions_path)
+        .map_err(|e| format!("Failed to read sessions.json: {}", e))?;
+    let mut sessions: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse sessions.json: {}", e))?;
+
+    let bindings = match sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+        Some(b) => b,
+        None => return Ok(SoftResetReport { cleared: 0, partial: vec![] }),
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let mut cleared = 0usize;
+    let mut partial: Vec<SoftResetSkip> = Vec::new();
+    let mut roles_to_buzz: Vec<(String, u64)> = Vec::new();
+
+    bindings.retain(|b| {
+        let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        if role == "human" || role.is_empty() {
+            return true; // never touch human bindings
+        }
+        let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+        let pid = b.get("pid").and_then(|p| p.as_u64()).map(|n| n as u32);
+        let pid_alive = pid.map(pid_alive_fn).unwrap_or(false);
+
+        match classify_binding_for_soft_reset(b, now_ms, pid_alive) {
+            BindingClass::Cleared => {
+                cleared += 1;
+                roles_to_buzz.push((role.to_string(), instance));
+                false
+            }
+            BindingClass::KeepStaleSurface => {
+                partial.push(SoftResetSkip {
+                    role: role.to_string(),
+                    instance,
+                    reason: "stale_pid_alive".to_string(),
+                });
+                true
+            }
+            BindingClass::KeepNewbornSilent => {
+                partial.push(SoftResetSkip {
+                    role: role.to_string(),
+                    instance,
+                    reason: "absent_pid_alive_newborn".to_string(),
+                });
+                true
+            }
+        }
+    });
+
+    let updated = serde_json::to_string_pretty(&sessions)
+        .map_err(|e| format!("Failed to serialize sessions.json: {}", e))?;
+    std::fs::write(&sessions_path, updated)
+        .map_err(|e| format!("Failed to write sessions.json: {}", e))?;
+
+    // Buzz each cleared role:instance so any CC still in project_wait standby wakes up
+    // and rejoins via UserPromptSubmit hook. Best-effort; failures don't fail the reset.
+    for (role, instance) in roles_to_buzz {
+        let _ = write_buzz_message(project_dir, &role, instance);
+    }
+
+    Ok(SoftResetReport { cleared, partial })
+}
+
+/// Classification for a single sessions.json binding under soft-reset partition rules.
+/// Pure function input — no I/O — so it's unit-testable with synthetic JSON values.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BindingClass {
+    /// Drop this binding from sessions.json (healthy heartbeat OR ghost row).
+    Cleared,
+    /// Keep + surface in `partial[]` with reason `stale_pid_alive` (heartbeat stale OR
+    /// missing, process still running — needs Hard-reset to clear).
+    KeepStaleSurface,
+    /// Keep + surface in `partial[]` with reason `absent_pid_alive_newborn` (just joined,
+    /// no heartbeat written yet, will rejoin shortly — informational, not actionable).
+    KeepNewbornSilent,
+}
+
+const NEWBORN_WINDOW_MS: u64 = 10_000;
+
+/// Classify one binding for soft-reset. Pure function: takes the binding JSON value,
+/// the current wall-clock millisecond, and the pid-alive answer (looked up by caller).
+/// All three partition states + edge cases are exercised in `mod tests` below.
+pub(crate) fn classify_binding_for_soft_reset(
+    binding: &serde_json::Value,
+    now_ms: u64,
+    pid_alive: bool,
+) -> BindingClass {
+    let last_alive = binding.get("last_alive_at_ms").and_then(|v| v.as_u64());
+    let joined_at = binding.get("joined_at_ms").and_then(|v| v.as_u64());
+
+    let is_newborn = joined_at
+        .map(|j| now_ms.saturating_sub(j) < NEWBORN_WINDOW_MS)
+        .unwrap_or(false);
+
+    match (last_alive, pid_alive) {
+        // ABSENT heartbeat + pid_alive: newborn (just joined) skip-keep, else stale.
+        (None, true) if is_newborn => BindingClass::KeepNewbornSilent,
+        (None, true) => BindingClass::KeepStaleSurface,
+        // ABSENT heartbeat + no PID alive: ghost row.
+        (None, false) => BindingClass::Cleared,
+        // PRESENT heartbeat: freshness wins; on stale, pid_alive decides surface vs ghost.
+        (Some(la), pid_live) => {
+            let age = now_ms.saturating_sub(la);
+            if age < SOFT_RESET_FRESHNESS_MS {
+                BindingClass::Cleared
+            } else if pid_live {
+                BindingClass::KeepStaleSurface
+            } else {
+                BindingClass::Cleared
+            }
+        }
+    }
+}
+
+/// Append a buzz message to `.vaak/board.jsonl` so the target role's next `project_wait`
+/// return surfaces a rejoin instruction. Mirrors the shape that `mcp__vaak__project_buzz`
+/// produces, with `from = "system"` to indicate harness origin. Time encoded as a UNIX
+/// millisecond integer to avoid pulling chrono into this module.
+fn write_buzz_message(project_dir: &str, role: &str, instance: u64) -> Result<(), String> {
+    let board_path = std::path::Path::new(project_dir).join(".vaak").join("board.jsonl");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let entry = serde_json::json!({
+        "id": now_ms,
+        "from": "system:reset_team_state_soft",
+        "to": format!("{}:{}", role, instance),
+        "type": "buzz",
+        "subject": "Soft reset cleared your binding — please rejoin",
+        "body": "Your sessions.json binding was cleared by the human's Reset action. Call project_join with your role to re-register; the AL state is preserved.",
+        "metadata": {},
+        "timestamp_ms": now_ms,
+    });
+    let line = format!("{}\n", entry.to_string());
+
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+        .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+    f.write_all(line.as_bytes())
+        .map_err(|e| format!("Failed to append buzz: {}", e))?;
     Ok(())
 }
 
@@ -2033,5 +2268,284 @@ mod tests {
         let json = serde_json::to_string_pretty(&agents).unwrap();
         let loaded: Vec<SpawnedAgent> = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.len(), 2);
+    }
+
+    // ── classify_binding_for_soft_reset (3-way partition) ─────────────────
+    //
+    // Covers all 3 BindingClass outputs + edge cases per evil-arch #555 demand.
+    // NOW_MS = 1_000_000_000 ms (arbitrary; only diffs matter).
+
+    const NOW_MS: u64 = 1_000_000_000;
+
+    fn b(json: serde_json::Value) -> serde_json::Value { json }
+
+    #[test]
+    fn classify_present_fresh_heartbeat_clears() {
+        // Heartbeat 5s ago, pid_alive=true. Below 60s threshold → cleared.
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 0,
+            "last_alive_at_ms": NOW_MS - 5_000,
+        }));
+        assert_eq!(classify_binding_for_soft_reset(&binding, NOW_MS, true), BindingClass::Cleared);
+    }
+
+    #[test]
+    fn classify_present_stale_heartbeat_pid_alive_surfaces() {
+        // Heartbeat 90s ago, pid_alive=true. Above 60s + alive → keep + surface stale.
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 0,
+            "last_alive_at_ms": NOW_MS - 90_000,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepStaleSurface
+        );
+    }
+
+    #[test]
+    fn classify_present_stale_heartbeat_no_pid_clears() {
+        // Heartbeat 90s ago, pid_alive=false. Process died — ghost row.
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 0,
+            "last_alive_at_ms": NOW_MS - 90_000,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, false),
+            BindingClass::Cleared
+        );
+    }
+
+    #[test]
+    fn classify_absent_heartbeat_pid_alive_newborn_keeps_silent() {
+        // No heartbeat field, but joined 3s ago. Newborn — keep + informational surface.
+        let binding = b(serde_json::json!({
+            "role": "ux-engineer", "instance": 0,
+            "joined_at_ms": NOW_MS - 3_000,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepNewbornSilent
+        );
+    }
+
+    #[test]
+    fn classify_absent_heartbeat_pid_alive_not_newborn_surfaces() {
+        // No heartbeat AND joined 30s ago (past newborn window). Treated as stale.
+        let binding = b(serde_json::json!({
+            "role": "ux-engineer", "instance": 0,
+            "joined_at_ms": NOW_MS - 30_000,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepStaleSurface
+        );
+    }
+
+    #[test]
+    fn classify_absent_heartbeat_no_pid_clears_ghost() {
+        // No heartbeat, no live PID. Pure ghost row.
+        let binding = b(serde_json::json!({
+            "role": "tester", "instance": 0,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, false),
+            BindingClass::Cleared
+        );
+    }
+
+    #[test]
+    fn classify_absent_heartbeat_no_joined_at_no_pid_clears() {
+        // No fields at all + no live PID — clearly ghost.
+        let binding = b(serde_json::json!({}));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, false),
+            BindingClass::Cleared
+        );
+    }
+
+    #[test]
+    fn classify_absent_heartbeat_no_joined_at_pid_alive_surfaces() {
+        // No heartbeat, no joined_at, pid_alive=true. Can't prove newborn → treat as stale.
+        // PID-recycled-to-different-process case behaves identically here (we trust pid_alive
+        // signal; recycled-PID detection is out of scope per #555 — limitation noted).
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 1,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepStaleSurface
+        );
+    }
+
+    #[test]
+    fn classify_threshold_boundary_exact_60s() {
+        // Heartbeat exactly at threshold — strict-less-than means it's stale.
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 0,
+            "last_alive_at_ms": NOW_MS - SOFT_RESET_FRESHNESS_MS,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepStaleSurface
+        );
+    }
+
+    #[test]
+    fn classify_threshold_boundary_just_under_60s() {
+        // 59.999s ago — just barely fresh, should clear.
+        let binding = b(serde_json::json!({
+            "role": "developer", "instance": 0,
+            "last_alive_at_ms": NOW_MS - (SOFT_RESET_FRESHNESS_MS - 1),
+        }));
+        assert_eq!(classify_binding_for_soft_reset(&binding, NOW_MS, true), BindingClass::Cleared);
+    }
+
+    #[test]
+    fn classify_newborn_window_exact_10s() {
+        // joined exactly at the newborn boundary → no longer newborn.
+        let binding = b(serde_json::json!({
+            "role": "ux-engineer", "instance": 0,
+            "joined_at_ms": NOW_MS - NEWBORN_WINDOW_MS,
+        }));
+        assert_eq!(
+            classify_binding_for_soft_reset(&binding, NOW_MS, true),
+            BindingClass::KeepStaleSurface
+        );
+    }
+
+    // ── do_clear_ghost_seat_rows end-to-end fixture tests ─────────────────
+    //
+    // Uses the std env::temp_dir() to set up a synthetic .vaak/ directory and exercises
+    // the full Tauri-command body (minus the State<> wrapper). Covers:
+    //   - case (iii) mic-holder protocol.json byte-equality (evil-arch #561 / dev-challenger #556)
+    //   - empty-bindings no-op (dev-challenger #562)
+
+    fn make_temp_project() -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "vaak-clear-ghost-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join(".vaak")).expect("create .vaak");
+        dir
+    }
+
+    fn always_alive(_pid: u32) -> bool { true }
+    fn never_alive(_pid: u32) -> bool { false }
+
+    #[test]
+    fn end_to_end_protocol_json_unchanged_when_mic_held() {
+        let project_dir = make_temp_project();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        // Sessions.json with one fresh-heartbeat binding (will be cleared).
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "developer", "instance": 0, "session_id": "abc",
+                  "last_alive_at_ms": now_ms - 5_000 }
+            ]
+        });
+        std::fs::write(
+            project_dir.join(".vaak").join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        ).unwrap();
+
+        // Protocol.json holding a mic. This file MUST NOT be touched.
+        let protocol_json = serde_json::json!({
+            "rev": 7,
+            "preset": "Debate",
+            "floor": {
+                "mode": "reactive",
+                "current_speaker": "developer:0",
+                "queue": [],
+                "rotation_order": []
+            }
+        });
+        let protocol_path = project_dir.join(".vaak").join("protocol.json");
+        let protocol_serialized = serde_json::to_string_pretty(&protocol_json).unwrap();
+        std::fs::write(&protocol_path, &protocol_serialized).unwrap();
+        let protocol_bytes_before = std::fs::read(&protocol_path).unwrap();
+
+        let report = do_clear_ghost_seat_rows(
+            project_dir.to_str().unwrap(),
+            always_alive,
+        ).expect("clear should succeed");
+
+        // The healthy binding was cleared; protocol.json byte-equal pre/post.
+        assert_eq!(report.cleared, 1, "fresh-heartbeat binding should clear");
+        assert!(report.partial.is_empty(), "no stale or newborn surfaces expected");
+        let protocol_bytes_after = std::fs::read(&protocol_path).unwrap();
+        assert_eq!(
+            protocol_bytes_before, protocol_bytes_after,
+            "protocol.json must be byte-equal pre/post — clear_ghost_seat_rows should not touch it (case iii)"
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn end_to_end_empty_bindings_returns_zero_no_panic() {
+        let project_dir = make_temp_project();
+        let sessions = serde_json::json!({ "bindings": [] });
+        std::fs::write(
+            project_dir.join(".vaak").join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        ).unwrap();
+
+        let report = do_clear_ghost_seat_rows(
+            project_dir.to_str().unwrap(),
+            never_alive,
+        ).expect("empty bindings should succeed");
+
+        assert_eq!(report.cleared, 0);
+        assert!(report.partial.is_empty());
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn end_to_end_human_binding_never_touched() {
+        // Defensive coverage: the human binding must survive even if its heartbeat is "stale."
+        // Locked at line 650 of the implementation; this regression-locks it.
+        let project_dir = make_temp_project();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let sessions = serde_json::json!({
+            "bindings": [
+                { "role": "human", "instance": 0, "session_id": "human-sid",
+                  "last_alive_at_ms": now_ms - 999_999 } // ancient — should be cleared if not for the human guard
+            ]
+        });
+        std::fs::write(
+            project_dir.join(".vaak").join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        ).unwrap();
+
+        let report = do_clear_ghost_seat_rows(
+            project_dir.to_str().unwrap(),
+            never_alive,
+        ).expect("human binding should not panic");
+
+        assert_eq!(report.cleared, 0, "human binding must NEVER be cleared");
+        assert!(report.partial.is_empty(), "human binding must NEVER appear in partial[]");
+
+        // Verify the binding is still on disk.
+        let after = std::fs::read_to_string(project_dir.join(".vaak").join("sessions.json"))
+            .unwrap();
+        let after_json: serde_json::Value = serde_json::from_str(&after).unwrap();
+        let bindings_count = after_json.get("bindings").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        assert_eq!(bindings_count, 1, "human binding must remain on disk");
+
+        let _ = std::fs::remove_dir_all(&project_dir);
     }
 }
