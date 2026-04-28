@@ -159,7 +159,26 @@ Write-Host ''
 Write-Host "Launched $($Roles.Count) team members:" -ForegroundColor Green
 foreach ($s in $seatPlan) { Write-Host "  $($s.role):$($s.instance)" }
 Write-Host ''
-Write-Host "Layer 1 (process-exit recovery) active in every window."
-Write-Host "Layer 2 (vaak-mcp --supervise) and Layer 3 (Pre/PostToolUse hooks) ship separately via dev:0."
+
+# Slice 8 — Layer 2 supervisor auto-launch (spec §12.2). Spawns vaak-mcp.exe
+# --supervise as a detached process so it survives this script exiting.
+# Idempotent via supervisor.pid lock with stale-PID recovery — if a previous
+# supervisor is alive, the new instance exits cleanly without disrupting it.
+$vaakMcpExe = Join-Path $PSScriptRoot 'desktop\src-tauri\binaries\vaak-mcp-x86_64-pc-windows-msvc.exe'
+if (Test-Path $vaakMcpExe) {
+    Write-Host "Layer 2: starting vaak-mcp --supervise (90s stall → 5s grace → kill+relaunch)..." -ForegroundColor Cyan
+    # Detached spawn — survives parent exit. Logs to .vaak/supervisor.log.
+    $supervisorLog = Join-Path $ProjectDir '.vaak\supervisor.log'
+    Start-Process -FilePath $vaakMcpExe `
+        -ArgumentList @('--supervise', '--project-dir', $ProjectDir) `
+        -RedirectStandardOutput $supervisorLog `
+        -RedirectStandardError $supervisorLog `
+        -WindowStyle Hidden `
+        -PassThru | Out-Null
+    Write-Host "  (supervisor log: $supervisorLog — tails Layer 2 buzz/grace/kill events)" -ForegroundColor DarkGray
+} else {
+    Write-Host "Layer 2 SKIPPED: $vaakMcpExe not found. Build vaak-desktop first." -ForegroundColor Yellow
+}
+Write-Host "Layer 3 (Pre/PostToolUse hooks) install via 'vaak-mcp.exe --install-hooks' (idempotent)."
 Write-Host "Logs:           $logsDir\<role>-<instance>.jsonl"
 Write-Host "Drain a seat:   New-Item $ProjectDir\.vaak\stop-<role>-<instance>"
