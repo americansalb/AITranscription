@@ -21,9 +21,9 @@ const ROLL_UP_ICON: Record<ResilienceStatus['roll_up'], string> = {
   bad: '🔴',
 };
 const ROLL_UP_LABEL: Record<ResilienceStatus['roll_up'], string> = {
-  green: 'Stack OK',
-  warn: '1 issue',
-  bad: 'Stack degraded',
+  green: 'All systems running',
+  warn: 'Minor issue (click)',
+  bad: 'Something\'s wrong (click)',
 };
 
 export function HealthPill({ projectDir }: { projectDir: string | null }) {

@@ -19,19 +19,19 @@ import { HealthPill } from '../HealthPill';
 const STATUS_GREEN = {
   roll_up: 'green',
   pillars_ok: 4,
-  layer1: { ok: true, label: 'Process wrappers', detail: '3/3 seats with recent activity' },
-  layer2: { ok: true, label: 'Supervisor (vaak-mcp --supervise)', detail: 'Active' },
-  layer3: { ok: true, label: 'Pre/PostToolUse hooks', detail: 'Installed' },
-  layer4: { ok: true, label: 'Visual feedback', detail: 'Active (this panel)' },
+  layer1: { ok: true, label: 'Agents responding', detail: '3 of 3 agents have heartbeated recently' },
+  layer2: { ok: true, label: 'Auto-recovery watchdog', detail: 'Running — will restart hung agents automatically' },
+  layer3: { ok: true, label: 'Activity heartbeats', detail: 'Installed — every agent action keeps the seat alive' },
+  layer4: { ok: true, label: 'Visual indicators', detail: 'This panel is rendering' },
 };
 
 const STATUS_BAD = {
   roll_up: 'bad',
   pillars_ok: 2,
-  layer1: { ok: false, label: 'Process wrappers', detail: '0/0 seats with recent activity' },
-  layer2: { ok: false, label: 'Supervisor (vaak-mcp --supervise)', detail: 'Not running — auto-recovery disabled' },
-  layer3: { ok: true, label: 'Pre/PostToolUse hooks', detail: 'Installed' },
-  layer4: { ok: true, label: 'Visual feedback', detail: 'Active (this panel)' },
+  layer1: { ok: false, label: 'Agents responding', detail: '0 of 0 agents have heartbeated recently' },
+  layer2: { ok: false, label: 'Auto-recovery watchdog', detail: 'Not running — auto-recovery disabled' },
+  layer3: { ok: true, label: 'Activity heartbeats', detail: 'Installed' },
+  layer4: { ok: true, label: 'Visual indicators', detail: 'This panel is rendering' },
 };
 
 beforeEach(() => {
@@ -49,7 +49,7 @@ describe('HealthPill — Slice 9 resilience-stack JOIN UI (spec §12.4)', () => 
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(STATUS_GREEN);
     render(<HealthPill projectDir="/tmp/x" />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Stack OK/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /All systems running/ })).toBeInTheDocument();
     });
   });
 
@@ -57,17 +57,17 @@ describe('HealthPill — Slice 9 resilience-stack JOIN UI (spec §12.4)', () => 
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(STATUS_BAD);
     render(<HealthPill projectDir="/tmp/x" />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Stack degraded/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Something's wrong/ })).toBeInTheDocument();
     });
   });
 
   it('clicking pill expands per-layer detail', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(STATUS_BAD);
     render(<HealthPill projectDir="/tmp/x" />);
-    await waitFor(() => screen.getByRole('button', { name: /Stack degraded/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Stack degraded/ }));
+    await waitFor(() => screen.getByRole('button', { name: /Something's wrong/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Something's wrong/ }));
     await waitFor(() => {
-      expect(screen.getByText(/Supervisor.*vaak-mcp --supervise/)).toBeInTheDocument();
+      expect(screen.getByText(/Auto-recovery watchdog/)).toBeInTheDocument();
       expect(screen.getByText(/Not running — auto-recovery disabled/)).toBeInTheDocument();
       expect(screen.getByText(/Installed/)).toBeInTheDocument();
     });
@@ -76,8 +76,8 @@ describe('HealthPill — Slice 9 resilience-stack JOIN UI (spec §12.4)', () => 
   it('expanded detail shows ✓ for ok layers and ✗ for failing layers', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(STATUS_BAD);
     render(<HealthPill projectDir="/tmp/x" />);
-    await waitFor(() => screen.getByRole('button', { name: /Stack degraded/ }));
-    fireEvent.click(screen.getByRole('button', { name: /Stack degraded/ }));
+    await waitFor(() => screen.getByRole('button', { name: /Something's wrong/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Something's wrong/ }));
     await waitFor(() => {
       // Layer1 + Layer2 fail in STATUS_BAD; Layer3 + Layer4 pass.
       const fails = screen.getAllByText('✗');

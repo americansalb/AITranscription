@@ -3110,8 +3110,13 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
 }
 
 // ==================== Assembly Line UI commands ====================
-// Tauri-side counterpart to the MCP `assembly_line` tool. Both write the same
-// .vaak/[sections/<s>/]assembly.json file — single source of truth on disk.
+// Tauri-side counterpart to the MCP `assembly_line` tool. Post-44a7123:
+// `set_assembly_state` writes the legacy .vaak/[sections/<s>/]assembly.json
+// AND mirrors into protocol.json via do_protocol_mutate_inner so the new
+// ProtocolPanel surface stays in sync with the existing AL toggle button
+// (closes the disconnect human #1122 flagged). Single source of truth is
+// becoming protocol.json; legacy assembly.json kept for the one-release
+// compat tail per spec §3.3.
 
 #[tauri::command]
 fn get_assembly_state(dir: String) -> Result<serde_json::Value, String> {
@@ -3337,23 +3342,23 @@ fn get_resilience_status(dir: String) -> Result<serde_json::Value, String> {
         "pillars_ok": pillars_ok,
         "layer1": {
             "ok": layer1_ok,
-            "label": "Process wrappers",
-            "detail": format!("{}/{} seats with recent activity", layer1_seats_alive, layer1_seats_total)
+            "label": "Agents responding",
+            "detail": format!("{} of {} agents have heartbeated recently", layer1_seats_alive, layer1_seats_total)
         },
         "layer2": {
             "ok": layer2_ok,
-            "label": "Supervisor (vaak-mcp --supervise)",
-            "detail": if layer2_ok { "Active".to_string() } else { "Not running — auto-recovery disabled".to_string() }
+            "label": "Auto-recovery watchdog",
+            "detail": if layer2_ok { "Running — will restart hung agents automatically".to_string() } else { "Not running — restart vaak to enable, or expand this layer for the manual command".to_string() }
         },
         "layer3": {
             "ok": layer3_ok,
-            "label": "Pre/PostToolUse hooks",
-            "detail": if layer3_ok { "Installed".to_string() } else { "Not installed — heartbeats only fire on MCP calls".to_string() }
+            "label": "Activity heartbeats",
+            "detail": if layer3_ok { "Installed — every agent action keeps the seat alive".to_string() } else { "Not installed — agents only refresh on MCP calls. Run `vaak-mcp.exe --install-hooks` once per machine.".to_string() }
         },
         "layer4": {
             "ok": true,
-            "label": "Visual feedback",
-            "detail": "Active (this panel)"
+            "label": "Visual indicators",
+            "detail": "This panel is rendering"
         }
     }))
 }

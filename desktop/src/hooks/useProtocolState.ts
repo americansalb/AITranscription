@@ -68,6 +68,43 @@ type GetProtocolResponse = {
 };
 
 /**
+ * Translate raw protocol_mutate error envelopes into plain-English
+ * messages for the UI (per dev-chall #1135 + memory #27 jargon sweep).
+ * Raw `[Code]` form is preserved in console.warn so the team retains
+ * debug context.
+ */
+function friendlyError(raw: string): string {
+  if (raw.includes('[StaleRev]')) {
+    return 'Someone else updated the panel state — the system is catching up. Try again in a moment.';
+  }
+  if (raw.includes('[MissingRev]')) {
+    return 'Internal error: panel state revision missing. Please reload.';
+  }
+  if (raw.includes('[NotPermitted]')) {
+    return 'You can\'t do that right now. Common causes: someone else has the mic, or you\'re trying to take an action only the speaker can do.';
+  }
+  if (raw.includes('[StuckGateNotPassed]')) {
+    return 'The current speaker is still active. The mic only frees up after they\'ve been silent for a minute.';
+  }
+  if (raw.includes('[SeatNotFound]')) {
+    return 'That seat isn\'t in the active roster.';
+  }
+  if (raw.includes('[InvalidArgs]')) {
+    return 'Internal error: bad arguments. Check the console for details.';
+  }
+  if (raw.includes('[InvalidAction]')) {
+    return 'That action isn\'t available right now.';
+  }
+  if (raw.includes('[Slice5Unimplemented]') || raw.includes('[Slice6Unimplemented]')) {
+    return 'That feature isn\'t fully wired yet.';
+  }
+  if (raw.includes('[InternalError]')) {
+    return 'Something failed inside the system. Check the console.';
+  }
+  return raw;
+}
+
+/**
  * Subscribe to protocol.json for the given project + section. Returns
  * `{ state, heartbeats, loaded, mutate }`. Mutations are fire-and-forget;
  * result arrives through the next `protocol_changed` event.
@@ -153,8 +190,12 @@ export function useProtocolState(
         return result;
       } catch (e) {
         const msg = String(e);
-        console.warn(`[useProtocolState] mutate('${action}') failed: ${msg}`);
-        setLastError(msg);
+        // Translate raw [Code] error envelopes into plain-English messages
+        // before surfacing to the UI (memory #27 + dev-chall #1135 jargon
+        // sweep). Keep the raw msg in the console for debugging.
+        const friendly = friendlyError(msg);
+        console.warn(`[useProtocolState] mutate('${action}') failed: ${msg} → '${friendly}'`);
+        setLastError(friendly);
         // [StaleRev] recovery (evil-arch #952 RATIFIED in #954): re-invoke
         // get_protocol DIRECTLY rather than waiting for the best-effort
         // protocol_changed push. If the push event was dropped (Tauri IPC
