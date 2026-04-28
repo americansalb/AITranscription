@@ -49,7 +49,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::collab::{atomic_write, get_active_section, iso_now};
+use crate::collab::{atomic_write, get_active_section, iso_now, with_board_lock};
 
 // Single-source threshold (mirrors spec §2 / vaak-mcp.rs MIC_GRAB_THRESHOLD_MS).
 pub const MIC_GRAB_THRESHOLD_MS: u64 = 60_000;
@@ -260,23 +260,67 @@ fn legacy_archive_dir(dir: &str, section: &str) -> PathBuf {
 
 // ==================== Read / write / migrate ====================
 
-/// Read protocol state for a section. On first read with no `protocol.json`
-/// but an existing `assembly.json` or `discussion.json`, synthesize a fresh
-/// protocol and archive the legacy files (per spec §3.3).
+/// Read protocol state for a section. On first read with no `protocol.json`,
+/// synthesize from legacy `assembly.json` / `discussion.json` and archive
+/// them (spec §3.3).
 ///
-/// Caller is responsible for holding `board.lock` if reading inside a mutation
-/// transaction. Plain reads (UI display) may skip the lock.
+/// **Concurrency** (per evil-arch #929 round of review): the read-or-migrate
+/// path acquires `board.lock` so two concurrent first-readers don't both
+/// rename the same legacy files (second rename would silently no-op, then
+/// the second migration writes empty defaults over the first's correct
+/// state — silent data loss).
+///
+/// **Corrupted-file recovery** (same review): if `protocol.json` exists but
+/// fails to parse, we DO NOT silently fall through to legacy migration —
+/// legacy files have already been archived in a prior run, so re-migration
+/// would produce empty defaults and overwrite the corrupted file with no
+/// warning. Instead we eprintln the error and return `Protocol::fresh()`
+/// without writing, leaving the bad file in place for human inspection.
 pub fn read_protocol_for_section(dir: &str, section: &str) -> Protocol {
     let path = protocol_path_for_section(dir, section);
+
+    // Fast path: file exists and parses cleanly. No lock needed for plain reads.
     if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(p) = serde_json::from_str::<Protocol>(&content) {
-            return p;
+        match serde_json::from_str::<Protocol>(&content) {
+            Ok(p) => return p,
+            Err(e) => {
+                eprintln!(
+                    "[protocol] {} exists but failed to parse: {}. \
+                     Returning fresh defaults; not overwriting on disk so \
+                     the corrupted file is preserved for inspection.",
+                    path.display(), e
+                );
+                return Protocol::fresh();
+            }
         }
     }
-    // No protocol.json (or unparseable). Try migration from legacy.
-    let migrated = migrate_legacy_for_section(dir, section);
-    let _ = write_protocol_for_section_unlocked(dir, section, &migrated);
-    migrated
+
+    // No protocol.json — migrate under board.lock so concurrent first-readers
+    // serialize. Inside the lock, re-check for protocol.json (a peer may have
+    // migrated in the gap between our miss and the lock acquire); only one
+    // caller actually performs the rename + write.
+    let dir_owned = dir.to_string();
+    let section_owned = section.to_string();
+    let path_for_recheck = path.clone();
+    let result: Result<Protocol, String> = with_board_lock(dir, move || {
+        if let Ok(content) = std::fs::read_to_string(&path_for_recheck) {
+            if let Ok(p) = serde_json::from_str::<Protocol>(&content) {
+                return Ok(p);
+            }
+        }
+        let migrated = migrate_legacy_for_section(&dir_owned, &section_owned);
+        write_protocol_for_section_unlocked(&dir_owned, &section_owned, &migrated)?;
+        Ok(migrated)
+    });
+
+    match result {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[protocol] migration under board.lock failed: {}. \
+                       Returning fresh defaults (no disk write).", e);
+            Protocol::fresh()
+        }
+    }
 }
 
 pub fn read_protocol(dir: &str) -> Protocol {
@@ -527,6 +571,27 @@ mod tests {
         let archived_discussion = std::fs::read_to_string(archive.join("discussion.json")).unwrap();
         assert_eq!(archived_assembly, assembly_payload);
         assert_eq!(archived_discussion, discussion_payload);
+    }
+
+    /// Corrupted protocol.json (per evil-arch #929 review): must NOT
+    /// silently re-migrate (legacy files already archived would yield
+    /// fresh defaults overwriting the bad file). Must return fresh
+    /// defaults WITHOUT writing — leaving the bad file in place.
+    #[test]
+    fn corrupted_protocol_json_does_not_silently_re_migrate() {
+        let project = temp_project("corrupt");
+        // Plant a corrupted protocol.json at the active path.
+        let path = protocol_path_for_section(project.to_str().unwrap(), "default");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is not valid json {{{").unwrap();
+
+        let p = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(p.preset, "Debate", "must return fresh defaults on parse failure");
+
+        // Critical: the corrupted file must remain on disk for inspection.
+        let still_corrupted = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(still_corrupted, "this is not valid json {{{",
+            "corrupted file must NOT be overwritten");
     }
 
     /// Idempotency: a second read after migration must NOT re-trigger
