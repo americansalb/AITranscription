@@ -80,7 +80,7 @@ export function ProtocolPanel({
         {announcement}
       </div>
 
-      <PhaseRow protocol={state} />
+      <PhaseRow protocol={state} mutate={mutate} />
       <PresetRow protocol={state} />
       <MicLine
         protocol={state}
@@ -103,31 +103,67 @@ export function ProtocolPanel({
   );
 }
 
-function PhaseRow({ protocol }: { protocol: Protocol }) {
+function PhaseRow({
+  protocol,
+  mutate,
+}: {
+  protocol: Protocol;
+  mutate: (action: string, args?: object) => Promise<unknown>;
+}) {
   const phases = protocol.phase_plan.phases;
   const idx = protocol.phase_plan.current_phase_idx;
   const total = phases.length;
+  const isPaused = protocol.phase_plan.paused_at !== null;
+
   if (total === 0) {
     return (
       <div className="protocol-panel__row protocol-panel__phase">
         <span style={{ color: '#5b6478', fontStyle: 'italic' }}>
-          No phase plan — set one to track progress.
+          No phase plan — set one via `set_phase_plan` MCP tool to track progress.
         </span>
       </div>
     );
   }
   const pct = total > 0 ? Math.round(((idx + 1) / total) * 100) : 0;
+  const atEnd = idx >= total;
+
   return (
     <div className="protocol-panel__row protocol-panel__phase">
       <span>
-        <strong>Phase {idx + 1} of {total}</strong>
+        <strong>Phase {Math.min(idx + 1, total)} of {total}</strong>
+        {isPaused && <span style={{ color: '#f59e0b', marginLeft: 8 }}>⏸ paused</span>}
+        {atEnd && <span style={{ color: '#10b981', marginLeft: 8 }}>✓ complete</span>}
       </span>
       <div className="protocol-panel__progress" aria-label={`${pct}% complete`}>
         <div className="protocol-panel__progress-fill" style={{ width: `${pct}%` }} />
       </div>
-      <button type="button" className="protocol-panel__pill" disabled>⏸ pause</button>
-      <button type="button" className="protocol-panel__pill" disabled>⏭ skip</button>
-      <button type="button" className="protocol-panel__pill" disabled>⏲ +15m</button>
+      <button
+        type="button"
+        className="protocol-panel__pill"
+        onClick={() => { void mutate(isPaused ? 'resume_plan' : 'pause_plan', {}); }}
+        disabled={atEnd}
+        title={isPaused ? 'Resume the timer' : 'Pause the timer (floor + consensus stay live)'}
+      >
+        {isPaused ? '▶ resume' : '⏸ pause'}
+      </button>
+      <button
+        type="button"
+        className="protocol-panel__pill"
+        onClick={() => { void mutate('advance_phase', {}); }}
+        disabled={atEnd}
+        title="Force-advance to next phase regardless of outcome predicate"
+      >
+        ⏭ skip
+      </button>
+      <button
+        type="button"
+        className="protocol-panel__pill"
+        onClick={() => { void mutate('extend_phase', { secs: 900 }); }}
+        disabled={atEnd}
+        title="Add 15 minutes to current phase duration"
+      >
+        ⏲ +15m
+      </button>
     </div>
   );
 }

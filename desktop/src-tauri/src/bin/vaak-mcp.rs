@@ -2977,14 +2977,11 @@ fn do_protocol_mutate(
                 "transfer_mic" => apply_transfer_mic(&mut current, &args, actor, pd),
                 "yield" => apply_yield(&mut current, &args, actor),
                 "toggle_queue" => apply_toggle_queue(&mut current, &args, actor),
-                "set_phase_plan"
-                | "advance_phase"
-                | "pause_plan"
-                | "resume_plan"
-                | "extend_phase" => Err(format!(
-                    "[Slice5Unimplemented] phase action '{}' lands in Slice 5",
-                    action
-                )),
+                "set_phase_plan" => apply_set_phase_plan(&mut current, &args),
+                "advance_phase" => apply_advance_phase(&mut current, pd),
+                "pause_plan" => apply_pause_plan(&mut current),
+                "resume_plan" => apply_resume_plan(&mut current),
+                "extend_phase" => apply_extend_phase(&mut current, &args),
                 "open_round" | "submit" | "close_round" => Err(format!(
                     "[Slice6Unimplemented] consensus action '{}' lands in Slice 6",
                     action
@@ -3356,6 +3353,184 @@ fn apply_protocol_mic_to_transfer(
     }
 
     write_protocol_for_section_value(project_dir, section, &current)
+}
+
+// ============================================================
+// Slice 5 — phase plan executor (spec §7 + §3.3 outcome predicates).
+// Five action implementations + the four outcome evaluators they drive.
+// ============================================================
+
+fn apply_set_phase_plan(state: &mut serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
+    let phases = args.get("phases")
+        .and_then(|v| v.as_array())
+        .ok_or("[InvalidArgs] set_phase_plan requires args.phases (array of phase objects)")?
+        .clone();
+    if phases.is_empty() {
+        return Err("[InvalidArgs] set_phase_plan: phases array must be non-empty".to_string());
+    }
+    // Validate each phase has at minimum a preset and an outcome.
+    for (i, p) in phases.iter().enumerate() {
+        let preset = p.get("preset").and_then(|v| v.as_str());
+        let outcome = p.get("outcome");
+        if preset.is_none() {
+            return Err(format!("[InvalidArgs] phase[{}] missing 'preset'", i));
+        }
+        if outcome.is_none() {
+            return Err(format!("[InvalidArgs] phase[{}] missing 'outcome'", i));
+        }
+    }
+    // Stamp started_at on the first phase if not already set.
+    let mut phases_owned = phases;
+    if let Some(first) = phases_owned.first_mut() {
+        if first.get("started_at").is_none() || first.get("started_at").map(|v| v.is_null()).unwrap_or(true) {
+            if let Some(obj) = first.as_object_mut() {
+                obj.insert("started_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+        }
+    }
+    if let Some(plan) = state.get_mut("phase_plan").and_then(|p| p.as_object_mut()) {
+        plan.insert("phases".to_string(), serde_json::Value::Array(phases_owned));
+        plan.insert("current_phase_idx".to_string(), serde_json::json!(0));
+        plan.insert("paused_at".to_string(), serde_json::Value::Null);
+        plan.insert("paused_total_secs".to_string(), serde_json::json!(0));
+    }
+    Ok(())
+}
+
+/// Force-advance to the next phase regardless of outcome predicate. Stamps
+/// `ended_at` on the current phase + `started_at` on the next. If the
+/// current phase is the last, ends the plan (current_phase_idx unchanged
+/// but the predicate evaluator returns "complete").
+fn apply_advance_phase(state: &mut serde_json::Value, _project_dir: &str) -> Result<(), String> {
+    let plan = state.get_mut("phase_plan").and_then(|p| p.as_object_mut())
+        .ok_or("[InternalError] phase_plan field missing")?;
+    let phases_len = plan.get("phases").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0);
+    if phases_len == 0 {
+        return Err("[InvalidArgs] advance_phase: no phase_plan set — call set_phase_plan first".to_string());
+    }
+    let cur_idx = plan.get("current_phase_idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    if cur_idx >= phases_len {
+        return Err(format!("[InvalidArgs] advance_phase: already past last phase ({}/{})", cur_idx, phases_len));
+    }
+    let now = utc_now_iso();
+    if let Some(phases) = plan.get_mut("phases").and_then(|p| p.as_array_mut()) {
+        if let Some(cur_phase) = phases.get_mut(cur_idx).and_then(|p| p.as_object_mut()) {
+            cur_phase.insert("ended_at".to_string(), serde_json::json!(now));
+        }
+        let next_idx = cur_idx + 1;
+        if next_idx < phases_len {
+            if let Some(next_phase) = phases.get_mut(next_idx).and_then(|p| p.as_object_mut()) {
+                if next_phase.get("started_at").map(|v| v.is_null()).unwrap_or(true) {
+                    next_phase.insert("started_at".to_string(), serde_json::json!(now));
+                }
+            }
+        }
+    }
+    let next_idx = (cur_idx + 1).min(phases_len);
+    plan.insert("current_phase_idx".to_string(), serde_json::json!(next_idx));
+    Ok(())
+}
+
+fn apply_pause_plan(state: &mut serde_json::Value) -> Result<(), String> {
+    let plan = state.get_mut("phase_plan").and_then(|p| p.as_object_mut())
+        .ok_or("[InternalError] phase_plan field missing")?;
+    if !plan.get("paused_at").map(|v| v.is_null()).unwrap_or(true) {
+        return Err("[InvalidArgs] pause_plan: plan is already paused — call resume_plan first".to_string());
+    }
+    plan.insert("paused_at".to_string(), serde_json::json!(utc_now_iso()));
+    Ok(())
+}
+
+fn apply_resume_plan(state: &mut serde_json::Value) -> Result<(), String> {
+    let plan = state.get_mut("phase_plan").and_then(|p| p.as_object_mut())
+        .ok_or("[InternalError] phase_plan field missing")?;
+    let paused_at = plan.get("paused_at").and_then(|v| v.as_str()).map(String::from);
+    let paused_at = match paused_at {
+        Some(s) => s,
+        None => return Err("[InvalidArgs] resume_plan: plan is not paused".to_string()),
+    };
+    // Add elapsed-while-paused to paused_total_secs accumulator (spec §3
+    // schema field — outcome timer compares wall-clock minus this).
+    let paused_secs = parse_iso_to_epoch_secs(&paused_at);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let prev_total = plan.get("paused_total_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let pause_duration = paused_secs.map(|s| now_secs.saturating_sub(s)).unwrap_or(0);
+    plan.insert("paused_total_secs".to_string(), serde_json::json!(prev_total + pause_duration));
+    plan.insert("paused_at".to_string(), serde_json::Value::Null);
+    Ok(())
+}
+
+fn apply_extend_phase(state: &mut serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
+    let secs = args.get("secs").and_then(|v| v.as_u64())
+        .ok_or("[InvalidArgs] extend_phase requires args.secs (positive integer)")?;
+    let plan = state.get_mut("phase_plan").and_then(|p| p.as_object_mut())
+        .ok_or("[InternalError] phase_plan field missing")?;
+    let cur_idx = plan.get("current_phase_idx").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let phases = plan.get_mut("phases").and_then(|p| p.as_array_mut())
+        .ok_or("[InternalError] phase_plan.phases not an array")?;
+    let phase = phases.get_mut(cur_idx).and_then(|p| p.as_object_mut())
+        .ok_or(format!("[InvalidArgs] extend_phase: current_phase_idx {} out of range", cur_idx))?;
+    let prev_ext = phase.get("extension_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    phase.insert("extension_secs".to_string(), serde_json::json!(prev_ext + secs));
+    Ok(())
+}
+
+/// Evaluate the outcome predicate for a phase. Returns true if the phase
+/// is "done." Spec §3.3 + §7 outcome table:
+///   - file_nonempty: target path exists and size > 0
+///   - timer: now > started_at + duration_secs + extension_secs - paused_total_secs
+///   - manual: always false (only advance_phase fires, predicate never true on its own)
+///   - vote_quorum: deferred to Slice 6 consensus (returns false until then)
+#[allow(dead_code)] // Used by Slice 5's auto-advance loop (lands at scheduler in subsequent commit).
+fn evaluate_phase_outcome(
+    phase: &serde_json::Value,
+    project_dir: &str,
+    paused_total_secs: u64,
+) -> bool {
+    let outcome = match phase.get("outcome") {
+        Some(o) => o,
+        None => return false,
+    };
+    let kind = outcome.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    match kind {
+        "file_nonempty" => {
+            let target = match outcome.get("target").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => return false,
+            };
+            let abs = if std::path::Path::new(target).is_absolute() {
+                target.to_string()
+            } else {
+                format!("{}/{}", project_dir, target)
+            };
+            std::fs::metadata(&abs).map(|m| m.len() > 0).unwrap_or(false)
+        }
+        "timer" => {
+            let started = match phase.get("started_at").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return false,
+            };
+            let started_secs = match parse_iso_to_epoch_secs(started) {
+                Some(s) => s,
+                None => return false,
+            };
+            let duration = phase.get("duration_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+            let extension = phase.get("extension_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+            if duration == 0 { return false; } // duration=0 means manual outcome
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let elapsed = now_secs.saturating_sub(started_secs).saturating_sub(paused_total_secs);
+            elapsed >= duration + extension
+        }
+        "manual" => false, // only advance_phase fires
+        "vote_quorum" => false, // Slice 6 owns consensus rounds
+        _ => false,
+    }
 }
 
 // ============================================================
@@ -3828,11 +4003,13 @@ mod protocol_slice2_tests {
         assert_eq!(after["floor"]["queue"], serde_json::json!(["developer:0"]));
     }
 
-    /// Phase action stub returns [Slice5Unimplemented].
+    /// Slice 5 — phase actions are now implemented. advance_phase on an
+    /// EMPTY plan returns [InvalidArgs] (caller must set_phase_plan first);
+    /// the test below covers happy-path advance with a real plan.
     #[test]
-    fn dispatch_phase_action_returns_slice5_unimplemented() {
+    fn dispatch_advance_phase_empty_plan_returns_invalid_args() {
         let dir = temp_project_with_protocol(
-            "dispatch-slice5",
+            "dispatch-advance-empty",
             serde_json::json!({
                 "schema_version": 1, "rev": 0, "preset": "Debate",
                 "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
@@ -3852,7 +4029,151 @@ mod protocol_slice2_tests {
             Some(0),
         )
         .unwrap_err();
-        assert!(err.starts_with("[Slice5Unimplemented]"), "got: {}", err);
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// Slice 5 — set_phase_plan happy path stamps started_at and rev=1.
+    #[test]
+    fn dispatch_set_phase_plan_seeds_started_at() {
+        let dir = temp_project_with_protocol(
+            "dispatch-set-plan",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "set_phase_plan",
+            serde_json::json!({"phases": [
+                {"preset": "Debate", "duration_secs": 3600, "outcome": {"kind": "manual"}}
+            ]}),
+            Some(0),
+        )
+        .unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 1);
+        let phases = after["phase_plan"]["phases"].as_array().unwrap();
+        assert_eq!(phases.len(), 1);
+        assert!(phases[0].get("started_at").and_then(|s| s.as_str()).is_some());
+    }
+
+    /// Slice 5 — advance_phase stamps ended_at on current and started_at
+    /// on next, advances current_phase_idx.
+    #[test]
+    fn dispatch_advance_phase_stamps_boundaries() {
+        let dir = temp_project_with_protocol(
+            "dispatch-advance",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {
+                    "phases": [
+                        {"preset": "Debate", "duration_secs": 0, "outcome": {"kind": "manual"}, "started_at": "2026-04-28T00:00:00Z", "ended_at": null, "extension_secs": 0},
+                        {"preset": "Brainstorm", "duration_secs": 0, "outcome": {"kind": "manual"}, "started_at": null, "ended_at": null, "extension_secs": 0}
+                    ],
+                    "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0
+                },
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "advance_phase",
+            serde_json::json!({}),
+            Some(0),
+        )
+        .unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["phase_plan"]["current_phase_idx"], 1);
+        assert!(after["phase_plan"]["phases"][0]["ended_at"].is_string());
+        assert!(after["phase_plan"]["phases"][1]["started_at"].is_string());
+    }
+
+    /// Slice 5 — pause_plan + resume_plan adds elapsed pause to
+    /// paused_total_secs accumulator.
+    #[test]
+    fn dispatch_pause_resume_accumulates_paused_secs() {
+        let dir = temp_project_with_protocol(
+            "dispatch-pause-resume",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [{"preset": "Debate", "duration_secs": 60, "outcome": {"kind": "manual"}}], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "pause_plan",
+            serde_json::json!({}),
+            Some(0),
+        ).unwrap();
+        let after_pause = read_protocol_back(&dir);
+        assert!(after_pause["phase_plan"]["paused_at"].is_string());
+
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "resume_plan",
+            serde_json::json!({}),
+            Some(1),
+        ).unwrap();
+        let after_resume = read_protocol_back(&dir);
+        assert!(after_resume["phase_plan"]["paused_at"].is_null());
+        // paused_total_secs accumulates (any value >= 0; sub-second pauses
+        // round to 0, that's expected on a fast test).
+        let total = after_resume["phase_plan"]["paused_total_secs"].as_u64().unwrap_or(999);
+        assert!(total < 999, "paused_total_secs should be a small accumulator value, got: {}", total);
+    }
+
+    /// Slice 5 — extend_phase adds to extension_secs on current phase.
+    #[test]
+    fn dispatch_extend_phase_adds_secs() {
+        let dir = temp_project_with_protocol(
+            "dispatch-extend",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {
+                    "phases": [{"preset": "Debate", "duration_secs": 60, "outcome": {"kind": "timer"}, "started_at": "2026-04-28T00:00:00Z", "ended_at": null, "extension_secs": 30}],
+                    "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0
+                },
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "extend_phase",
+            serde_json::json!({"secs": 900}),
+            Some(0),
+        )
+        .unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["phase_plan"]["phases"][0]["extension_secs"], 930);
     }
 
     /// Consensus action stub returns [Slice6Unimplemented].

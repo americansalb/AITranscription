@@ -204,23 +204,37 @@ impl Protocol {
     }
 
     /// Apply structural fixups required by spec §2.1 transition rules and
-    /// §2.2 invariants. Slice 1 ships the surface shape only — concrete
-    /// transition logic lands with the mutate API in Slice 2 and the phase
-    /// plan executor in Slice 5. Spec edge case row 4 ("any→free-grab
-    /// dissolves the queue", §2.2 spec line: "edge case 4") is the canonical
-    /// driver.
+    /// §2.2 invariants. Three rules (Slice 5 — implements the body that
+    /// architect left as no-op stub at 27f4eee):
     ///
-    /// Today this is a deliberate no-op so callers can already structure
-    /// their code around `state.normalize()` and the call site doesn't move
-    /// when the body fills in. If you delete this method, walk the call
-    /// graph in collab.rs / vaak-mcp.rs first.
-    pub fn normalize(&mut self) {
-        // Slice 5 will implement:
-        //   - if floor.mode == "free-grab": self.floor.queue.clear()
-        //   - if floor.current_speaker no longer in active seats: clear it
-        //   - drop queue entries that reference seats no longer alive
-        // The shape of these mutations is settled (evil-arch #923, dev-chall
-        // #917.3); only the wire-up waits.
+    /// 1. `floor.mode == "free-grab"` → clear `floor.queue`. (Spec §2.2
+    ///    edge case row 4: "any→free-grab dissolves the queue.")
+    /// 2. `floor.current_speaker` references a seat not in `active_seats` →
+    ///    clear current_speaker. Prevents the orphan-speaker invariant
+    ///    violation when a held mic outlives its holder.
+    /// 3. Queue entries that reference seats not in `active_seats` → prune.
+    ///    Spec §2.2 invariant 2: every queue entry references a live seat.
+    ///
+    /// `active_seats` is the caller's view of which `role:instance` strings
+    /// currently have an `active` binding in sessions.json. Pass an empty
+    /// set to skip rules 2 + 3 (rule 1 still fires on free-grab).
+    pub fn normalize(&mut self, active_seats: &std::collections::HashSet<String>) {
+        // Rule 1: free-grab dissolves the queue.
+        if self.floor.mode == "free-grab" {
+            self.floor.queue.clear();
+        }
+
+        // Rule 2: orphan current_speaker → clear.
+        if let Some(cs) = &self.floor.current_speaker {
+            if !active_seats.is_empty() && !active_seats.contains(cs) {
+                self.floor.current_speaker = None;
+            }
+        }
+
+        // Rule 3: prune dead queue entries.
+        if !active_seats.is_empty() {
+            self.floor.queue.retain(|s| active_seats.contains(s));
+        }
     }
 }
 
@@ -624,6 +638,61 @@ mod tests {
         let still_corrupted = std::fs::read_to_string(&path).unwrap();
         assert_eq!(still_corrupted, "this is not valid json {{{",
             "corrupted file must NOT be overwritten");
+    }
+
+    // ============================================================
+    // normalize() body — Slice 5 (architect left no-op stub at 27f4eee).
+    // Three rules per spec §2.2 invariants 1+2 and edge case row 4.
+    // ============================================================
+
+    fn active_set(seats: &[&str]) -> std::collections::HashSet<String> {
+        seats.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn normalize_free_grab_dissolves_queue() {
+        let mut p = Protocol::fresh();
+        p.floor.mode = "free-grab".to_string();
+        p.floor.queue = vec!["dev:0".to_string(), "tester:0".to_string()];
+        p.normalize(&active_set(&["dev:0", "tester:0"]));
+        assert!(p.floor.queue.is_empty());
+    }
+
+    #[test]
+    fn normalize_orphan_speaker_cleared() {
+        let mut p = Protocol::fresh();
+        p.floor.current_speaker = Some("ghost:0".to_string());
+        p.normalize(&active_set(&["dev:0", "tester:0"]));
+        assert!(p.floor.current_speaker.is_none());
+    }
+
+    #[test]
+    fn normalize_keeps_active_speaker() {
+        let mut p = Protocol::fresh();
+        p.floor.current_speaker = Some("dev:0".to_string());
+        p.normalize(&active_set(&["dev:0"]));
+        assert_eq!(p.floor.current_speaker.as_deref(), Some("dev:0"));
+    }
+
+    #[test]
+    fn normalize_prunes_dead_queue_entries() {
+        let mut p = Protocol::fresh();
+        p.floor.queue = vec!["dev:0".to_string(), "ghost:0".to_string(), "tester:0".to_string()];
+        p.normalize(&active_set(&["dev:0", "tester:0"]));
+        assert_eq!(p.floor.queue, vec!["dev:0".to_string(), "tester:0".to_string()]);
+    }
+
+    #[test]
+    fn normalize_empty_active_set_skips_seat_rules() {
+        // Rule 1 still fires on free-grab; rules 2+3 skipped (no signal).
+        let mut p = Protocol::fresh();
+        p.floor.mode = "reactive".to_string();
+        p.floor.current_speaker = Some("ghost:0".to_string());
+        p.floor.queue = vec!["ghost:0".to_string(), "dev:0".to_string()];
+        p.normalize(&active_set(&[]));
+        // Speaker stays (rule 2 skipped); queue stays (rule 3 skipped).
+        assert_eq!(p.floor.current_speaker.as_deref(), Some("ghost:0"));
+        assert_eq!(p.floor.queue, vec!["ghost:0".to_string(), "dev:0".to_string()]);
     }
 
     /// Idempotency: a second read after migration must NOT re-trigger

@@ -3210,6 +3210,35 @@ fn protocol_mutate_cmd(
     Ok(result)
 }
 
+/// Minimal ISO-8601 → epoch-seconds parser local to main.rs (mirrors
+/// vaak-mcp.rs's same helper). Used by Slice 5 phase pause/resume
+/// duration math.
+fn parse_iso_to_epoch_secs_main(ts: &str) -> Option<u64> {
+    let no_tz: &str = if let Some(idx) = ts.find('Z') {
+        &ts[..idx]
+    } else if let Some(idx) = ts.rfind(|c| c == '+' || c == '-').filter(|&i| i > 10) {
+        &ts[..idx]
+    } else { ts };
+    let main = no_tz.split('.').next()?;
+    let (date, time) = main.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let y: i64 = date_parts.next()?.parse().ok()?;
+    let mo: i64 = date_parts.next()?.parse().ok()?;
+    let d: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let h: i64 = time_parts.next()?.parse().ok()?;
+    let mi: i64 = time_parts.next()?.parse().ok()?;
+    let s: i64 = time_parts.next()?.parse().ok()?;
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + h * 3600 + mi * 60 + s;
+    if secs < 0 { None } else { Some(secs as u64) }
+}
+
 /// Inner of `protocol_mutate_cmd` — pure-input version that runs the same
 /// CAS gate + dispatch as vaak-mcp.rs's `do_protocol_mutate`. Mirrored by
 /// design (vaak-mcp and vaak-desktop are separate binaries with no shared
@@ -3280,8 +3309,67 @@ fn do_protocol_mutate_inner(
                         Ok(())
                     }
                 }
+                // Slice 5 phase actions (spec §7).
+                "pause_plan" => {
+                    if current.phase_plan.paused_at.is_some() {
+                        Err("[InvalidArgs] pause_plan: plan is already paused".to_string())
+                    } else {
+                        current.phase_plan.paused_at = Some(collab::iso_now());
+                        Ok(())
+                    }
+                }
+                "resume_plan" => {
+                    let paused_at = match &current.phase_plan.paused_at {
+                        Some(s) => s.clone(),
+                        None => return Ok(Err("[InvalidArgs] resume_plan: plan is not paused".to_string())),
+                    };
+                    let paused_secs = parse_iso_to_epoch_secs_main(&paused_at);
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let pause_duration = paused_secs.map(|s| now_secs.saturating_sub(s)).unwrap_or(0);
+                    current.phase_plan.paused_total_secs += pause_duration;
+                    current.phase_plan.paused_at = None;
+                    Ok(())
+                }
+                "extend_phase" => {
+                    let secs = args.get("secs").and_then(|v| v.as_u64());
+                    let secs = match secs {
+                        Some(s) => s,
+                        None => return Ok(Err("[InvalidArgs] extend_phase requires args.secs (positive integer)".to_string())),
+                    };
+                    let cur_idx = current.phase_plan.current_phase_idx;
+                    if cur_idx >= current.phase_plan.phases.len() {
+                        return Ok(Err(format!("[InvalidArgs] extend_phase: current_phase_idx {} out of range", cur_idx)));
+                    }
+                    current.phase_plan.phases[cur_idx].extension_secs += secs;
+                    Ok(())
+                }
+                "advance_phase" => {
+                    let phases_len = current.phase_plan.phases.len();
+                    if phases_len == 0 {
+                        return Ok(Err("[InvalidArgs] advance_phase: no phase_plan set — call set_phase_plan first".to_string()));
+                    }
+                    let cur_idx = current.phase_plan.current_phase_idx;
+                    if cur_idx >= phases_len {
+                        return Ok(Err(format!("[InvalidArgs] advance_phase: already past last phase ({}/{})", cur_idx, phases_len)));
+                    }
+                    let now = collab::iso_now();
+                    current.phase_plan.phases[cur_idx].ended_at = Some(now.clone());
+                    let next_idx = cur_idx + 1;
+                    if next_idx < phases_len {
+                        let next_phase = &mut current.phase_plan.phases[next_idx];
+                        if next_phase.started_at.is_none() {
+                            next_phase.started_at = Some(now);
+                        }
+                    }
+                    current.phase_plan.current_phase_idx = next_idx.min(phases_len);
+                    Ok(())
+                }
+                "set_phase_plan" => Err("[InvalidAction] set_phase_plan goes through MCP protocol_mutate (authoring is plan-author tier per spec §10)".to_string()),
                 other => Err(format!(
-                    "[InvalidAction] UI mutate dispatch only handles toggle_queue + yield in Slice 3; '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase; '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };
