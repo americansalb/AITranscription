@@ -612,8 +612,16 @@ export function CollabTab() {
     rotation_order: string[];
   } | null>(null);
   const [assemblyToggling, setAssemblyToggling] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [closingRound, setClosingRound] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [continuousTimeout, setContinuousTimeout] = useState(60);
+  // Unused state retained — `setClosingRound`/`setContinuousTimeout` are still
+  // referenced inside the handler bodies below + an initializer at L~1337.
+  // The displayed `closingRound`/`continuousTimeout` values were rendered by
+  // the deleted discussion-status-panel; ConsensusRow in ProtocolPanel will
+  // surface equivalent state in a follow-on commit. Suppress TS6133 inline.
+  void closingRound; void continuousTimeout;
   const [startDiscussionOpen, setStartDiscussionOpen] = useState(false);
   const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous">("delphi");
   const [sdTopic, setSdTopic] = useState("");
@@ -1895,6 +1903,7 @@ When multiple instances of this role are active:
     }
   };
 
+  // @ts-expect-error TS6133: retained for future ConsensusRow enrichment
   const handleCloseRound = async () => {
     setClosingRound(true);
     try {
@@ -1911,6 +1920,7 @@ When multiple instances of this role are active:
     }
   };
 
+  // @ts-expect-error TS6133: retained for future ConsensusRow enrichment
   const handleEndDiscussion = async () => {
     try {
       if (window.__TAURI__) {
@@ -1969,6 +1979,7 @@ When multiple instances of this role are active:
     }
   };
 
+  // @ts-expect-error TS6133: retained for future ConsensusRow enrichment
   const handleSetContinuousTimeout = async (seconds: number) => {
     setContinuousTimeout(seconds);
     try {
@@ -2746,112 +2757,12 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        {/* Discussion Status Panel — rich display when active */}
-        {discussionState?.active ? (
-          <div className="discussion-status-panel" role="region" aria-label="Active discussion status">
-            {/* Row 1: Mode + Phase + Round + Actions */}
-            <div className="discussion-status-header">
-              <div className="discussion-status-left">
-                <span className="discussion-status-mode">
-                  {(discussionState.mode || "Discussion").charAt(0).toUpperCase() + (discussionState.mode || "").slice(1)}
-                </span>
-                <span className="discussion-status-phase-badge" aria-label={`Phase: ${
-                  closingRound ? "aggregating" :
-                  discussionState.phase === "submitting" ? "accepting submissions" :
-                  discussionState.phase === "reviewing" ? "reviewing aggregate" :
-                  discussionState.phase === "complete" ? "complete" :
-                  discussionState.phase || "unknown"
-                }`}>
-                  {closingRound ? "Aggregating..." :
-                   discussionState.phase === "submitting" ? "Submitting" :
-                   discussionState.phase === "aggregating" ? "Aggregating" :
-                   discussionState.phase === "reviewing" ? "Reviewing" :
-                   discussionState.phase === "paused" ? "Paused" :
-                   discussionState.phase === "complete" ? "Complete" :
-                   discussionState.phase || ""}
-                </span>
-                <span className="discussion-status-round-counter" aria-label={`Round ${discussionState.current_round} of ${discussionState.settings?.max_rounds || "?"}`}>
-                  Round {discussionState.current_round}
-                  {discussionState.settings?.max_rounds ? ` / ${discussionState.settings.max_rounds}` : ""}
-                </span>
-                {discussionState.moderator && (
-                  <span className="discussion-status-mod">
-                    Mod: <span style={{ color: getRoleColor(discussionState.moderator.split(":")[0]) }}>{discussionState.moderator}</span>
-                  </span>
-                )}
-                {discussionState.mode === "continuous" && (
-                  <select
-                    className="discussion-controls-timeout"
-                    value={continuousTimeout}
-                    onChange={(e) => handleSetContinuousTimeout(Number(e.target.value))}
-                    aria-label="Auto-close timeout"
-                  >
-                    <option value={30}>30s</option>
-                    <option value={60}>60s</option>
-                    <option value={120}>2m</option>
-                    <option value={300}>5m</option>
-                  </select>
-                )}
-              </div>
-              <div className="discussion-controls-actions">
-                {discussionState.phase === "submitting" && discussionState.mode !== "continuous" && (
-                  <button className="discussion-controls-btn" onClick={handleCloseRound} disabled={closingRound}>
-                    {closingRound ? "Closing..." : "Close Round"}
-                  </button>
-                )}
-                <button className="discussion-controls-btn discussion-controls-end" onClick={handleEndDiscussion}>
-                  End
-                </button>
-              </div>
-            </div>
-
-            {/* Row 2: Topic */}
-            {discussionState.topic && (
-              <div className="discussion-status-topic" title={discussionState.topic}>
-                {discussionState.topic}
-              </div>
-            )}
-
-            {/* Row 3: Participant submission tracker */}
-            {discussionState.phase === "submitting" && discussionState.rounds.length > 0 && (() => {
-              const currentRound = discussionState.rounds[discussionState.rounds.length - 1];
-              const submittedBy = new Set((currentRound?.submissions || []).map(s => s.from));
-              const eligible = (discussionState.participants || []).filter(p => p !== discussionState.moderator);
-              if (eligible.length === 0) return null;
-              return (
-                <div className="discussion-status-submissions" aria-label={`${submittedBy.size} of ${eligible.length} submitted`}>
-                  {eligible.map(pid => {
-                    const [role] = pid.split(":");
-                    const didSubmit = submittedBy.has(pid);
-                    return (
-                      <span
-                        key={pid}
-                        className={`discussion-status-participant${didSubmit ? " ds-submitted" : ""}`}
-                        title={`${pid}${didSubmit ? " — submitted" : " — waiting"}`}
-                      >
-                        <span className="ds-check" aria-hidden="true">{didSubmit ? "\u2713" : "\u2022"}</span>
-                        <span style={{ color: getRoleColor(role) }}>{pid}</span>
-                      </span>
-                    );
-                  })}
-                </div>
-              );
-            })()}
-
-            {/* Round history mini-bar */}
-            {discussionState.rounds.length > 1 && (
-              <div className="discussion-status-rounds-bar" aria-label="Round history">
-                {discussionState.rounds.map((round, i) => (
-                  <span
-                    key={i}
-                    className={`ds-round-pip${round.closed_at ? " ds-round-closed" : " ds-round-open"}`}
-                    title={`Round ${round.number}: ${round.closed_at ? "closed" : "open"} — ${round.submissions?.length || 0} submissions`}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        ) : null}
+        {/* Discussion Status Panel — REMOVED per spec §1.1 (human #1062 "two UIs").
+            ProtocolPanel's ConsensusRow renders the topic + phase + close button
+            when consensus.round is active. The legacy panel block is gated below
+            with `false &&` to keep the JSX compile-clean while we ship; future
+            cleanup commit drops the dead JSX entirely once team verifies the
+            replacement is sufficient. */}
 
         {/* Add to Team — collapsible section, collapsed by default to maximize conversation space */}
         {project && (

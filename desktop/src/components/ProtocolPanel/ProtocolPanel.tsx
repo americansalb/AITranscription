@@ -99,6 +99,7 @@ export function ProtocolPanel({
         />
       )}
       <PresetRow protocol={state} />
+      <ConsensusRow protocol={state} mutate={mutate} />
       <MicLine
         protocol={state}
         heartbeats={heartbeats}
@@ -208,6 +209,53 @@ function PresetRow({ protocol }: { protocol: Protocol }) {
       <span><strong>Preset:</strong> {protocol.preset}</span>
       <span><strong>Floor:</strong> {protocol.floor.mode}</span>
       <span><strong>Consensus:</strong> {protocol.consensus.mode}</span>
+    </div>
+  );
+}
+
+/// ConsensusRow — Slice 9 follow-on (closes legacy discussion-status-panel
+/// gap per spec §1.1 + human #1062). Renders when a consensus round is
+/// active: topic + phase pill + close-round button. Replaces the
+/// `discussion-status-panel` JSX block in CollabTab.
+function ConsensusRow({
+  protocol,
+  mutate,
+}: {
+  protocol: Protocol;
+  mutate: (action: string, args?: object) => Promise<unknown>;
+}) {
+  const round = protocol.consensus.round as
+    | { topic?: string; opened_at?: string; opened_by?: string }
+    | null;
+  const phase = protocol.consensus.phase;
+
+  // Only render when there's an active round to display.
+  if (!round || !phase || phase === "closed") return null;
+
+  const phaseLabel =
+    phase === "submitting" ? "Submitting" :
+    phase === "reviewing" ? "Reviewing" :
+    phase;
+
+  return (
+    <div className="protocol-panel__row" style={{ background: '#eef2ff', borderRadius: 6, padding: '8px 12px' }}>
+      <span style={{ fontSize: '1.05rem' }}>📊</span>
+      <span style={{ fontWeight: 600 }}>{round.topic || 'Round in progress'}</span>
+      <span className="protocol-panel__pill" style={{ background: '#fff' }}>{phaseLabel}</span>
+      {round.opened_by && (
+        <span style={{ color: '#5b6478', fontSize: '0.85rem' }}>opener: {round.opened_by}</span>
+      )}
+      {phase === "submitting" && (
+        <button
+          type="button"
+          className="protocol-panel__pill"
+          style={{ marginLeft: 'auto', background: '#4f46e5', color: 'white', borderColor: '#4f46e5' }}
+          onClick={() => { void mutate('close_round', {}); }}
+          title="Close this consensus round"
+        >
+          Close round
+        </button>
+      )}
     </div>
   );
 }
