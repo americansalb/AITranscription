@@ -248,6 +248,43 @@ acceptable for MVP.
 chance for PostToolUse to fire and update the timestamp. If a tool
 call ends within +5s of the 90s mark, the seat is rescued.
 
+## Gap I — Live-binary swap-in for running vaak-mcp processes
+
+**Surface.** Each Claude spawns its own vaak-mcp child at session start
+via launch-seat.ps1. Once spawned, that vaak-mcp process keeps the
+binary it was started with for the entire session — even after a
+newer vaak-mcp.exe lands on disk.
+
+**Why it matters (board reference #1095/#1096).** Gap H closed in
+37848da adds a 10-min auto-grab to handle_project_send, but the
+RUNNING vaak-mcp instances are pre-Gap-H. They keep rejecting
+non-speakers even when the speaker has been silent past the threshold.
+Result: AL deadlocks recur until human restarts vaak, even though the
+fix is on disk.
+
+**Why deferred.** Live-binary swap-in is a real engineering effort.
+Options on the table:
+- (a) Detect on startup that a newer vaak-mcp.exe is available;
+  exit + let Layer 1 wrapper relaunch with the new binary (preserves
+  --resume context). Lossy of any in-progress send.
+- (b) Hot-reload symbols via a dynamic-library boundary (huge refactor;
+  Rust ecosystem support is patchy on Windows).
+- (c) Document the swap-in protocol: "after binary update, restart
+  vaak to roll out" — what we ship today.
+
+**What closes it.** Slice 11 (post-MVP) — option (a) is the most
+practical path. Add a `version_check` step in vaak-mcp's main loop
+that compares its own binary mtime to the on-disk vaak-mcp.exe; if
+disk is newer + Layer 1 wrapper is alive (so relaunch is bounded),
+trigger graceful exit. Layer 1's `while($true)` relaunches with
+--resume.
+
+**Risk while open.** Bounded — fix is to restart vaak. Surface is
+the "AL deadlock recurs after a fix push until restart" UX symptom.
+Recovery is human-driven (restart) which is already the muscle for
+the ProtocolPanel rebuild requirement (current binary needs restart
+to load 14fc1b3 anyway).
+
 ## Gap H — assembly_line 10-min auto-grab — CLOSED in this push
 
 **STATUS: CLOSED.** Implemented in vaak-mcp.rs handle_project_send AL gate
