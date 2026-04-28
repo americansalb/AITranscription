@@ -243,7 +243,14 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             // the cold-start burst (N dead seats → N visible windows opening with 5s
             // stagger). After #827's persistence patch wrappers survive vaak restart,
             // so the burst only manifests on a true cold start — accepted trade-off.
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
+            //
+            // CREATE_NEW_CONSOLE = 0x10 (architect #860, dev #857): pass via
+            // Win32_ProcessStartup.CreateFlags so the spawned PS gets its OWN conhost
+            // independent of vaak-desktop's process tree. Without this flag, after a
+            // vaak restart the inner PS PIDs survived (#827) but their console was
+            // orphaned — the human's #852 report. Probe-verified on 2026-04-28: WMI
+            // returns ReturnValue=0 and the spawned PS shows non-zero MainWindowHandle.
+            "$s=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{{CreateFlags=[UInt32]0x10}}; $r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -File \"{}\"';CurrentDirectory='{}';ProcessStartupInformation=$s}}; Write-Output $r.ProcessId",
             script_path_str, safe_dir_ps
         );
         let ps_args = ["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd];
