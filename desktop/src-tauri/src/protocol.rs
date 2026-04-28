@@ -6,6 +6,33 @@
 // per Assembly Line architecture v6 (`.vaak/al-architecture-diagram.md`
 // §3 — Slice 1 scope).
 //
+// ============================================================
+// Resilience-stack timer registry (per evil-arch #923 + dev-chall #917.1)
+// ============================================================
+// Five named constants drive different layers of the spec. They live where
+// they are consumed — keep them decentralized but discoverable. Update both
+// this block AND the mirror in vaak-mcp.rs whenever a constant moves.
+//
+//   floor.threshold_ms (per-section, default 60_000)
+//                                       — protocol.rs::MIC_GRAB_THRESHOLD_MS
+//                                         (mic freshness gate, spec §2)
+//   SUPERVISOR_STALL_SECS = 90          — vaak-mcp.rs supervisor loop
+//                                         (90s stall before pre-kill buzz,
+//                                          spec §12.2 Layer 2)
+//   PRE_KILL_GRACE_SECS = 5             — vaak-mcp.rs supervisor loop
+//                                         (5s grace after buzz before
+//                                          taskkill, spec §12.2)
+//   KEEP_ALIVE_DEBOUNCE_MS ≈ 10_000     — composer (UI) keystroke heartbeat
+//                                         (debounced fire to avoid storm,
+//                                          spec §3.1)
+//   MIC_AUTOROTATE_SECS = 600           — assembly_line auto-rotation
+//                                         (10-min idle = grab, human #903)
+//
+// These are NOT collapsed into a single timer — see spec §2 ("Single
+// threshold" applies to the freshness gate only) + memory entry on three-
+// timestamps-three-consumers.
+// ============================================================
+//
 // Slice 1 scope (this file):
 //   - Schema struct + serde
 //   - Path helpers
@@ -86,7 +113,7 @@ pub struct Phase {
     pub ended_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PhasePlan {
     #[serde(default)]
     pub phases: Vec<Phase>,
@@ -117,6 +144,11 @@ impl Default for Scopes {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Protocol {
+    // Anchor for future on-disk schema migrations (evil-arch #923).
+    // `rev` is per-write monotonic and doesn't survive structural changes —
+    // schema_version does.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     #[serde(default)]
     pub rev: u64,
     #[serde(default = "default_preset")]
@@ -135,11 +167,13 @@ pub struct Protocol {
     pub rev_at: Option<String>,
 }
 
+fn default_schema_version() -> u32 { 1 }
 fn default_preset() -> String { "Debate".to_string() }
 
 impl Protocol {
     pub fn fresh() -> Self {
         Self {
+            schema_version: default_schema_version(),
             rev: 0,
             preset: default_preset(),
             floor: Floor {
@@ -167,6 +201,26 @@ impl Protocol {
             last_writer_action: None,
             rev_at: None,
         }
+    }
+
+    /// Apply structural fixups required by spec §2.1 transition rules and
+    /// §2.2 invariants. Slice 1 ships the surface shape only — concrete
+    /// transition logic lands with the mutate API in Slice 2 and the phase
+    /// plan executor in Slice 5. Spec edge case row 4 ("any→free-grab
+    /// dissolves the queue", §2.2 spec line: "edge case 4") is the canonical
+    /// driver.
+    ///
+    /// Today this is a deliberate no-op so callers can already structure
+    /// their code around `state.normalize()` and the call site doesn't move
+    /// when the body fills in. If you delete this method, walk the call
+    /// graph in collab.rs / vaak-mcp.rs first.
+    pub fn normalize(&mut self) {
+        // Slice 5 will implement:
+        //   - if floor.mode == "free-grab": self.floor.queue.clear()
+        //   - if floor.current_speaker no longer in active seats: clear it
+        //   - drop queue entries that reference seats no longer alive
+        // The shape of these mutations is settled (evil-arch #923, dev-chall
+        // #917.3); only the wire-up waits.
     }
 }
 
@@ -335,4 +389,163 @@ fn archive_legacy_for_section(dir: &str, section: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ============================================================
+// Tests — golden migration fixtures + archive round-trip
+// ============================================================
+// Per tester #922 / tech-leader #925 hard requirements (a) + (c).
+// (b) "any mutate sequence preserves invariants" lands with Slice 2's
+// `protocol_mutate` API — no mutation surface to property-test today.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Per-test temp project dir under the OS tempdir, unique by test name.
+    fn temp_project(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vaak-protocol-test-{}", test_name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vaak")).unwrap();
+        dir
+    }
+
+    fn write_legacy_assembly(project: &Path, section: &str, content: &str) {
+        let path = legacy_assembly_path_for_section(project.to_str().unwrap(), section);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn write_legacy_discussion(project: &Path, section: &str, content: &str) {
+        let path = legacy_discussion_path_for_section(project.to_str().unwrap(), section);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// Fixture (a)-empty: section with no legacy files. Migration produces a
+    /// fresh Protocol with the documented defaults.
+    #[test]
+    fn migration_empty_section_yields_fresh_defaults() {
+        let project = temp_project("empty");
+        let p = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(p.schema_version, 1);
+        assert_eq!(p.preset, "Debate");
+        assert_eq!(p.floor.mode, "reactive");
+        assert_eq!(p.consensus.mode, "none");
+        assert_eq!(p.rev, 0);
+    }
+
+    /// Fixture (a)-mid-rotation: legacy assembly.json with active=true and a
+    /// rotation order. Migration must preserve current_speaker + rotation.
+    #[test]
+    fn migration_mid_rotation_preserves_speaker_and_order() {
+        let project = temp_project("mid-rotation");
+        write_legacy_assembly(&project, "default", r#"{
+            "active": true,
+            "current_speaker": "architect:0",
+            "rotation_order": ["architect:0", "developer:0", "tester:0"],
+            "started_at": "2026-04-28T18:00:00Z",
+            "started_by": "human:0"
+        }"#);
+        let p = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(p.preset, "Assembly Line");
+        assert_eq!(p.floor.mode, "round-robin");
+        assert_eq!(p.floor.current_speaker.as_deref(), Some("architect:0"));
+        assert_eq!(p.floor.rotation_order.len(), 3);
+        assert_eq!(p.floor.started_at.as_deref(), Some("2026-04-28T18:00:00Z"));
+        assert_eq!(p.last_writer_action.as_deref(), Some("migrate_from_legacy"));
+    }
+
+    /// Fixture (a)-mid-discussion: legacy discussion.json with active
+    /// continuous round. Migration preserves topic + opener.
+    #[test]
+    fn migration_mid_discussion_preserves_round() {
+        let project = temp_project("mid-discussion");
+        write_legacy_discussion(&project, "default", r#"{
+            "mode": "continuous",
+            "topic": "ship 9faf275 to main?",
+            "moderator": "moderator:0",
+            "round": {
+                "topic": "ship 9faf275 to main?",
+                "opened_at": "2026-04-28T18:30:00Z"
+            }
+        }"#);
+        let p = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(p.consensus.mode, "tally");
+        let round = p.consensus.round.expect("round preserved");
+        assert_eq!(round.topic.as_deref(), Some("ship 9faf275 to main?"));
+        assert_eq!(round.opened_at.as_deref(), Some("2026-04-28T18:30:00Z"));
+        assert_eq!(round.opened_by.as_deref(), Some("moderator:0"));
+    }
+
+    /// Fixture (a)-orphan-queue: dev-chall asked about a queue entry whose
+    /// referenced seat isn't in rotation_order. Slice 1 must NOT silently
+    /// drop the entry — that decision belongs to Slice 5's normalize().
+    /// Today's job: round-trip the data without loss.
+    #[test]
+    fn migration_does_not_drop_orphan_queue_entries_in_slice_1() {
+        let project = temp_project("orphan-queue");
+        write_legacy_assembly(&project, "default", r#"{
+            "active": true,
+            "current_speaker": "architect:0",
+            "rotation_order": ["architect:0"]
+        }"#);
+        let p = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(p.floor.rotation_order, vec!["architect:0"]);
+        // queue defaults to empty — legacy assembly.json has no queue field.
+        // The "orphan" surface emerges in Slice 2 (mutate API) and is
+        // resolved in Slice 5 (normalize). Slice 1 simply preserves shape.
+        assert!(p.floor.queue.is_empty());
+    }
+
+    /// Fixture (c)-archive-round-trip: legacy files must move to
+    /// `.vaak/legacy/<section>/` after migration. Original locations are
+    /// emptied; archive contents byte-for-byte match the originals.
+    #[test]
+    fn archive_round_trip_legacy_byte_for_byte() {
+        let project = temp_project("archive-rt");
+        let assembly_payload = r#"{"active":false,"current_speaker":null,"rotation_order":[]}"#;
+        let discussion_payload = r#"{"mode":"continuous","topic":"vote a","submissions":[]}"#;
+
+        write_legacy_assembly(&project, "default", assembly_payload);
+        write_legacy_discussion(&project, "default", discussion_payload);
+
+        let _ = read_protocol_for_section(project.to_str().unwrap(), "default");
+
+        let legacy_assembly = legacy_assembly_path_for_section(project.to_str().unwrap(), "default");
+        let legacy_discussion = legacy_discussion_path_for_section(project.to_str().unwrap(), "default");
+        assert!(!legacy_assembly.exists(), "original assembly.json must be moved");
+        assert!(!legacy_discussion.exists(), "original discussion.json must be moved");
+
+        let archive = legacy_archive_dir(project.to_str().unwrap(), "default");
+        let archived_assembly = std::fs::read_to_string(archive.join("assembly.json")).unwrap();
+        let archived_discussion = std::fs::read_to_string(archive.join("discussion.json")).unwrap();
+        assert_eq!(archived_assembly, assembly_payload);
+        assert_eq!(archived_discussion, discussion_payload);
+    }
+
+    /// Idempotency: a second read after migration must NOT re-trigger
+    /// migration (legacy archive directory is the canonical home, and
+    /// protocol.json now exists). The second read should produce the same
+    /// rev/preset and not change last_writer_*.
+    #[test]
+    fn second_read_is_idempotent() {
+        let project = temp_project("idempotent");
+        write_legacy_assembly(&project, "default", r#"{
+            "active": true,
+            "current_speaker": "developer:0",
+            "rotation_order": ["developer:0", "architect:0"]
+        }"#);
+        let first = read_protocol_for_section(project.to_str().unwrap(), "default");
+        let second = read_protocol_for_section(project.to_str().unwrap(), "default");
+        assert_eq!(first.rev, second.rev);
+        assert_eq!(first.preset, second.preset);
+        assert_eq!(first.last_writer_action, second.last_writer_action);
+        assert_eq!(first.floor.current_speaker, second.floor.current_speaker);
+    }
 }

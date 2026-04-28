@@ -3,6 +3,29 @@
 //! This is a minimal MCP (Model Context Protocol) server that provides a `speak` tool
 //! for Claude Code to send text-to-speech requests to the Vaak desktop app.
 //!
+//! ============================================================
+//! Resilience-stack timer registry (mirror — keep in sync with
+//! protocol.rs and collab.rs)
+//! ============================================================
+//! Per evil-arch #923 + dev-chall #917.1, the AL vision intentionally
+//! keeps timers decentralized at their consumers — only when consumers
+//! can find each other does decentralization work.
+//!
+//!   floor.threshold_ms (per-section, default 60_000)
+//!                                       — protocol.rs::MIC_GRAB_THRESHOLD_MS
+//!                                         (mic freshness gate, spec §2)
+//!   SUPERVISOR_STALL_SECS = 90          — vaak-mcp.rs supervisor loop
+//!                                         (90s stall before pre-kill buzz)
+//!   PRE_KILL_GRACE_SECS = 5             — vaak-mcp.rs supervisor loop
+//!                                         (5s grace before taskkill)
+//!   KEEP_ALIVE_DEBOUNCE_MS ≈ 10_000     — composer (UI) keystroke heartbeat
+//!   MIC_AUTOROTATE_SECS = 600           — assembly_line auto-rotation
+//!                                         (10-min idle = grab, human #903)
+//!
+//! Spec: .vaak/al-architecture-diagram.md §2 (single threshold for the
+//! freshness gate only) + §12 (resilience layers).
+//! ============================================================
+//!
 //! Session ID is determined using a priority chain of methods for redundancy:
 //! 1. CLAUDE_SESSION_ID env var (explicit override)
 //! 2. WT_SESSION env var (Windows Terminal GUID)
