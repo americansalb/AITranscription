@@ -36,7 +36,7 @@ New-Item -ItemType Directory -Force -Path $logsDir  | Out-Null
 $seatJsonPath = Join-Path $seatsDir "$seatLabel.json"
 $logPath      = Join-Path $logsDir  "$seatLabel.jsonl"
 $sentinelPath = Join-Path $ProjectDir ".vaak\stop-$seatLabel"
-$resumeNudge  = "Re-engage in autonomous team mode. Handle any unread team messages, then call mcp__vaak__project_wait to enter standby. Continue indefinitely."
+$resumeNudge  = "You are being resumed across a vaak restart. Your prior MCP server child died with the previous vaak.exe; the new vaak.exe has no record of your seat. Step 1: call mcp__vaak__project_join with role='$Role' to rebind your seat. Your prior instance was $Instance; flag if you land on a different number. Step 2: handle any unread team messages from the board. Step 3: call mcp__vaak__project_wait to enter standby. Continue indefinitely in autonomous team mode."
 
 function Write-VaakLog($ev, $payload) {
     $entry = [pscustomobject]@{
@@ -60,6 +60,19 @@ function Test-VaakHostAlive {
 
 $restartTimes = @()
 $attempt = 0
+$script:dropResumeNextIter = $false
+
+# Diagnostics (#708 fix round, evil-arch #713(3)): emit a wrapper_spawn marker on
+# every wrapper birth so post-mortem investigations of failed cross-restart probes
+# can see exactly when this PS host started, what its PID is, and whether a
+# predecessor seat.json was visible to it on entry.
+$predecessorVisible = Test-Path $seatJsonPath
+Write-VaakLog 'wrapper_spawn' @{
+    wrapper_pid           = $PID
+    role                  = $Role
+    instance              = $Instance
+    predecessor_seat_json = $predecessorVisible
+}
 
 while ($true) {
     if (Test-Path $sentinelPath) {
@@ -96,6 +109,13 @@ while ($true) {
 
     # Decide branch + session-id (architect #648 P3 pivot: wrapper owns session_id, no
     # dependency on Layer 3 hooks). Pin J degraded to time-only (DC-2): 4h since last_fresh_at.
+    #
+    # Cross-process continuity (fix #708, dev/architect/evil-arch round of 2026-04-28):
+    # the prior `-and $attempt -gt 1` guard meant a NEW wrapper born after vaak.exe
+    # restart always saw $attempt=1 → discarded the predecessor's session_id → fresh
+    # UUID. Resume only worked for crashes inside ONE wrapper's lifetime. Dropping the
+    # guard makes disk state the cross-process continuity layer: any spawn that finds a
+    # fresh seatJsonPath resumes the prior session.
     $useResume    = $false
     $sessionId    = $null
     $reasonFresh  = 'first_launch'
@@ -106,7 +126,7 @@ while ($true) {
         try { $seatData = Get-Content $seatJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch { $seatData = $null }
     }
 
-    if ($seatData -ne $null -and $attempt -gt 1) {
+    if ($seatData -ne $null -and -not $script:dropResumeNextIter) {
         $ageHrs = if ($seatData.last_fresh_at) { (($now - (Get-Date $seatData.last_fresh_at)).TotalHours) } else { 999 }
         if ($ageHrs -ge 4) {
             $reasonFresh = ("wall_clock_{0:N1}h" -f $ageHrs)
@@ -114,6 +134,10 @@ while ($true) {
             $useResume = $true
             $sessionId = $seatData.session_id
         }
+    }
+    if ($script:dropResumeNextIter) {
+        $reasonFresh = 'resume_failed_prev_iter'
+        $script:dropResumeNextIter = $false
     }
 
     if (-not $useResume) {
@@ -138,6 +162,7 @@ while ($true) {
     Write-Host "[vaak-launch][$seatLabel] attempt $attempt @ $(Get-Date -Format 'HH:mm:ss')  use_resume=$useResume session_id=$sessionId" -ForegroundColor Cyan
 
     $exitCode = 0
+    $launchAt = Get-Date
     if ($useResume) {
         Write-VaakLog 'claude_resume' @{ session_id = $sessionId; attempt = $attempt }
         & $ClaudeExe --dangerously-skip-permissions --resume $sessionId $resumeNudge
@@ -147,8 +172,21 @@ while ($true) {
         & $ClaudeExe --dangerously-skip-permissions --session-id $sessionId $JoinPrompt
         $exitCode = $LASTEXITCODE
     }
+    $ranSecs = ((Get-Date) - $launchAt).TotalSeconds
 
-    Write-VaakLog 'claude_exit' @{ exit_code = $exitCode; attempt = $attempt }
+    # Pin D (#708, architect #711 adjudication): if --resume failed AND we're on
+    # attempt==1 of this wrapper's lifetime, the session is stale (deleted from
+    # claude-store, schema-bumped, etc.) — drop it on the next iteration so the
+    # wrapper retries fresh. Mid-session crashes (attempt > 1, claude already ran
+    # successfully at least once this wrapper-life) preserve the resume affordance.
+    # Wall-time threshold rejected as brittle: a stale-store check can hang the
+    # claude binary >10s before failing, breaking the heuristic.
+    if ($useResume -and $exitCode -ne 0 -and $attempt -eq 1) {
+        Write-VaakLog 'resume_startup_failed' @{ session_id = $sessionId; ran_secs = $ranSecs; exit_code = $exitCode }
+        $script:dropResumeNextIter = $true
+    }
+
+    Write-VaakLog 'claude_exit' @{ exit_code = $exitCode; attempt = $attempt; ran_secs = $ranSecs }
     $restartTimes += $now
 
     $backoff = [Math]::Min([Math]::Pow(2, [Math]::Min($attempt, 5)), 30)

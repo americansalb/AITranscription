@@ -754,6 +754,40 @@ fn append_to_board(project_dir: &str, message: &serde_json::Value) -> Result<(),
     Ok(())
 }
 
+/// Mark a seat as intentionally-left so the launcher's repopulate_spawned skips
+/// auto-respawning it on the next vaak start.
+///
+/// Why this file (not spawned.json directly): launcher.rs writes spawned.json
+/// without a file lock; cross-process writes from vaak-mcp would race. This
+/// sentinel file is single-writer (vaak-mcp only) until launcher reads + deletes
+/// it on next startup. Closes the gap evil-arch raised at #710(2) — auto-respawn
+/// without this would resurrect kicked / project_leave'd roles after every
+/// vaak restart.
+///
+/// Format: append-only JSONL — `{"role":"developer","instance":0,"reason":"left","ts":"..."}`.
+/// launcher.rs reads, applies as a skip-list, then deletes the file.
+fn mark_seat_intentionally_left(project_dir: &str, role: &str, instance: u32, reason: &str) {
+    let path = std::path::Path::new(project_dir)
+        .join(".vaak")
+        .join("intentionally_left.jsonl");
+    let entry = serde_json::json!({
+        "role": role,
+        "instance": instance,
+        "reason": reason,
+        "ts": utc_now_iso(),
+    });
+    if let Ok(line) = serde_json::to_string(&entry) {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{}", line)
+            });
+    }
+}
+
 /// Read sessions.json
 fn read_sessions(project_dir: &str) -> serde_json::Value {
     let path = sessions_json_path(project_dir);
@@ -3553,6 +3587,10 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
         Ok(())
     })?;
 
+    // Tell launcher's auto-respawn (repopulate_spawned) that this exit was deliberate
+    // so it doesn't resurrect us on the next vaak start. Fix for evil-arch #710(2).
+    mark_seat_intentionally_left(&state.project_dir, &state.role, state.instance, "project_leave");
+
     // Clear active state
     if let Ok(mut guard) = ACTIVE_PROJECT.lock() {
         *guard = None;
@@ -3607,6 +3645,10 @@ fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, S
         write_sessions(&state.project_dir, &sessions)?;
         Ok(())
     })?;
+
+    // Mark intentionally-left so auto-respawn doesn't resurrect a kicked role
+    // on the next vaak restart. Fix for evil-arch #710(2).
+    mark_seat_intentionally_left(&state.project_dir, role, instance, "project_kick");
 
     notify_desktop();
 

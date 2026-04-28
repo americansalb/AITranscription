@@ -1423,18 +1423,98 @@ fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
         .unwrap_or_default()
 }
 
+/// Read and consume `.vaak/intentionally_left.jsonl` — the skip-list written by
+/// vaak-mcp's project_leave / project_kick handlers (see #708 round, evil-arch
+/// #710(2) + #713(2)). Returns the set of `(role, instance)` pairs that should NOT
+/// be auto-respawned on this vaak startup.
+///
+/// Atomic-rename pattern (evil-arch #713(2)): rename the live file to a
+/// `.processing` suffix before reading. Any concurrent vaak-mcp append-write that
+/// loses the race lands in a fresh `intentionally_left.jsonl`, which the next
+/// repopulate_spawned will pick up. Without the rename, a leave that arrives
+/// between our read and our delete is lost → respawned-anyway zombie.
+///
+/// Format: one JSON object per line: `{"role": "...", "instance": N, "reason": "...", "ts": "..."}`.
+fn consume_intentionally_left(project_dir: &str) -> std::collections::HashSet<(String, u64)> {
+    let dir = std::path::Path::new(project_dir).join(".vaak");
+    let live = dir.join("intentionally_left.jsonl");
+    let processing = dir.join("intentionally_left.jsonl.processing");
+    let mut set = std::collections::HashSet::new();
+
+    let parse_into = |path: &std::path::Path, set: &mut std::collections::HashSet<(String, u64)>| {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                if line.trim().is_empty() { continue; }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+                    let instance = v.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                    if !role.is_empty() {
+                        set.insert((role, instance));
+                    }
+                }
+            }
+        }
+    };
+
+    // Recover any prior-run leftover (process crashed between rename and delete).
+    if processing.exists() {
+        parse_into(&processing, &mut set);
+        let _ = std::fs::remove_file(&processing);
+    }
+
+    // Atomic move: any vaak-mcp append-open after this point opens a fresh live file.
+    if std::fs::rename(&live, &processing).is_ok() {
+        parse_into(&processing, &mut set);
+        let _ = std::fs::remove_file(&processing);
+    }
+
+    set
+}
+
 /// Re-populate the in-memory spawned list from disk on app startup.
-/// Keeps entries whose PIDs are still alive, and auto-respawns dead agents
-/// so team members survive app restarts.
+/// Keeps entries whose PIDs are still alive, and **auto-respawns dead agents**
+/// so team members survive app restarts. The wrapper (launch-seat.ps1) reads
+/// `.vaak/sessions/<role>-<inst>.json` on spawn and resumes the predecessor's
+/// claude session via `--resume <uuid>` (cross-process continuity layer).
+///
+/// History (#708 fix round, 2026-04-28):
+/// - `bfa2199` (2026-04-16) added the auto-respawn here.
+/// - `cd97ee5` (2026-04-18) gutted it because the human hit a "burst of new
+///   PowerShell windows on app start" — every dead seat opened a visible window.
+/// - This commit restores auto-respawn now that wrappers spawn via
+///   WMI Win32_Process.Create with the host PowerShell hidden behind `-WindowStyle Hidden`
+///   on the OUTER call. The visual burst the human saw in April was from each
+///   dead seat opening its own console; with the new wrapper they share the
+///   hidden host. 5s stagger (was 2s) gives the user time to Ctrl-C if they
+///   really wanted vaak to start with no team.
+///
+/// Edge: respawn errors are logged but never fail the call — partial recovery
+/// beats the previous outcome (zero recovery + dead entries surviving in
+/// spawned.json forever).
 #[tauri::command]
 pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) -> Result<u32, String> {
     *state.project_dir.lock() = Some(project_dir.clone());
     let disk_agents = load_spawned_from_disk(&project_dir);
+
+    // Consume the intentionally-left sentinel: vaak-mcp's project_leave / project_kick
+    // wrote here so we don't resurrect deliberately-departed roles on this start.
+    // File is deleted after read — if the user re-spawns one of these roles between
+    // now and the next vaak restart, it'll respawn normally.
+    let skip_set = consume_intentionally_left(&project_dir);
+    if !skip_set.is_empty() {
+        eprintln!("[launcher] Skipping auto-respawn for {} intentionally-left seat(s): {:?}",
+            skip_set.len(), skip_set);
+    }
+
     let mut spawned = state.spawned.lock();
     let mut alive_count = 0u32;
     let mut dead_agents: Vec<SpawnedAgent> = Vec::new();
 
     for agent in disk_agents {
+        if skip_set.contains(&(agent.role.clone(), agent.instance as u64)) {
+            // Drop entirely from disk + memory: user said leave/kick, honor it.
+            continue;
+        }
         if is_pid_alive(agent.pid) {
             if !spawned.iter().any(|a| a.role == agent.role && a.instance == agent.instance) {
                 eprintln!("[launcher] Reconnected to alive agent: {}:{} (PID {})", agent.role, agent.instance, agent.pid);
@@ -1442,18 +1522,39 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
                 alive_count += 1;
             }
         } else {
-            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — removing from tracker", agent.role, agent.instance, agent.pid);
+            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — queuing respawn", agent.role, agent.instance, agent.pid);
             dead_agents.push(agent);
         }
     }
 
-    // Update disk with only alive agents (remove dead ones)
+    // Snapshot alive list to disk before kicking respawn so disk is consistent
+    // even if a respawn races ahead and writes its own entry.
     let all: Vec<SpawnedAgent> = spawned.clone();
     drop(spawned);
     save_spawned_to_disk(&project_dir, &all);
 
+    // Auto-respawn dead agents in a background thread so the Tauri command
+    // returns promptly. 5s stagger between spawns (was 2s in bfa2199) gives
+    // the human a tighter window to Ctrl-C if they didn't want auto-respawn.
     if !dead_agents.is_empty() {
-        eprintln!("[launcher] Cleaned up {} dead agent(s) from spawned.json (not respawning)", dead_agents.len());
+        eprintln!("[launcher] Auto-respawning {} dead agent(s) with 5s stagger", dead_agents.len());
+        let dir_clone = project_dir.clone();
+        let spawned_clone = Arc::clone(&state.spawned);
+        std::thread::spawn(move || {
+            let bg_state = LauncherState {
+                spawned: spawned_clone,
+                project_dir: Mutex::new(Some(dir_clone.clone())),
+            };
+            for (i, agent) in dead_agents.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                eprintln!("[launcher] Respawning {}:{}", agent.role, agent.instance);
+                if let Err(e) = do_spawn_member(&dir_clone, &agent.role, Some(agent.instance as i32), &bg_state) {
+                    eprintln!("[launcher] Failed to respawn {}:{}: {}", agent.role, agent.instance, e);
+                }
+            }
+        });
     }
 
     Ok(alive_count)
