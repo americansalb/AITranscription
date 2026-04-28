@@ -5577,15 +5577,68 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // so they don't need a gate exemption (#113.A).
         let asm = read_assembly_state(&state.project_dir);
         let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut asm_auto_grabbed: Option<serde_json::Value> = None;
         if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
             if cur != from_label {
-                return Err(format!(
-                    "Assembly Line active — not your turn. Current speaker: {}. The mic will pass to you when it rotates.",
-                    if cur.is_empty() { "(none)" } else { cur }
-                ));
+                // Gap H — 10-min auto-grab per human #903 + architect #1082.
+                // If the current speaker has been silent for >MIC_AUTOROTATE_SECS
+                // (600s = 10min), the next sender claims the mic. Closes the
+                // recurring deadlock pattern where a vacant/idle speaker
+                // freezes assembly mode (tech-leader's #1075 emergency disable
+                // was the symptom).
+                const MIC_AUTOROTATE_SECS: u64 = 600;
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let speaker_silent_secs: u64 = if cur.is_empty() {
+                    // No current speaker — first send claims (cold-open).
+                    u64::MAX
+                } else {
+                    // Find the most recent message from the current speaker.
+                    let board = read_board_filtered(&state.project_dir);
+                    let last_speaker_ts = board.iter().rev()
+                        .find(|m| m.get("from").and_then(|f| f.as_str()) == Some(cur))
+                        .and_then(|m| m.get("timestamp").and_then(|t| t.as_str()).map(String::from))
+                        .and_then(|t| parse_iso_to_epoch_secs(&t));
+                    match last_speaker_ts {
+                        Some(t) => now_secs.saturating_sub(t),
+                        None => u64::MAX, // never spoke → effectively infinite silence
+                    }
+                };
+
+                if speaker_silent_secs > MIC_AUTOROTATE_SECS {
+                    // Auto-grab — caller becomes new speaker. Advance assembly
+                    // state inline so the post-append auto-rotate (line ~5641)
+                    // sees from_label as cur.
+                    eprintln!(
+                        "[assembly_line] auto-grab: prior speaker '{}' silent {}s (> {}s threshold); '{}' claims mic per human #903",
+                        cur, speaker_silent_secs, MIC_AUTOROTATE_SECS, from_label
+                    );
+                    let mut updated = asm.clone();
+                    updated["current_speaker"] = serde_json::json!(from_label);
+                    if let Err(e) = write_assembly_state_unlocked(&state.project_dir, &updated) {
+                        eprintln!("[assembly_line] auto-grab write failed: {}", e);
+                        return Err(format!(
+                            "Assembly Line auto-grab attempted but write failed: {}. Current speaker: {}.",
+                            e,
+                            if cur.is_empty() { "(none)" } else { cur }
+                        ));
+                    }
+                    asm_auto_grabbed = Some(updated);
+                } else {
+                    let remaining = MIC_AUTOROTATE_SECS.saturating_sub(speaker_silent_secs);
+                    return Err(format!(
+                        "Assembly Line active — not your turn. Current speaker: {}. Silent {}s; auto-grab in {}s. Or wait for the mic to rotate.",
+                        if cur.is_empty() { "(none)" } else { cur },
+                        speaker_silent_secs,
+                        remaining
+                    ));
+                }
             }
         }
+        let _ = asm_auto_grabbed; // value held in case downstream needs it
 
         // Delphi-broadcast gate (atomic with the assembly gate above and the append below).
         // Per #56.1: when assembly_line is active, it OWNS the speech gate — the Delphi

@@ -248,6 +248,23 @@ acceptable for MVP.
 chance for PostToolUse to fire and update the timestamp. If a tool
 call ends within +5s of the 90s mark, the seat is rescued.
 
+## Gap H — assembly_line 10-min auto-grab — CLOSED in this push
+
+**STATUS: CLOSED.** Implemented in vaak-mcp.rs handle_project_send AL gate
+(lines ~5580–5640). On project_send when assembly mode is active and
+caller is not current_speaker:
+- Read board.jsonl, find most-recent message from current_speaker.
+- Compute `speaker_silent_secs = now - last_speaker_msg_timestamp`.
+- If > MIC_AUTOROTATE_SECS (600 = 10min per human #903), auto-grab:
+  caller becomes new current_speaker, assembly state written + send
+  proceeds.
+- Else reject with detailed error including remaining-seconds-to-grab.
+
+Closes the deadlock that triggered tech-leader's #1075 emergency
+assembly_line disable (dev-challenger:0 silent ~25min holding the mic
+with no auto-grab path in code). Memory entry on the same page now
+points at this closure.
+
 ## Gap G — run_supervise full-loop integration test
 
 **Surface.** `run_supervise` is a `loop { sleep; check_seats; }`
