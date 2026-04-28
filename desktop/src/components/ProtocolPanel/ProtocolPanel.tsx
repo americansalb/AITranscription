@@ -14,6 +14,7 @@ import { useProtocolState } from '../../hooks/useProtocolState';
 import type { Heartbeats, Protocol } from '../../hooks/useProtocolState';
 import { SeatChip } from './SeatChip';
 import { PhasePlanEditor } from './PhasePlanEditor';
+import { HealthPill } from './HealthPill';
 import './ProtocolPanel.css';
 
 export type ProtocolPanelProps = {
@@ -84,7 +85,12 @@ export function ProtocolPanel({
         {announcement}
       </div>
 
-      <PhaseRow protocol={state} mutate={mutate} onEdit={() => setEditorOpen(true)} />
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <PhaseRow protocol={state} mutate={mutate} onEdit={() => setEditorOpen(true)} />
+        </div>
+        <HealthPill projectDir={projectDir} />
+      </div>
       {editorOpen && (
         <PhasePlanEditor
           protocol={state}

@@ -3210,6 +3210,128 @@ fn protocol_mutate_cmd(
     Ok(result)
 }
 
+/// Slice 9 health pill — read 4-layer resilience status.
+/// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
+///
+/// Layer 1 (process wrapper): per-seat sessions/<role>-<inst>.json has
+/// recent last_alive_at_ms. We approximate by checking if any seat's
+/// .json file has been touched in the last 2× SUPERVISE_HANG_THRESHOLD
+/// (so we don't false-alarm during normal idle gaps).
+///
+/// Layer 2 (supervisor): .vaak/supervisor.pid exists AND the recorded
+/// PID is alive.
+///
+/// Layer 3 (hooks): ~/.claude/settings.json contains a hooks block
+/// referencing vaak-keep-alive (or equivalent).
+///
+/// Layer 4 (visual): always reported as installed if the panel is rendering.
+#[tauri::command]
+fn get_resilience_status(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let vaak_dir = std::path::Path::new(&dir).join(".vaak");
+
+    // Layer 1: any seat session file with last_alive_at_ms within 180s.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let layer1_threshold_ms: u64 = 180_000; // 2× supervisor's 90s
+    let mut layer1_ok = false;
+    let mut layer1_seats_alive = 0u32;
+    let mut layer1_seats_total = 0u32;
+    if let Ok(entries) = std::fs::read_dir(vaak_dir.join("sessions")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
+            if !path.is_file() { continue; }
+            layer1_seats_total += 1;
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    let last_alive = v.get("last_alive_at_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+                    if last_alive > 0 && now_ms.saturating_sub(last_alive) < layer1_threshold_ms {
+                        layer1_seats_alive += 1;
+                        layer1_ok = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Layer 2: supervisor.pid exists + recorded PID alive.
+    let supervisor_pid_path = vaak_dir.join("supervisor.pid");
+    let layer2_ok = std::fs::read_to_string(&supervisor_pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|pid| {
+            #[cfg(windows)]
+            {
+                use std::process::Command;
+                Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+                    .output()
+                    .map(|o| {
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        stdout.contains(&format!("\"{}\"", pid))
+                    })
+                    .unwrap_or(false)
+            }
+            #[cfg(not(windows))]
+            {
+                // Unix: kill -0 PID returns 0 if alive.
+                use std::process::Command;
+                Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        })
+        .unwrap_or(false);
+
+    // Layer 3: ~/.claude/settings.json has hooks block referencing vaak.
+    let layer3_ok = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .and_then(|h| {
+            let settings_path = std::path::PathBuf::from(h).join(".claude").join("settings.json");
+            std::fs::read_to_string(&settings_path).ok()
+        })
+        .map(|s| s.contains("vaak-keep-alive") || s.contains("vaak-mcp"))
+        .unwrap_or(false);
+
+    // Roll-up: count pillars healthy. 4/4 OK → green. 3/4 → warn. ≤2 → bad.
+    let pillars_ok = (layer1_ok as u32) + (layer2_ok as u32) + (layer3_ok as u32) + 1; // L4 always 1
+    let roll_up = match pillars_ok {
+        4 => "green",
+        3 => "warn",
+        _ => "bad",
+    };
+
+    Ok(serde_json::json!({
+        "roll_up": roll_up,
+        "pillars_ok": pillars_ok,
+        "layer1": {
+            "ok": layer1_ok,
+            "label": "Process wrappers",
+            "detail": format!("{}/{} seats with recent activity", layer1_seats_alive, layer1_seats_total)
+        },
+        "layer2": {
+            "ok": layer2_ok,
+            "label": "Supervisor (vaak-mcp --supervise)",
+            "detail": if layer2_ok { "Active".to_string() } else { "Not running — auto-recovery disabled".to_string() }
+        },
+        "layer3": {
+            "ok": layer3_ok,
+            "label": "Pre/PostToolUse hooks",
+            "detail": if layer3_ok { "Installed".to_string() } else { "Not installed — heartbeats only fire on MCP calls".to_string() }
+        },
+        "layer4": {
+            "ok": true,
+            "label": "Visual feedback",
+            "detail": "Active (this panel)"
+        }
+    }))
+}
+
 /// Minimal ISO-8601 → epoch-seconds parser local to main.rs (mirrors
 /// vaak-mcp.rs's same helper). Used by Slice 5 phase pause/resume
 /// duration math.
@@ -4771,6 +4893,8 @@ fn main() {
             // Protocol v6 (Slice 3+4) — read + UI-side mutate
             get_protocol_cmd,
             protocol_mutate_cmd,
+            // Slice 9 — health pill (resilience-stack JOIN)
+            get_resilience_status,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,
