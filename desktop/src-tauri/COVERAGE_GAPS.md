@@ -7,7 +7,13 @@ reason the gap exists, and the work item that closes it.
 
 ## Slice 2 — `handle_protocol_mutate` CAS gate behavioral coverage
 
-**Gap.** The CAS gate codes — `[StaleRev]`, `[MissingRev]` — fire from
+**STATUS: CLOSED IN `3b8735a` (developer:0, board #950).** Dev:0 chose
+the second option from this doc — extracted `do_protocol_mutate` as a
+pure function over `(project_dir, section, action, args, rev_in)` and
+added 7 CAS-gate behavioral tests against it. Doc retained as audit
+record of what was deferred and how it was closed.
+
+**Original gap (closed).** The CAS gate codes — `[StaleRev]`, `[MissingRev]` — fire from
 `handle_protocol_mutate` (vaak-mcp.rs `fn handle_protocol_mutate`). The
 gate is verified at the apply layer through unit tests (see
 `protocol_slice2_tests::*` in vaak-mcp.rs at line ~3477+) but no test
