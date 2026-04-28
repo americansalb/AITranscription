@@ -2012,27 +2012,57 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
     // keep their legacy state machine because their semantics (Delphi
     // blind-submit gate, Oxford team assignment) exceed the consensus
     // model's surface; Slice 7 owns wider mapping.
-    if action == "start_discussion" && mode == Some("continuous") {
-        let topic_str = topic.ok_or("[InvalidArgs] start_discussion(continuous) requires topic")?;
+    if action == "start_discussion" {
+        // Slice 7: route delphi/oxford/red_team/continuous through
+        // protocol_mutate(open_round) with mode + optional teams +
+        // blind_submit_gate args. Closes COVERAGE_GAPS.md Gap A.
+        let mode_val = mode.ok_or("[InvalidArgs] start_discussion requires mode")?;
+        let topic_str = topic.ok_or("[InvalidArgs] start_discussion requires topic")?;
         let pd = state.project_dir.clone();
         let actor = my_label.clone();
         let section = get_active_section(&pd);
         let cur_proto = read_protocol_for_section_value(&pd, &section);
         let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        // Map legacy mode → protocol consensus mode per spec §6 matrix.
+        let (consensus_mode, blind_gate) = match mode_val {
+            "continuous" => ("tally", false),
+            "delphi"     => ("vote", true),  // blind-submit gate semantics
+            "oxford"     => ("vote", false),
+            "red_team"   => ("vote", false),
+            other => return Err(format!("[InvalidArgs] start_discussion mode must be continuous|delphi|oxford|red_team (got '{}')", other)),
+        };
+
+        // Build args including teams (Oxford) if provided.
+        let mut open_args = serde_json::json!({
+            "topic": topic_str,
+            "mode": consensus_mode
+        });
+        if blind_gate {
+            open_args["blind_submit_gate"] = serde_json::json!(true);
+        }
+        if let Some(t) = &teams {
+            // Only valid for oxford per spec, but pass through if provided
+            // (open_round validates shape; non-oxford callers won't supply).
+            open_args["teams"] = t.clone();
+        }
+
         let new_state = do_protocol_mutate(
             &pd,
             &actor,
             &section,
             "open_round",
-            serde_json::json!({"topic": topic_str, "mode": "tally"}),
+            open_args,
             Some(cur_rev),
         )?;
         // Project to legacy shape so old callers' result-handling code
         // keeps working through the compat tail.
         return Ok(serde_json::json!({
             "active": true,
-            "mode": "continuous",
+            "mode": mode_val,
             "topic": topic_str,
+            "moderator": new_state.get("consensus").and_then(|c| c.get("round")).and_then(|r| r.get("opened_by")).cloned().unwrap_or(serde_json::Value::Null),
+            "teams": new_state.get("consensus").and_then(|c| c.get("round")).and_then(|r| r.get("teams")).cloned().unwrap_or(serde_json::Value::Null),
             "rounds": [{
                 "topic": topic_str,
                 "opened_at": new_state.get("consensus").and_then(|c| c.get("round")).and_then(|r| r.get("opened_at")).cloned().unwrap_or(serde_json::Value::Null),
@@ -2041,6 +2071,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
             "_via": "protocol.json"
         }));
     }
+    let _ = participants; // not used by Slice 7 thin-wrap
     if action == "close_round" {
         let pd = state.project_dir.clone();
         let actor = my_label.clone();
@@ -3774,13 +3805,40 @@ fn apply_open_round(state: &mut serde_json::Value, args: &serde_json::Value, act
             return Err(format!("[NotPermitted] open_round: a round is already open (phase: {})", phase));
         }
     }
+    // Slice 7: Oxford preset uses args.teams = {for: [], against: []} for
+    // team assignment (spec §6 matrix). Validate shape if present.
+    let teams = args.get("teams").cloned();
+    if let Some(t) = &teams {
+        if !t.is_object() {
+            return Err("[InvalidArgs] open_round.teams must be an object {for: [seats], against: [seats]} when present".to_string());
+        }
+        for key in ["for", "against"] {
+            if let Some(arr) = t.get(key) {
+                if !arr.is_array() {
+                    return Err(format!("[InvalidArgs] open_round.teams.{} must be an array of seat labels", key));
+                }
+            }
+        }
+    }
+    // Slice 7: Delphi preset uses args.blind_submit_gate=true to indicate
+    // the round operates under blind-submission semantics (no broadcasts
+    // to "all" allowed during submitting; only directed-to-moderator).
+    let blind_gate = args.get("blind_submit_gate").and_then(|v| v.as_bool()).unwrap_or(false);
+
     if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
         cons.insert("mode".to_string(), serde_json::json!(mode));
-        cons.insert("round".to_string(), serde_json::json!({
+        let mut round = serde_json::json!({
             "topic": topic,
             "opened_at": utc_now_iso(),
             "opened_by": actor
-        }));
+        });
+        if let Some(t) = teams {
+            round.as_object_mut().unwrap().insert("teams".to_string(), t);
+        }
+        if blind_gate {
+            round.as_object_mut().unwrap().insert("blind_submit_gate".to_string(), serde_json::json!(true));
+        }
+        cons.insert("round".to_string(), round);
         cons.insert("phase".to_string(), serde_json::json!("submitting"));
         cons.insert("submissions".to_string(), serde_json::json!([]));
     }
@@ -4486,6 +4544,100 @@ mod protocol_slice2_tests {
         // round to 0, that's expected on a fast test).
         let total = after_resume["phase_plan"]["paused_total_secs"].as_u64().unwrap_or(999);
         assert!(total < 999, "paused_total_secs should be a small accumulator value, got: {}", total);
+    }
+
+    /// Slice 7 — Delphi mode: open_round with mode=vote + blind_submit_gate=true.
+    #[test]
+    fn slice7_delphi_open_round_carries_blind_gate() {
+        let dir = temp_project_with_protocol(
+            "slice7-delphi",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "moderator:0",
+            "default",
+            "open_round",
+            serde_json::json!({
+                "topic": "Should we ship 9faf275?",
+                "mode": "vote",
+                "blind_submit_gate": true
+            }),
+            Some(0),
+        ).unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["consensus"]["mode"], "vote");
+        assert_eq!(after["consensus"]["round"]["blind_submit_gate"], true);
+    }
+
+    /// Slice 7 — Oxford mode: open_round with mode=vote + teams.
+    #[test]
+    fn slice7_oxford_open_round_carries_teams() {
+        let dir = temp_project_with_protocol(
+            "slice7-oxford",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "moderator:0",
+            "default",
+            "open_round",
+            serde_json::json!({
+                "topic": "Resolved: ship as-is",
+                "mode": "vote",
+                "teams": {"for": ["dev:0", "architect:0"], "against": ["evil-architect:0"]}
+            }),
+            Some(0),
+        ).unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["consensus"]["round"]["teams"]["for"], serde_json::json!(["dev:0", "architect:0"]));
+        assert_eq!(after["consensus"]["round"]["teams"]["against"], serde_json::json!(["evil-architect:0"]));
+    }
+
+    /// Slice 7 — open_round rejects malformed teams shape.
+    #[test]
+    fn slice7_open_round_rejects_malformed_teams() {
+        let dir = temp_project_with_protocol(
+            "slice7-bad-teams",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "moderator:0",
+            "default",
+            "open_round",
+            serde_json::json!({
+                "topic": "x",
+                "mode": "vote",
+                "teams": {"for": "should-be-array", "against": []}
+            }),
+            Some(0),
+        ).unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
     }
 
     /// Round-trip test for the assembly_line thin-wrap (tech-leader #994):
