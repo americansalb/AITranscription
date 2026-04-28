@@ -235,7 +235,14 @@ fn do_spawn_member(project_dir: &str, role: &str, roster_instance: Option<i32>, 
             // DC-1 (architect #648): drop -NoExit so the powershell host terminates cleanly
             // when the wrapper's while-loop ends via sentinel, instead of leaving a zombie
             // window (the smoking-gun pattern dev cited at #632 for the prior single-shot path).
-            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
+            //
+            // -WindowStyle Hidden (architect #720, #708 fix round): the WMI-spawned
+            // launch-seat.ps1 host previously got a visible console (architect verified
+            // via Get-Process MainWindowHandle on PIDs 11036/1588/17348). Combined with
+            // auto-respawn-on-startup (this round's repopulate_spawned change), N visible
+            // PowerShell windows would burst open every vaak restart — the exact UX
+            // regression cd97ee5 reverted. Hidden keeps stdin/stdout pipes for claude.
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{CommandLine='powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{}\"';CurrentDirectory='{}'}}; Write-Output $r.ProcessId",
             script_path_str, safe_dir_ps
         );
         let ps_args = ["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd];
@@ -1481,12 +1488,12 @@ fn consume_intentionally_left(project_dir: &str) -> std::collections::HashSet<(S
 /// - `bfa2199` (2026-04-16) added the auto-respawn here.
 /// - `cd97ee5` (2026-04-18) gutted it because the human hit a "burst of new
 ///   PowerShell windows on app start" — every dead seat opened a visible window.
-/// - This commit restores auto-respawn now that wrappers spawn via
-///   WMI Win32_Process.Create with the host PowerShell hidden behind `-WindowStyle Hidden`
-///   on the OUTER call. The visual burst the human saw in April was from each
-///   dead seat opening its own console; with the new wrapper they share the
-///   hidden host. 5s stagger (was 2s) gives the user time to Ctrl-C if they
-///   really wanted vaak to start with no team.
+/// - This commit restores auto-respawn AND fixes the visibility regression at
+///   the source: the inner WMI-spawned PS host now also gets `-WindowStyle Hidden`
+///   (this commit, launcher.rs:238). Architect #720 verified the prior wrappers
+///   showed non-zero MainWindowHandle — the cd97ee5 burst would have returned
+///   without that extra fix. 5s stagger (was 2s) gives the user a tighter window
+///   to Ctrl-C if they really wanted vaak to start with no team.
 ///
 /// Edge: respawn errors are logged but never fail the call — partial recovery
 /// beats the previous outcome (zero recovery + dead entries surviving in
