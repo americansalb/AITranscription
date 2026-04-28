@@ -2830,6 +2830,58 @@ fn protocol_is_seat_stuck(project_dir: &str, seat_label: &str, threshold_ms: u64
     true
 }
 
+/// Active-seat set sourced from sessions.json. Used by the JSON-Value
+/// `protocol_normalize_in_place` mirror of `protocol::Protocol::normalize`
+/// per evil-arch #978 + architect #979 ship-block fix (Slice 5 follow-on).
+fn protocol_active_seats_set(project_dir: &str) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let sessions = read_sessions(project_dir);
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+            let status = b.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !role.is_empty() && status == "active" {
+                set.insert(format!("{}:{}", role, inst));
+            }
+        }
+    }
+    set
+}
+
+/// JSON-Value mirror of `protocol::Protocol::normalize` from protocol.rs.
+/// Three ratified rules per spec §2.2 + evil-arch #923 + #954:
+///   1. floor.mode == "free-grab" → clear floor.queue
+///   2. orphan current_speaker (not in active_seats) → clear
+///   3. prune dead queue entries
+/// Empty `active_seats` → skip rules 2+3 (rule 1 still fires).
+fn protocol_normalize_in_place(state: &mut serde_json::Value, active_seats: &std::collections::HashSet<String>) {
+    let floor_mode = state.get("floor")
+        .and_then(|f| f.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        // Rule 1: free-grab dissolves the queue.
+        if floor_mode == "free-grab" {
+            floor.insert("queue".to_string(), serde_json::Value::Array(vec![]));
+        }
+        // Rule 2: orphan current_speaker → clear.
+        let cs = floor.get("current_speaker").and_then(|v| v.as_str()).map(String::from);
+        if let Some(cs_str) = &cs {
+            if !active_seats.is_empty() && !active_seats.contains(cs_str) {
+                floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+            }
+        }
+        // Rule 3: prune dead queue entries.
+        if !active_seats.is_empty() {
+            if let Some(arr) = floor.get_mut("queue").and_then(|q| q.as_array_mut()) {
+                arr.retain(|v| v.as_str().map(|s| active_seats.contains(s)).unwrap_or(false));
+            }
+        }
+    }
+}
+
 fn protocol_seat_exists_active(project_dir: &str, seat_label: &str) -> bool {
     let parts: Vec<&str> = seat_label.splitn(2, ':').collect();
     let role = parts.get(0).copied().unwrap_or("");
@@ -3017,7 +3069,19 @@ fn do_protocol_mutate(
                 return Ok(Err(e));
             }
 
-            // CAS bump + audit — only after successful apply.
+            // Normalize after apply (evil-arch #978 + architect #979 ship-
+            // block fix): three ratified rules of spec §2.2 only fire if
+            // we invoke them here. Rules:
+            //   1. free-grab → clear queue (Brainstorm/Continuous Review preset
+            //      transitions need this, otherwise Town Hall queue persists)
+            //   2. orphan speaker (not in active_seats) → clear current_speaker
+            //   3. dead seats in queue → prune
+            // active_seats sourced from sessions.json under our lock so the
+            // pruning is consistent with whatever the supervisor saw last.
+            let active_seats = protocol_active_seats_set(pd);
+            protocol_normalize_in_place(&mut current, &active_seats);
+
+            // CAS bump + audit — only after successful apply + normalize.
             if let Some(rev_field) = current.get_mut("rev") {
                 *rev_field = serde_json::json!(current_rev + 1);
             }
@@ -4289,6 +4353,78 @@ mod protocol_slice2_tests {
         // round to 0, that's expected on a fast test).
         let total = after_resume["phase_plan"]["paused_total_secs"].as_u64().unwrap_or(999);
         assert!(total < 999, "paused_total_secs should be a small accumulator value, got: {}", total);
+    }
+
+    /// Normalize-wired test (evil-arch #978 ship-block fix): when
+    /// set_preset transitions floor.mode to "free-grab", normalize must
+    /// dissolve floor.queue in the SAME mutate window. Closes the
+    /// "tests-only firing" gap by exercising the path through
+    /// do_protocol_mutate, not the bare normalize() helper.
+    #[test]
+    fn normalize_wired_to_set_preset_clears_queue_on_free_grab() {
+        let dir = temp_project_with_protocol(
+            "normalize-set-preset",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Town hall",
+                "floor": {"mode": "queue", "current_speaker": "architect:0", "queue": ["dev:0", "tester:0"], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "architect", "instance": 0, "status": "active"},
+                {"role": "dev", "instance": 0, "status": "active"},
+                {"role": "tester", "instance": 0, "status": "active"}
+            ]}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "set_preset",
+            serde_json::json!({"name": "Brainstorm"}), // Brainstorm = (free-grab, none)
+            Some(0),
+        ).unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["floor"]["mode"], "free-grab");
+        // Normalize rule 1 must have fired: queue dissolved.
+        assert_eq!(after["floor"]["queue"], serde_json::json!([]));
+    }
+
+    /// Normalize-wired test: orphan current_speaker (active_seats from
+    /// sessions.json doesn't include the held mic) → clear on next mutate.
+    #[test]
+    fn normalize_wired_clears_orphan_current_speaker() {
+        let dir = temp_project_with_protocol(
+            "normalize-orphan",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": "ghost:0", "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "dev", "instance": 0, "status": "active"}
+            ]}),
+        );
+        // Any mutate that triggers a normalize pass will clear ghost:0.
+        // toggle_queue (self-only, dev:0 → adds self) is a clean trigger.
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "dev:0",
+            "default",
+            "toggle_queue",
+            serde_json::json!({}),
+            Some(0),
+        ).unwrap();
+        let after = read_protocol_back(&dir);
+        // Normalize rule 2: orphan ghost:0 cleared.
+        assert!(after["floor"]["current_speaker"].is_null());
+        // toggle_queue itself added dev:0; rule 3 prunes nothing here.
+        assert_eq!(after["floor"]["queue"], serde_json::json!(["dev:0"]));
     }
 
     /// Slice 5 — extend_phase adds to extension_secs on current phase.
