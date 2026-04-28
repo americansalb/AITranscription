@@ -3123,7 +3123,33 @@ fn get_assembly_state(dir: String) -> Result<serde_json::Value, String> {
 fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, String> {
     let dir = validate_project_dir(&dir)?;
     // Per architect #156: single shared impl in collab.rs, both front doors call it.
-    collab::set_assembly_v0(&dir, &action, "human")
+    let legacy_state = collab::set_assembly_v0(&dir, &action, "human")?;
+
+    // Human #1122 fix: legacy AL button now ALSO mirrors into protocol.json
+    // so ProtocolPanel sees the change. Without this, clicking the AL toggle
+    // in CollabTab updated assembly.json but the new ProtocolPanel (which
+    // reads protocol.json) showed stale state — exactly the disconnect the
+    // human flagged. Spec §3.3 thin-wrap was for the MCP path; this is the
+    // Tauri-button path's symmetric piece.
+    let section = collab::get_active_section(&dir);
+    let preset_name = match action.as_str() {
+        "enable" => "Assembly Line",
+        "disable" => "Default chat",
+        _ => return Ok(legacy_state), // get_state or unknown — don't mirror
+    };
+    let cur_proto = protocol::read_protocol_for_section(&dir, &section);
+    let cur_rev = cur_proto.rev;
+    if let Err(e) = do_protocol_mutate_inner(
+        &dir,
+        "human",
+        &section,
+        "set_preset",
+        serde_json::json!({"name": preset_name}),
+        Some(cur_rev),
+    ) {
+        eprintln!("[set_assembly_state] protocol.json mirror failed: {} — legacy state still updated", e);
+    }
+    Ok(legacy_state)
 }
 
 // ==================== Protocol v6 — Slice 3 Tauri commands ====================
