@@ -8,6 +8,7 @@ mod collab_v2;
 mod database;
 mod keyboard_hook;
 mod launcher;
+mod protocol;
 mod queue;
 
 
