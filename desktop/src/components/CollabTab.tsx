@@ -3,7 +3,11 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
+// AssemblyBanner replaced by ProtocolPanel per al-architecture-diagram.md §11 step 3.
+// Old import retained for now while we transition; will be deleted in
+// follow-on cleanup commit once Slice 4 composer mic_to lands.
 import { AssemblyBanner } from "./AssemblyBanner";
+import { ProtocolPanel } from "./ProtocolPanel";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
@@ -2607,7 +2611,17 @@ When multiple instances of this role are active:
           </button>
         </div>
 
-        {/* Assembly Line banner — current speaker, next-up, queue chips. Renders only when AL is on. */}
+        {/* Protocol panel — unified floor + consensus state (Slice 3+4).
+            Replaces AssemblyBanner per spec §11 step 3. AssemblyBanner kept
+            below temporarily for legacy sections until Slice 6 deprecates the
+            old MCP tools entirely. */}
+        <ProtocolPanel
+          projectDir={projectDir}
+          section={activeSection || "default"}
+          selfSeat={null /* this is the human's view; selfSeat = null */}
+          rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+        />
+        {/* Legacy Assembly Line banner — kept while Slice 6 deprecation is pending. */}
         <AssemblyBanner state={assemblyState} sessions={project?.sessions} />
 
         {/* Settings Panel */}

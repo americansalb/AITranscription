@@ -1,0 +1,283 @@
+// ProtocolPanel — section-pinned UI surface that replaces AssemblyBanner
+// + scattered roster status dots. Spec §1.1.
+//
+// One-way data flow (spec §4): we read from useProtocolState, dispatch via
+// its mutate(). NEVER setState locally. Refresh comes through the
+// `protocol_changed` event listener inside the hook.
+//
+// 1Hz freshness ticker re-renders SeatChip children with the current
+// `now`. Per spec §4.2: freshness is recomputed from Date.now() each tick,
+// no `x += dt` accumulation (memory: timer-accumulator-hidden-tab drift).
+
+import { useEffect, useMemo, useState } from 'react';
+import { useProtocolState } from '../../hooks/useProtocolState';
+import type { Heartbeats, Protocol } from '../../hooks/useProtocolState';
+import { SeatChip } from './SeatChip';
+import './ProtocolPanel.css';
+
+export type ProtocolPanelProps = {
+  projectDir: string | null;
+  section: string;
+  selfSeat: string | null; // "role:N" of the current viewer (null if human)
+  rosterRoles: string[]; // role slugs from project config (for vacancy detection)
+};
+
+export function ProtocolPanel({
+  projectDir,
+  section,
+  selfSeat,
+  rosterRoles,
+}: ProtocolPanelProps) {
+  const { state, heartbeats, loaded, lastError, mutate } = useProtocolState(
+    projectDir,
+    section,
+  );
+
+  // 1Hz freshness ticker. Recomputes `now` each tick — never accumulates.
+  // Hidden-tab throttling is OK because the next visible tick recomputes
+  // from Date.now() (memory entry on timer drift).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ARIA-live announcement of mic transitions. We announce when
+  // current_speaker changes — polite (not assertive) per spec §5.2.
+  const [announcement, setAnnouncement] = useState<string>('');
+  const [prevSpeaker, setPrevSpeaker] = useState<string | null>(null);
+  useEffect(() => {
+    if (!state) return;
+    const cs = state.floor.current_speaker;
+    if (cs !== prevSpeaker) {
+      if (cs) setAnnouncement(`${cs} now has the mic`);
+      else setAnnouncement('Floor cleared — first send claims');
+      setPrevSpeaker(cs);
+    }
+  }, [state, prevSpeaker]);
+
+  if (!loaded || !state) {
+    return (
+      <section
+        className="protocol-panel"
+        role="region"
+        aria-label={`Protocol panel for section ${section}`}
+      >
+        <div className="protocol-panel__skeleton">
+          {lastError ? `Protocol panel error: ${lastError}` : 'Loading protocol…'}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className="protocol-panel"
+      role="region"
+      aria-label={`Protocol panel for section ${section}`}
+    >
+      <div aria-live="polite" className="visually-hidden" style={{ position: 'absolute', clip: 'rect(0 0 0 0)', clipPath: 'inset(50%)', height: 1, overflow: 'hidden', whiteSpace: 'nowrap', width: 1 }}>
+        {announcement}
+      </div>
+
+      <PhaseRow protocol={state} />
+      <PresetRow protocol={state} />
+      <MicLine
+        protocol={state}
+        heartbeats={heartbeats}
+        selfSeat={selfSeat}
+        now={now}
+        mutate={mutate}
+      />
+      <QueueStrip queue={state.floor.queue} />
+      <Roster
+        protocol={state}
+        heartbeats={heartbeats}
+        rosterRoles={rosterRoles}
+        selfSeat={selfSeat}
+        now={now}
+        mutate={mutate}
+      />
+      <SymbolKey />
+    </section>
+  );
+}
+
+function PhaseRow({ protocol }: { protocol: Protocol }) {
+  const phases = protocol.phase_plan.phases;
+  const idx = protocol.phase_plan.current_phase_idx;
+  const total = phases.length;
+  if (total === 0) {
+    return (
+      <div className="protocol-panel__row protocol-panel__phase">
+        <span style={{ color: '#5b6478', fontStyle: 'italic' }}>
+          No phase plan — set one to track progress.
+        </span>
+      </div>
+    );
+  }
+  const pct = total > 0 ? Math.round(((idx + 1) / total) * 100) : 0;
+  return (
+    <div className="protocol-panel__row protocol-panel__phase">
+      <span>
+        <strong>Phase {idx + 1} of {total}</strong>
+      </span>
+      <div className="protocol-panel__progress" aria-label={`${pct}% complete`}>
+        <div className="protocol-panel__progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <button type="button" className="protocol-panel__pill" disabled>⏸ pause</button>
+      <button type="button" className="protocol-panel__pill" disabled>⏭ skip</button>
+      <button type="button" className="protocol-panel__pill" disabled>⏲ +15m</button>
+    </div>
+  );
+}
+
+function PresetRow({ protocol }: { protocol: Protocol }) {
+  return (
+    <div className="protocol-panel__row">
+      <span><strong>Preset:</strong> {protocol.preset}</span>
+      <span><strong>Floor:</strong> {protocol.floor.mode}</span>
+      <span><strong>Consensus:</strong> {protocol.consensus.mode}</span>
+    </div>
+  );
+}
+
+function MicLine({
+  protocol,
+  heartbeats,
+  selfSeat,
+  now,
+  mutate,
+}: {
+  protocol: Protocol;
+  heartbeats: Heartbeats;
+  selfSeat: string | null;
+  now: number;
+  mutate: (action: string, args?: object) => Promise<unknown>;
+}) {
+  const speaker = protocol.floor.current_speaker;
+  const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
+
+  if (!speaker) {
+    return (
+      <div className="protocol-panel__row protocol-panel__mic-line">
+        <span className="protocol-panel__mic-icon" aria-hidden="true">🎙</span>
+        <span style={{ color: '#5b6478', fontStyle: 'italic' }}>
+          No current speaker — first send claims the floor.
+        </span>
+      </div>
+    );
+  }
+
+  const hb = heartbeats[speaker];
+  const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
+
+  return (
+    <div className="protocol-panel__row protocol-panel__mic-line">
+      <span className="protocol-panel__mic-icon" aria-hidden="true">🎙</span>
+      <span className="protocol-panel__speaker">{speaker}</span>
+      {ageSecs !== null && (
+        <span style={{ color: '#5b6478', fontSize: '0.9rem' }}>
+          active {ageSecs}s ago
+        </span>
+      )}
+      {isSelfSpeaker && (
+        <button
+          type="button"
+          className="protocol-panel__pill"
+          onClick={() => { void mutate('yield', {}); }}
+          style={{ marginLeft: 'auto', background: '#4f46e5', color: 'white', borderColor: '#4f46e5' }}
+        >
+          Yield mic
+        </button>
+      )}
+    </div>
+  );
+}
+
+function QueueStrip({ queue }: { queue: string[] }) {
+  if (queue.length === 0) return null;
+  return (
+    <div className="protocol-panel__row">
+      <span>🙋 Queue ({queue.length}):</span>
+      <div className="protocol-panel__queue">
+        {queue.map((seat, i) => (
+          <span key={seat} className="protocol-panel__queue-item">
+            {i + 1}. {seat}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Roster({
+  protocol,
+  heartbeats,
+  rosterRoles,
+  selfSeat,
+  now,
+  mutate,
+}: {
+  protocol: Protocol;
+  heartbeats: Heartbeats;
+  rosterRoles: string[];
+  selfSeat: string | null;
+  now: number;
+  mutate: (action: string, args?: object) => Promise<unknown>;
+}) {
+  // Collect all seats — those with heartbeats AND vacant roster roles.
+  const seatLabels = useMemo(() => {
+    const labels = new Set<string>();
+    Object.keys(heartbeats).forEach((k) => labels.add(k));
+    rosterRoles.forEach((role) => {
+      if (!Array.from(labels).some((l) => l.startsWith(`${role}:`))) {
+        labels.add(`${role}:0`); // synthetic vacant seat at instance 0
+      }
+    });
+    return Array.from(labels).sort();
+  }, [heartbeats, rosterRoles]);
+
+  return (
+    <>
+      <div className="protocol-panel__section-header">Roster</div>
+      <div className="protocol-panel__row">
+        <div className="protocol-panel__roster">
+          {seatLabels.map((seat) => {
+            const hb = heartbeats[seat];
+            const isVacant = !hb;
+            const isSelf = selfSeat === seat;
+            const onClick = isSelf
+              ? () => { void mutate('toggle_queue', {}); }
+              : undefined;
+            return (
+              <SeatChip
+                key={seat}
+                seatLabel={seat}
+                protocol={protocol}
+                heartbeat={hb}
+                isVacant={isVacant}
+                isSelf={isSelf}
+                now={now}
+                onClick={onClick}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SymbolKey() {
+  return (
+    <div className="protocol-panel__symbol-key">
+      <div><b style={{ color: '#4f46e5' }}>🎙 Has the mic</b><br />Currently speaking.</div>
+      <div><b style={{ color: '#f59e0b' }}>⚠ Silent past 60s</b><br />Anyone can grab the mic.</div>
+      <div><b style={{ color: '#3b82f6' }}>✎ Composing</b><br />Drafting — don't skip.</div>
+      <div><b>● Online</b><br />Connected, idle.</div>
+      <div><b style={{ color: '#94a3b8' }}>⊘ Disconnected</b><br />Offline.</div>
+      <div><b style={{ color: '#94a3b8' }}>· Vacant</b><br />No seat joined.</div>
+    </div>
+  );
+}

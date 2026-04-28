@@ -3126,6 +3126,181 @@ fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, 
     collab::set_assembly_v0(&dir, &action, "human")
 }
 
+// ==================== Protocol v6 — Slice 3 Tauri commands ====================
+// Tauri-side counterpart to the MCP `get_protocol` / `protocol_mutate` tools
+// (Slice 2, vaak-mcp.rs). Reads/writes the same .vaak/[sections/<s>/]protocol.json
+// file. Used by useProtocolState React hook (Slice 3+4).
+//
+// Heartbeat snapshot is JOIN at read time (spec §3.1 perf rule) — joined
+// here from sessions.json. Mirrors handle_get_protocol in vaak-mcp.rs.
+
+#[tauri::command]
+fn get_protocol_cmd(dir: String, section: Option<String>) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let section_resolved = section.unwrap_or_else(|| collab::get_active_section(&dir));
+    let protocol = protocol::read_protocol_for_section(&dir, &section_resolved);
+
+    // Heartbeat snapshot from sessions.json (per spec §3.1 — heartbeat lives
+    // at runtime, not in protocol state).
+    let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+    let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+
+    let mut snapshot = serde_json::Map::new();
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+            if role.is_empty() {
+                continue;
+            }
+            let label = format!("{}:{}", role, inst);
+            let entry = serde_json::json!({
+                "last_active_at_ms": b.get("last_active_at_ms").cloned().unwrap_or(serde_json::Value::Null),
+                "last_drafting_at_ms": b.get("last_drafting_at_ms").cloned().unwrap_or(serde_json::Value::Null),
+                "last_heartbeat": b.get("last_heartbeat").cloned().unwrap_or(serde_json::Value::Null),
+                "connected": b.get("status").and_then(|s| s.as_str()).map(|s| s == "active").unwrap_or(false)
+            });
+            snapshot.insert(label, entry);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "section": section_resolved,
+        "protocol": protocol,
+        "heartbeats": snapshot
+    }))
+}
+
+/// Tauri-side mutate. Mirrors `handle_protocol_mutate` in vaak-mcp.rs but
+/// runs in the desktop binary. Both processes coordinate via OS-level
+/// board.lock — same JSON shape, same flock, no race.
+///
+/// On success, emits a `protocol_changed` window event so the useProtocolState
+/// hook re-reads (spec §4 push-then-pull rule).
+#[tauri::command]
+fn protocol_mutate_cmd(
+    window: tauri::Window,
+    dir: String,
+    action: String,
+    args: Option<serde_json::Value>,
+    rev: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let actor = "human".to_string(); // Tauri side = human-driven UI per spec §10 auth.
+    let section = collab::get_active_section(&dir);
+    let args_value = args.unwrap_or(serde_json::json!({}));
+
+    let result = do_protocol_mutate_inner(&dir, &actor, &section, &action, args_value, rev)?;
+
+    // Push event so all subscribed UIs re-read via get_protocol (spec §4.1
+    // push-events-best-effort, get_protocol authoritative).
+    let _ = window.emit("protocol_changed", serde_json::json!({
+        "section": section,
+        "rev": result.get("rev").cloned().unwrap_or(serde_json::Value::Null)
+    }));
+
+    Ok(result)
+}
+
+/// Inner of `protocol_mutate_cmd` — pure-input version that runs the same
+/// CAS gate + dispatch as vaak-mcp.rs's `do_protocol_mutate`. Mirrored by
+/// design (vaak-mcp and vaak-desktop are separate binaries with no shared
+/// crate; both serialize to the same JSON shape via OS-level board.lock).
+///
+/// For Slice 3 we ship only the floor actions exposed to the UI:
+/// `toggle_queue` / `yield`. Everything else is rejected with the
+/// MCP-equivalent error code so the UI never accidentally shadows the
+/// MCP authoritative path.
+fn do_protocol_mutate_inner(
+    pd: &str,
+    actor: &str,
+    section: &str,
+    action: &str,
+    args: serde_json::Value,
+    rev_in: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    if action == "keep_alive" {
+        return Err("[InvalidAction] keep_alive is composer-side via MCP, not a UI mutate".to_string());
+    }
+    let rev_in = rev_in.ok_or("[MissingRev] rev field is required for protocol_mutate (silent CAS bypass forbidden)")?;
+
+    let result: Result<Result<serde_json::Value, String>, String> =
+        collab::with_board_lock(pd, || {
+            let mut current = protocol::read_protocol_for_section(pd, section);
+            let current_rev = current.rev;
+            if rev_in != current_rev {
+                return Ok(Err(format!(
+                    "[StaleRev] expected rev {} (caller passed), current rev is {}",
+                    rev_in, current_rev
+                )));
+            }
+
+            // Slice 3 UI-side actions are the subset the panel needs:
+            // toggle_queue (raise/lower hand on own chip) + yield (current
+            // speaker drops mic). Everything else flows through the MCP
+            // tool path so authority lives in one place per slice.
+            let dispatch_result: Result<(), String> = match action {
+                "toggle_queue" => {
+                    let seat = args.get("seat").and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| actor.to_string());
+                    if seat != actor {
+                        Err(format!("[NotPermitted] toggle_queue is self-only; caller '{}' tried to toggle '{}'", actor, seat))
+                    } else {
+                        let already_in = current.floor.queue.iter().any(|s| s == &seat);
+                        if already_in {
+                            current.floor.queue.retain(|s| s != &seat);
+                        } else {
+                            current.floor.queue.push(seat);
+                        }
+                        Ok(())
+                    }
+                }
+                "yield" => {
+                    if current.floor.current_speaker.as_deref() != Some(actor) {
+                        Err(format!("[NotPermitted] caller '{}' is not current_speaker (current: {:?})", actor, current.floor.current_speaker))
+                    } else {
+                        let target = args.get("target").and_then(|v| v.as_str()).map(String::from);
+                        let new_speaker = match target {
+                            Some(t) => Some(t),
+                            None => current.floor.queue.first().cloned(),
+                        };
+                        if let Some(t) = &new_speaker {
+                            current.floor.queue.retain(|s| s != t);
+                        }
+                        current.floor.current_speaker = new_speaker;
+                        Ok(())
+                    }
+                }
+                other => Err(format!(
+                    "[InvalidAction] UI mutate dispatch only handles toggle_queue + yield in Slice 3; '{}' must go through MCP protocol_mutate",
+                    other
+                )),
+            };
+
+            if let Err(e) = dispatch_result {
+                return Ok(Err(e));
+            }
+
+            current.rev = current_rev + 1;
+            current.last_writer_seat = Some(actor.to_string());
+            current.last_writer_action = Some(action.to_string());
+            current.rev_at = Some(collab::iso_now());
+
+            if let Err(e) = protocol::write_protocol_for_section_unlocked(pd, section, &current) {
+                return Ok(Err(e));
+            }
+            Ok(Ok(serde_json::to_value(&current).unwrap_or(serde_json::Value::Null)))
+        });
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    }
+}
+
 #[tauri::command]
 fn set_continuous_timeout(dir: String, timeout_seconds: u32) -> Result<(), String> {
     let dir = validate_project_dir(&dir)?;
@@ -4467,6 +4642,9 @@ fn main() {
             get_discussion_state,
             get_assembly_state,
             set_assembly_state,
+            // Protocol v6 (Slice 3+4) — read + UI-side mutate
+            get_protocol_cmd,
+            protocol_mutate_cmd,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,

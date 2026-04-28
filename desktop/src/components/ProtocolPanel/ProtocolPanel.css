@@ -1,0 +1,225 @@
+/* ProtocolPanel — single section-pinned widget (spec §1.1).
+   Replaces AssemblyBanner + scattered roster status dots. */
+
+.protocol-panel {
+  background: #ffffff;
+  border: 1px solid #e3e6ec;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin: 8px 0 12px;
+  font-size: 0.93rem;
+  color: #1a1f2e;
+}
+
+.protocol-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+  border-bottom: 1px solid #eef2ff;
+}
+.protocol-panel__row:last-child { border-bottom: none; }
+
+.protocol-panel__phase {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.protocol-panel__progress {
+  flex: 1;
+  height: 8px;
+  min-width: 120px;
+  background: #e3e6ec;
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.protocol-panel__progress-fill {
+  position: absolute;
+  top: 0; left: 0; bottom: 0;
+  background: #4f46e5;
+  border-radius: 4px;
+  transition: width 0.3s ease;
+}
+
+.protocol-panel__pill {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  background: #fafbfc;
+  border: 1px solid #e3e6ec;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.protocol-panel__pill:hover { background: #eef2ff; }
+.protocol-panel__pill:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.protocol-panel__mic-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 1rem;
+}
+.protocol-panel__mic-icon { font-size: 1.2rem; }
+.protocol-panel__speaker { font-weight: 600; }
+.protocol-panel__next-up {
+  color: #5b6478;
+  font-size: 0.9rem;
+  padding-left: 32px;
+  margin-top: 4px;
+}
+
+.protocol-panel__queue {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.protocol-panel__queue-item {
+  background: #eef2ff;
+  color: #4f46e5;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 0.85rem;
+}
+
+.protocol-panel__roster {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.protocol-panel__section-header {
+  background: #eef2ff;
+  color: #4f46e5;
+  font-weight: 600;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+.protocol-panel__skeleton {
+  padding: 24px;
+  text-align: center;
+  color: #5b6478;
+  font-style: italic;
+}
+
+.protocol-panel__symbol-key {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  font-size: 0.8rem;
+  color: #5b6478;
+  padding: 10px 0;
+  border-top: 1px solid #e3e6ec;
+}
+
+/* SeatChip — six visual states. Hard cuts at threshold boundaries (no fade). */
+
+.seat-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 2px solid #e3e6ec;
+  background: #ffffff;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  width: 100%;
+}
+.seat-chip:not(:disabled) { cursor: pointer; }
+.seat-chip:not(:disabled):hover { filter: brightness(1.05); }
+.seat-chip:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+
+.seat-chip__icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #fafbfc;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.seat-chip__col {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+.seat-chip__label { font-weight: 600; font-size: 0.92rem; }
+.seat-chip__state { color: #5b6478; font-size: 0.82rem; }
+
+/* State 1: holding — has the mic. Gentle pulse. */
+.seat-chip--holding {
+  border-color: #4f46e5;
+  background: #eef2ff;
+  animation: seat-chip-speaker-pulse 2.4s ease-in-out infinite;
+}
+.seat-chip--holding .seat-chip__icon { background: #4f46e5; color: white; }
+@keyframes seat-chip-speaker-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79,70,229,0.0); }
+  50%      { box-shadow: 0 0 0 4px rgba(79,70,229,0.18); }
+}
+
+/* State 2: stuck — silent past threshold; amber. */
+.seat-chip--stuck {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+.seat-chip--stuck .seat-chip__icon { background: #f59e0b; color: white; }
+
+/* State 3: drafting — blue dashed. */
+.seat-chip--drafting {
+  border-color: #3b82f6;
+  border-style: dashed;
+  background: #eff6ff;
+}
+.seat-chip--drafting .seat-chip__icon { background: #3b82f6; color: white; }
+
+/* State 5: disconnected — faded, gray. */
+.seat-chip--disconnected {
+  opacity: 0.45;
+  border-style: dashed;
+  border-color: #94a3b8;
+}
+.seat-chip--disconnected .seat-chip__icon { background: #94a3b8; color: white; }
+
+/* State 6: vacant — minimal. */
+.seat-chip--vacant {
+  opacity: 0.4;
+  background: transparent;
+  border-style: dashed;
+}
+.seat-chip--vacant .seat-chip__icon {
+  background: transparent;
+  color: #94a3b8;
+  border: 1px dashed #94a3b8;
+}
+
+/* In-queue: gold accent on icon */
+.seat-chip--queued .seat-chip__icon {
+  background: #4f46e5;
+  color: white;
+}
+
+/* Reduced-motion: kill pulse animations (spec §4.2). */
+@media (prefers-reduced-motion: reduce) {
+  .seat-chip--holding { animation: none; }
+}
