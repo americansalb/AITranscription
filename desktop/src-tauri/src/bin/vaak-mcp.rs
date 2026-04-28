@@ -2613,9 +2613,14 @@ fn protocol_fresh_value() -> serde_json::Value {
 }
 
 /// Read protocol.json for a section. Plain fs::read — caller may hold
-/// board.lock or not. Missing file or parse error → fresh defaults
-/// (vaak-mcp sees post-Slice-1 state; the migrate-from-legacy path is
-/// the desktop crate's responsibility, not this binary's).
+/// board.lock or not. Missing file or parse error → fresh defaults.
+///
+/// **NOT migration-aware** — see `protocol_legacy_files_exist` /
+/// `vaak_mcp_migrate_legacy_unlocked` for the pre-migrate hook used by the
+/// mutate path (evil-arch #939 concern 1: vaak-mcp must not write fresh
+/// defaults on top of un-migrated legacy state, leaving legacy dangling
+/// forever). For pure reads (get_protocol), missing-file → fresh is fine —
+/// no disk write happens.
 fn read_protocol_for_section_value(project_dir: &str, section: &str) -> serde_json::Value {
     let path = protocol_path_for_section(project_dir, section);
     match std::fs::read_to_string(&path) {
@@ -2629,6 +2634,145 @@ fn read_protocol_for_section_value(project_dir: &str, section: &str) -> serde_js
                 protocol_fresh_value()
             }),
         Err(_) => protocol_fresh_value(),
+    }
+}
+
+fn legacy_assembly_path_for_section(project_dir: &str, section: &str) -> PathBuf {
+    if section == "default" {
+        Path::new(project_dir).join(".vaak").join("assembly.json")
+    } else {
+        Path::new(project_dir).join(".vaak").join("sections").join(section).join("assembly.json")
+    }
+}
+
+fn legacy_discussion_path_for_section(project_dir: &str, section: &str) -> PathBuf {
+    if section == "default" {
+        Path::new(project_dir).join(".vaak").join("discussion.json")
+    } else {
+        Path::new(project_dir).join(".vaak").join("sections").join(section).join("discussion.json")
+    }
+}
+
+fn legacy_archive_dir(project_dir: &str, section: &str) -> PathBuf {
+    Path::new(project_dir).join(".vaak").join("legacy").join(section)
+}
+
+fn protocol_legacy_files_exist(project_dir: &str, section: &str) -> bool {
+    legacy_assembly_path_for_section(project_dir, section).exists()
+        || legacy_discussion_path_for_section(project_dir, section).exists()
+}
+
+/// In-process legacy → protocol synthesis (mirror of desktop crate's
+/// `synthesize_from_legacy_for_section` — kept in sync with that file's
+/// migration semantics). Caller MUST hold board.lock and MUST write
+/// protocol.json BEFORE calling `archive_legacy_in_process` (dev-chall
+/// #930 ordering rule).
+fn synthesize_protocol_from_legacy(project_dir: &str, section: &str) -> (serde_json::Value, bool) {
+    let mut p = protocol_fresh_value();
+    let mut migrated_anything = false;
+
+    let legacy_assembly = legacy_assembly_path_for_section(project_dir, section);
+    let legacy_discussion = legacy_discussion_path_for_section(project_dir, section);
+
+    if let Ok(content) = std::fs::read_to_string(&legacy_assembly) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
+            if active {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("preset".to_string(), serde_json::json!("Assembly Line"));
+                }
+                if let Some(floor) = p.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                    floor.insert("mode".to_string(), serde_json::json!("round-robin"));
+                    if let Some(cs) = v.get("current_speaker").and_then(|s| s.as_str()) {
+                        floor.insert("current_speaker".to_string(), serde_json::json!(cs));
+                    }
+                    if let Some(arr) = v.get("rotation_order").and_then(|r| r.as_array()) {
+                        floor.insert("rotation_order".to_string(), serde_json::Value::Array(arr.clone()));
+                    }
+                    if let Some(sa) = v.get("started_at").and_then(|s| s.as_str()) {
+                        floor.insert("started_at".to_string(), serde_json::json!(sa));
+                    }
+                }
+            } else {
+                if let Some(obj) = p.as_object_mut() {
+                    obj.insert("preset".to_string(), serde_json::json!("Default chat"));
+                }
+                if let Some(floor) = p.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                    floor.insert("mode".to_string(), serde_json::json!("none"));
+                }
+            }
+            migrated_anything = true;
+        }
+    }
+
+    if let Ok(content) = std::fs::read_to_string(&legacy_discussion) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+            if !mode.is_empty() {
+                if let Some(cons) = p.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+                    cons.insert("mode".to_string(), serde_json::json!("tally"));
+                    if let Some(round) = v.get("round").or_else(|| v.get("current_round")) {
+                        let topic = round.get("topic").and_then(|t| t.as_str())
+                            .or_else(|| v.get("topic").and_then(|t| t.as_str()));
+                        let opened_at = round.get("opened_at").and_then(|t| t.as_str());
+                        let opened_by = v.get("moderator").and_then(|t| t.as_str());
+                        cons.insert("round".to_string(), serde_json::json!({
+                            "topic": topic, "opened_at": opened_at, "opened_by": opened_by
+                        }));
+                    }
+                    if let Some(phase) = v.get("phase").and_then(|s| s.as_str()) {
+                        cons.insert("phase".to_string(), serde_json::json!(phase));
+                    }
+                    if let Some(arr) = v.get("submissions").and_then(|s| s.as_array()) {
+                        cons.insert("submissions".to_string(), serde_json::Value::Array(arr.clone()));
+                    }
+                }
+            }
+            migrated_anything = true;
+        }
+    }
+
+    if migrated_anything {
+        if let Some(obj) = p.as_object_mut() {
+            obj.insert("last_writer_seat".to_string(), serde_json::json!("system:migrate"));
+            obj.insert("last_writer_action".to_string(), serde_json::json!("migrate_from_legacy"));
+            obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+        }
+    }
+
+    (p, migrated_anything)
+}
+
+/// Move legacy files to .vaak/legacy/<section>/. Caller MUST have already
+/// written protocol.json and MUST hold board.lock. Errors are logged
+/// (tech-leader #931 D — surface or log).
+fn archive_legacy_in_process(project_dir: &str, section: &str) {
+    let archive_dir = legacy_archive_dir(project_dir, section);
+    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+        eprintln!(
+            "[protocol_mcp] archive_legacy: create_dir_all({}) failed: {}",
+            archive_dir.display(), e
+        );
+        return;
+    }
+    for src in [
+        legacy_assembly_path_for_section(project_dir, section),
+        legacy_discussion_path_for_section(project_dir, section),
+    ] {
+        if src.exists() {
+            let file_name = match src.file_name() {
+                Some(n) => n.to_owned(),
+                None => continue,
+            };
+            let dest = archive_dir.join(file_name);
+            if let Err(e) = std::fs::rename(&src, &dest) {
+                eprintln!(
+                    "[protocol_mcp] archive_legacy: rename({} -> {}) failed: {} \
+                     (protocol.json already written; legacy file remains for retry)",
+                    src.display(), dest.display(), e
+                );
+            }
+        }
     }
 }
 
@@ -2782,12 +2926,35 @@ fn handle_protocol_mutate(
 
     let result: Result<Result<serde_json::Value, String>, String> =
         with_file_lock(&pd, || {
+            // Pre-migration check (evil-arch #939 concern 1): if protocol.json
+            // is missing AND legacy files exist, vaak-mcp must NOT write fresh
+            // defaults — that would leave legacy dangling on disk forever.
+            // Synthesize from legacy under our lock, write protocol.json FIRST
+            // (dev-chall #930 ordering), then archive legacy. Mirrors the
+            // desktop crate's `read_protocol_for_section` migration path.
+            let path = protocol_path_for_section(&pd, &section);
+            if !path.exists() && protocol_legacy_files_exist(&pd, &section) {
+                let (synth, did_migrate) = synthesize_protocol_from_legacy(&pd, &section);
+                if let Err(e) = write_protocol_for_section_value(&pd, &section, &synth) {
+                    return Ok(Err(format!(
+                        "[InternalError] pre-migration synth write failed: {}",
+                        e
+                    )));
+                }
+                if did_migrate {
+                    archive_legacy_in_process(&pd, &section);
+                }
+                // Migration produced rev=0; if caller passed rev=0 they can
+                // proceed against the synthesized state. Otherwise it's a
+                // stale-rev error (caller's expectation didn't match).
+            }
+
             let mut current = read_protocol_for_section_value(&pd, &section);
             let current_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
             if rev_in != current_rev {
                 return Ok(Err(format!(
-                    "[StaleRev] expected rev {}, current rev {} (caller passed {})",
-                    current_rev, current_rev, rev_in
+                    "[StaleRev] expected rev {} (caller passed), current rev is {}",
+                    rev_in, current_rev
                 )));
             }
 
@@ -3054,7 +3221,17 @@ fn apply_keep_alive(project_dir: &str, actor: &str) -> Result<serde_json::Value,
                 }
             }
             if updated {
-                let _ = write_sessions(project_dir, &sessions);
+                // Surface write errors loudly (evil-arch #939 concern 3 —
+                // tech-leader #931 D forbids silent `let _ =` on disk ops in
+                // new code). keep_alive failure is non-fatal (caller can
+                // retry on next keystroke), but visibility is required.
+                if let Err(e) = write_sessions(project_dir, &sessions) {
+                    eprintln!(
+                        "[protocol_mcp] apply_keep_alive: write_sessions failed for {}: {}",
+                        actor, e
+                    );
+                    return Ok(Err(format!("[InternalError] keep_alive write_sessions failed: {}", e)));
+                }
             }
             Ok(Ok(serde_json::json!({
                 "ok": true,
@@ -3917,11 +4094,21 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         serde_json::json!(utc_now_iso()),
                     );
                 }
-                let _ = write_protocol_for_section_value(
+                // Surface write errors loudly (evil-arch #939 concern 2).
+                // Message has already appended in this same lock window —
+                // if the protocol write fails, the audit trail diverges
+                // from the message commit. Logging surfaces it; rolling back
+                // an append-only board.jsonl is not safe.
+                if let Err(e) = write_protocol_for_section_value(
                     &state.project_dir,
                     &section,
                     &current,
-                );
+                ) {
+                    eprintln!(
+                        "[protocol_mcp][SEVERE] project_send mic_to atomic transfer write failed AFTER message append: {}. Section: {}. Target: {}. Audit drift — message landed but floor did not move. Manual reconcile required.",
+                        e, section, target
+                    );
+                }
             }
         }
 
