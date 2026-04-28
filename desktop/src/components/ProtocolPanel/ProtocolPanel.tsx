@@ -21,15 +21,20 @@ export type ProtocolPanelProps = {
   projectDir: string | null;
   section: string;
   selfSeat: string | null; // "role:N" of the current viewer (null if human)
-  rosterRoles: string[]; // role slugs from project config (for vacancy detection)
+  rosterRoles: string[]; // role slugs from project config (legacy — CollabTab owns roster post-#1100)
+  defaultExpanded?: boolean; // human #1100: panel collapsed by default; tests + power users may force-expand
 };
 
 export function ProtocolPanel({
   projectDir,
   section,
   selfSeat,
-  rosterRoles,
+  rosterRoles: _rosterRoles,
+  defaultExpanded = false,
 }: ProtocolPanelProps) {
+  // _rosterRoles is intentionally unused after the human #1100 collapse —
+  // CollabTab owns the roster surface; ProtocolPanel surfaces only mic +
+  // phase + queue (collapsed by default unless `defaultExpanded` set).
   const { state, heartbeats, loaded, lastError, mutate } = useProtocolState(
     projectDir,
     section,
@@ -46,6 +51,10 @@ export function ProtocolPanel({
 
   // Slice 9: phase plan editor modal toggle.
   const [editorOpen, setEditorOpen] = useState(false);
+
+  // Human #1100: panel was 80% of screen — collapsed-by-default. User
+  // expands via the chevron to see queue/floor mode/health detail.
+  const [expanded, setExpanded] = useState(defaultExpanded);
 
   // ARIA-live announcement of mic transitions. We announce when
   // current_speaker changes — polite (not assertive) per spec §5.2.
@@ -85,12 +94,35 @@ export function ProtocolPanel({
         {announcement}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <PhaseRow protocol={state} mutate={mutate} onEdit={() => setEditorOpen(true)} />
-        </div>
+      {/* Compact header (always visible): chevron + mic line + health pill. */}
+      <div className="protocol-panel__row" style={{ alignItems: 'center', padding: '6px 0' }}>
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+          title="Toggle protocol detail"
+          style={{ background: 'transparent', border: 'none', padding: '0 6px', cursor: 'pointer' }}
+        >
+          {expanded ? '▼' : '▶'}
+        </button>
+        <CompactMicLine
+          protocol={state}
+          heartbeats={heartbeats}
+          selfSeat={selfSeat}
+          now={now}
+          mutate={mutate}
+        />
         <HealthPill projectDir={projectDir} />
       </div>
+      {/* Expandable detail. Roster + SymbolKey REMOVED per human #1100 —
+          CollabTab already renders the roster cards with full context. */}
+      {expanded && (
+        <>
+          <PhaseRow protocol={state} mutate={mutate} onEdit={() => setEditorOpen(true)} />
+          <ConsensusRow protocol={state} mutate={mutate} />
+          <QueueStrip queue={state.floor.queue} />
+        </>
+      )}
       {editorOpen && (
         <PhasePlanEditor
           protocol={state}
@@ -98,25 +130,6 @@ export function ProtocolPanel({
           onClose={() => setEditorOpen(false)}
         />
       )}
-      <PresetRow protocol={state} />
-      <ConsensusRow protocol={state} mutate={mutate} />
-      <MicLine
-        protocol={state}
-        heartbeats={heartbeats}
-        selfSeat={selfSeat}
-        now={now}
-        mutate={mutate}
-      />
-      <QueueStrip queue={state.floor.queue} />
-      <Roster
-        protocol={state}
-        heartbeats={heartbeats}
-        rosterRoles={rosterRoles}
-        selfSeat={selfSeat}
-        now={now}
-        mutate={mutate}
-      />
-      <SymbolKey />
     </section>
   );
 }
@@ -203,6 +216,7 @@ function PhaseRow({
   );
 }
 
+// @ts-expect-error TS6133: retained for follow-on detail-view enrichment
 function PresetRow({ protocol }: { protocol: Protocol }) {
   return (
     <div className="protocol-panel__row">
@@ -260,6 +274,52 @@ function ConsensusRow({
   );
 }
 
+/// CompactMicLine — single-line replacement for MicLine + PresetRow.
+/// Designed for the always-visible header row (human #1100: panel was
+/// 80% of screen). Shows just: 🎙 [speaker] · [preset] · Yield/[empty].
+function CompactMicLine({
+  protocol,
+  heartbeats,
+  selfSeat,
+  now,
+  mutate,
+}: {
+  protocol: Protocol;
+  heartbeats: Heartbeats;
+  selfSeat: string | null;
+  now: number;
+  mutate: (action: string, args?: object) => Promise<unknown>;
+}) {
+  const speaker = protocol.floor.current_speaker;
+  const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
+  const hb = speaker ? heartbeats[speaker] : undefined;
+  const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, fontSize: '0.9rem' }}>
+      <span aria-hidden="true">🎙</span>
+      <span style={{ fontWeight: 600 }}>
+        {speaker || <span style={{ fontStyle: 'italic', color: '#5b6478' }}>idle</span>}
+      </span>
+      {ageSecs !== null && (
+        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>{ageSecs}s</span>
+      )}
+      <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
+        · {protocol.preset}
+      </span>
+      {isSelfSpeaker && (
+        <button
+          type="button"
+          onClick={() => { void mutate('yield', {}); }}
+          style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 6, background: '#4f46e5', color: 'white', border: 'none', fontSize: '0.78rem' }}
+        >
+          Yield
+        </button>
+      )}
+    </div>
+  );
+}
+
+// @ts-expect-error TS6133: replaced by CompactMicLine; retained for detail view
 function MicLine({
   protocol,
   heartbeats,
@@ -329,6 +389,7 @@ function QueueStrip({ queue }: { queue: string[] }) {
   );
 }
 
+// @ts-expect-error TS6133: REMOVED per human #1100 — CollabTab owns the roster
 function Roster({
   protocol,
   heartbeats,
@@ -387,6 +448,7 @@ function Roster({
   );
 }
 
+// @ts-expect-error TS6133: REMOVED per human #1100 — legend belongs near the roster, not in panel
 function SymbolKey() {
   return (
     <div className="protocol-panel__symbol-key">

@@ -55,7 +55,7 @@ beforeEach(() => {
 describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
   it('renders Phase 1 of 2 with progress bar', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({}));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => {
       expect(screen.getByText(/Phase 1 of 2/)).toBeInTheDocument();
     });
@@ -63,7 +63,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
 
   it('pause button shows "pause" when paused_at is null', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({ paused_at: null }));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /pause/i })).toBeInTheDocument();
     });
@@ -73,7 +73,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(
       fixtureWith({ paused_at: '2026-04-28T20:00:00Z' }),
     );
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument();
       expect(screen.getByText(/paused/i)).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
 
   it('clicking pause invokes protocol_mutate_cmd with action=pause_plan', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({}));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => screen.getByRole('button', { name: /pause/i }));
     fireEvent.click(screen.getByRole('button', { name: /pause/i }));
     await waitFor(() => {
@@ -96,7 +96,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
 
   it('clicking skip invokes protocol_mutate_cmd with action=advance_phase', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({}));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => screen.getByRole('button', { name: /skip/i }));
     fireEvent.click(screen.getByRole('button', { name: /skip/i }));
     await waitFor(() => {
@@ -110,7 +110,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
 
   it('clicking +15m invokes protocol_mutate_cmd with action=extend_phase, args.secs=900', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({}));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => screen.getByRole('button', { name: /\+15m/i }));
     fireEvent.click(screen.getByRole('button', { name: /\+15m/i }));
     await waitFor(() => {
@@ -124,7 +124,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
 
   it('renders complete pill + disabled buttons when current_phase_idx >= phases.length', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(fixtureWith({ current_phase_idx: 2 }));
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => {
       expect(screen.getByText(/complete/i)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /pause/i })).toBeDisabled();
@@ -137,7 +137,7 @@ describe('PhaseRow — Slice 9 Gap B (R6 phase controls)', () => {
     (invoke as ReturnType<typeof vi.fn>).mockResolvedValue(
       fixtureWith({ phases: [], current_phase_idx: 0 }),
     );
-    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} />);
+    render(<ProtocolPanel projectDir="/x" section="default" selfSeat={null} rosterRoles={[]} defaultExpanded={true} />);
     await waitFor(() => {
       expect(screen.getByText(/No phase plan/i)).toBeInTheDocument();
     });

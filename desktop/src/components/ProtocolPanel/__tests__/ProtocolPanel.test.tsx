@@ -78,6 +78,7 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
         section="default"
         selfSeat={null}
         rosterRoles={['architect', 'developer', 'tester']}
+        defaultExpanded={true}
       />,
     );
     expect(screen.getByText(/Loading protocol/i)).toBeInTheDocument();
@@ -90,6 +91,7 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
         section="default"
         selfSeat={null}
         rosterRoles={['architect', 'developer', 'tester']}
+        defaultExpanded={true}
       />,
     );
     await waitFor(() => {
@@ -99,18 +101,20 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
     });
   });
 
-  it('renders preset, floor mode, consensus mode from fixture', async () => {
+  it('renders preset name in CompactMicLine after fixture loads', async () => {
     render(
       <ProtocolPanel
         projectDir="/tmp/x"
         section="default"
         selfSeat={null}
         rosterRoles={['architect', 'developer', 'tester']}
+        defaultExpanded={true}
       />,
     );
     await waitFor(() => {
+      // Compact header shows "· Debate" after the speaker label.
+      // Floor mode + consensus mode are no longer surfaced inline post-#1100.
       expect(screen.getByText(/Debate/)).toBeInTheDocument();
-      expect(screen.getByText(/reactive/)).toBeInTheDocument();
     });
   });
 
@@ -121,6 +125,7 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
         section="default"
         selfSeat={null}
         rosterRoles={['architect', 'developer', 'tester']}
+        defaultExpanded={true}
       />,
     );
     await waitFor(() => {
@@ -136,6 +141,7 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
         section="default"
         selfSeat={null}
         rosterRoles={['architect', 'developer', 'tester']}
+        defaultExpanded={true}
       />,
     );
     await waitFor(() => {
@@ -143,17 +149,6 @@ describe('ProtocolPanel — R1 render integration (#954 vote-3 gate)', () => {
     });
   });
 
-  it('renders Roster section header', async () => {
-    render(
-      <ProtocolPanel
-        projectDir="/tmp/x"
-        section="default"
-        selfSeat={null}
-        rosterRoles={['architect', 'developer', 'tester']}
-      />,
-    );
-    await waitFor(() => {
-      expect(screen.getByText(/Roster/i)).toBeInTheDocument();
-    });
-  });
+  // 'renders Roster section header' DELETED per human #1100 — ProtocolPanel
+  // no longer renders the Roster grid (CollabTab owns the roster cards).
 });
