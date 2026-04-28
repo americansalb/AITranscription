@@ -3,10 +3,10 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
-// AssemblyBanner replaced by ProtocolPanel per al-architecture-diagram.md §11 step 3.
-// Old import retained for now while we transition; will be deleted in
-// follow-on cleanup commit once Slice 4 composer mic_to lands.
-import { AssemblyBanner } from "./AssemblyBanner";
+// AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
+// R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
+// section-pinned widget. Legacy `assembly_line` MCP tool still alive
+// (Slice 6 owns that decom) but the UI surface is unified.
 import { ProtocolPanel } from "./ProtocolPanel";
 import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
@@ -2645,17 +2645,14 @@ When multiple instances of this role are active:
         </div>
 
         {/* Protocol panel — unified floor + consensus state (Slice 3+4).
-            Replaces AssemblyBanner per spec §11 step 3. AssemblyBanner kept
-            below temporarily for legacy sections until Slice 6 deprecates the
-            old MCP tools entirely. */}
+            Replaces AssemblyBanner per spec §11 step 3 — banner deletion
+            cleared #954 vote-3 gate (R1 6/6 + R2 9/9 + R5 18/18 tests pass). */}
         <ProtocolPanel
           projectDir={projectDir}
           section={activeSection || "default"}
           selfSeat={null /* this is the human's view; selfSeat = null */}
           rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
         />
-        {/* Legacy Assembly Line banner — kept while Slice 6 deprecation is pending. */}
-        <AssemblyBanner state={assemblyState} sessions={project?.sessions} />
 
         {/* Settings Panel */}
         {settingsOpen && (

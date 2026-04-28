@@ -3196,11 +3196,16 @@ fn protocol_mutate_cmd(
     let result = do_protocol_mutate_inner(&dir, &actor, &section, &action, args_value, rev)?;
 
     // Push event so all subscribed UIs re-read via get_protocol (spec §4.1
-    // push-events-best-effort, get_protocol authoritative).
-    let _ = window.emit("protocol_changed", serde_json::json!({
+    // push-events-best-effort, get_protocol authoritative). Failure to emit
+    // is non-fatal — the hook's StaleRev recovery (useProtocolState.ts) will
+    // re-fetch on the next stale collision. Surface via eprintln per
+    // tech-leader #959 nit (no silent `let _ =` on side-effect calls in new code).
+    if let Err(e) = window.emit("protocol_changed", serde_json::json!({
         "section": section,
         "rev": result.get("rev").cloned().unwrap_or(serde_json::Value::Null)
-    }));
+    })) {
+        eprintln!("[protocol] window.emit(protocol_changed) failed: {} — push best-effort, hook StaleRev recovery covers", e);
+    }
 
     Ok(result)
 }
