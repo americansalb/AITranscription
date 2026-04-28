@@ -1988,9 +1988,74 @@ fn handle_audience_history(topic: &str, pool: Option<&str>) -> Result<serde_json
 }
 
 fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&str>, participants: Option<Vec<String>>, teams: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    // Slice 6 deprecation warning + thin-wrap split (per #993/#994/#995/#996
+    // SHIP vote). discussion_control's many sub-actions are NOT all
+    // mechanically translatable to protocol_mutate — Oxford team
+    // assignment, Delphi gate, etc. live outside the consensus model.
+    // For Slice 6 closer, we mirror the start_discussion(continuous) +
+    // close_round flows into protocol.json so the §10 single-source-of-
+    // truth invariant holds for the common case. Other actions (Oxford
+    // set_teams, Delphi state machine) keep their legacy paths until the
+    // post-release-tail decom round.
+    eprintln!(
+        "[deprecated] discussion_control MCP tool ('{}') — migrate continuous-review callers to protocol_mutate(open_round/submit/close_round). Oxford/Delphi flows pending Slice 7 wider mapping.",
+        action
+    );
+
     let state = get_or_rejoin_state()?;
 
     let my_label = format!("{}:{}", state.role, state.instance);
+
+    // Slice 6 thin-wrap: mirror start_discussion(continuous) + close_round
+    // into protocol.json BEFORE the legacy path runs. Two-write envelope
+    // matches assembly_line: protocol_mutate first (best-effort), legacy
+    // path always runs (compat). On race / failure, log and continue.
+    if action == "start_discussion" && mode == Some("continuous") {
+        if let Some(topic_str) = topic {
+            let pd_for_mirror = state.project_dir.clone();
+            let actor_for_mirror = my_label.clone();
+            let section = get_active_section(&pd_for_mirror);
+            let cur_proto = read_protocol_for_section_value(&pd_for_mirror, &section);
+            let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Mirror: open_round on protocol.json so UI reading
+            // get_protocol sees the consensus state.
+            if let Err(e) = do_protocol_mutate(
+                &pd_for_mirror,
+                &actor_for_mirror,
+                &section,
+                "open_round",
+                serde_json::json!({"topic": topic_str, "mode": "tally"}),
+                Some(cur_rev),
+            ) {
+                eprintln!("[deprecated] discussion_control(start, continuous) mirror to open_round failed: {} — legacy discussion.json write proceeds", e);
+            }
+        }
+    }
+    if action == "close_round" {
+        let pd_for_mirror = state.project_dir.clone();
+        let actor_for_mirror = my_label.clone();
+        let section = get_active_section(&pd_for_mirror);
+        let cur_proto = read_protocol_for_section_value(&pd_for_mirror, &section);
+        let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Only mirror if a round is actually open in protocol.json
+        // (avoid the [InvalidArgs] error that close_round on no-round throws).
+        let phase = cur_proto.get("consensus")
+            .and_then(|c| c.get("phase"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if phase == "submitting" || phase == "reviewing" {
+            if let Err(e) = do_protocol_mutate(
+                &pd_for_mirror,
+                &actor_for_mirror,
+                &section,
+                "close_round",
+                serde_json::json!({}),
+                Some(cur_rev),
+            ) {
+                eprintln!("[deprecated] discussion_control(close_round) mirror to protocol.json failed: {} — legacy path proceeds", e);
+            }
+        }
+    }
 
     match action {
         "start_discussion" => {
