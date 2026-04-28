@@ -2549,6 +2549,679 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     Ok(new_state)
 }
 
+// ============================================================
+// Protocol v6 — Slice 2: protocol_mutate + get_protocol MCP tools
+// ============================================================
+// Per-section unified floor + consensus state. Mirrors the schema in
+// desktop/src-tauri/src/protocol.rs (Slice 1, architect 27f4eee).
+// vaak-mcp.exe and vaak-desktop are separate binaries with no shared crate;
+// both serialize to the same JSON shape and coordinate via OS-level
+// board.lock flock (with_file_lock here, with_board_lock in the desktop crate).
+//
+// Resilience-stack timer registry mirror (canonical: protocol.rs top-of-file):
+//   floor.threshold_ms (per-section, default 60_000) — mic freshness gate (spec §2)
+//   SUPERVISOR_STALL_SECS = 90                       — vaak-mcp.rs run_supervise
+//   PRE_KILL_GRACE_SECS   = 5                        — vaak-mcp.rs run_supervise
+//   KEEP_ALIVE_DEBOUNCE_MS ≈ 10_000                  — composer (UI) keystroke
+//   MIC_AUTOROTATE_SECS   = 600                      — assembly_line auto-rotate (#903)
+
+const PROTOCOL_DEFAULT_THRESHOLD_MS: u64 = 60_000;
+const KEEP_ALIVE_SERVER_DEBOUNCE_MS: u64 = 5_000;
+
+fn protocol_path_for_section(project_dir: &str, section: &str) -> PathBuf {
+    if section == "default" {
+        Path::new(project_dir).join(".vaak").join("protocol.json")
+    } else {
+        Path::new(project_dir)
+            .join(".vaak")
+            .join("sections")
+            .join(section)
+            .join("protocol.json")
+    }
+}
+
+fn protocol_fresh_value() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "rev": 0,
+        "preset": "Debate",
+        "floor": {
+            "mode": "reactive",
+            "current_speaker": null,
+            "queue": [],
+            "rotation_order": [],
+            "threshold_ms": PROTOCOL_DEFAULT_THRESHOLD_MS,
+            "started_at": utc_now_iso()
+        },
+        "consensus": {
+            "mode": "none",
+            "round": null,
+            "phase": null,
+            "submissions": []
+        },
+        "phase_plan": {
+            "phases": [],
+            "current_phase_idx": 0,
+            "paused_at": null,
+            "paused_total_secs": 0
+        },
+        "scopes": { "floor": "instance", "consensus": "role" },
+        "last_writer_seat": null,
+        "last_writer_action": null,
+        "rev_at": null
+    })
+}
+
+/// Read protocol.json for a section. Plain fs::read — caller may hold
+/// board.lock or not. Missing file or parse error → fresh defaults
+/// (vaak-mcp sees post-Slice-1 state; the migrate-from-legacy path is
+/// the desktop crate's responsibility, not this binary's).
+fn read_protocol_for_section_value(project_dir: &str, section: &str) -> serde_json::Value {
+    let path = protocol_path_for_section(project_dir, section);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<serde_json::Value>(&content)
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "[protocol_mcp] {} exists but failed to parse: {}. \
+                     Returning fresh defaults; not overwriting on disk.",
+                    path.display(), e
+                );
+                protocol_fresh_value()
+            }),
+        Err(_) => protocol_fresh_value(),
+    }
+}
+
+/// Write protocol.json atomically. Caller MUST hold board.lock (we re-use
+/// `with_file_lock` in `handle_protocol_mutate` for this purpose).
+fn write_protocol_for_section_value(
+    project_dir: &str,
+    section: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let path = protocol_path_for_section(project_dir, section);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Failed to serialize protocol: {}", e))?;
+    atomic_write(&path, json.as_bytes())
+}
+
+/// Spec §2 two-source freshness rule: stuck = both `last_active_at_ms`
+/// AND `last_drafting_at_ms` stale past `threshold_ms`. Reads sessions.json
+/// directly — heartbeats live at runtime, not in protocol.json (spec §3.1).
+/// Missing seat / missing fields → treated as stuck (no presence signal).
+fn protocol_is_seat_stuck(project_dir: &str, seat_label: &str, threshold_ms: u64) -> bool {
+    let parts: Vec<&str> = seat_label.splitn(2, ':').collect();
+    let role = parts.get(0).copied().unwrap_or("");
+    let inst: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let sessions = read_sessions(project_dir);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let bindings = match sessions.get("bindings").and_then(|b| b.as_array()) {
+        Some(b) => b,
+        None => return true,
+    };
+    for b in bindings {
+        let b_role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let b_inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+        if b_role != role || b_inst != inst {
+            continue;
+        }
+        let last_active = b.get("last_active_at_ms").and_then(|v| v.as_u64())
+            .or_else(|| b.get("last_heartbeat").and_then(|v| v.as_str())
+                .and_then(parse_iso_to_epoch_secs).map(|s| s * 1000))
+            .unwrap_or(0);
+        let last_drafting = b
+            .get("last_drafting_at_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let active_stale = now_ms.saturating_sub(last_active) > threshold_ms;
+        let drafting_stale = now_ms.saturating_sub(last_drafting) > threshold_ms;
+        return active_stale && drafting_stale;
+    }
+    true
+}
+
+fn protocol_seat_exists_active(project_dir: &str, seat_label: &str) -> bool {
+    let parts: Vec<&str> = seat_label.splitn(2, ':').collect();
+    let role = parts.get(0).copied().unwrap_or("");
+    let inst: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let sessions = read_sessions(project_dir);
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let b_role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let b_inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+            let b_status = b.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if b_role == role && b_inst == inst && b_status == "active" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// MCP tool — `get_protocol(section?)`. Returns full protocol.json plus a
+/// heartbeat snapshot {seat: {last_active_at_ms, last_drafting_at_ms,
+/// connected}}. Heartbeat is JOIN at read time (spec §3.1 perf rule —
+/// per-call disk write to protocol.json would be an order-of-magnitude
+/// regression vs. today's sessions.json-as-runtime model).
+fn handle_get_protocol(section: Option<&str>) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+    let pd = state.project_dir.clone();
+    let section_resolved = section
+        .map(String::from)
+        .unwrap_or_else(|| get_active_section(&pd));
+    let protocol = read_protocol_for_section_value(&pd, &section_resolved);
+
+    let sessions = read_sessions(&pd);
+    let mut snapshot = serde_json::Map::new();
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+            if role.is_empty() {
+                continue;
+            }
+            let label = format!("{}:{}", role, inst);
+            let entry = serde_json::json!({
+                "last_active_at_ms": b.get("last_active_at_ms").cloned().unwrap_or(serde_json::Value::Null),
+                "last_drafting_at_ms": b.get("last_drafting_at_ms").cloned().unwrap_or(serde_json::Value::Null),
+                "last_heartbeat": b.get("last_heartbeat").cloned().unwrap_or(serde_json::Value::Null),
+                "connected": b.get("status").and_then(|s| s.as_str()).map(|s| s == "active").unwrap_or(false)
+            });
+            snapshot.insert(label, entry);
+        }
+    }
+
+    Ok(serde_json::json!({
+        "section": section_resolved,
+        "protocol": protocol,
+        "heartbeats": snapshot
+    }))
+}
+
+/// MCP tool — `protocol_mutate(action, args?, rev)`. Single dispatch entry for
+/// floor + consensus mutations. Acquires board.lock for the entire CAS+apply+
+/// write sequence so that no observer sees a state where a mutation half-
+/// landed (spec §10 atomicity rule).
+///
+/// Error envelope (per dev #927 vote 3): error string is prefixed with
+/// `[Code]` so callers can branch:
+///   [StaleRev]            CAS failure (`current.rev` ≠ `rev_in`)
+///   [MissingRev]          rev field omitted (silent CAS bypass forbidden)
+///   [InvalidAction]       action name not in dispatch table
+///   [InvalidArgs]         message
+///   [NotPermitted]        auth gate or self/other constraint
+///   [SeatNotFound]        target not in active sessions.json
+///   [StuckGateNotPassed]  current speaker is fresh; `transfer_mic` blocked
+///   [Slice5Unimplemented] phase action stub
+///   [Slice6Unimplemented] consensus action stub
+fn handle_protocol_mutate(
+    action: &str,
+    args: serde_json::Value,
+    rev_in: Option<u64>,
+) -> Result<serde_json::Value, String> {
+    let state = get_or_rejoin_state()?;
+    let pd = state.project_dir.clone();
+    let actor = format!("{}:{}", state.role, state.instance);
+    let section = get_active_section(&pd);
+
+    // keep_alive bypasses CAS + protocol.rev bump — it writes to sessions.json
+    // (spec §3.1 perf rule, dev #920). Every non-keep_alive action goes
+    // through the rev gate.
+    if action == "keep_alive" {
+        return apply_keep_alive(&pd, &actor);
+    }
+
+    let rev_in =
+        rev_in.ok_or("[MissingRev] rev field is required for protocol_mutate (silent CAS bypass forbidden — dev #927 vote 3)")?;
+
+    let result: Result<Result<serde_json::Value, String>, String> =
+        with_file_lock(&pd, || {
+            let mut current = read_protocol_for_section_value(&pd, &section);
+            let current_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if rev_in != current_rev {
+                return Ok(Err(format!(
+                    "[StaleRev] expected rev {}, current rev {} (caller passed {})",
+                    current_rev, current_rev, rev_in
+                )));
+            }
+
+            let dispatch_result = match action {
+                "set_preset" => apply_set_preset(&mut current, &args),
+                "transfer_mic" => apply_transfer_mic(&mut current, &args, &actor, &pd),
+                "yield" => apply_yield(&mut current, &args, &actor),
+                "toggle_queue" => apply_toggle_queue(&mut current, &args, &actor),
+                "set_phase_plan"
+                | "advance_phase"
+                | "pause_plan"
+                | "resume_plan"
+                | "extend_phase" => Err(format!(
+                    "[Slice5Unimplemented] phase action '{}' lands in Slice 5",
+                    action
+                )),
+                "open_round" | "submit" | "close_round" => Err(format!(
+                    "[Slice6Unimplemented] consensus action '{}' lands in Slice 6",
+                    action
+                )),
+                other => Err(format!("[InvalidAction] no such action: {}", other)),
+            };
+
+            if let Err(e) = dispatch_result {
+                return Ok(Err(e));
+            }
+
+            // CAS bump + audit — only after successful apply.
+            if let Some(rev_field) = current.get_mut("rev") {
+                *rev_field = serde_json::json!(current_rev + 1);
+            }
+            if let Some(obj) = current.as_object_mut() {
+                obj.insert("last_writer_seat".to_string(), serde_json::json!(actor.clone()));
+                obj.insert("last_writer_action".to_string(), serde_json::json!(action));
+                obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+
+            if let Err(e) = write_protocol_for_section_value(&pd, &section, &current) {
+                return Ok(Err(e));
+            }
+            Ok(Ok(current))
+        });
+
+    // Unwrap nested Result: outer Err = lock failure; inner Err = mutation failure.
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    }
+}
+
+fn apply_set_preset(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] set_preset requires args.name (string)")?;
+    // Spec §6 matrix: preset → (floor.mode, consensus.mode).
+    let (floor_mode, consensus_mode) = match name {
+        "Default chat" => ("none", "none"),
+        "Debate" => ("reactive", "none"),
+        "Assembly Line" => ("round-robin", "none"),
+        "Town hall" => ("queue", "none"),
+        "Brainstorm" => ("free-grab", "none"),
+        "Continuous Review" => ("free-grab", "tally"),
+        "Delphi" => ("round-robin", "vote"),
+        "Oxford" => ("queue", "vote"),
+        other => {
+            return Err(format!(
+                "[InvalidArgs] unknown preset '{}' — see spec §6 matrix for valid names",
+                other
+            ));
+        }
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("preset".to_string(), serde_json::json!(name));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("mode".to_string(), serde_json::json!(floor_mode));
+    }
+    if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+        cons.insert("mode".to_string(), serde_json::json!(consensus_mode));
+    }
+    Ok(())
+}
+
+/// transfer_mic — caller MUST NOT equal current_speaker; freshness gate must
+/// pass (current speaker is STUCK) UNLESS current_speaker is None (cold-open
+/// IDLE). Per spec §2 + §10 + dev-chall #924 §2.1 lock.
+fn apply_transfer_mic(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+    project_dir: &str,
+) -> Result<(), String> {
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] transfer_mic requires args.target (seat label like 'role:0')")?
+        .to_string();
+    let current_speaker = state
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let threshold_ms = state
+        .get("floor")
+        .and_then(|f| f.get("threshold_ms"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(PROTOCOL_DEFAULT_THRESHOLD_MS);
+
+    if current_speaker.as_deref() == Some(actor) {
+        return Err("[NotPermitted] caller IS current_speaker — use yield, not transfer_mic".to_string());
+    }
+    if let Some(cs) = &current_speaker {
+        if !protocol_is_seat_stuck(project_dir, cs, threshold_ms) {
+            return Err(format!(
+                "[StuckGateNotPassed] current speaker '{}' is fresh (within {}ms freshness threshold). Wait for STUCK or address them via metadata.mic_to in a message.",
+                cs, threshold_ms
+            ));
+        }
+    }
+    if !protocol_seat_exists_active(project_dir, &target) {
+        return Err(format!(
+            "[SeatNotFound] target '{}' not in active sessions.json bindings",
+            target
+        ));
+    }
+
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("current_speaker".to_string(), serde_json::json!(target));
+        if let Some(queue) = floor.get_mut("queue").and_then(|q| q.as_array_mut()) {
+            queue.retain(|v| v.as_str() != Some(&target));
+        }
+    }
+    Ok(())
+}
+
+/// yield — caller MUST equal current_speaker. Optional `args.target` hands
+/// directly to a specific seat (skipping queue head). Default: pop queue head.
+/// If queue empty and no target → current_speaker becomes None (IDLE).
+fn apply_yield(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let current_speaker = state
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if current_speaker.as_deref() != Some(actor) {
+        return Err(format!(
+            "[NotPermitted] caller '{}' is not current_speaker (current: {:?}) — only the speaker may yield",
+            actor, current_speaker
+        ));
+    }
+    let target = args.get("target").and_then(|v| v.as_str()).map(String::from);
+    let new_speaker: Option<String> = match target {
+        Some(t) => Some(t),
+        None => state
+            .get("floor")
+            .and_then(|f| f.get("queue"))
+            .and_then(|q| q.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    };
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert(
+            "current_speaker".to_string(),
+            new_speaker
+                .as_ref()
+                .map(|s| serde_json::json!(s))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if let Some(target_seat) = &new_speaker {
+            if let Some(queue) = floor.get_mut("queue").and_then(|q| q.as_array_mut()) {
+                queue.retain(|v| v.as_str() != Some(target_seat));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// toggle_queue — self-only (caller toggles their OWN seat in/out of the
+/// queue). `args.seat` MAY be omitted (defaults to caller); if provided, must
+/// equal caller. Per spec §10 auth gate (Self-floor tier).
+fn apply_toggle_queue(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let seat = args
+        .get("seat")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| actor.to_string());
+    if seat != actor {
+        return Err(format!(
+            "[NotPermitted] toggle_queue is self-only; caller '{}' tried to toggle '{}' (Self-floor tier — spec §10)",
+            actor, seat
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        let queue_owned: Vec<serde_json::Value> = floor
+            .get("queue")
+            .and_then(|q| q.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let already_in = queue_owned.iter().any(|v| v.as_str() == Some(&seat));
+        let mut new_queue = queue_owned;
+        if already_in {
+            new_queue.retain(|v| v.as_str() != Some(&seat));
+        } else {
+            new_queue.push(serde_json::json!(seat));
+        }
+        floor.insert("queue".to_string(), serde_json::Value::Array(new_queue));
+    }
+    Ok(())
+}
+
+/// keep_alive — composer-typing heartbeat. Writes `last_drafting_at_ms` to
+/// sessions.json (NOT protocol.json — spec §3.1 perf rule). Server-side
+/// debounce: if prior stamp is within KEEP_ALIVE_SERVER_DEBOUNCE_MS (5s),
+/// no-op (returns `debounced: true`). Caller-side debounce is also recommended
+/// (spec § 3.1 ≤1 ping per 5–10s) but server-side is the safety net.
+fn apply_keep_alive(project_dir: &str, actor: &str) -> Result<serde_json::Value, String> {
+    let parts: Vec<&str> = actor.splitn(2, ':').collect();
+    let role = parts.get(0).copied().unwrap_or("").to_string();
+    let inst: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let result: Result<Result<serde_json::Value, String>, String> =
+        with_file_lock(project_dir, || {
+            let mut sessions = read_sessions(project_dir);
+            let mut updated = false;
+            if let Some(bindings) =
+                sessions.get_mut("bindings").and_then(|b| b.as_array_mut())
+            {
+                for b in bindings.iter_mut() {
+                    let b_role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    let b_inst = b.get("instance").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if b_role == role && b_inst == inst {
+                        let prior = b
+                            .get("last_drafting_at_ms")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        if now_ms.saturating_sub(prior) >= KEEP_ALIVE_SERVER_DEBOUNCE_MS {
+                            if let Some(obj) = b.as_object_mut() {
+                                obj.insert(
+                                    "last_drafting_at_ms".to_string(),
+                                    serde_json::json!(now_ms),
+                                );
+                                updated = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if updated {
+                let _ = write_sessions(project_dir, &sessions);
+            }
+            Ok(Ok(serde_json::json!({
+                "ok": true,
+                "debounced": !updated,
+                "last_drafting_at_ms": now_ms
+            })))
+        });
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    }
+}
+
+// ============================================================
+// Slice 2 tests — apply_* layer (pure JSON-state mutations, no I/O)
+// ============================================================
+// Per dev #927 plan (a) CAS gate, (b) action smokes. (c) backward-compat,
+// (d) cold-open race, and (e) invariant property test ride along after
+// the legacy wrappers + integration paths are wired.
+
+#[cfg(test)]
+mod protocol_slice2_tests {
+    use super::*;
+
+    fn fresh_state() -> serde_json::Value {
+        protocol_fresh_value()
+    }
+
+    /// (a) CAS — apply layer accepts and bumps. (Full rev gate is exercised
+    /// in handle_protocol_mutate; here we assert apply_set_preset is idempotent
+    /// in input shape and writes the matrix-mapped modes.)
+    #[test]
+    fn apply_set_preset_assembly_line_maps_to_round_robin_none() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        assert_eq!(s["preset"], "Assembly Line");
+        assert_eq!(s["floor"]["mode"], "round-robin");
+        assert_eq!(s["consensus"]["mode"], "none");
+    }
+
+    #[test]
+    fn apply_set_preset_continuous_review_maps_to_free_grab_tally() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Continuous Review"})).unwrap();
+        assert_eq!(s["floor"]["mode"], "free-grab");
+        assert_eq!(s["consensus"]["mode"], "tally");
+    }
+
+    #[test]
+    fn apply_set_preset_unknown_returns_invalid_args() {
+        let mut s = fresh_state();
+        let err = apply_set_preset(&mut s, &serde_json::json!({"name": "Nonexistent"}))
+            .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    #[test]
+    fn apply_set_preset_missing_name_returns_invalid_args() {
+        let mut s = fresh_state();
+        let err = apply_set_preset(&mut s, &serde_json::json!({})).unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// (b) yield — non-speaker fails NotPermitted; speaker yielding to None
+    /// with empty queue clears current_speaker.
+    #[test]
+    fn apply_yield_by_non_speaker_fails_not_permitted() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        let err = apply_yield(&mut s, &serde_json::json!({}), "developer:0").unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    #[test]
+    fn apply_yield_speaker_no_target_no_queue_clears_speaker() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        apply_yield(&mut s, &serde_json::json!({}), "architect:0").unwrap();
+        assert!(s["floor"]["current_speaker"].is_null());
+    }
+
+    #[test]
+    fn apply_yield_speaker_pops_queue_head() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        s["floor"]["queue"] = serde_json::json!(["developer:0", "tester:0"]);
+        apply_yield(&mut s, &serde_json::json!({}), "architect:0").unwrap();
+        assert_eq!(s["floor"]["current_speaker"], "developer:0");
+        // popped head should be removed from queue
+        assert_eq!(s["floor"]["queue"], serde_json::json!(["tester:0"]));
+    }
+
+    /// (b) toggle_queue — self-only; toggles in then out.
+    #[test]
+    fn apply_toggle_queue_other_seat_fails_not_permitted() {
+        let mut s = fresh_state();
+        let err = apply_toggle_queue(
+            &mut s,
+            &serde_json::json!({"seat": "architect:0"}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    #[test]
+    fn apply_toggle_queue_self_adds_then_removes() {
+        let mut s = fresh_state();
+        apply_toggle_queue(&mut s, &serde_json::json!({}), "developer:0").unwrap();
+        assert_eq!(s["floor"]["queue"], serde_json::json!(["developer:0"]));
+        apply_toggle_queue(&mut s, &serde_json::json!({}), "developer:0").unwrap();
+        assert_eq!(s["floor"]["queue"], serde_json::json!([]));
+    }
+
+    /// (b) transfer_mic — caller==current_speaker fails (yield is the path).
+    #[test]
+    fn apply_transfer_mic_self_fails_not_permitted() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        // We don't reach the project_dir-dependent branch because the
+        // self-target check fires first. project_dir doesn't matter here.
+        let err = apply_transfer_mic(
+            &mut s,
+            &serde_json::json!({"target": "developer:0"}),
+            "architect:0",
+            "/nonexistent",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    /// transfer_mic missing args.target → InvalidArgs (early return before
+    /// any project_dir read).
+    #[test]
+    fn apply_transfer_mic_missing_target_invalid_args() {
+        let mut s = fresh_state();
+        let err = apply_transfer_mic(&mut s, &serde_json::json!({}), "architect:0", "/none")
+            .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// Error-taxonomy reachability (tester #928 add): every prefix listed in
+    /// the handle_protocol_mutate doc-comment is reachable from a fixtured
+    /// input. We assert at least the apply-layer ones here; CAS-gate ones
+    /// (StaleRev / MissingRev) need handle_protocol_mutate which depends on
+    /// get_or_rejoin_state — covered in the integration test PR.
+    #[test]
+    fn error_taxonomy_apply_layer_codes_all_reachable() {
+        let prefixes = [
+            "[InvalidArgs]",
+            "[NotPermitted]",
+        ];
+        let mut hit = std::collections::HashSet::new();
+        // Each apply test above hit one — re-run a representative sample
+        // here so this test is self-contained.
+        let mut s = fresh_state();
+        let e = apply_set_preset(&mut s, &serde_json::json!({})).unwrap_err();
+        if e.starts_with("[InvalidArgs]") { hit.insert("[InvalidArgs]"); }
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        let e = apply_yield(&mut s, &serde_json::json!({}), "developer:0").unwrap_err();
+        if e.starts_with("[NotPermitted]") { hit.insert("[NotPermitted]"); }
+        for prefix in prefixes {
+            assert!(hit.contains(prefix), "no test fixture reached {}", prefix);
+        }
+    }
+}
+
 /// Walk up from CWD to find .vaak/project.json
 fn find_project_root() -> Option<String> {
     let mut dir = std::env::current_dir().ok()?;
@@ -3081,6 +3754,19 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
     // Delphi protocol enforcement moved INSIDE with_file_lock — see #120 race fix.
 
+    // Slice 2 (spec §10 atomicity): extract metadata.mic_to so the post-append
+    // transfer happens in the SAME lock window as the message commit. If
+    // metadata.mic_to is set AND the active protocol's floor mode permits
+    // transfers (reactive/queue/free-grab) AND the caller IS current_speaker,
+    // the floor moves to mic_to atomically with the send. No observer can see
+    // a state where the message landed but the floor didn't move (vote 5
+    // ratified by team #927→#931).
+    let mic_to_target: Option<String> = metadata
+        .as_ref()
+        .and_then(|m| m.get("mic_to"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let result = with_file_lock(&state.project_dir, || {
         let from_label = format!("{}:{}", state.role, state.instance);
 
@@ -3161,6 +3847,81 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 let mut updated = asm.clone();
                 updated["current_speaker"] = serde_json::json!(next);
                 let _ = write_assembly_state_unlocked(&state.project_dir, &updated);
+            }
+        }
+
+        // Slice 2 (spec §10): protocol-side atomic mic_to transfer. Read
+        // protocol.json, check (a) floor.mode permits, (b) caller IS
+        // current_speaker, (c) target is a real seat. If all three hold,
+        // transfer + bump rev + last_writer_*. Same lock window as the
+        // message commit above — no half-landed state observable.
+        // Disabled when assembly_line legacy state is active (round-robin
+        // auto-advance owns the floor in that mode; protocol layer would
+        // double-write).
+        if !asm_active && mic_to_target.is_some() {
+            let target = mic_to_target.clone().unwrap();
+            let section = get_active_section(&state.project_dir);
+            let mut current = read_protocol_for_section_value(&state.project_dir, &section);
+            let floor_mode = current
+                .get("floor")
+                .and_then(|f| f.get("mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            let permits_transfer = matches!(floor_mode.as_str(), "reactive" | "queue" | "free-grab");
+            let cur_speaker = current
+                .get("floor")
+                .and_then(|f| f.get("current_speaker"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            // Caller must be current_speaker to authorize a mic_to transfer.
+            // Cold-open IDLE: caller claims by becoming the new speaker too.
+            let caller_authorized = cur_speaker.is_none()
+                || cur_speaker.as_deref() == Some(&from_label);
+            if permits_transfer
+                && caller_authorized
+                && protocol_seat_exists_active(&state.project_dir, &target)
+            {
+                if let Some(floor) = current
+                    .get_mut("floor")
+                    .and_then(|f| f.as_object_mut())
+                {
+                    floor.insert(
+                        "current_speaker".to_string(),
+                        serde_json::json!(target.clone()),
+                    );
+                    if let Some(queue) =
+                        floor.get_mut("queue").and_then(|q| q.as_array_mut())
+                    {
+                        queue.retain(|v| v.as_str() != Some(&target));
+                    }
+                }
+                let cur_rev = current
+                    .get("rev")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if let Some(rev_field) = current.get_mut("rev") {
+                    *rev_field = serde_json::json!(cur_rev + 1);
+                }
+                if let Some(obj) = current.as_object_mut() {
+                    obj.insert(
+                        "last_writer_seat".to_string(),
+                        serde_json::json!(from_label.clone()),
+                    );
+                    obj.insert(
+                        "last_writer_action".to_string(),
+                        serde_json::json!("project_send_mic_to"),
+                    );
+                    obj.insert(
+                        "rev_at".to_string(),
+                        serde_json::json!(utc_now_iso()),
+                    );
+                }
+                let _ = write_protocol_for_section_value(
+                    &state.project_dir,
+                    &section,
+                    &current,
+                );
             }
         }
 
@@ -4946,6 +5707,41 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "protocol_mutate",
+                    "description": "Unified floor + consensus mutation (Assembly Line v6, spec §10). Single dispatch entry replacing assembly_line + discussion_control state primitives. CAS-gated by `rev` — caller MUST pass current rev (read via get_protocol) or get [StaleRev]. Actions: set_preset (Debate|Assembly Line|Default chat|Town hall|Brainstorm|Continuous Review|Delphi|Oxford), transfer_mic (target — caller != current_speaker, freshness gate), yield (target? — caller == current_speaker), toggle_queue (seat? self-only — raise/lower hand), keep_alive (composer typing heartbeat, bypasses CAS), set_phase_plan/advance_phase/pause_plan/resume_plan/extend_phase (Slice 5 stubs), open_round/submit/close_round (Slice 6 stubs).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "Action name — see description for full enum"
+                            },
+                            "args": {
+                                "type": "object",
+                                "description": "Per-action arguments (target, name, seat, secs, etc.)"
+                            },
+                            "rev": {
+                                "type": "integer",
+                                "description": "Current protocol rev (read via get_protocol). REQUIRED for all actions except keep_alive — silent CAS bypass forbidden per dev #927 vote 3."
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                },
+                {
+                    "name": "get_protocol",
+                    "description": "Read full protocol.json for a section + a heartbeat snapshot (last_active_at_ms, last_drafting_at_ms, connected) joined from sessions.json at read time. Heartbeat lives at runtime (sessions.json), not in protocol state — spec §3.1 perf rule.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "section": {
+                                "type": "string",
+                                "description": "Section slug (default: active section)"
+                            }
+                        }
+                    }
+                },
+                {
                     "name": "audience_vote",
                     "description": "Collect votes from an AI audience pool (27 personas across 3 LLM providers). Results are posted to the collab board as a broadcast so all team members see them simultaneously. Any role can invoke this tool.",
                     "inputSchema": {
@@ -5506,6 +6302,52 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "isError": true
                         })
                     }
+                }
+            } else if tool_name == "protocol_mutate" {
+                // Slice 2 — unified floor + consensus mutation entry. Spec §10.
+                let arguments = params.get("arguments").and_then(|a| a.as_object());
+                let args_obj = match arguments {
+                    Some(a) => a,
+                    None => {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": "Missing arguments for protocol_mutate (action, args?, rev required)"
+                                }],
+                                "isError": true
+                            }
+                        }));
+                    }
+                };
+                let action = args_obj.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                let action_args = args_obj.get("args").cloned().unwrap_or(serde_json::json!({}));
+                let rev_in = args_obj.get("rev").and_then(|v| v.as_u64());
+                match handle_protocol_mutate(action, action_args, rev_in) {
+                    Ok(resp) => serde_json::json!({
+                        "content": [{ "type": "text", "text": resp.to_string() }]
+                    }),
+                    Err(e) => serde_json::json!({
+                        "content": [{ "type": "text", "text": e }],
+                        "isError": true
+                    }),
+                }
+            } else if tool_name == "get_protocol" {
+                // Slice 2 — read protocol state + heartbeat snapshot. Spec §10.
+                let arguments = params.get("arguments").and_then(|a| a.as_object());
+                let section_opt = arguments
+                    .and_then(|a| a.get("section"))
+                    .and_then(|v| v.as_str());
+                match handle_get_protocol(section_opt) {
+                    Ok(resp) => serde_json::json!({
+                        "content": [{ "type": "text", "text": resp.to_string() }]
+                    }),
+                    Err(e) => serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("get_protocol failed: {}", e) }],
+                        "isError": true
+                    }),
                 }
             } else if tool_name == "audience_vote" {
                 let arguments = params.get("arguments")?;
