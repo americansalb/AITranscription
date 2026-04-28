@@ -1430,6 +1430,105 @@ fn load_spawned_from_disk(project_dir: &str) -> Vec<SpawnedAgent> {
         .unwrap_or_default()
 }
 
+/// Heartbeat staleness threshold for the orphan-wrapper detection in
+/// `repopulate_spawned`. Mirrors the `MIC_GRAB_THRESHOLD_MS` 60s convention
+/// used elsewhere as the "this seat is no longer functionally alive" gate.
+const STALE_HEARTBEAT_SECS: i64 = 60;
+
+/// Build the set of `(role, instance)` whose binding in `sessions.json` has a
+/// `last_heartbeat` older than `STALE_HEARTBEAT_SECS` (or missing entirely).
+/// Used by `repopulate_spawned` to identify orphan wrappers — alive processes
+/// whose MCP child died with the prior vaak-desktop.exe and stopped emitting
+/// heartbeats. See evil-arch #722 / memory #21 (liveness != functional health).
+///
+/// Failures (missing/corrupt sessions.json, unparseable timestamps) yield an
+/// empty set, which means orphan detection degrades to "PID-alive = healthy" —
+/// the prior pre-#708 behavior. Strict failure handling is intentionally avoided
+/// so a sessions.json hiccup never blocks the launcher startup path.
+fn read_stale_heartbeat_set(project_dir: &str) -> std::collections::HashSet<(String, u64)> {
+    use std::collections::HashSet;
+    let path = std::path::Path::new(project_dir).join(".vaak").join("sessions.json");
+    let mut stale: HashSet<(String, u64)> = HashSet::new();
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return stale,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return stale,
+    };
+    let bindings = match json.get("bindings").and_then(|b| b.as_array()) {
+        Some(b) => b,
+        None => return stale,
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    for b in bindings {
+        let role = b.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+        let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+        if role.is_empty() { continue; }
+
+        // last_heartbeat is ISO 8601 like "2026-04-28T01:48:21Z". Parse to seconds-since-epoch.
+        let stale_for_this = match b.get("last_heartbeat").and_then(|h| h.as_str()) {
+            None => true, // no heartbeat ever → stale
+            Some(ts) => {
+                // Best-effort RFC3339 parse via serde_json (which understands chrono in many builds).
+                // Fall back to parsing year/month/day/hour/min/sec by hand for robustness.
+                let parsed_secs = parse_iso_to_unix_secs(ts);
+                match parsed_secs {
+                    Some(s) => (now_secs - s) > STALE_HEARTBEAT_SECS,
+                    None => true, // unparseable → treat as stale
+                }
+            }
+        };
+        if stale_for_this {
+            stale.insert((role, instance));
+        }
+    }
+    stale
+}
+
+/// Minimal RFC3339 / ISO-8601 parser sufficient for sessions.json's `last_heartbeat`
+/// format ("2026-04-28T01:48:21Z" or "...+00:00"). Returns seconds-since-epoch on
+/// success. Avoids pulling chrono into launcher.rs just for this one call.
+fn parse_iso_to_unix_secs(ts: &str) -> Option<i64> {
+    // Accept either trailing "Z" or "+HH:MM" / "-HH:MM"; treat tz as UTC for our
+    // 60s-staleness threshold (sub-minute tz drift is irrelevant at this scale).
+    // Strip the timezone suffix without using `?` inside the split closure.
+    let no_tz: &str = if let Some(idx) = ts.find('Z') {
+        &ts[..idx]
+    } else if let Some(idx) = ts.rfind(|c| c == '+' || c == '-').filter(|&i| i > 10) {
+        &ts[..idx]
+    } else {
+        ts
+    };
+    // Expect "YYYY-MM-DDTHH:MM:SS" (optional .frac trimmed).
+    let main = no_tz.split('.').next()?;
+    let (date, time) = main.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let y: i64 = date_parts.next()?.parse().ok()?;
+    let mo: i64 = date_parts.next()?.parse().ok()?;
+    let d: i64 = date_parts.next()?.parse().ok()?;
+    let mut time_parts = time.split(':');
+    let h: i64 = time_parts.next()?.parse().ok()?;
+    let mi: i64 = time_parts.next()?.parse().ok()?;
+    let s: i64 = time_parts.next()?.parse().ok()?;
+
+    // Civil-to-days (Howard Hinnant's algorithm — public domain).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as i64;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Some(days * 86400 + h * 3600 + mi * 60 + s)
+}
+
 /// Read and consume `.vaak/intentionally_left.jsonl` — the skip-list written by
 /// vaak-mcp's project_leave / project_kick handlers (see #708 round, evil-arch
 /// #710(2) + #713(2)). Returns the set of `(role, instance)` pairs that should NOT
@@ -1513,6 +1612,17 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
             skip_set.len(), skip_set);
     }
 
+    // Liveness != functional health (memory #21, evil-arch #722). On vaak.exe
+    // restart, prior wrapper PIDs are typically still alive (Launch Vaak Dev.bat
+    // only taskkills vaak-desktop + vaak-mcp, not the powershell wrappers), but
+    // their vaak-mcp child died with the prior vaak-desktop → claude is MCP-mute.
+    // Read sessions.json's last_heartbeat per role:instance to distinguish a
+    // functionally-healthy wrapper (heartbeat <STALE_HEARTBEAT_SECS) from an
+    // orphan zombie (heartbeat stale or absent). Orphans get force-killed and
+    // queued for respawn so the auto-respawn loop can re-establish a live seat
+    // via the wrapper's --resume <session_id> path.
+    let stale_seats = read_stale_heartbeat_set(&project_dir);
+
     let mut spawned = state.spawned.lock();
     let mut alive_count = 0u32;
     let mut dead_agents: Vec<SpawnedAgent> = Vec::new();
@@ -1522,14 +1632,27 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
             // Drop entirely from disk + memory: user said leave/kick, honor it.
             continue;
         }
-        if is_pid_alive(agent.pid) {
+        let pid_alive = is_pid_alive(agent.pid);
+        let heartbeat_stale = stale_seats.contains(&(agent.role.clone(), agent.instance as u64));
+
+        if pid_alive && !heartbeat_stale {
+            // Wrapper is alive AND its MCP child has been seen recently → still working.
             if !spawned.iter().any(|a| a.role == agent.role && a.instance == agent.instance) {
                 eprintln!("[launcher] Reconnected to alive agent: {}:{} (PID {})", agent.role, agent.instance, agent.pid);
                 spawned.push(agent);
                 alive_count += 1;
             }
         } else {
-            eprintln!("[launcher] Agent {}:{} (PID {}) is dead — queuing respawn", agent.role, agent.instance, agent.pid);
+            if pid_alive {
+                // Orphan wrapper — alive process, dead MCP. Kill before respawning so
+                // the new wrapper born in the auto-respawn loop has a clean PID slot
+                // and the prior claude doesn't compete for the same session_id.
+                eprintln!("[launcher] Agent {}:{} (PID {}) is an orphan (heartbeat stale, MCP died) — killing before respawn",
+                    agent.role, agent.instance, agent.pid);
+                let _ = kill_process(agent.pid);
+            } else {
+                eprintln!("[launcher] Agent {}:{} (PID {}) is dead — queuing respawn", agent.role, agent.instance, agent.pid);
+            }
             dead_agents.push(agent);
         }
     }
@@ -1996,6 +2119,35 @@ mod tests {
         assert!(prompt.contains("developer"), "prompt should contain role name");
         assert!(prompt.contains("project_join"), "prompt should mention project_join");
         assert!(prompt.contains("project_wait"), "prompt should mention project_wait");
+    }
+
+    // ── parse_iso_to_unix_secs (#708 orphan-detection helper) ─────────────
+
+    #[test]
+    fn test_parse_iso_z_suffix() {
+        // 2026-04-28T01:48:21Z — known unix timestamp 1777340901
+        let s = parse_iso_to_unix_secs("2026-04-28T01:48:21Z").expect("should parse");
+        assert_eq!(s, 1777340901, "parsed seconds should match known value");
+    }
+
+    #[test]
+    fn test_parse_iso_offset_suffix() {
+        // Treat tz offset as UTC (60s threshold tolerates sub-minute drift).
+        let s = parse_iso_to_unix_secs("2026-04-28T01:48:21+00:00").expect("should parse");
+        assert_eq!(s, 1777340901);
+    }
+
+    #[test]
+    fn test_parse_iso_with_fractional() {
+        // Trailing .NNNN... should be trimmed.
+        let s = parse_iso_to_unix_secs("2026-04-28T01:48:21.5901328-05:00").expect("should parse");
+        assert_eq!(s, 1777340901);
+    }
+
+    #[test]
+    fn test_parse_iso_invalid_returns_none() {
+        assert!(parse_iso_to_unix_secs("not-a-date").is_none());
+        assert!(parse_iso_to_unix_secs("2026-04-28").is_none()); // no T
     }
 
     #[test]
