@@ -308,8 +308,19 @@ pub fn read_protocol_for_section(dir: &str, section: &str) -> Protocol {
                 return Ok(p);
             }
         }
-        let migrated = migrate_legacy_for_section(&dir_owned, &section_owned);
+        // Belt-and-suspenders ordering (dev-chall #930): synthesize the migrated
+        // Protocol from legacy, then write protocol.json FIRST, archive legacy
+        // ONLY on successful write. A crash between write and archive leaves a
+        // valid protocol.json plus the legacy files (next read short-circuits
+        // on the parsed protocol.json and skips archive — orphaned legacy is
+        // benign vs. silent data loss). A crash before write leaves legacy
+        // intact for retry. Lock + reorder = double safety per #931.
+        let (migrated, did_migrate) =
+            synthesize_from_legacy_for_section(&dir_owned, &section_owned);
         write_protocol_for_section_unlocked(&dir_owned, &section_owned, &migrated)?;
+        if did_migrate {
+            archive_legacy_for_section(&dir_owned, &section_owned);
+        }
         Ok(migrated)
     });
 
@@ -345,9 +356,14 @@ pub fn write_protocol_for_section_unlocked(
 }
 
 /// Build a Protocol from any legacy `assembly.json` / `discussion.json` present
-/// in the section. Archives the legacy files into `.vaak/legacy/<section>/` —
-/// rollback is just moving them back. Per spec §3.3.
-fn migrate_legacy_for_section(dir: &str, section: &str) -> Protocol {
+/// in the section. Pure synthesis — does NOT touch disk. Caller is
+/// responsible for writing protocol.json FIRST, then calling
+/// `archive_legacy_for_section` only on successful write (dev-chall #930
+/// belt-and-suspenders ordering).
+///
+/// Returns `(Protocol, did_migrate)` where `did_migrate=true` means at least
+/// one legacy file was read and folded in.
+fn synthesize_from_legacy_for_section(dir: &str, section: &str) -> (Protocol, bool) {
     let mut p = Protocol::fresh();
 
     let legacy_assembly = legacy_assembly_path_for_section(dir, section);
@@ -405,19 +421,29 @@ fn migrate_legacy_for_section(dir: &str, section: &str) -> Protocol {
     }
 
     if migrated_anything {
-        let _ = archive_legacy_for_section(dir, section);
         p.last_writer_seat = Some("system:migrate".to_string());
         p.last_writer_action = Some("migrate_from_legacy".to_string());
         p.rev_at = Some(iso_now());
     }
 
-    p
+    (p, migrated_anything)
 }
 
-fn archive_legacy_for_section(dir: &str, section: &str) -> Result<(), String> {
+/// Move legacy `assembly.json` / `discussion.json` into `.vaak/legacy/<section>/`.
+/// Caller MUST hold board.lock and have already written the new protocol.json
+/// (dev-chall #930 ordering rule). Errors are logged, not returned — by this
+/// point the new protocol.json is on disk, so a failed archive leaves the
+/// system in a valid (just messy) state. Surface via eprintln so the human or
+/// post-mortem reads it (tech-leader #931 D — no silent `let _ =` on disk ops).
+fn archive_legacy_for_section(dir: &str, section: &str) {
     let archive_dir = legacy_archive_dir(dir, section);
-    std::fs::create_dir_all(&archive_dir)
-        .map_err(|e| format!("Failed to create legacy archive dir: {}", e))?;
+    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+        eprintln!(
+            "[protocol] archive_legacy: create_dir_all({}) failed: {}",
+            archive_dir.display(), e
+        );
+        return;
+    }
 
     for src in [
         legacy_assembly_path_for_section(dir, section),
@@ -429,10 +455,16 @@ fn archive_legacy_for_section(dir: &str, section: &str) -> Result<(), String> {
                 None => continue,
             };
             let dest = archive_dir.join(file_name);
-            let _ = std::fs::rename(&src, &dest);
+            if let Err(e) = std::fs::rename(&src, &dest) {
+                eprintln!(
+                    "[protocol] archive_legacy: rename({} -> {}) failed: {} \
+                     (protocol.json already written; legacy file remains in \
+                     original location for next-run retry)",
+                    src.display(), dest.display(), e
+                );
+            }
         }
     }
-    Ok(())
 }
 
 // ============================================================
@@ -527,12 +559,12 @@ mod tests {
         assert_eq!(round.opened_by.as_deref(), Some("moderator:0"));
     }
 
-    /// Fixture (a)-orphan-queue: dev-chall asked about a queue entry whose
-    /// referenced seat isn't in rotation_order. Slice 1 must NOT silently
-    /// drop the entry — that decision belongs to Slice 5's normalize().
-    /// Today's job: round-trip the data without loss.
+    /// Fixture (a)-default-queue: legacy `assembly.json` has no `queue` field,
+    /// so migrated `floor.queue` defaults to empty. Renamed from the prior
+    /// over-promising name (dev-chall #930 nit — this test asserts the
+    /// default, not orphan handling, which lands in Slice 5's normalize()).
     #[test]
-    fn migration_does_not_drop_orphan_queue_entries_in_slice_1() {
+    fn migration_queue_defaults_empty_when_legacy_omits_queue() {
         let project = temp_project("orphan-queue");
         write_legacy_assembly(&project, "default", r#"{
             "active": true,
