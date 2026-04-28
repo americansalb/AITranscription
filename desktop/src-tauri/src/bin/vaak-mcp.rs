@@ -2913,43 +2913,57 @@ fn handle_protocol_mutate(
     let pd = state.project_dir.clone();
     let actor = format!("{}:{}", state.role, state.instance);
     let section = get_active_section(&pd);
+    do_protocol_mutate(&pd, &actor, &section, action, args, rev_in)
+}
 
+/// Inner of `handle_protocol_mutate` — pure-input version used by tests
+/// (project_dir, actor, section all explicit, no `get_or_rejoin_state`
+/// dependency). Closes the CAS-gate behavioral coverage gap that
+/// tech-leader #941.5 + dev-chall #940.4 flagged before Slice 3 forks.
+fn do_protocol_mutate(
+    pd: &str,
+    actor: &str,
+    section: &str,
+    action: &str,
+    args: serde_json::Value,
+    rev_in: Option<u64>,
+) -> Result<serde_json::Value, String> {
     // keep_alive bypasses CAS + protocol.rev bump — it writes to sessions.json
     // (spec §3.1 perf rule, dev #920). Every non-keep_alive action goes
     // through the rev gate.
     if action == "keep_alive" {
-        return apply_keep_alive(&pd, &actor);
+        return apply_keep_alive(pd, actor);
     }
 
     let rev_in =
         rev_in.ok_or("[MissingRev] rev field is required for protocol_mutate (silent CAS bypass forbidden — dev #927 vote 3)")?;
 
     let result: Result<Result<serde_json::Value, String>, String> =
-        with_file_lock(&pd, || {
+        with_file_lock(pd, || {
             // Pre-migration check (evil-arch #939 concern 1): if protocol.json
             // is missing AND legacy files exist, vaak-mcp must NOT write fresh
             // defaults — that would leave legacy dangling on disk forever.
             // Synthesize from legacy under our lock, write protocol.json FIRST
             // (dev-chall #930 ordering), then archive legacy. Mirrors the
             // desktop crate's `read_protocol_for_section` migration path.
-            let path = protocol_path_for_section(&pd, &section);
-            if !path.exists() && protocol_legacy_files_exist(&pd, &section) {
-                let (synth, did_migrate) = synthesize_protocol_from_legacy(&pd, &section);
-                if let Err(e) = write_protocol_for_section_value(&pd, &section, &synth) {
+            let path = protocol_path_for_section(pd, section);
+            if !path.exists() && protocol_legacy_files_exist(pd, section) {
+                let (synth, did_migrate) = synthesize_protocol_from_legacy(pd, section);
+                if let Err(e) = write_protocol_for_section_value(pd, section, &synth) {
                     return Ok(Err(format!(
                         "[InternalError] pre-migration synth write failed: {}",
                         e
                     )));
                 }
                 if did_migrate {
-                    archive_legacy_in_process(&pd, &section);
+                    archive_legacy_in_process(pd, section);
                 }
                 // Migration produced rev=0; if caller passed rev=0 they can
                 // proceed against the synthesized state. Otherwise it's a
                 // stale-rev error (caller's expectation didn't match).
             }
 
-            let mut current = read_protocol_for_section_value(&pd, &section);
+            let mut current = read_protocol_for_section_value(pd, section);
             let current_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
             if rev_in != current_rev {
                 return Ok(Err(format!(
@@ -2960,9 +2974,9 @@ fn handle_protocol_mutate(
 
             let dispatch_result = match action {
                 "set_preset" => apply_set_preset(&mut current, &args),
-                "transfer_mic" => apply_transfer_mic(&mut current, &args, &actor, &pd),
-                "yield" => apply_yield(&mut current, &args, &actor),
-                "toggle_queue" => apply_toggle_queue(&mut current, &args, &actor),
+                "transfer_mic" => apply_transfer_mic(&mut current, &args, actor, pd),
+                "yield" => apply_yield(&mut current, &args, actor),
+                "toggle_queue" => apply_toggle_queue(&mut current, &args, actor),
                 "set_phase_plan"
                 | "advance_phase"
                 | "pause_plan"
@@ -2987,12 +3001,12 @@ fn handle_protocol_mutate(
                 *rev_field = serde_json::json!(current_rev + 1);
             }
             if let Some(obj) = current.as_object_mut() {
-                obj.insert("last_writer_seat".to_string(), serde_json::json!(actor.clone()));
+                obj.insert("last_writer_seat".to_string(), serde_json::json!(actor.to_string()));
                 obj.insert("last_writer_action".to_string(), serde_json::json!(action));
                 obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
             }
 
-            if let Err(e) = write_protocol_for_section_value(&pd, &section, &current) {
+            if let Err(e) = write_protocol_for_section_value(pd, section, &current) {
                 return Ok(Err(e));
             }
             Ok(Ok(current))
@@ -3719,11 +3733,227 @@ mod protocol_slice2_tests {
         assert_eq!(after["floor"]["current_speaker"], "developer:0");
     }
 
+    // ============================================================
+    // CAS-gate behavioral tests — close tech-leader #941.5 +
+    // dev-chall #940.4 coverage gap. Run against `do_protocol_mutate`
+    // (the inner of `handle_protocol_mutate`) so we don't need to
+    // mock `get_or_rejoin_state`.
+    // ============================================================
+
+    /// (a) Stale rev → [StaleRev] error, no disk write (rev unchanged).
+    #[test]
+    fn cas_stale_rev_returns_error_no_write() {
+        let dir = temp_project_with_protocol(
+            "cas-stale",
+            serde_json::json!({
+                "schema_version": 1, "rev": 5, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "toggle_queue",
+            serde_json::json!({}),
+            Some(0), // wrong rev — current is 5
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[StaleRev]"), "got: {}", err);
+        // Disk state unchanged.
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 5);
+    }
+
+    /// (a) Missing rev → [MissingRev] error.
+    #[test]
+    fn cas_missing_rev_returns_error() {
+        let dir = temp_project_with_protocol(
+            "cas-missing",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "toggle_queue",
+            serde_json::json!({}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[MissingRev]"), "got: {}", err);
+    }
+
+    /// (a) Happy path: rev increments, last_writer_* stamped.
+    #[test]
+    fn cas_happy_path_increments_rev_and_stamps_audit() {
+        let dir = temp_project_with_protocol(
+            "cas-happy",
+            serde_json::json!({
+                "schema_version": 1, "rev": 7, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "toggle_queue",
+            serde_json::json!({}),
+            Some(7),
+        )
+        .unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 8);
+        assert_eq!(after["last_writer_seat"], "developer:0");
+        assert_eq!(after["last_writer_action"], "toggle_queue");
+        assert_eq!(after["floor"]["queue"], serde_json::json!(["developer:0"]));
+    }
+
+    /// Phase action stub returns [Slice5Unimplemented].
+    #[test]
+    fn dispatch_phase_action_returns_slice5_unimplemented() {
+        let dir = temp_project_with_protocol(
+            "dispatch-slice5",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "advance_phase",
+            serde_json::json!({}),
+            Some(0),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[Slice5Unimplemented]"), "got: {}", err);
+    }
+
+    /// Consensus action stub returns [Slice6Unimplemented].
+    #[test]
+    fn dispatch_consensus_action_returns_slice6_unimplemented() {
+        let dir = temp_project_with_protocol(
+            "dispatch-slice6",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "open_round",
+            serde_json::json!({"topic": "x", "mode": "tally"}),
+            Some(0),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[Slice6Unimplemented]"), "got: {}", err);
+    }
+
+    /// Unknown action → [InvalidAction].
+    #[test]
+    fn dispatch_unknown_action_returns_invalid_action() {
+        let dir = temp_project_with_protocol(
+            "dispatch-invalid",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        let err = do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "wat",
+            serde_json::json!({}),
+            Some(0),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidAction]"), "got: {}", err);
+    }
+
+    /// Pre-migration: no protocol.json + legacy assembly.json present →
+    /// vaak-mcp synthesizes, archives, then accepts the rev=0 mutate
+    /// (evil-arch #939 concern 1).
+    #[test]
+    fn pre_migration_synth_archives_and_accepts_mutate() {
+        let dir = std::env::temp_dir().join("vaak-mcp-protocol-pre-mig");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vaak")).unwrap();
+        // Legacy assembly.json present, NO protocol.json.
+        std::fs::write(
+            dir.join(".vaak").join("assembly.json"),
+            r#"{"active":true,"current_speaker":"architect:0","rotation_order":["architect:0","developer:0"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".vaak").join("sessions.json"),
+            r#"{"bindings":[{"role":"architect","instance":0,"status":"active"},{"role":"developer","instance":0,"status":"active"}]}"#,
+        )
+        .unwrap();
+
+        // Caller passes rev=0 because the synth produces rev=0.
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "toggle_queue",
+            serde_json::json!({}),
+            Some(0),
+        )
+        .unwrap();
+
+        // protocol.json now exists, legacy archived.
+        assert!(dir.join(".vaak").join("protocol.json").exists());
+        assert!(!dir.join(".vaak").join("assembly.json").exists());
+        assert!(dir.join(".vaak").join("legacy").join("default").join("assembly.json").exists());
+        let after = read_protocol_back(&dir);
+        // Synth produces "Assembly Line" preset; toggle_queue then bumps rev to 1.
+        assert_eq!(after["preset"], "Assembly Line");
+        assert_eq!(after["rev"], 1);
+        assert_eq!(after["floor"]["queue"], serde_json::json!(["developer:0"]));
+    }
+
     /// Error-taxonomy reachability (tester #928 add): every prefix listed in
     /// the handle_protocol_mutate doc-comment is reachable from a fixtured
-    /// input. We assert at least the apply-layer ones here; CAS-gate ones
-    /// (StaleRev / MissingRev) need handle_protocol_mutate which depends on
-    /// get_or_rejoin_state — covered in the integration test PR.
+    /// input.
     #[test]
     fn error_taxonomy_apply_layer_codes_all_reachable() {
         let prefixes = [
