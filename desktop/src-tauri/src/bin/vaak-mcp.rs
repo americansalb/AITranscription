@@ -3245,6 +3245,105 @@ fn apply_keep_alive(project_dir: &str, actor: &str) -> Result<serde_json::Value,
     }
 }
 
+/// Apply `metadata.mic_to` transfer atomically. Caller MUST hold board.lock
+/// (project_send already does, before the board append). Reads protocol.json,
+/// applies transfer per spec §2.2 row 2 + §10 atomicity, writes protocol.json.
+/// Returns Err iff the disk read/write fails — semantic refusals (mode doesn't
+/// permit, caller not authorized, target unauthorized) are silent successes
+/// (the floor stays put per spec). Vacant target falls through to queue head
+/// per spec §2.2 row 2 (dev-chall #940.5 fix).
+fn apply_protocol_mic_to_transfer(
+    project_dir: &str,
+    section: &str,
+    from_label: &str,
+    requested_target: &str,
+) -> Result<(), String> {
+    let mut current = read_protocol_for_section_value(project_dir, section);
+    let floor_mode = current
+        .get("floor")
+        .and_then(|f| f.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none")
+        .to_string();
+    let permits_transfer = matches!(
+        floor_mode.as_str(),
+        "reactive" | "queue" | "free-grab"
+    );
+    if !permits_transfer {
+        return Ok(()); // mode prohibits transfers — silent success (floor stays)
+    }
+
+    let cur_speaker = current
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let caller_authorized =
+        cur_speaker.is_none() || cur_speaker.as_deref() == Some(from_label);
+    if !caller_authorized {
+        return Ok(()); // caller not speaker — silent success
+    }
+
+    // Resolve target per spec §2.2 row 2: requested seat is vacant →
+    // fall through to queue head; queue empty → floor goes idle.
+    let resolved_target: Option<String> = if protocol_seat_exists_active(project_dir, requested_target) {
+        Some(requested_target.to_string())
+    } else {
+        // Vacant target — fall through to queue head (spec §2.2 row 2).
+        current
+            .get("floor")
+            .and_then(|f| f.get("queue"))
+            .and_then(|q| q.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+
+    // Apply transfer (or fall-through-to-idle if neither target nor queue head).
+    if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert(
+            "current_speaker".to_string(),
+            resolved_target
+                .as_ref()
+                .map(|s| serde_json::json!(s))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if let Some(rt) = &resolved_target {
+            if let Some(queue) = floor.get_mut("queue").and_then(|q| q.as_array_mut()) {
+                queue.retain(|v| v.as_str() != Some(rt));
+            }
+        }
+    }
+
+    let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Some(rev_field) = current.get_mut("rev") {
+        *rev_field = serde_json::json!(cur_rev + 1);
+    }
+    if let Some(obj) = current.as_object_mut() {
+        obj.insert(
+            "last_writer_seat".to_string(),
+            serde_json::json!(from_label),
+        );
+        let action_label = if resolved_target.as_deref() == Some(requested_target) {
+            "project_send_mic_to"
+        } else if resolved_target.is_some() {
+            "project_send_mic_to_fallthrough_queue_head"
+        } else {
+            "project_send_mic_to_fallthrough_idle"
+        };
+        obj.insert(
+            "last_writer_action".to_string(),
+            serde_json::json!(action_label),
+        );
+        obj.insert(
+            "rev_at".to_string(),
+            serde_json::json!(utc_now_iso()),
+        );
+    }
+
+    write_protocol_for_section_value(project_dir, section, &current)
+}
+
 // ============================================================
 // Slice 2 tests — apply_* layer (pure JSON-state mutations, no I/O)
 // ============================================================
@@ -3371,6 +3470,253 @@ mod protocol_slice2_tests {
         let err = apply_transfer_mic(&mut s, &serde_json::json!({}), "architect:0", "/none")
             .unwrap_err();
         assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    // ============================================================
+    // §10 atomicity behavioral tests (dev-chall #940.4 + tech-leader #941.5)
+    // Run against apply_protocol_mic_to_transfer directly — the function the
+    // project_send hook delegates to. Doesn't require get_or_rejoin_state
+    // since this layer is pure (project_dir, section, from_label, target).
+    // ============================================================
+
+    fn temp_project_with_protocol(
+        test_name: &str,
+        protocol: serde_json::Value,
+        sessions: serde_json::Value,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vaak-mcp-protocol-{}", test_name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vaak")).unwrap();
+        std::fs::write(
+            dir.join(".vaak").join("protocol.json"),
+            serde_json::to_string_pretty(&protocol).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".vaak").join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn read_protocol_back(dir: &std::path::Path) -> serde_json::Value {
+        let s = std::fs::read_to_string(dir.join(".vaak").join("protocol.json")).unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+
+    /// (d) §10 atomicity happy path: transfer commits → protocol.rev bumps,
+    /// current_speaker updates, audit fields stamped. Same-lock-window
+    /// invariant: this function is what runs INSIDE project_send's lock.
+    #[test]
+    fn protocol_mic_to_transfer_happy_path() {
+        let dir = temp_project_with_protocol(
+            "mic-to-happy",
+            serde_json::json!({
+                "schema_version": 1, "rev": 5, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": "architect:0", "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [
+                    {"role": "architect", "instance": 0, "status": "active", "last_active_at_ms": 9999999999u64, "last_drafting_at_ms": 0},
+                    {"role": "developer", "instance": 0, "status": "active", "last_active_at_ms": 9999999999u64, "last_drafting_at_ms": 0}
+                ]
+            }),
+        );
+
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "architect:0",
+            "developer:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 6);
+        assert_eq!(after["floor"]["current_speaker"], "developer:0");
+        assert_eq!(after["last_writer_seat"], "architect:0");
+        assert_eq!(after["last_writer_action"], "project_send_mic_to");
+    }
+
+    /// Vacant target → fall through to queue head (spec §2.2 row 2 +
+    /// dev-chall #940.5).
+    #[test]
+    fn protocol_mic_to_vacant_falls_through_to_queue_head() {
+        let dir = temp_project_with_protocol(
+            "mic-to-vacant-queue",
+            serde_json::json!({
+                "schema_version": 1, "rev": 1, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": "architect:0", "queue": ["tester:0", "developer:0"], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [
+                    {"role": "architect", "instance": 0, "status": "active"},
+                    {"role": "tester", "instance": 0, "status": "active"},
+                    {"role": "developer", "instance": 0, "status": "active"}
+                    // manager is NOT in bindings — vacant
+                ]
+            }),
+        );
+
+        // Speaker addresses vacant manager:0 — should fall through to queue head tester:0.
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "architect:0",
+            "manager:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["floor"]["current_speaker"], "tester:0");
+        assert_eq!(after["last_writer_action"], "project_send_mic_to_fallthrough_queue_head");
+        // Queue head consumed.
+        assert_eq!(after["floor"]["queue"], serde_json::json!(["developer:0"]));
+    }
+
+    /// Vacant target + empty queue → floor goes idle (current_speaker = null).
+    #[test]
+    fn protocol_mic_to_vacant_empty_queue_falls_through_to_idle() {
+        let dir = temp_project_with_protocol(
+            "mic-to-vacant-idle",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": "architect:0", "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [{"role": "architect", "instance": 0, "status": "active"}]
+            }),
+        );
+
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "architect:0",
+            "manager:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        assert!(after["floor"]["current_speaker"].is_null());
+        assert_eq!(after["last_writer_action"], "project_send_mic_to_fallthrough_idle");
+    }
+
+    /// Mode `none` blocks transfer — silent success, floor stays.
+    #[test]
+    fn protocol_mic_to_mode_none_does_not_transfer() {
+        let dir = temp_project_with_protocol(
+            "mic-to-mode-none",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Default chat",
+                "floor": {"mode": "none", "current_speaker": "architect:0", "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [
+                    {"role": "architect", "instance": 0, "status": "active"},
+                    {"role": "developer", "instance": 0, "status": "active"}
+                ]
+            }),
+        );
+
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "architect:0",
+            "developer:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        // Rev should NOT bump — floor mode rejects transfers.
+        assert_eq!(after["rev"], 0);
+        assert_eq!(after["floor"]["current_speaker"], "architect:0");
+    }
+
+    /// Caller not current_speaker → silent success, no transfer (auth gate).
+    #[test]
+    fn protocol_mic_to_unauthorized_caller_no_transfer() {
+        let dir = temp_project_with_protocol(
+            "mic-to-unauth",
+            serde_json::json!({
+                "schema_version": 1, "rev": 3, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": "architect:0", "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [
+                    {"role": "architect", "instance": 0, "status": "active"},
+                    {"role": "tester", "instance": 0, "status": "active"},
+                    {"role": "developer", "instance": 0, "status": "active"}
+                ]
+            }),
+        );
+
+        // tester:0 is NOT current_speaker (architect:0 is). Should silently no-op.
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "tester:0",
+            "developer:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 3);
+        assert_eq!(after["floor"]["current_speaker"], "architect:0");
+    }
+
+    /// Cold-open IDLE: caller authorized when current_speaker is null.
+    #[test]
+    fn protocol_mic_to_cold_open_first_sender_authorized() {
+        let dir = temp_project_with_protocol(
+            "mic-to-cold-open",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({
+                "bindings": [
+                    {"role": "architect", "instance": 0, "status": "active"},
+                    {"role": "developer", "instance": 0, "status": "active"}
+                ]
+            }),
+        );
+
+        apply_protocol_mic_to_transfer(
+            dir.to_str().unwrap(),
+            "default",
+            "architect:0",
+            "developer:0",
+        )
+        .unwrap();
+
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["rev"], 1);
+        assert_eq!(after["floor"]["current_speaker"], "developer:0");
     }
 
     /// Error-taxonomy reachability (tester #928 add): every prefix listed in
@@ -4027,86 +4373,20 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             }
         }
 
-        // Slice 2 (spec §10): protocol-side atomic mic_to transfer. Read
-        // protocol.json, check (a) floor.mode permits, (b) caller IS
-        // current_speaker, (c) target is a real seat. If all three hold,
-        // transfer + bump rev + last_writer_*. Same lock window as the
-        // message commit above — no half-landed state observable.
-        // Disabled when assembly_line legacy state is active (round-robin
-        // auto-advance owns the floor in that mode; protocol layer would
-        // double-write).
-        if !asm_active && mic_to_target.is_some() {
-            let target = mic_to_target.clone().unwrap();
-            let section = get_active_section(&state.project_dir);
-            let mut current = read_protocol_for_section_value(&state.project_dir, &section);
-            let floor_mode = current
-                .get("floor")
-                .and_then(|f| f.get("mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("none")
-                .to_string();
-            let permits_transfer = matches!(floor_mode.as_str(), "reactive" | "queue" | "free-grab");
-            let cur_speaker = current
-                .get("floor")
-                .and_then(|f| f.get("current_speaker"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            // Caller must be current_speaker to authorize a mic_to transfer.
-            // Cold-open IDLE: caller claims by becoming the new speaker too.
-            let caller_authorized = cur_speaker.is_none()
-                || cur_speaker.as_deref() == Some(&from_label);
-            if permits_transfer
-                && caller_authorized
-                && protocol_seat_exists_active(&state.project_dir, &target)
-            {
-                if let Some(floor) = current
-                    .get_mut("floor")
-                    .and_then(|f| f.as_object_mut())
-                {
-                    floor.insert(
-                        "current_speaker".to_string(),
-                        serde_json::json!(target.clone()),
-                    );
-                    if let Some(queue) =
-                        floor.get_mut("queue").and_then(|q| q.as_array_mut())
-                    {
-                        queue.retain(|v| v.as_str() != Some(&target));
-                    }
-                }
-                let cur_rev = current
-                    .get("rev")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if let Some(rev_field) = current.get_mut("rev") {
-                    *rev_field = serde_json::json!(cur_rev + 1);
-                }
-                if let Some(obj) = current.as_object_mut() {
-                    obj.insert(
-                        "last_writer_seat".to_string(),
-                        serde_json::json!(from_label.clone()),
-                    );
-                    obj.insert(
-                        "last_writer_action".to_string(),
-                        serde_json::json!("project_send_mic_to"),
-                    );
-                    obj.insert(
-                        "rev_at".to_string(),
-                        serde_json::json!(utc_now_iso()),
-                    );
-                }
-                // Surface write errors loudly (evil-arch #939 concern 2).
-                // Message has already appended in this same lock window —
-                // if the protocol write fails, the audit trail diverges
-                // from the message commit. Logging surfaces it; rolling back
-                // an append-only board.jsonl is not safe.
-                if let Err(e) = write_protocol_for_section_value(
-                    &state.project_dir,
-                    &section,
-                    &current,
+        // Slice 2 (spec §10): protocol-side atomic mic_to transfer. Same
+        // lock window as the board.jsonl append above — no observer can see
+        // a state where the message landed but the floor didn't move.
+        // Disabled when legacy assembly_line state is active (round-robin
+        // auto-advance owns the floor in that mode).
+        if !asm_active {
+            if let Some(target) = &mic_to_target {
+                let section = get_active_section(&state.project_dir);
+                if let Err(e) = apply_protocol_mic_to_transfer(
+                    &state.project_dir, &section, &from_label, target
                 ) {
                     eprintln!(
-                        "[protocol_mcp][SEVERE] project_send mic_to atomic transfer write failed AFTER message append: {}. Section: {}. Target: {}. Audit drift — message landed but floor did not move. Manual reconcile required.",
-                        e, section, target
+                        "[protocol_mcp][SEVERE] project_send mic_to atomic transfer failed AFTER message append: {}. Section: {}. From: {}. Target: {}. Audit drift — message landed but floor did not move. Manual reconcile required.",
+                        e, section, from_label, target
                     );
                 }
             }
