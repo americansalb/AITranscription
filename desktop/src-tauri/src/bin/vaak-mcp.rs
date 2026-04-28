@@ -2859,6 +2859,31 @@ fn handle_get_protocol(section: Option<&str>) -> Result<serde_json::Value, Strin
     let section_resolved = section
         .map(String::from)
         .unwrap_or_else(|| get_active_section(&pd));
+
+    // Slice 6 auto-advance check: under board.lock, read protocol, evaluate
+    // current phase's outcome predicate. If met, advance + bump rev + write.
+    // Piggybacks on every UI poll so we don't need a separate scheduler
+    // thread — at the cost of one disk write per get_protocol IF at a phase
+    // boundary (rare).
+    let _ = with_file_lock(&pd, || {
+        let mut current = read_protocol_for_section_value(&pd, &section_resolved);
+        if auto_advance_if_outcome_met(&mut current, &pd) {
+            let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(rev_field) = current.get_mut("rev") {
+                *rev_field = serde_json::json!(cur_rev + 1);
+            }
+            if let Some(obj) = current.as_object_mut() {
+                obj.insert("last_writer_seat".to_string(), serde_json::json!("system:auto_advance"));
+                obj.insert("last_writer_action".to_string(), serde_json::json!("auto_advance"));
+                obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+            if let Err(e) = write_protocol_for_section_value(&pd, &section_resolved, &current) {
+                eprintln!("[protocol_mcp] auto_advance write failed: {} — phase boundary not persisted, will retry on next poll", e);
+            }
+        }
+        Ok(())
+    });
+
     let protocol = read_protocol_for_section_value(&pd, &section_resolved);
 
     let sessions = read_sessions(&pd);
@@ -2982,10 +3007,9 @@ fn do_protocol_mutate(
                 "pause_plan" => apply_pause_plan(&mut current),
                 "resume_plan" => apply_resume_plan(&mut current),
                 "extend_phase" => apply_extend_phase(&mut current, &args),
-                "open_round" | "submit" | "close_round" => Err(format!(
-                    "[Slice6Unimplemented] consensus action '{}' lands in Slice 6",
-                    action
-                )),
+                "open_round" => apply_open_round(&mut current, &args, actor),
+                "submit" => apply_submit(&mut current, &args, actor),
+                "close_round" => apply_close_round(&mut current, &args, actor),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -3531,6 +3555,128 @@ fn evaluate_phase_outcome(
         "vote_quorum" => false, // Slice 6 owns consensus rounds
         _ => false,
     }
+}
+
+// ============================================================
+// Slice 6 — consensus actions (spec §3 + §10 + §6 matrix).
+// Three actions: open_round / submit / close_round. Per spec §10
+// "Round-scoped" auth tier: open_round any seat, submit any
+// participant, close_round opener OR plan-author.
+// ============================================================
+
+fn apply_open_round(state: &mut serde_json::Value, args: &serde_json::Value, actor: &str) -> Result<(), String> {
+    let topic = args.get("topic").and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] open_round requires args.topic (string)")?;
+    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("tally");
+    if !matches!(mode, "tally" | "vote" | "silence-consent") {
+        return Err(format!("[InvalidArgs] open_round.mode must be tally|vote|silence-consent (got '{}')", mode));
+    }
+    // Refuse if a round is already open in submitting/reviewing phase.
+    if let Some(phase) = state.get("consensus").and_then(|c| c.get("phase")).and_then(|p| p.as_str()) {
+        if phase == "submitting" || phase == "reviewing" {
+            return Err(format!("[NotPermitted] open_round: a round is already open (phase: {})", phase));
+        }
+    }
+    if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+        cons.insert("mode".to_string(), serde_json::json!(mode));
+        cons.insert("round".to_string(), serde_json::json!({
+            "topic": topic,
+            "opened_at": utc_now_iso(),
+            "opened_by": actor
+        }));
+        cons.insert("phase".to_string(), serde_json::json!("submitting"));
+        cons.insert("submissions".to_string(), serde_json::json!([]));
+    }
+    Ok(())
+}
+
+fn apply_submit(state: &mut serde_json::Value, args: &serde_json::Value, actor: &str) -> Result<(), String> {
+    let body = args.get("body")
+        .ok_or("[InvalidArgs] submit requires args.body (any JSON)")?
+        .clone();
+    let phase = state.get("consensus").and_then(|c| c.get("phase")).and_then(|p| p.as_str()).unwrap_or("");
+    if phase != "submitting" {
+        return Err(format!("[NotPermitted] submit: round phase must be 'submitting' (got '{}')", phase));
+    }
+    // Per-role scope (spec §3 scopes.consensus = "role"): replace prior
+    // submission by same role to honor "one vote per role" invariant.
+    let role: String = actor.split(':').next().unwrap_or(actor).to_string();
+    if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+        let submissions = cons.entry("submissions").or_insert_with(|| serde_json::json!([]));
+        if let Some(arr) = submissions.as_array_mut() {
+            arr.retain(|s| {
+                s.get("from").and_then(|v| v.as_str())
+                    .map(|f| f.split(':').next().unwrap_or(f) != role)
+                    .unwrap_or(true)
+            });
+            arr.push(serde_json::json!({
+                "from": actor,
+                "role": role,
+                "body": body,
+                "submitted_at": utc_now_iso()
+            }));
+        }
+    }
+    Ok(())
+}
+
+fn apply_close_round(state: &mut serde_json::Value, _args: &serde_json::Value, actor: &str) -> Result<(), String> {
+    // Auth: opener OR plan-author (v0 permissive — any seat may close in
+    // v0 per spec §10 v0/v1 split, audit row stamps the actor).
+    let opened_by = state.get("consensus")
+        .and_then(|c| c.get("round"))
+        .and_then(|r| r.get("opened_by"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let _ = opened_by; // v0 permissive; v1 will gate on (opener OR plan-author set)
+    let _ = actor;
+
+    let phase = state.get("consensus").and_then(|c| c.get("phase")).and_then(|p| p.as_str()).unwrap_or("");
+    if phase == "closed" {
+        return Err("[NotPermitted] close_round: round is already closed".to_string());
+    }
+    if phase == "" {
+        return Err("[InvalidArgs] close_round: no round is open".to_string());
+    }
+    if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+        cons.insert("phase".to_string(), serde_json::json!("closed"));
+    }
+    Ok(())
+}
+
+/// Auto-advance check: if the current phase's outcome predicate evaluates
+/// true, fire advance_phase. Called from get_protocol read path so every
+/// UI poll opportunistically checks. Idempotent — if predicate is true and
+/// we're already past last phase, no-op.
+fn auto_advance_if_outcome_met(state: &mut serde_json::Value, project_dir: &str) -> bool {
+    let phases = match state.get("phase_plan").and_then(|p| p.get("phases")).and_then(|p| p.as_array()) {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => return false,
+    };
+    let cur_idx = state.get("phase_plan").and_then(|p| p.get("current_phase_idx"))
+        .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    if cur_idx >= phases.len() { return false; }
+
+    // Skip auto-advance if plan is paused.
+    let paused = state.get("phase_plan")
+        .and_then(|p| p.get("paused_at"))
+        .map(|v| !v.is_null())
+        .unwrap_or(false);
+    if paused { return false; }
+
+    let paused_total = state.get("phase_plan")
+        .and_then(|p| p.get("paused_total_secs"))
+        .and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let cur_phase = &phases[cur_idx];
+    if !evaluate_phase_outcome(cur_phase, project_dir, paused_total) {
+        return false;
+    }
+
+    // Fire advance_phase inline (don't recurse through dispatch — we're
+    // already inside a get_protocol path that holds no lock).
+    let _ = apply_advance_phase(state, project_dir);
+    true
 }
 
 // ============================================================
@@ -4176,11 +4322,11 @@ mod protocol_slice2_tests {
         assert_eq!(after["phase_plan"]["phases"][0]["extension_secs"], 930);
     }
 
-    /// Consensus action stub returns [Slice6Unimplemented].
+    /// Slice 6 — open_round happy path opens a round in submitting phase.
     #[test]
-    fn dispatch_consensus_action_returns_slice6_unimplemented() {
+    fn dispatch_open_round_happy_path() {
         let dir = temp_project_with_protocol(
-            "dispatch-slice6",
+            "dispatch-open-round",
             serde_json::json!({
                 "schema_version": 1, "rev": 0, "preset": "Debate",
                 "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
@@ -4191,16 +4337,77 @@ mod protocol_slice2_tests {
             }),
             serde_json::json!({"bindings": []}),
         );
-        let err = do_protocol_mutate(
+        do_protocol_mutate(
             dir.to_str().unwrap(),
             "architect:0",
             "default",
             "open_round",
-            serde_json::json!({"topic": "x", "mode": "tally"}),
+            serde_json::json!({"topic": "Ship 9faf275 to main?", "mode": "tally"}),
             Some(0),
         )
-        .unwrap_err();
-        assert!(err.starts_with("[Slice6Unimplemented]"), "got: {}", err);
+        .unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["consensus"]["mode"], "tally");
+        assert_eq!(after["consensus"]["phase"], "submitting");
+        assert_eq!(after["consensus"]["round"]["topic"], "Ship 9faf275 to main?");
+        assert_eq!(after["consensus"]["round"]["opened_by"], "architect:0");
+    }
+
+    /// Slice 6 — submit + close_round end-to-end. Per-role replacement
+    /// preserves "one vote per role" invariant.
+    #[test]
+    fn dispatch_submit_then_close_round_full_path() {
+        let dir = temp_project_with_protocol(
+            "dispatch-submit-close",
+            serde_json::json!({
+                "schema_version": 1, "rev": 0, "preset": "Debate",
+                "floor": {"mode": "reactive", "current_speaker": null, "queue": [], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "consensus": {
+                    "mode": "tally",
+                    "round": {"topic": "x", "opened_at": "2026-04-28T00:00:00Z", "opened_by": "architect:0"},
+                    "phase": "submitting",
+                    "submissions": []
+                },
+                "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
+                "scopes": {"floor": "instance", "consensus": "role"},
+                "last_writer_seat": null, "last_writer_action": null, "rev_at": null
+            }),
+            serde_json::json!({"bindings": []}),
+        );
+        // First submission from developer:0
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "submit",
+            serde_json::json!({"body": "approve"}),
+            Some(0),
+        ).unwrap();
+        // Second submission from same role replaces (per-role scope).
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "developer:0",
+            "default",
+            "submit",
+            serde_json::json!({"body": "actually changed mind"}),
+            Some(1),
+        ).unwrap();
+        let mid = read_protocol_back(&dir);
+        let subs = mid["consensus"]["submissions"].as_array().unwrap();
+        assert_eq!(subs.len(), 1, "per-role replacement should keep exactly one submission per role");
+        assert_eq!(subs[0]["body"], "actually changed mind");
+
+        // Close the round.
+        do_protocol_mutate(
+            dir.to_str().unwrap(),
+            "architect:0",
+            "default",
+            "close_round",
+            serde_json::json!({}),
+            Some(2),
+        ).unwrap();
+        let after = read_protocol_back(&dir);
+        assert_eq!(after["consensus"]["phase"], "closed");
     }
 
     /// Unknown action → [InvalidAction].
