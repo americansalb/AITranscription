@@ -2502,15 +2502,64 @@ fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: 
 /// Posting the moderation board event stays here because it depends on
 /// `next_message_id` and `append_to_board`, which are MCP-binary helpers.
 fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
+    // Slice 6 deprecation warning — `assembly_line` is now a thin wrapper
+    // around `protocol_mutate(set_preset, ...)`. Spec §3.3 + architect
+    // #988: kept for one release tail; strict removal is "release after."
+    eprintln!(
+        "[deprecated] assembly_line MCP tool — migrate callers to protocol_mutate(set_preset, \"Assembly Line\"|\"Default chat\"). This tool routes through the same protocol_mutate path under the hood as of Slice 6 closer."
+    );
+
     let state = get_or_rejoin_state()?;
     let pd = state.project_dir.clone();
     let actor = format!("{}:{}", state.role, state.instance);
+    let section = get_active_section(&pd);
 
     if action == "get_state" {
+        // Slice 6 closer: project protocol.json into the legacy shape so
+        // existing callers see consistent state regardless of which tool
+        // wrote last. Falls back to legacy assembly.json read if
+        // protocol.json missing (Slice 1 migration may not have run yet).
+        let proto = read_protocol_for_section_value(&pd, &section);
+        let preset = proto.get("preset").and_then(|p| p.as_str()).unwrap_or("");
+        let active = preset == "Assembly Line";
+        if active || proto.get("rev").and_then(|v| v.as_u64()).map(|r| r > 0).unwrap_or(false) {
+            return Ok(serde_json::json!({
+                "active": active,
+                "current_speaker": proto.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
+                "rotation_order": proto.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
+                "started_at": proto.get("floor").and_then(|f| f.get("started_at")).cloned().unwrap_or(serde_json::Value::Null),
+                "_via": "protocol.json"
+            }));
+        }
         return Ok(read_assembly_state(&pd));
     }
 
-    // Single shared mutation impl. Acquires board.lock cross-process internally.
+    // Slice 6 thin-wrap: route enable/disable through protocol_mutate
+    // (spec §6 matrix: Assembly Line preset = round-robin floor).
+    let preset_name = match action {
+        "enable" => "Assembly Line",
+        "disable" => "Default chat",
+        other => return Err(format!("[InvalidAction] assembly_line action '{}' must be enable|disable|get_state", other)),
+    };
+    // CAS read current rev from protocol.json.
+    let cur_proto = read_protocol_for_section_value(&pd, &section);
+    let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Err(e) = do_protocol_mutate(
+        &pd,
+        &actor,
+        &section,
+        "set_preset",
+        serde_json::json!({"name": preset_name}),
+        Some(cur_rev),
+    ) {
+        // Don't let protocol_mutate failure block the legacy path — log
+        // and continue. Legacy assembly.json write will still happen.
+        // This is the "kept for one release" compat envelope.
+        eprintln!("[deprecated] assembly_line: protocol_mutate(set_preset, '{}') failed: {} — falling back to legacy assembly.json only", preset_name, e);
+    }
+
+    // Single shared legacy mutation impl. Acquires board.lock cross-process
+    // internally. Kept for the one-release-tail per spec §3.3.
     let new_state = collab_shared::set_assembly_v0(&pd, action, &actor)?;
 
     // Post a system event to the board so sessions in project_wait wake up.
