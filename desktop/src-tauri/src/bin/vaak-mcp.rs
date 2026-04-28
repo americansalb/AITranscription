@@ -8423,49 +8423,55 @@ fn run_supervise(project_dir: &str) {
                 None => continue,
             };
 
-            let last_alive = state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            let pid = state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
             let seat_label = path.file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("?")
                 .to_string();
 
-            // Don't trust last_alive=0 (newly created or never stamped) — skip.
-            if last_alive == 0 { continue; }
-
-            let age_ms = now_ms.saturating_sub(last_alive);
-            if age_ms < SUPERVISE_HANG_THRESHOLD_MS { continue; }
-
-            // PID alive? If no PID recorded or process is gone, skip — Layer 1 handles process exit.
-            let pid = match pid {
-                Some(p) => p,
-                None => continue,
+            // Slice 8 closure (architect #1052 ship-block fix): production
+            // loop now calls the tested decision helpers instead of inline
+            // one-source logic. Two-source freshness (max(last_alive,
+            // last_drafting)) closes the long-tool-call false-kill window
+            // for active typers per spec §3.1 + tech-leader #1042 fold.
+            let pre_state = state.clone();
+            let pid = match supervise_initial_decide(&pre_state, now_ms, SUPERVISE_HANG_THRESHOLD_MS) {
+                SuperviseDecision::Skip => continue,
+                SuperviseDecision::BuzzAndWait { pid, age_ms } => {
+                    eprintln!(
+                        "[vaak-supervise] seat {} stale ({}ms) pid={}; pre-kill grace 5s",
+                        seat_label, age_ms, pid
+                    );
+                    stamp_supervisor_warning(&path, now_ms);
+                    std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_PRE_KILL_GRACE_MS));
+                    pid
+                }
+                SuperviseDecision::AbortKill | SuperviseDecision::Kill { .. } => {
+                    // Initial decide never returns these variants — they're
+                    // post-grace-only. Defensive: treat as Skip.
+                    continue;
+                }
             };
-            if !is_process_alive(pid) { continue; }
 
-            // Pre-kill grace: post a buzz row, sleep 5s, re-check timestamp.
-            eprintln!(
-                "[vaak-supervise] seat {} stale ({}ms) pid={}; pre-kill grace 5s",
-                seat_label, age_ms, pid
-            );
-            stamp_supervisor_warning(&path, now_ms);
-            std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_PRE_KILL_GRACE_MS));
-
-            // Re-read the timestamp; abort if the seat responded.
+            // Re-read post-grace state and run the post-grace decision.
             let post_state = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .unwrap_or(serde_json::json!({}));
-            let post_alive = post_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-            if post_alive > last_alive {
-                eprintln!("[vaak-supervise] seat {} recovered during grace — abort kill", seat_label);
-                continue;
+            match supervise_post_grace_decide(&pre_state, &post_state, pid) {
+                SuperviseDecision::AbortKill => {
+                    eprintln!("[vaak-supervise] seat {} recovered during grace — abort kill", seat_label);
+                    continue;
+                }
+                SuperviseDecision::Kill { pid } => {
+                    eprintln!("[vaak-supervise] seat {} still hung — killing pid={}", seat_label, pid);
+                    kill_process_tree(pid);
+                    stamp_supervisor_kill(&path, now_ms);
+                }
+                SuperviseDecision::Skip | SuperviseDecision::BuzzAndWait { .. } => {
+                    // Post-grace decide never returns these — defensive.
+                    continue;
+                }
             }
-
-            // Kill the process tree (taskkill /F /T on Windows; SIGKILL on unix).
-            eprintln!("[vaak-supervise] seat {} still hung — killing pid={}", seat_label, pid);
-            kill_process_tree(pid);
-            stamp_supervisor_kill(&path, now_ms);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_POLL_INTERVAL_MS));
