@@ -3367,7 +3367,40 @@ fn do_protocol_mutate_inner(
                     current.phase_plan.current_phase_idx = next_idx.min(phases_len);
                     Ok(())
                 }
-                "set_phase_plan" => Err("[InvalidAction] set_phase_plan goes through MCP protocol_mutate (authoring is plan-author tier per spec §10)".to_string()),
+                "set_phase_plan" => {
+                    // Slice 9 phase editor wires this UI-side. v0 permissive
+                    // auth per spec §10 plan-author tier ("any seat" in v0;
+                    // hard-gate to phase_plan_authors lands in v1).
+                    let phases_val = args.get("phases").cloned().unwrap_or(serde_json::Value::Null);
+                    let phases_arr = match phases_val.as_array() {
+                        Some(a) => a.clone(),
+                        None => return Ok(Err("[InvalidArgs] set_phase_plan requires args.phases (array)".to_string())),
+                    };
+                    if phases_arr.is_empty() {
+                        return Ok(Err("[InvalidArgs] set_phase_plan: phases array must be non-empty".to_string()));
+                    }
+                    // Validate + deserialize each phase via the existing
+                    // protocol::Phase struct. serde_json::from_value enforces
+                    // schema (preset + outcome required).
+                    let mut new_phases: Vec<protocol::Phase> = Vec::with_capacity(phases_arr.len());
+                    for (i, p) in phases_arr.iter().enumerate() {
+                        match serde_json::from_value::<protocol::Phase>(p.clone()) {
+                            Ok(phase) => new_phases.push(phase),
+                            Err(e) => return Ok(Err(format!("[InvalidArgs] phase[{}] schema error: {}", i, e))),
+                        }
+                    }
+                    // Stamp started_at on phase[0] if not already set.
+                    if let Some(first) = new_phases.first_mut() {
+                        if first.started_at.is_none() {
+                            first.started_at = Some(collab::iso_now());
+                        }
+                    }
+                    current.phase_plan.phases = new_phases;
+                    current.phase_plan.current_phase_idx = 0;
+                    current.phase_plan.paused_at = None;
+                    current.phase_plan.paused_total_secs = 0;
+                    Ok(())
+                }
                 other => Err(format!(
                     "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase; '{}' must go through MCP protocol_mutate",
                     other

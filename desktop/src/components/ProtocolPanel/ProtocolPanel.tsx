@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useProtocolState } from '../../hooks/useProtocolState';
 import type { Heartbeats, Protocol } from '../../hooks/useProtocolState';
 import { SeatChip } from './SeatChip';
+import { PhasePlanEditor } from './PhasePlanEditor';
 import './ProtocolPanel.css';
 
 export type ProtocolPanelProps = {
@@ -41,6 +42,9 @@ export function ProtocolPanel({
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  // Slice 9: phase plan editor modal toggle.
+  const [editorOpen, setEditorOpen] = useState(false);
 
   // ARIA-live announcement of mic transitions. We announce when
   // current_speaker changes — polite (not assertive) per spec §5.2.
@@ -80,7 +84,14 @@ export function ProtocolPanel({
         {announcement}
       </div>
 
-      <PhaseRow protocol={state} mutate={mutate} />
+      <PhaseRow protocol={state} mutate={mutate} onEdit={() => setEditorOpen(true)} />
+      {editorOpen && (
+        <PhasePlanEditor
+          protocol={state}
+          mutate={mutate}
+          onClose={() => setEditorOpen(false)}
+        />
+      )}
       <PresetRow protocol={state} />
       <MicLine
         protocol={state}
@@ -106,9 +117,11 @@ export function ProtocolPanel({
 function PhaseRow({
   protocol,
   mutate,
+  onEdit,
 }: {
   protocol: Protocol;
   mutate: (action: string, args?: object) => Promise<unknown>;
+  onEdit?: () => void;
 }) {
   const phases = protocol.phase_plan.phases;
   const idx = protocol.phase_plan.current_phase_idx;
@@ -119,8 +132,13 @@ function PhaseRow({
     return (
       <div className="protocol-panel__row protocol-panel__phase">
         <span style={{ color: '#5b6478', fontStyle: 'italic' }}>
-          No phase plan — set one via `set_phase_plan` MCP tool to track progress.
+          No phase plan.
         </span>
+        {onEdit && (
+          <button type="button" className="protocol-panel__pill" onClick={onEdit}>
+            ✎ Edit plan
+          </button>
+        )}
       </div>
     );
   }
@@ -164,6 +182,16 @@ function PhaseRow({
       >
         ⏲ +15m
       </button>
+      {onEdit && (
+        <button
+          type="button"
+          className="protocol-panel__pill"
+          onClick={onEdit}
+          title="Edit phase plan"
+        >
+          ✎
+        </button>
+      )}
     </div>
   );
 }
