@@ -383,7 +383,7 @@
 
   <!-- TALLY -->
   <div class="tally">
-    <div class="card crit"><div class="num">6</div><div class="lbl">Critical</div></div>
+    <div class="card crit"><div class="num">7</div><div class="lbl">Critical</div></div>
     <div class="card high"><div class="num">11</div><div class="lbl">High</div></div>
     <div class="card med"><div class="num">16</div><div class="lbl">Medium</div></div>
     <div class="card low"><div class="num">10</div><div class="lbl">Low</div></div>
@@ -451,6 +451,23 @@ The <code class="inline">min(220px, 100%)</code> trick ensures the minmax never 
       <div class="receipts"><code>collab.css:344-352</code></div>
       <div class="why">At 4 columns inside a ~780px content area, each card gets ~190px. After 12px padding, the X button (20px), and gap, the title gets ~120px. That fits "Tester" but not "Adaptive Learning Engineer" or "Quality Assurance Editor". The user can't distinguish 30 vacant cards by title.</div>
       <div class="fix"><span class="fix-label">Fix</span>Bump the minmax to 240px so the auto-fill drops to 3 columns at this width — every card gets ~248px, room for full titles. Optional secondary: a <code class="inline">title</code>/aria attribute already exists; add a CSS-only "show full title" via <code class="inline">:hover</code> tooltip pattern (or accept ellipsis if 240px is enough).</div>
+    </div>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Assembly Line state has THREE source files that diverge silently.</span>
+      </div>
+      <div class="receipts"><code>.vaak/legacy/assembly-line/assembly.json</code> · <code>.vaak/sections/&lt;section&gt;/assembly.json</code> · <code>.vaak/sections/&lt;section&gt;/protocol.json</code> · <code>CollabTab.tsx:1364-1381 (get_assembly_state poll)</code> · <code>ProtocolPanel.tsx (get_protocol)</code></div>
+      <div class="why">Confirmed live 2026-04-29: at one moment the running app simultaneously showed <i>three different current speakers</i> in three places — the legacy <code class="inline">assembly.json</code> said <code class="inline">developer:0</code>, the section's <code class="inline">assembly.json</code> said <code class="inline">ui-architect:0</code>, and the section's <code class="inline">protocol.json</code> said <code class="inline">architect:0</code>. The CollabTab AL toggle pill polls <code class="inline">get_assembly_state</code> (assembly.json); the ProtocolPanel CompactMicLine reads <code class="inline">get_protocol</code> (protocol.json); the project_send rejection gate reads yet another path. Slice 6's "thin-wrap" dual-write only mirrors <code class="inline">set_preset</code>, not <code class="inline">current_speaker</code> / <code class="inline">rotation_order</code> / <code class="inline">yield</code>.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Single source of truth: <code class="inline">protocol.json</code>. Three changes:
+        <ol style="margin: 8px 0 0 18px; padding: 0;">
+          <li>CollabTab AL toggle reads from <code class="inline">protocol.floor.current_speaker</code>, not <code class="inline">get_assembly_state</code>.</li>
+          <li>The project_send AL gate (vaak-mcp / Rust) reads <code class="inline">protocol.json</code>'s <code class="inline">floor</code>, not <code class="inline">assembly.json</code>.</li>
+          <li>Delete <code class="inline">set_assembly_state</code> + <code class="inline">read_assembly_state</code> Tauri commands. Migrate any remaining writers to <code class="inline">protocol_mutate</code>.</li>
+        </ol>
+        After: <code class="inline">.vaak/legacy/assembly-line/</code> and <code class="inline">sections/&lt;s&gt;/assembly.json</code> become orphaned; can be deleted in a follow-up sweep.
+      </div>
     </div>
 
     <div class="finding sev-MED">
@@ -980,10 +997,11 @@ And switch <code class="inline">scrollIntoView({ behavior: "smooth" })</code> at
   <div class="backlog">
     <h2>Backlog — tick as you ship</h2>
     <ul>
-      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Fix role-card grid clipping (<code class="inline">min(220px, 100%)</code> + <code class="inline">min-width: 0</code>).</li>
-      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Bump role-card minmax to 240px so titles fit without ellipsis.</li>
+      <li><input type="checkbox" checked> <span class="sevtag CRIT">CRIT</span> Fix role-card grid clipping (<code class="inline">min(220px, 100%)</code> + <code class="inline">min-width: 0</code>). <i>Shipped @ 2d01f5b.</i></li>
+      <li><input type="checkbox" checked> <span class="sevtag HIGH">HIGH</span> Bump role-card minmax to 240px so titles fit without ellipsis. <i>Shipped @ 2d01f5b.</i></li>
       <li><input type="checkbox"> <span class="sevtag MED">MED</span> <code class="inline">position: sticky</code> the compose bar; trim empty banner padding.</li>
-      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Add <code class="inline">prefers-reduced-motion</code> globally.</li>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Single-source AL state from <code class="inline">protocol.json</code>; delete legacy <code class="inline">assembly.json</code> readers/writers.</li>
+      <li><input type="checkbox" checked> <span class="sevtag CRIT">CRIT</span> Add <code class="inline">prefers-reduced-motion</code> globally. <i>Shipped @ 2d01f5b.</i></li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Audit every <code class="inline">title=</code>-only button; add <code class="inline">aria-label</code>.</li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Status dot: pattern + color, not color alone.</li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Replace all <code class="inline">:focus</code> with one global <code class="inline">:focus-visible</code> ring.</li>
