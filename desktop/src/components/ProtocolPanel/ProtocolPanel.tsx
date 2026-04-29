@@ -294,8 +294,35 @@ function CompactMicLine({
   const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
   const hb = speaker ? heartbeats[speaker] : undefined;
   const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
+
+  // Single named-state for AL visibility (per ui-architect #1230 + #1233):
+  // when floor.mode == "round-robin", show "AL ON" + speaker + → next-up
+  // inline. No multi-axis, no auto-expand. Pinned to always-visible header.
+  const isAssemblyLine = protocol.floor.mode === 'round-robin';
+  const rotation = protocol.floor.rotation_order;
+  const speakerIdx = speaker ? rotation.indexOf(speaker) : -1;
+  const nextUp = isAssemblyLine && rotation.length > 0 && speakerIdx >= 0
+    ? rotation[(speakerIdx + 1) % rotation.length]
+    : null;
+
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, fontSize: '0.9rem' }}>
+      {isAssemblyLine && (
+        <span
+          style={{
+            background: '#4f46e5',
+            color: 'white',
+            padding: '2px 8px',
+            borderRadius: 4,
+            fontSize: '0.7rem',
+            fontWeight: 700,
+            letterSpacing: '0.04em',
+          }}
+          aria-label="Assembly line is on"
+        >
+          AL
+        </span>
+      )}
       <span aria-hidden="true">🎙</span>
       <span style={{ fontWeight: 600 }}>
         {speaker || <span style={{ fontStyle: 'italic', color: '#5b6478' }}>idle</span>}
@@ -303,9 +330,16 @@ function CompactMicLine({
       {ageSecs !== null && (
         <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>{ageSecs}s</span>
       )}
-      <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
-        · {protocol.preset}
-      </span>
+      {nextUp && (
+        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
+          → next: <span style={{ color: '#1a1f2e', fontWeight: 600 }}>{nextUp}</span>
+        </span>
+      )}
+      {!isAssemblyLine && (
+        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
+          · {protocol.preset}
+        </span>
+      )}
       {isSelfSpeaker && (
         <button
           type="button"
