@@ -18,6 +18,19 @@
   --collab-border: var(--border, #27272a);
 }
 
+/* WCAG 2.1 — vestibular safety. UI audit 2026-04-29 finding #1.
+   Honour the OS-level reduced-motion preference; collab.css has 113
+   transition/animation rules and we must not impose them on users who
+   can't tolerate motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ==================== Project Tab Layout ==================== */
 
 .project-tab {
@@ -290,11 +303,17 @@
 
 .project-roles-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  /* min(240px, 100%) — never let minmax exceed container width. UI audit
+     2026-04-29 visible-bug #1 (cards spilling off viewport edges). 240px
+     gives full role titles room without ellipsis at typical Vaak window
+     widths. */
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
   gap: 10px;
   padding-right: 4px;
   max-height: 280px;
   overflow-y: auto;
+  width: 100%;
+  min-width: 0;
 }
 
 /* Smooth scrollbar for roles grid */
@@ -320,6 +339,11 @@
   border-radius: 8px;
   padding: 12px;
   transition: background 0.15s;
+  /* min-width: 0 + overflow: hidden so flex/grid children can shrink past
+     intrinsic content size without pushing the column wider than its
+     track. UI audit 2026-04-29 visible-bug #1. */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .role-card:hover {

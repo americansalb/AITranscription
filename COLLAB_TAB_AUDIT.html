@@ -383,16 +383,17 @@
 
   <!-- TALLY -->
   <div class="tally">
-    <div class="card crit"><div class="num">5</div><div class="lbl">Critical</div></div>
-    <div class="card high"><div class="num">10</div><div class="lbl">High</div></div>
-    <div class="card med"><div class="num">15</div><div class="lbl">Medium</div></div>
+    <div class="card crit"><div class="num">6</div><div class="lbl">Critical</div></div>
+    <div class="card high"><div class="num">11</div><div class="lbl">High</div></div>
+    <div class="card med"><div class="num">16</div><div class="lbl">Medium</div></div>
     <div class="card low"><div class="num">10</div><div class="lbl">Low</div></div>
   </div>
 
   <!-- PUNCH LIST -->
   <div class="punch">
-    <h2>If you do nothing else, do these five</h2>
+    <h2>If you do nothing else, do these six</h2>
     <ol>
+      <li><b>Fix the role-card grid clipping.</b> Cards spill past the left and right viewport edges right now. Single CSS change — <a href="#live">see Visible Bugs</a>.</li>
       <li><b>Add <code class="inline">prefers-reduced-motion</code></b> — 113 transitions/animations, zero opt-outs. Vestibular accessibility is a floor, not a feature.</li>
       <li><b>Stop using <code class="inline">title</code> as the primary label.</b> 47 buttons rely on hover-only tooltips — invisible on touch, inconsistent for screen readers, untranslatable.</li>
       <li><b>Break CollabTab.tsx apart.</b> 5,084 lines and 110 useStates in one component is not a UI surface, it's a landfill. Each modal is a route.</li>
@@ -405,6 +406,7 @@
   <nav class="toc">
     <h2>Themes</h2>
     <ol>
+      <li><a href="#live">Visible bugs (from live screen capture)</a></li>
       <li><a href="#a11y">Accessibility</a></li>
       <li><a href="#arch">Architecture &amp; component shape</a></li>
       <li><a href="#tokens">Design tokens &amp; theming</a></li>
@@ -417,6 +419,55 @@
       <li><a href="#polish">Polish nits</a></li>
     </ol>
   </nav>
+
+  <!-- ============================================================ -->
+  <!-- LIVE VISUAL BUGS -->
+  <section class="theme" id="live">
+    <h2>0. Visible bugs (from live screen capture) <a href="#live" class="anchor">#</a></h2>
+    <p class="theme-sub">Code-level findings miss the things only the rendered UI reveals. These three came from looking at the user's actual Vaak window at 816&times;939.</p>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Role-card grid clips off the left and right edges of the viewport.</span>
+      </div>
+      <div class="receipts"><code>collab.css:291-298 (.project-roles-grid)</code> · <code>collab.css:315-323 (.role-card)</code></div>
+      <div class="why">In the live window, the first card ("Adaptive Learning &hellip;") is partially cut off on the left and the last card ("Clinical Synthesizer" / "Role Creator") is partially cut off on the right. The grid uses <code class="inline">repeat(auto-fill, minmax(200px, 1fr))</code>, but at the user's window width the columns end up <i>wider</i> than the available track, so the rightmost column overflows and the grid container takes a wider layout than its parent. Cards <code class="inline">.role-card</code> have no <code class="inline">min-width: 0</code>, so any inner content (a long action button label, the overflow menu) refuses to shrink and pushes the column outwards.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Three lines:
+<pre>.project-roles-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+  width: 100%;
+  min-width: 0;
+}
+.role-card { min-width: 0; overflow: hidden; }</pre>
+The <code class="inline">min(220px, 100%)</code> trick ensures the minmax never exceeds the actual container width on narrow windows. <code class="inline">min-width: 0</code> on the card lets flex children shrink past intrinsic size.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">Most card titles truncate to ellipsis: "Adaptive Learning &hellip;", "Quality Assurance &hellip;", "Assessment Desig&hellip;".</span>
+      </div>
+      <div class="receipts"><code>collab.css:344-352</code></div>
+      <div class="why">At 4 columns inside a ~780px content area, each card gets ~190px. After 12px padding, the X button (20px), and gap, the title gets ~120px. That fits "Tester" but not "Adaptive Learning Engineer" or "Quality Assurance Editor". The user can't distinguish 30 vacant cards by title.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Bump the minmax to 240px so the auto-fill drops to 3 columns at this width — every card gets ~248px, room for full titles. Optional secondary: a <code class="inline">title</code>/aria attribute already exists; add a CSS-only "show full title" via <code class="inline">:hover</code> tooltip pattern (or accept ellipsis if 240px is enough).</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Bottom 40% of the viewport is empty horizontal bands.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3699-3741, 3762-3970, 3979-4029</code></div>
+      <div class="why">Below "Launch All Vacant", the user sees: empty band, empty band, empty band, then nothing. The compose bar isn't visible. Likely culprit: <code class="inline">.message-timeline</code> at <code class="inline">L3763</code> uses <code class="inline">flex: 1</code>-equivalent but renders empty rows for project-hint-banner, claims-section, and a couple of other collapsed containers. Each ships its own padding even when childless. The compose bar is below those — pushed out of viewport when team is large.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Two changes:
+        <ol style="margin: 8px 0 0 18px; padding: 0;">
+          <li><b>Empty containers shouldn't render.</b> Wrap <code class="inline">.project-hint-banner</code>, <code class="inline">.claims-section</code>, and the macOS-permission banner in <code class="inline">{condition &amp;&amp; ...}</code> guards (most already are; verify each renders nothing when empty).</li>
+          <li><b>Compose bar must be reachable.</b> Make <code class="inline">.compose-bar</code> <code class="inline">position: sticky; bottom: 0</code> within the project-tab so it's always visible. The message-timeline above it gets the remaining height via <code class="inline">flex: 1; min-height: 0; overflow-y: auto</code>.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
 
   <!-- ============================================================ -->
   <!-- A11Y -->
@@ -929,6 +980,9 @@ And switch <code class="inline">scrollIntoView({ behavior: "smooth" })</code> at
   <div class="backlog">
     <h2>Backlog — tick as you ship</h2>
     <ul>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Fix role-card grid clipping (<code class="inline">min(220px, 100%)</code> + <code class="inline">min-width: 0</code>).</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Bump role-card minmax to 240px so titles fit without ellipsis.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> <code class="inline">position: sticky</code> the compose bar; trim empty banner padding.</li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Add <code class="inline">prefers-reduced-motion</code> globally.</li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Audit every <code class="inline">title=</code>-only button; add <code class="inline">aria-label</code>.</li>
       <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Status dot: pattern + color, not color alone.</li>
