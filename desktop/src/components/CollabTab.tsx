@@ -635,7 +635,10 @@ export function CollabTab() {
   // Auto-buzz watchdog: tracks which agents have been auto-buzzed in the current staleness episode
   const [openCardMenu, setOpenCardMenu] = useState<string | null>(null); // "slug:instance" key
   const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
-  const [claimsCollapsed, setClaimsCollapsed] = useState(true);
+  // human #1280: claims used to be visible always; collapsed-by-default
+  // hid them. Default expanded so the team's "who's working on what" is
+  // surfaced without an extra click. User can still collapse via the title.
+  const [claimsCollapsed, setClaimsCollapsed] = useState(false);
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});

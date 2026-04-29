@@ -1506,11 +1506,13 @@
 }
 
 .claims-section-title {
-  font-size: 10px;
+  /* human #1280: was 10px muted — invisible. Bump to 12px secondary so the
+     "who's working on what" label is actually readable at a glance. */
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--collab-text-muted);
+  color: var(--collab-text-secondary);
   margin-bottom: 8px;
   cursor: pointer;
   display: flex;
