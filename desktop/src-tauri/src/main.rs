@@ -3121,40 +3121,101 @@ fn get_discussion_state(dir: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn get_assembly_state(dir: String) -> Result<serde_json::Value, String> {
     let dir = validate_project_dir(&dir)?;
-    Ok(collab::read_assembly(&dir))
+    // Human #1252 fix — single source of truth: project from protocol.json
+    // (the new authoritative state) into the legacy assembly.json shape that
+    // CollabTab's AL toggle button + assemblyState UI binding expect. No more
+    // dual-source poll.
+    let section = collab::get_active_section(&dir);
+    let proto = protocol::read_protocol_for_section(&dir, &section);
+    let active = proto.preset == "Assembly Line";
+    Ok(serde_json::json!({
+        "active": active,
+        "current_speaker": proto.floor.current_speaker,
+        "rotation_order": proto.floor.rotation_order,
+        "started_at": proto.floor.started_at,
+        "started_by": proto.last_writer_seat.unwrap_or_default(),
+        "_via": "protocol.json"
+    }))
 }
 
 #[tauri::command]
 fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, String> {
     let dir = validate_project_dir(&dir)?;
-    // Per architect #156: single shared impl in collab.rs, both front doors call it.
-    let legacy_state = collab::set_assembly_v0(&dir, &action, "human")?;
-
-    // Human #1122 fix: legacy AL button now ALSO mirrors into protocol.json
-    // so ProtocolPanel sees the change. Without this, clicking the AL toggle
-    // in CollabTab updated assembly.json but the new ProtocolPanel (which
-    // reads protocol.json) showed stale state — exactly the disconnect the
-    // human flagged. Spec §3.3 thin-wrap was for the MCP path; this is the
-    // Tauri-button path's symmetric piece.
+    // Human #1252 fix — true single source of truth. Writes ONLY to
+    // protocol.json (full state: preset + floor.mode + rotation_order +
+    // current_speaker), via direct `protocol::Protocol` mutation under
+    // board.lock. Legacy `.vaak/assembly.json` is no longer written; the
+    // project_send AL gate in vaak-mcp.rs will be migrated in the same push
+    // so it reads protocol.json too.
     let section = collab::get_active_section(&dir);
-    let preset_name = match action.as_str() {
-        "enable" => "Assembly Line",
-        "disable" => "Default chat",
-        _ => return Ok(legacy_state), // get_state or unknown — don't mirror
+
+    // Read active seats for rotation_order seeding (matches the prior
+    // collab::set_assembly_v0 behavior).
+    let active_seats: Vec<String> = {
+        let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+        let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+        let bindings = sessions.get("bindings").and_then(|b| b.as_array()).cloned().unwrap_or_default();
+        bindings.iter()
+            .filter(|b| b.get("status").and_then(|s| s.as_str()) == Some("active"))
+            .filter_map(|b| {
+                let role = b.get("role").and_then(|r| r.as_str())?;
+                let inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                Some(format!("{}:{}", role, inst))
+            })
+            .collect()
     };
-    let cur_proto = protocol::read_protocol_for_section(&dir, &section);
-    let cur_rev = cur_proto.rev;
-    if let Err(e) = do_protocol_mutate_inner(
-        &dir,
-        "human",
-        &section,
-        "set_preset",
-        serde_json::json!({"name": preset_name}),
-        Some(cur_rev),
-    ) {
-        eprintln!("[set_assembly_state] protocol.json mirror failed: {} — legacy state still updated", e);
+
+    let lock_result: Result<Result<serde_json::Value, String>, String> = collab::with_board_lock(&dir, || {
+        let mut proto = protocol::read_protocol_for_section(&dir, &section);
+        match action.as_str() {
+            "enable" => {
+                proto.preset = "Assembly Line".to_string();
+                proto.floor.mode = "round-robin".to_string();
+                proto.floor.rotation_order = active_seats.clone();
+                proto.floor.current_speaker = active_seats.first().cloned();
+                proto.floor.started_at = Some(collab::iso_now());
+            }
+            "disable" => {
+                proto.preset = "Default chat".to_string();
+                proto.floor.mode = "none".to_string();
+                proto.floor.rotation_order = vec![];
+                // current_speaker preserved per spec §2.2 normalize() — the
+                // none-mode HOLDING semantics keep the speaker informational.
+            }
+            "get_state" => {
+                // Read-only — return the current state without mutation.
+                return Ok(Ok(serde_json::json!({
+                    "active": proto.preset == "Assembly Line",
+                    "current_speaker": proto.floor.current_speaker,
+                    "rotation_order": proto.floor.rotation_order,
+                    "started_at": proto.floor.started_at,
+                    "_via": "protocol.json"
+                })));
+            }
+            other => return Ok(Err(format!("[InvalidAction] unknown set_assembly_state action: {}", other))),
+        }
+        proto.rev += 1;
+        proto.last_writer_seat = Some("human".to_string());
+        proto.last_writer_action = Some(format!("set_assembly_state.{}", action));
+        proto.rev_at = Some(collab::iso_now());
+        if let Err(e) = protocol::write_protocol_for_section_unlocked(&dir, &section, &proto) {
+            return Ok(Err(e));
+        }
+        Ok(Ok(serde_json::json!({
+            "active": proto.preset == "Assembly Line",
+            "current_speaker": proto.floor.current_speaker,
+            "rotation_order": proto.floor.rotation_order,
+            "started_at": proto.floor.started_at,
+            "_via": "protocol.json"
+        })))
+    });
+    match lock_result {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
     }
-    Ok(legacy_state)
 }
 
 // ==================== Protocol v6 — Slice 3 Tauri commands ====================

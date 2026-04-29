@@ -5575,8 +5575,21 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // type="moderation". Internal system events from handle_assembly_line append
         // to the board directly via append_to_board(), bypassing this entire function,
         // so they don't need a gate exemption (#113.A).
-        let asm = read_assembly_state(&state.project_dir);
-        let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Human #1252 fix — AL gate now reads protocol.json (single source of
+        // truth) instead of legacy assembly.json. Translates the protocol
+        // schema (preset + floor.mode) into the legacy active/current_speaker
+        // shape the rest of this gate expects.
+        let section_for_gate = get_active_section(&state.project_dir);
+        let proto_for_gate = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+        let asm_active = proto_for_gate
+            .get("preset").and_then(|p| p.as_str())
+            .map(|s| s == "Assembly Line")
+            .unwrap_or(false);
+        let asm = serde_json::json!({
+            "active": asm_active,
+            "current_speaker": proto_for_gate.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
+            "rotation_order": proto_for_gate.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
+        });
         let mut asm_auto_grabbed: Option<serde_json::Value> = None;
         if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
@@ -5616,16 +5629,31 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         "[assembly_line] auto-grab: prior speaker '{}' silent {}s (> {}s threshold); '{}' claims mic per human #903",
                         cur, speaker_silent_secs, MIC_AUTOROTATE_SECS, from_label
                     );
-                    let mut updated = asm.clone();
-                    updated["current_speaker"] = serde_json::json!(from_label);
-                    if let Err(e) = write_assembly_state_unlocked(&state.project_dir, &updated) {
-                        eprintln!("[assembly_line] auto-grab write failed: {}", e);
+                    // Human #1252 fix — write auto-grab to protocol.json
+                    // (single source of truth) instead of legacy assembly.json.
+                    let mut current = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+                    if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                        floor.insert("current_speaker".to_string(), serde_json::json!(from_label));
+                    }
+                    let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if let Some(rev_field) = current.get_mut("rev") {
+                        *rev_field = serde_json::json!(cur_rev + 1);
+                    }
+                    if let Some(obj) = current.as_object_mut() {
+                        obj.insert("last_writer_seat".to_string(), serde_json::json!(from_label.clone()));
+                        obj.insert("last_writer_action".to_string(), serde_json::json!("al_auto_grab"));
+                        obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+                    }
+                    if let Err(e) = write_protocol_for_section_value(&state.project_dir, &section_for_gate, &current) {
+                        eprintln!("[assembly_line] auto-grab protocol.json write failed: {}", e);
                         return Err(format!(
                             "Assembly Line auto-grab attempted but write failed: {}. Current speaker: {}.",
                             e,
                             if cur.is_empty() { "(none)" } else { cur }
                         ));
                     }
+                    let mut updated = asm.clone();
+                    updated["current_speaker"] = serde_json::json!(from_label);
                     asm_auto_grabbed = Some(updated);
                 } else {
                     let remaining = MIC_AUTOROTATE_SECS.saturating_sub(speaker_silent_secs);
@@ -5688,14 +5716,31 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         append_to_board(&state.project_dir, &message)?;
 
         // Assembly Line auto-advance (atomic with the append above).
-        // Skips standby/disconnected seats; if no live seat exists, mic stays put.
-        // Bypass matches the gate above: ONLY human-origin sends skip the advance
-        // (caller-supplied msg_type is not trusted here either, per #113.A).
+        // Human #1252 fix — write to protocol.json (single source of truth)
+        // instead of legacy assembly.json. The asm view above was projected
+        // from protocol.json so next_assembly_speaker still works on the
+        // synthetic shape. Skips standby/disconnected seats; if no live seat
+        // exists, mic stays put. Bypass matches the gate above: ONLY
+        // human-origin sends skip the advance (caller-supplied msg_type is
+        // not trusted here either, per #113.A).
         if asm_active && state.role != "human" {
             if let Some(next) = next_assembly_speaker(&asm, &state.project_dir, &from_label) {
-                let mut updated = asm.clone();
-                updated["current_speaker"] = serde_json::json!(next);
-                let _ = write_assembly_state_unlocked(&state.project_dir, &updated);
+                // Write the new current_speaker into protocol.json under the
+                // existing lock window.
+                let mut current = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+                if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                    floor.insert("current_speaker".to_string(), serde_json::json!(next));
+                }
+                let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(rev_field) = current.get_mut("rev") {
+                    *rev_field = serde_json::json!(cur_rev + 1);
+                }
+                if let Some(obj) = current.as_object_mut() {
+                    obj.insert("last_writer_seat".to_string(), serde_json::json!(from_label.clone()));
+                    obj.insert("last_writer_action".to_string(), serde_json::json!("al_auto_advance"));
+                    obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+                }
+                let _ = write_protocol_for_section_value(&state.project_dir, &section_for_gate, &current);
             }
         }
 
