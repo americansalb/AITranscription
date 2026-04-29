@@ -330,9 +330,34 @@ function CompactMicLine({
       {ageSecs !== null && (
         <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>{ageSecs}s</span>
       )}
-      {nextUp && (
-        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
-          → next: <span style={{ color: '#1a1f2e', fontWeight: 600 }}>{nextUp}</span>
+      {/* Full rotation strip (human #1238): show every seat in rotation_order
+          with current speaker highlighted, separated by → arrows. Compact
+          enough for the always-visible header. */}
+      {isAssemblyLine && rotation.length > 0 && (
+        <span
+          style={{ color: '#5b6478', fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}
+          aria-label="Assembly line rotation"
+        >
+          {rotation.map((seat, i) => {
+            const isCurrent = seat === speaker;
+            const isNext = nextUp === seat;
+            return (
+              <span key={seat} style={{ display: 'inline-flex', alignItems: 'center' }}>
+                {i > 0 && <span style={{ color: '#cbd5e1', margin: '0 4px' }}>→</span>}
+                <span
+                  style={{
+                    color: isCurrent ? '#4f46e5' : isNext ? '#1a1f2e' : '#94a3b8',
+                    fontWeight: isCurrent ? 700 : isNext ? 600 : 400,
+                    background: isCurrent ? '#eef2ff' : 'transparent',
+                    padding: isCurrent ? '1px 6px' : '0',
+                    borderRadius: 3,
+                  }}
+                >
+                  {seat}
+                </span>
+              </span>
+            );
+          })}
         </span>
       )}
       {!isAssemblyLine && (
