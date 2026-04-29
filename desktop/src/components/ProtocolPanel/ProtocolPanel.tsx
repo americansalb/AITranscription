@@ -295,9 +295,12 @@ function CompactMicLine({
   const hb = speaker ? heartbeats[speaker] : undefined;
   const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
 
-  // Single named-state for AL visibility (per ui-architect #1230 + #1233):
-  // when floor.mode == "round-robin", show "AL ON" + speaker + → next-up
-  // inline. No multi-axis, no auto-expand. Pinned to always-visible header.
+  // ui-architect 2026-04-29 (human #1269): rotation strip used to be a
+  // 0.78rem inline-flex inside the mic line — invisible at default sizes.
+  // Restructured as two stacked rows: (1) the small mic/state line on top,
+  // (2) a dedicated horizontal pill row underneath that only renders when
+  // AL is on. Each seat gets a real pill (not text). Three named states:
+  // current speaker (filled), next-up (outlined), idle (muted).
   const isAssemblyLine = protocol.floor.mode === 'round-robin';
   const rotation = protocol.floor.rotation_order;
   const speakerIdx = speaker ? rotation.indexOf(speaker) : -1;
@@ -306,73 +309,59 @@ function CompactMicLine({
     : null;
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, fontSize: '0.9rem' }}>
-      {isAssemblyLine && (
-        <span
-          style={{
-            background: '#4f46e5',
-            color: 'white',
-            padding: '2px 8px',
-            borderRadius: 4,
-            fontSize: '0.7rem',
-            fontWeight: 700,
-            letterSpacing: '0.04em',
-          }}
-          aria-label="Assembly line is on"
-        >
-          AL
+    <div className="protocol-mic-stack">
+      {/* Top line: AL state + speaker + age + Yield (if self) */}
+      <div className="protocol-mic-line">
+        {isAssemblyLine && (
+          <span className="protocol-al-badge" aria-label="Assembly line is on">
+            ASSEMBLY LINE
+          </span>
+        )}
+        <span aria-hidden="true" className="protocol-mic-icon">🎙</span>
+        <span className="protocol-mic-speaker">
+          {speaker || <span className="protocol-mic-idle">idle</span>}
         </span>
-      )}
-      <span aria-hidden="true">🎙</span>
-      <span style={{ fontWeight: 600 }}>
-        {speaker || <span style={{ fontStyle: 'italic', color: '#5b6478' }}>idle</span>}
-      </span>
-      {ageSecs !== null && (
-        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>{ageSecs}s</span>
-      )}
-      {/* Full rotation strip (human #1238): show every seat in rotation_order
-          with current speaker highlighted, separated by → arrows. Compact
-          enough for the always-visible header. */}
+        {ageSecs !== null && (
+          <span className="protocol-mic-age">{ageSecs}s</span>
+        )}
+        {!isAssemblyLine && (
+          <span className="protocol-mic-preset">· {protocol.preset}</span>
+        )}
+        {isSelfSpeaker && (
+          <button
+            type="button"
+            className="protocol-mic-yield-btn"
+            onClick={() => { void mutate('yield', {}); }}
+          >
+            Yield
+          </button>
+        )}
+      </div>
+      {/* Second line (AL only): horizontal pill row, one pill per seat. */}
       {isAssemblyLine && rotation.length > 0 && (
-        <span
-          style={{ color: '#5b6478', fontSize: '0.78rem', display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}
-          aria-label="Assembly line rotation"
+        <div
+          className="protocol-al-rotation"
+          role="list"
+          aria-label="Assembly line rotation order"
         >
           {rotation.map((seat, i) => {
             const isCurrent = seat === speaker;
             const isNext = nextUp === seat;
+            const stateClass = isCurrent
+              ? 'is-current'
+              : isNext
+                ? 'is-next'
+                : 'is-idle';
             return (
-              <span key={seat} style={{ display: 'inline-flex', alignItems: 'center' }}>
-                {i > 0 && <span style={{ color: '#cbd5e1', margin: '0 4px' }}>→</span>}
-                <span
-                  style={{
-                    color: isCurrent ? '#4f46e5' : isNext ? '#1a1f2e' : '#94a3b8',
-                    fontWeight: isCurrent ? 700 : isNext ? 600 : 400,
-                    background: isCurrent ? '#eef2ff' : 'transparent',
-                    padding: isCurrent ? '1px 6px' : '0',
-                    borderRadius: 3,
-                  }}
-                >
+              <span key={seat} className="protocol-al-rotation-item" role="listitem">
+                {i > 0 && <span className="protocol-al-arrow" aria-hidden="true">→</span>}
+                <span className={`protocol-al-seat-pill ${stateClass}`}>
                   {seat}
                 </span>
               </span>
             );
           })}
-        </span>
-      )}
-      {!isAssemblyLine && (
-        <span style={{ color: '#5b6478', fontSize: '0.78rem' }}>
-          · {protocol.preset}
-        </span>
-      )}
-      {isSelfSpeaker && (
-        <button
-          type="button"
-          onClick={() => { void mutate('yield', {}); }}
-          style={{ marginLeft: 'auto', padding: '2px 10px', borderRadius: 6, background: '#4f46e5', color: 'white', border: 'none', fontSize: '0.78rem' }}
-        >
-          Yield
-        </button>
+        </div>
       )}
     </div>
   );

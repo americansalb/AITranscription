@@ -308,3 +308,126 @@
 .health-pill__layer--fail .health-pill__layer-icon { color: #ef4444; font-weight: 800; }
 .health-pill__layer-label  { font-weight: 600; color: #1a1f2e; }
 .health-pill__layer-detail { color: #5b6478; }
+
+/* ==================== Mic line + AL rotation pill row ====================
+   ui-architect 2026-04-29 (human #1269): the inline rotation strip from
+   a3d7a8c was 0.78rem flex-wrap text and rendered effectively invisible.
+   This rebuilds it as a real banner: top line = speaker/state, bottom
+   line = horizontal pill row, one pill per seat. */
+
+.protocol-mic-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.protocol-mic-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.95rem;
+  flex-wrap: wrap;
+}
+.protocol-mic-icon { font-size: 1.05rem; line-height: 1; }
+.protocol-mic-speaker { font-weight: 700; color: #1a1f2e; }
+.protocol-mic-idle { font-style: italic; color: #5b6478; font-weight: 400; }
+.protocol-mic-age {
+  color: #5b6478;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+.protocol-mic-preset { color: #5b6478; font-size: 0.85rem; }
+.protocol-mic-yield-btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: #4f46e5;
+  color: white;
+  border: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.protocol-mic-yield-btn:hover { background: #4338ca; }
+.protocol-mic-yield-btn:focus-visible { outline: 2px solid #1a1f2e; outline-offset: 2px; }
+
+/* "ASSEMBLY LINE" badge — small label at the start of the top row to
+   make the mode unmistakable at a glance. */
+.protocol-al-badge {
+  background: #4f46e5;
+  color: white;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+/* Bottom-row rotation: horizontal scrolling list of pills, one per seat. */
+.protocol-al-rotation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+  width: 100%;
+}
+
+.protocol-al-rotation-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.protocol-al-arrow {
+  color: #94a3b8;
+  font-size: 0.85rem;
+  user-select: none;
+}
+
+/* Seat pill — three states. ALL same shape; differ only in color/weight. */
+.protocol-al-seat-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  border: 1.5px solid;
+  white-space: nowrap;
+  line-height: 1.2;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+/* Current speaker — filled, bright. Gentle pulse to draw the eye. */
+.protocol-al-seat-pill.is-current {
+  background: #4f46e5;
+  border-color: #4f46e5;
+  color: white;
+  font-weight: 700;
+  animation: protocol-al-current-pulse 2.4s ease-in-out infinite;
+}
+@keyframes protocol-al-current-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.22); }
+}
+
+/* Next-up — outlined, primed. */
+.protocol-al-seat-pill.is-next {
+  background: #eef2ff;
+  border-color: #4f46e5;
+  color: #1a1f2e;
+}
+
+/* Idle — muted but legible. */
+.protocol-al-seat-pill.is-idle {
+  background: #f8fafc;
+  border-color: #e3e6ec;
+  color: #64748b;
+  font-weight: 500;
+}
