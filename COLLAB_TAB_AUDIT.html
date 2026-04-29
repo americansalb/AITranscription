@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CollabTab — UI Architect Audit · 2026-04-29</title>
+<style>
+  :root {
+    --bg: #0c0d10;
+    --panel: #14161b;
+    --panel-2: #1a1d24;
+    --line: #262a33;
+    --ink: #e7e9ee;
+    --ink-dim: #aab1c0;
+    --ink-mute: #6f7787;
+    --crit: #ff4d6d;
+    --high: #ff9f43;
+    --med:  #ffd166;
+    --low:  #6cc4a1;
+    --link: #7aa7ff;
+    --code-bg: #0a0b0e;
+    --good: #59c989;
+    --bad: #ff6b81;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); }
+  body {
+    margin: 0;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 48px 32px 96px; }
+
+  /* ---------- header ---------- */
+  header.hero {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 32px;
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--ink-mute);
+    font-weight: 600;
+  }
+  h1 {
+    font-size: 36px;
+    line-height: 1.1;
+    margin: 8px 0 12px;
+    letter-spacing: -0.02em;
+    font-weight: 700;
+  }
+  .sub {
+    color: var(--ink-dim);
+    max-width: 720px;
+    font-size: 16px;
+  }
+  .meta {
+    margin-top: 18px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .meta code {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--ink-dim);
+  }
+
+  /* ---------- tally ---------- */
+  .tally {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin: 32px 0 48px;
+  }
+  .tally .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .tally .num {
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 6px;
+    letter-spacing: -0.02em;
+  }
+  .tally .lbl {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-weight: 600;
+    color: var(--ink-mute);
+  }
+  .tally .crit .num { color: var(--crit); }
+  .tally .high .num { color: var(--high); }
+  .tally .med  .num { color: var(--med);  }
+  .tally .low  .num { color: var(--low);  }
+
+  /* ---------- punch list ---------- */
+  .punch {
+    background: linear-gradient(180deg, rgba(255,77,109,0.05) 0%, rgba(255,77,109,0.0) 100%);
+    border: 1px solid rgba(255,77,109,0.25);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 48px;
+  }
+  .punch h2 {
+    font-size: 15px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    margin: 0 0 12px;
+    color: var(--crit);
+    font-weight: 700;
+  }
+  .punch ol {
+    margin: 0;
+    padding-left: 22px;
+    color: var(--ink);
+  }
+  .punch li {
+    margin-bottom: 6px;
+    line-height: 1.5;
+  }
+  .punch li b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- TOC ---------- */
+  nav.toc {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 48px;
+  }
+  nav.toc h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    margin: 0 0 12px;
+    color: var(--ink-mute);
+  }
+  nav.toc ol {
+    columns: 2;
+    column-gap: 32px;
+    margin: 0;
+    padding-left: 22px;
+    color: var(--ink-dim);
+  }
+  nav.toc a {
+    color: var(--link);
+    text-decoration: none;
+  }
+  nav.toc a:hover { text-decoration: underline; }
+
+  /* ---------- sections ---------- */
+  section.theme {
+    margin-bottom: 56px;
+    scroll-margin-top: 24px;
+  }
+  section.theme > h2 {
+    font-size: 22px;
+    letter-spacing: -0.01em;
+    font-weight: 700;
+    margin: 0 0 4px;
+  }
+  section.theme > .theme-sub {
+    color: var(--ink-dim);
+    font-size: 14px;
+    margin-bottom: 24px;
+  }
+
+  /* ---------- finding ---------- */
+  .finding {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--line);
+    border-radius: 8px;
+    padding: 18px 22px;
+    margin-bottom: 14px;
+  }
+  .finding.sev-CRIT { border-left-color: var(--crit); }
+  .finding.sev-HIGH { border-left-color: var(--high); }
+  .finding.sev-MED  { border-left-color: var(--med);  }
+  .finding.sev-LOW  { border-left-color: var(--low);  }
+
+  .finding-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .badge {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid;
+  }
+  .badge.CRIT { background: rgba(255,77,109,0.12);   color: var(--crit); border-color: rgba(255,77,109,0.4); }
+  .badge.HIGH { background: rgba(255,159,67,0.12);   color: var(--high); border-color: rgba(255,159,67,0.4); }
+  .badge.MED  { background: rgba(255,209,102,0.12);  color: var(--med);  border-color: rgba(255,209,102,0.4); }
+  .badge.LOW  { background: rgba(108,196,161,0.12);  color: var(--low);  border-color: rgba(108,196,161,0.4); }
+
+  .finding-title {
+    font-weight: 600;
+    font-size: 15.5px;
+    flex: 1 1 100%;
+    line-height: 1.3;
+  }
+  .receipts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0 12px;
+  }
+  .receipts code {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: var(--ink-dim);
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .why {
+    color: var(--ink-dim);
+    font-size: 14px;
+    margin-bottom: 10px;
+  }
+  .why b { color: var(--ink); font-weight: 600; }
+  .fix {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    color: var(--ink-dim);
+  }
+  .fix-label {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-weight: 700;
+    color: var(--ink-mute);
+    margin-right: 8px;
+  }
+
+  pre, code.inline {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    color: #d6d8de;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  code.inline {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    padding: 1px 5px;
+    border-radius: 3px;
+    color: var(--ink);
+  }
+
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 10px 0;
+  }
+  .compare > div {
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .compare .lbl {
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-weight: 700;
+    padding: 6px 10px;
+  }
+  .compare .now .lbl { background: rgba(255,107,129,0.1); color: var(--bad); }
+  .compare .nxt .lbl { background: rgba(89,201,137,0.1);  color: var(--good); }
+  .compare pre { margin: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+
+  /* ---------- backlog ---------- */
+  .backlog {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin-top: 40px;
+  }
+  .backlog h2 {
+    font-size: 18px;
+    margin: 0 0 16px;
+  }
+  .backlog ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .backlog li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 14px;
+  }
+  .backlog li:last-child { border-bottom: 0; }
+  .backlog input[type=checkbox] {
+    margin-top: 4px;
+    accent-color: var(--low);
+    width: 14px;
+    height: 14px;
+  }
+  .backlog .sevtag {
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: 4px;
+    flex-shrink: 0;
+    margin-top: 3px;
+  }
+  .backlog .sevtag.CRIT { background: rgba(255,77,109,0.15);  color: var(--crit); }
+  .backlog .sevtag.HIGH { background: rgba(255,159,67,0.15);  color: var(--high); }
+  .backlog .sevtag.MED  { background: rgba(255,209,102,0.15); color: var(--med);  }
+  .backlog .sevtag.LOW  { background: rgba(108,196,161,0.15); color: var(--low);  }
+
+  footer.foot {
+    color: var(--ink-mute);
+    font-size: 12px;
+    border-top: 1px solid var(--line);
+    margin-top: 64px;
+    padding-top: 18px;
+  }
+  a.anchor {
+    color: var(--ink-mute);
+    text-decoration: none;
+    margin-left: 6px;
+    font-weight: 400;
+    opacity: 0;
+    transition: opacity .15s;
+  }
+  section.theme h2:hover a.anchor { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">UI Architect · Forensic Audit</div>
+    <h1>CollabTab — the roast</h1>
+    <p class="sub">A file-by-line audit of the collaboration tab. The component is doing too much, the design system is half-built, the accessibility floor is lower than it should be, and the icon language is incoherent. Receipts inside.</p>
+    <div class="meta">
+      <span><b style="color:var(--ink-dim)">Date:</b> 2026-04-29</span>
+      <span><b style="color:var(--ink-dim)">Reviewer:</b> ui-architect:0</span>
+      <span><b style="color:var(--ink-dim)">Target:</b> <code>desktop/src/components/CollabTab.tsx</code></span>
+      <span><b style="color:var(--ink-dim)">Branch tip:</b> <code>994c08f</code></span>
+      <span><b style="color:var(--ink-dim)">Lines audited:</b> <code>5,084 TSX + 6,714 CSS</code></span>
+    </div>
+  </header>
+
+  <!-- TALLY -->
+  <div class="tally">
+    <div class="card crit"><div class="num">5</div><div class="lbl">Critical</div></div>
+    <div class="card high"><div class="num">10</div><div class="lbl">High</div></div>
+    <div class="card med"><div class="num">15</div><div class="lbl">Medium</div></div>
+    <div class="card low"><div class="num">10</div><div class="lbl">Low</div></div>
+  </div>
+
+  <!-- PUNCH LIST -->
+  <div class="punch">
+    <h2>If you do nothing else, do these five</h2>
+    <ol>
+      <li><b>Add <code class="inline">prefers-reduced-motion</code></b> — 113 transitions/animations, zero opt-outs. Vestibular accessibility is a floor, not a feature.</li>
+      <li><b>Stop using <code class="inline">title</code> as the primary label.</b> 47 buttons rely on hover-only tooltips — invisible on touch, inconsistent for screen readers, untranslatable.</li>
+      <li><b>Break CollabTab.tsx apart.</b> 5,084 lines and 110 useStates in one component is not a UI surface, it's a landfill. Each modal is a route.</li>
+      <li><b>Pick one icon system.</b> HTML entities, <code class="inline">\u####</code>, inline SVG, and emoji literals are all mixed in the same file. Build an Icon component, retire the rest.</li>
+      <li><b>Reconcile the two color systems.</b> CSS tokens at the top of <code class="inline">collab.css</code> say accent is <code class="inline">#6366f1</code>; the <code class="inline">ROLE_COLORS</code> map in TSX says architect is <code class="inline">#1da1f2</code>. Theme switch only flips half.</li>
+    </ol>
+  </div>
+
+  <!-- TOC -->
+  <nav class="toc">
+    <h2>Themes</h2>
+    <ol>
+      <li><a href="#a11y">Accessibility</a></li>
+      <li><a href="#arch">Architecture &amp; component shape</a></li>
+      <li><a href="#tokens">Design tokens &amp; theming</a></li>
+      <li><a href="#hierarchy">Visual hierarchy</a></li>
+      <li><a href="#states">Interaction states &amp; loading</a></li>
+      <li><a href="#icons">Iconography</a></li>
+      <li><a href="#motion">Motion &amp; responsiveness</a></li>
+      <li><a href="#dialogs">Dialogs, modals, confirmations</a></li>
+      <li><a href="#dead">Dead code &amp; ghost states</a></li>
+      <li><a href="#polish">Polish nits</a></li>
+    </ol>
+  </nav>
+
+  <!-- ============================================================ -->
+  <!-- A11Y -->
+  <section class="theme" id="a11y">
+    <h2>1. Accessibility <a href="#a11y" class="anchor">#</a></h2>
+    <p class="theme-sub">Five blockers. None of these require a redesign — they require hooking up the floor.</p>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">No <code class="inline">prefers-reduced-motion</code> across the entire collab CSS.</span>
+      </div>
+      <div class="receipts"><code>collab.css (entire file)</code></div>
+      <div class="why">113 <code class="inline">transition:</code>/<code class="inline">animation:</code>/<code class="inline">@keyframes</code> rules across 6,714 lines and <b>zero <code class="inline">@media (prefers-reduced-motion)</code> queries</b>. Working-status pulse, scroll-into-view smoothness, hover lifts, modal fades — all unconditional. This is a vestibular-disorder trigger and an automated-audit fail.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Add a single global block at the top of <code class="inline">collab.css</code>:
+<pre>@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}</pre>
+And switch <code class="inline">scrollIntoView({ behavior: "smooth" })</code> at <code class="inline">CollabTab.tsx:2131,2165</code> to honour the same flag via <code class="inline">window.matchMedia</code>.</div>
+    </div>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Tooltip-only labels on 47+ buttons.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2509,2527,2592,2620,2659,3134,3899,5001,5029…</code></div>
+      <div class="why"><code class="inline">title=</code> is used as the <i>primary</i> affordance description on workflow chip, visibility chip, settings gear, role-card remove ✕, message-card delete ✕, and many more. Tooltips don't appear on touch devices, are inconsistent across browsers, often inaccessible to screen readers, and don't translate. Several buttons have <i>only</i> an HTML-entity glyph as their visible content.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Every interactive element needs an accessible name visible <i>or</i> exposed via <code class="inline">aria-label</code> in addition to (not instead of) <code class="inline">title</code>. Audit pass: any button whose visible content is <code class="inline">&amp;times;</code>, <code class="inline">⏹</code>, or <code class="inline">&amp;#9881;</code> requires <code class="inline">aria-label</code>. Many already have it; many don't.</div>
+    </div>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Status communicated by color alone in chip view.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3483,3109</code> · <code>collab.css .role-chip-working/-ready/-vacant</code></div>
+      <div class="why">The chip variant differentiates working / ready / vacant by border + background tint. The status word ("Working", "Ready", "Not started") is also rendered in a sibling span — but its color is <i>also</i> the role color, so for color-vision-deficient users the only legible state cue is the dot, which is small. WCAG 1.4.1 says color alone may not be the only visual means.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Add a pattern/glyph to the dot per status (●, ◐, ○ — filled / half / empty), or move the status word to a non-role-coloured token (<code class="inline">--collab-text-secondary</code>) so contrast stands on its own.</div>
+    </div>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Mixed <code class="inline">:focus</code> and <code class="inline">:focus-visible</code> coverage.</span>
+      </div>
+      <div class="receipts"><code>collab.css</code> · 21 <code class="inline">:focus</code> rules vs 11 <code class="inline">:focus-visible</code></div>
+      <div class="why">Some interactive elements get a focus ring on every mouse click (annoying, looks broken); others get nothing on keyboard (inaccessible). Inconsistent within the same surface — message-card delete vs. play vs. role-card overflow each handle this differently.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One global rule: <code class="inline">:focus { outline: none }</code>, then a single <code class="inline">:focus-visible { outline: 2px solid var(--collab-accent); outline-offset: 2px }</code> token applied via a <code class="inline">.focusable</code> mixin or base reset. Delete the 21 ad-hoc <code class="inline">:focus</code> rules.</div>
+    </div>
+
+    <div class="finding sev-CRIT">
+      <div class="finding-head">
+        <span class="badge CRIT">Critical</span>
+        <span class="finding-title">Role colors not contrast-verified against the dark surface.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:19-26,29-42</code></div>
+      <div class="why"><code class="inline">manager #9b59b6</code> on <code class="inline">--bg-primary #0a0a0b</code> = ~5.8:1 (passes AA for normal text). <code class="inline">audience #e74c3c</code> = ~4.4:1 (fails AA for normal text, passes for large). The hash palette includes <code class="inline">#7e57c2</code> = ~4.0:1 and <code class="inline">#26a69a</code> = ~5.5:1 — borderline. No contrast check exists in code or CI.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Pre-compute a "label color" sibling for each role (auto-lighten if luminance &lt; threshold) and use the saturated hex only for the dot/border. Visible text uses the lightened variant. Or hardcode a brand-light pair per role.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ARCH -->
+  <section class="theme" id="arch">
+    <h2>2. Architecture &amp; component shape <a href="#arch" class="anchor">#</a></h2>
+    <p class="theme-sub">The component-shape problems are also UI problems — they're why polish drift happens.</p>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">5,084 lines, one component, 110 <code class="inline">useState</code> hooks.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:1-5084</code></div>
+      <div class="why">CollabTab.tsx renders <b>everything</b>: header, two custom dropdowns, settings panel, section tabs, role-management modal (which contains a tree, a roster, and another grid), setup checklist, claims, message timeline, compose bar, mic-to hint, role briefing modal, audience panel modal, role create/edit form modal (with two sub-modes and a 7-step wizard), companion launch dialog, start discussion dialog, confirm dialog, create-group modal, interrupt dialog. Plus the directory picker. All in one tree, all in first paint.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Split into route-level components (each modal becomes its own file), extract role-form into <code class="inline">&lt;RoleFormModal&gt;</code>, audience into <code class="inline">&lt;AudiencePanel&gt;</code>, role-management into <code class="inline">&lt;RolesAndGroupsModal&gt;</code>. Use <code class="inline">React.lazy</code> + <code class="inline">Suspense</code> for the modals so they don't ship in the initial bundle. State per modal stays in its own component; the parent passes only "open" + ID.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">Two coexisting color systems — theme tokens vs hardcoded role colors.</span>
+      </div>
+      <div class="receipts"><code>collab.css:5-19</code> · <code>CollabTab.tsx:19-26,29-42</code></div>
+      <div class="why">Top of <code class="inline">collab.css</code>: <code class="inline">--collab-accent: var(--accent, #6366f1)</code>. In <code class="inline">CollabTab.tsx</code>: <code class="inline">architect: "#1da1f2"</code>. Different values, different purposes, never reconciled. Theming the app changes <code class="inline">--accent</code> but role chips, message-card "from"/"to" labels, and timeline borders <i>do not change</i>.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Move <code class="inline">ROLE_COLORS</code> into CSS custom properties: <code class="inline">--role-architect: #1da1f2</code> at <code class="inline">:root</code>, then <code class="inline">style={{ borderLeftColor: \`var(--role-${slug})\` }}</code>. Adds one indirection but lets a future theme system override role colors per theme.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">61 inline <code class="inline">style={'{{...}}'}</code> blocks, many static.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:448, 3176, 2639-2650, 4118-4120, 4143-4146…</code></div>
+      <div class="why">Some are legitimate (data-driven role colors). Many are static values smuggled into TSX: e.g., the Assembly Line button at <code>L2639-2650</code> sets <i>nine</i> static style props in JS when one classname would do. The audience-error block at <code>L4118</code> hardcodes <code class="inline">color: "#e0245e"</code> outside the design system entirely. These bypass the cascade, can't be themed, and break dark/light parity.</div>
+      <div class="compare">
+        <div class="now"><div class="lbl">Now</div>
+<pre>style={{
+  background: assemblyState?.active
+    ? "#137333" : "transparent",
+  color: assemblyState?.active
+    ? "#fff" : "#137333",
+  border: "1px solid #137333",
+  borderRadius: 6,
+  padding: "4px 10px",
+  marginLeft: 6,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: assemblyToggling ? "wait" : "pointer",
+  opacity: assemblyToggling ? 0.6 : 1,
+}}</pre></div>
+        <div class="nxt"><div class="lbl">Next</div>
+<pre>className={[
+  "assembly-line-toggle",
+  assemblyState?.active && "is-active",
+  assemblyToggling && "is-busy",
+].filter(Boolean).join(" ")}</pre></div>
+      </div>
+      <div class="fix"><span class="fix-label">Fix</span>Audit the 61 inline-style sites. Keep only the data-driven ones (role colors, dynamic widths from API data). Move every static value into a class.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">Header crammed with eight controls.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2497-2663</code></div>
+      <div class="why">The project header holds: back arrow, status dot, project name, pending-questions badge, workflow chip + dropdown, project description, Auto checkbox, Review checkbox, Visibility chip + dropdown, Discuss button, Assembly Line button, settings gear. That's eight interactive controls plus three labels in one horizontal strip — a primary-secondary-tertiary mess. On a narrow window everything wraps and there's no fallback.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Demote: Auto + Review become a single "Mode" pill with a popover. Workflow + Visibility + Assembly become a single "Behavior" cluster. Settings gear opens a panel that contains them all. Header keeps: name, status, primary mode pill, behavior cluster, settings.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">Modal-inside-modal-inside-modal.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2918 → 4276 → 4856</code></div>
+      <div class="why">Roles &amp; Groups modal can open the role-form modal, which can open the typed-confirmation dialog. Three z-stacked overlays. Each owns its own backdrop, click-outside handler, and Esc semantics. There's no central modal stack manager — Esc closes whichever modal happens to register its handler last, focus is captured then released chaotically, and on a narrow window the inner modal scrolls behind the outer's backdrop.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Single <code class="inline">&lt;ModalStack&gt;</code> provider with a stack of mounts. Esc pops the top. Focus trap is per-mount. Each modal subscribes to "I am top of stack" before installing its global keydown.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- TOKENS -->
+  <section class="theme" id="tokens">
+    <h2>3. Design tokens &amp; theming <a href="#tokens" class="anchor">#</a></h2>
+    <p class="theme-sub">There's a token system. It's used at the top of <code class="inline">collab.css</code> and almost nowhere else.</p>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">263 raw <code class="inline">rgba(255,255,255,X)</code>, 125 raw hex, 321 raw px font-sizes.</span>
+      </div>
+      <div class="receipts"><code>collab.css (across the file)</code></div>
+      <div class="why">There is no type scale, no spacing scale, no opacity scale. <code class="inline">font-size: 11px / 12px / 12.5px / 13px / 13.5px / 14px / 15px</code> all coexist; <code class="inline">rgba(255,255,255,0.05)</code>, <code class="inline">0.06</code>, <code class="inline">0.08</code>, <code class="inline">0.1</code>, <code class="inline">0.12</code>, <code class="inline">0.15</code> all coexist. Every magic number is a future inconsistency.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Define <code class="inline">--font-xs/sm/md/lg/xl</code>, <code class="inline">--space-1/2/3/4/6/8</code>, <code class="inline">--surface-1/2/3</code> (replacing the rgba ladder) at <code class="inline">:root</code>. Codemod the file. Anything that doesn't map cleanly to a token is itself a finding.</div>
+    </div>
+
+    <div class="finding sev-HIGH">
+      <div class="finding-head">
+        <span class="badge HIGH">High</span>
+        <span class="finding-title">Zero <code class="inline">@media</code> queries — no responsive design.</span>
+      </div>
+      <div class="receipts"><code>collab.css (entire file)</code></div>
+      <div class="why">6,714 lines of CSS, not one breakpoint. The design assumes a fixed-width desktop window. Narrow windows, zoomed text, and accessibility scaling all break silently. The header at <code>L2497-2663</code> — eight controls — has nowhere to go on smaller widths.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Define three breakpoints in tokens (<code class="inline">--bp-narrow: 720px</code>, etc.). At minimum, the header collapses controls into an overflow popover, the message-card header wraps gracefully, and the role-management modal goes full-bleed.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- HIERARCHY -->
+  <section class="theme" id="hierarchy">
+    <h2>4. Visual hierarchy <a href="#hierarchy" class="anchor">#</a></h2>
+    <p class="theme-sub">Density without rhythm.</p>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Message-card header: 7 typographic anchors per row.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3888-3901</code></div>
+      <div class="why">Every message renders <code class="inline">#id, from, →, to, badge, time, ✕, ▶</code> in a single horizontal strip before the subject + body. Every cell is a visual anchor competing for attention; the eye has nowhere to rest. On narrow widths it wraps unpredictably.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Two-tier header: row 1 is identity (avatar dot + role + relative time) at <code class="inline">--font-sm</code>; row 2 only on hover/focus reveals delete + play. ID and badge demote to a single "type · #id" caption. From → To is implied by the role color stripe; only show "to: X" if it's not the default broadcast.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Workflow / Visibility / Assembly chips use three different visual languages.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2521-2525, 2587-2589, 2639-2650</code></div>
+      <div class="why">Workflow chip: <code class="inline">${color}22</code> background + <code class="inline">${color}55</code> border (programmatic alpha). Visibility chip: same trick. Assembly button: hardcoded <code class="inline">#137333</code> green, opaque background swap, fixed border. Three sibling header controls — two visual languages.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One <code class="inline">&lt;StatePill state="active|inactive" tint={color} /&gt;</code> component. All three render through it. Hardcoded greens go.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Status label and dot class drift; "stale"/"active" branches dead in sort order.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:144-159, 3081, 3445</code></div>
+      <div class="why"><code class="inline">computeInstanceStatus</code> returns only <code class="inline">working | ready | vacant</code>, but <code class="inline">statusOrder</code> includes <code class="inline">{ working: 0, active: 0, stale: 1, vacant: 2 }</code>. <code class="inline">stale</code> never fires. <code class="inline">active</code> is folded into "working" for class but kept as a separate sort bucket. <code class="inline">getStatusLabel</code> says "Not started" for vacant and "Offline" for unknown — same dot class, two semantics.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Single source of truth: a <code class="inline">STATUS_DEF</code> map keyed by status with <code class="inline">{ label, sortOrder, dotClass, ariaLabel }</code>. Delete unreachable branches.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Wizard step dots are forward-locked but not visually so.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:4389-4401</code></div>
+      <div class="why"><code class="inline">disabled={i &gt; roleFormStep}</code> — you can click backward but not jump forward. The visual treatment (active/done) shows progress but doesn't tell the user that step 5 is locked. They click and nothing happens.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Render locked steps with a clear "locked" affordance (lower opacity + lock icon + <code class="inline">aria-disabled="true"</code>) and a tooltip "Complete the previous step first". Or — better — let users skim ahead read-only.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- STATES -->
+  <section class="theme" id="states">
+    <h2>5. Interaction states &amp; loading <a href="#states" class="anchor">#</a></h2>
+    <p class="theme-sub">Seven different in-flight verbs; one button has none.</p>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Seven in-flight verbs, no shared spinner.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:4027 (Sending…), 4691 (Saving…), 4849 (Starting…), 3692 (Launching…), 3338 (Installing…), 1734 (Importing…), 5012 (Connecting…)</code></div>
+      <div class="why">Each loading state ships its own copy. Some show a spinner, most just text-swap. The <code class="inline">launch-team-spinner</code> is the only animated indicator and it lives only inside one button. Inconsistent feedback erodes trust — the user can't tell if "Saving…" is hung or thinking.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One <code class="inline">&lt;LoadingButton&gt;</code> component with a shared spinner, one busy verb pattern (<code class="inline">{busy ? `${verb}…` : verb}</code>), and a <code class="inline">aria-busy="true"</code> hookup. Replace all seven sites.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Disabled-button visual is opacity-only.</span>
+      </div>
+      <div class="receipts"><code>collab.css (project-start-btn:disabled etc.)</code></div>
+      <div class="why">Most disabled buttons just lose <code class="inline">opacity: 0.4</code>. No cursor flag, no aria, no different colour treatment for context — "you can't click this because the form's invalid" looks the same as "you can't click this because we're saving". Two failure modes, one visual.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Differentiate <code class="inline">[aria-busy]</code> (spinner + label) from <code class="inline">:disabled</code> (lower opacity + helper text below) from <code class="inline">[aria-disabled]</code> (greyed but still discoverable / focusable for keyboard). Add <code class="inline">cursor: not-allowed</code> for <code class="inline">:disabled</code>.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Compose Enter-to-send is undiscoverable.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:4018-4019</code></div>
+      <div class="why">Enter sends, Shift+Enter would newline (but the input is a single-line <code class="inline">&lt;input&gt;</code>, not a textarea — so newlines aren't possible at all). Placeholder doesn't say either. New users discover by accident.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Either upgrade to <code class="inline">&lt;textarea&gt;</code> with auto-grow + Shift+Enter newlines + Enter to send + visible kbd hint ("⏎ to send · ⇧⏎ for newline"), or keep the input but add a "↵ Send" hint inside the field at right.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Multiple <code class="inline">autoFocus</code> on nested modal openings.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2748,4374,4467,4634,4869,4907,4967</code></div>
+      <div class="why">Seven different <code class="inline">autoFocus</code> sites. When a modal opens that contains an input <i>and</i> the parent had its own focus, the second-mounted child steals focus. On a multi-step wizard moving forward, each step's input claims focus, which is correct — but on the role-form modal both the title input and the briefing textarea would compete if both rendered.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Replace <code class="inline">autoFocus</code> with a centralised <code class="inline">useFocusOnMount(ref)</code> hook gated by "this element is the intended landing point". Most modals only need to focus the first interactive element; the wizard explicitly focuses on step change.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Native <code class="inline">alert()</code> calls inside a Tauri desktop app.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3289, 3322, 3331, 3335, 3393</code></div>
+      <div class="why">Five places use <code class="inline">window.alert()</code> to surface install/login errors. They break visual continuity, can't be styled, can't be dismissed by keyboard ergonomically, and look completely different on each OS. The codebase already has a <code class="inline">confirm-dialog</code> component for this.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Replace each <code class="inline">alert()</code> with a <code class="inline">setConfirmAction({ title, message, confirmLabel: "OK", onConfirm: () => setConfirmAction(null) })</code> call, or extract a tiny <code class="inline">&lt;Toast&gt;</code> that the setup checklist can render inline.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- ICONS -->
+  <section class="theme" id="icons">
+    <h2>6. Iconography <a href="#icons" class="anchor">#</a></h2>
+    <p class="theme-sub">Every icon strategy at once. Pick one.</p>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Four icon systems coexist in one file.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx</code> — entities at L369, L500, L2623, L2661, L2877, L2891, L2929, L2934, L3136, L3517, L3541, L3569, L3582, L3587, L3608, L3611, L3613, L3703, L3899, L3975, L5003, L5030 — escapes at L370, L750, L2912, L2963, L2992, L3131, L3258, L3304, L3582 — SVG at L4287, L4307, L4316 — emoji at L1641, L1659, L1677, L2653, L4066</div>
+      <div class="why">HTML entities (<code class="inline">&amp;times;</code>, <code class="inline">&amp;rarr;</code>, <code class="inline">&amp;#9881;</code>), Unicode escapes (<code class="inline">⏹</code>, <code class="inline">▶</code>, <code class="inline">⚙️</code>), inline SVG, and literal emoji (🎙, 🔔, 📦) all do icon duty. Each renders differently per OS. The <code class="inline">📦</code> default group icon will look like a parcel on Mac, a brown box on Windows, and a wireframe on Linux. The <code class="inline">▶</code> play button (<code class="inline">▶</code>) and <code class="inline">⏹</code> stop (<code class="inline">⏹</code>) come from a different visual family than the gear (<code class="inline">&amp;#9881;</code>) — sizes don't match, weights don't match.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Pick one: SVG sprite (best — sized via <code class="inline">currentColor</code>, deterministic). Build <code class="inline">&lt;Icon name="play|stop|delete|gear|…" /&gt;</code>. Migrate every entity/escape/emoji icon. Keep emoji literals only where the user can pick them (group icon picker — and even then constrain to a curated set).</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Close-button "✕" repeats with inconsistent sizing.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:369, 421, 3136, 3517, 4068, 4286, 5030, 4529, 2751, 2941, 4042</code></div>
+      <div class="why">11+ different close ✕ buttons, each with its own class (<code class="inline">message-delete-btn</code>, <code class="inline">role-card-remove-x</code>, <code class="inline">audience-panel-close</code>, <code class="inline">briefing-close-btn</code>, <code class="inline">saved-project-remove</code>, <code class="inline">section-tab-create-cancel</code>, <code class="inline">roles-modal-close</code>, <code class="inline">role-tag-remove</code>, …). Different padding, different hit-target, different hover treatment.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One <code class="inline">&lt;CloseButton size="sm|md" onClick /&gt;</code>. Standard 32px hit-target on lg, 24px on sm. Single hover/focus treatment.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- MOTION -->
+  <section class="theme" id="motion">
+    <h2>7. Motion &amp; responsiveness <a href="#motion" class="anchor">#</a></h2>
+    <p class="theme-sub">See <a href="#a11y">Accessibility</a> for the reduced-motion miss. This section covers how motion lands when it does play.</p>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Status-dot pulse runs on every "working" agent simultaneously.</span>
+      </div>
+      <div class="receipts"><code>collab.css (.project-status-dot.working keyframes)</code></div>
+      <div class="why">When five agents are working, five dots pulse in lockstep. Synchronised motion is more visually noisy than staggered motion, and the lockstep is purely an artefact of mounting time. With reduced-motion respected (item #1), this becomes moot — but for the default state, a small randomised <code class="inline">animation-delay</code> per dot would reduce noise.</div>
+      <div class="fix"><span class="fix-label">Fix</span><code class="inline">style={{ animationDelay: \`${(card.instance * 137) % 1000}ms\` }}</code> on the dot — or better, drop the pulse entirely and use a small inline-block "thinking" indicator only when the agent has been working &gt; N seconds.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Smooth-scroll fights the user during high-volume bursts.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2131,2165</code></div>
+      <div class="why"><code class="inline">scrollIntoView({ behavior: "smooth" })</code> on every new message-batch arrival. When the team is mid-burst (which the broadcast log suggests is frequent), the timeline scrolls smoothly while new content keeps arriving — the user reads a moving target. The <code class="inline">scrollingToBottomRef</code> guard helps but doesn't eliminate it.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Use <code class="inline">"auto"</code> for >1 message arrived in &lt;500ms (it's a burst — snap, don't pan). Use <code class="inline">"smooth"</code> only for single-message arrivals. Honour <code class="inline">prefers-reduced-motion</code> always-auto.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- DIALOGS -->
+  <section class="theme" id="dialogs">
+    <h2>8. Dialogs, modals, confirmations <a href="#dialogs" class="anchor">#</a></h2>
+    <p class="theme-sub">No principled severity ladder. Each dialog reinvented its own escalation.</p>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Type-to-confirm only on Delete-Role; Disconnect-Agent and Clear-All-Messages don't.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:957 (typed) vs 1808, 2043, 3592 (single click)</code></div>
+      <div class="why">Delete-Role makes you type the slug. Clear-All-Messages — which is at least as destructive — is single-click. Disconnect-Agent kills a process, single-click. The escalation curve is inverted from the actual blast radius.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Define a destruction tier:
+        <ul style="margin: 8px 0 0 18px; color: var(--ink-dim); padding: 0;">
+          <li><b>T1 (recoverable):</b> simple Cancel/Confirm. Examples: remove from roster, dismiss banner.</li>
+          <li><b>T2 (irreversible local):</b> red confirm button + 2-second wait. Examples: disconnect agent, delete one message.</li>
+          <li><b>T3 (irreversible global):</b> typed-confirm. Examples: delete role, clear all messages.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Three different confirm dialog visual containers.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:4859 (.confirm-dialog-box) · 4737 (.companion-launch-dialog) · 4776 (.start-discussion-dialog) · 4957 (.interrupt-dialog-box)</code></div>
+      <div class="why">Four different "dialog box" classes for what is essentially the same shape. Each has its own padding, max-width, and footer-action layout. The interrupt dialog uses <code class="inline">.interrupt-dialog-send</code>; the confirm dialog uses <code class="inline">.confirm-dialog-delete</code>; the discussion dialog uses <code class="inline">.sd-start-btn</code>. Different button colors for the same affirmative role.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One <code class="inline">&lt;Dialog title body actions /&gt;</code> primitive. Variants for destruction tier (see above). One footer pattern: <code class="inline">[Cancel] [Primary]</code>, primary tinted by tier.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- DEAD -->
+  <section class="theme" id="dead">
+    <h2>9. Dead code &amp; ghost states <a href="#dead" class="anchor">#</a></h2>
+    <p class="theme-sub">"<code class="inline">void someVar</code>" is a smell, not cosmetic noise.</p>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Six "future use" stubs and two <code class="inline">@ts-expect-error</code> handlers nobody renders.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:617-625, 639, 703, 1585, 1603, 1635, 1913, 1930, 1989</code></div>
+      <div class="why">
+        <ul style="margin: 4px 0 8px 18px; color: var(--ink-dim); padding: 0;">
+          <li><code class="inline">closingRound, continuousTimeout</code> — set by handlers, displayed by no one. Comment at L620 says "ConsensusRow in ProtocolPanel will surface equivalent state in a follow-on commit." Has not happened.</li>
+          <li><code class="inline">_addTeamTab, _setAddTeamTab</code> — never read.</li>
+          <li><code class="inline">_globalTemplates, _setGlobalTemplates</code> — populated, never read.</li>
+          <li><code class="inline">_expandGroup, _handleAddGroup</code> — defined and silenced via <code class="inline">void</code>.</li>
+          <li><code class="inline">handleCloseRound, handleEndDiscussion, handleSetContinuousTimeout</code> — three handlers wrapped in <code class="inline">@ts-expect-error TS6133</code>.</li>
+        </ul>
+        Each is a half-finished refactor. Per project memory: a discarded bound name is usually a clue, not noise — sometimes the gap is benign, sometimes a feature shipped without its UI.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Two-pass cleanup. Pass 1 — confirm with whoever last touched ProtocolPanel that ConsensusRow is in fact going to subsume the round/timeout state, then delete the stranded handlers and state. Pass 2 — drop every <code class="inline">_</code>-prefixed stub or wire it up.</div>
+    </div>
+
+    <div class="finding sev-MED">
+      <div class="finding-head">
+        <span class="badge MED">Medium</span>
+        <span class="finding-title">Sort orders include unreachable status keys.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3081 (modalStatusOrder) · 3445 (statusOrder)</code></div>
+      <div class="why">Both maps key on <code class="inline">{ working, active, stale, vacant }</code>. <code class="inline">computeInstanceStatus</code> only ever returns <code class="inline">working | ready | vacant</code>. <code class="inline">stale</code> is dead, <code class="inline">active</code> is dead, <code class="inline">ready</code> is missing — sort falls back to <code class="inline">?? 2</code> (treated as vacant) for ready cards. Active sessions in "ready" state sort below vacant.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Sync the maps with <code class="inline">computeInstanceStatus</code>. Likely intent: <code class="inline">{ working: 0, ready: 1, vacant: 2 }</code>.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- POLISH -->
+  <section class="theme" id="polish">
+    <h2>10. Polish nits <a href="#polish" class="anchor">#</a></h2>
+    <p class="theme-sub">Smaller items. Shipping these is what separates a competent UI from a crafted one.</p>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Relative-time tooltip is raw ISO.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:366, 3836, 3855, 3898</code></div>
+      <div class="why"><code class="inline">title={msg.timestamp}</code> — hovering a "5m ago" shows <code class="inline">2026-04-29T02:36:23Z</code>. Engineer-jargon for hover.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Format the tooltip the same way the audit log does ("Apr 29, 2026 · 2:36 AM") and use <code class="inline">&lt;time datetime={iso}&gt;</code> for semantic correctness.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title"><code class="inline">formatRelativeTime</code> grammar drops minutes after 24h.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:466-468</code></div>
+      <div class="why">"3h 5m ago" → "3d ago". Why minutes for 23h59m and not for 24h05m?</div>
+      <div class="fix"><span class="fix-label">Fix</span>Either keep one extra unit at every scale ("3d 4h ago") or commit to the higher-unit-only pattern from the start ("3h ago", not "3h 5m ago"). Pick one and apply uniformly.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Provider labels translated in three places.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3921, 4153, 4184, 4255</code></div>
+      <div class="why"><code class="inline">groq → "Llama"</code>, <code class="inline">openai → "GPT-5m"</code>, <code class="inline">anthropic → "Haiku"</code> is rewritten inline at four sites. Drift is one edit away.</div>
+      <div class="fix"><span class="fix-label">Fix</span>One <code class="inline">PROVIDER_LABELS = { groq: "Llama", openai: "GPT-5m", anthropic: "Haiku" }</code> at module scope. Three call-sites become one lookup.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Hash palette doesn't avoid collisions within a project.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:29-67</code></div>
+      <div class="why">Two custom roles can hash to the same palette bucket. The chip view, where the role color is the only differentiator, becomes ambiguous.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Build the palette assignment at project-load time: walk known role slugs, deal colors round-robin avoiding adjacency. Cache in project config so subsequent loads are stable.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Audience subtitle hardcodes "36 AI Jurors · 3 Models" as fallback.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:4066</code></div>
+      <div class="why">Renders before pools load. If the API ships different pool sizes, the fallback is silently wrong.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Render an empty string (or skeleton) until <code class="inline">audiencePools</code> resolves.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">"Discuss" button is grouped with toggles.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2616-2625</code></div>
+      <div class="why">"Start a structured discussion" is a destructive-of-attention command — it opens a dialog and changes how everyone communicates. Sitting in the header alongside "Auto" / "Review" treats it as a setting toggle, which it isn't.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Move it into the compose bar's secondary actions, or into a dedicated "Actions" dropdown. Keep the header for state, not commands.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Section-tab "+ New" looks like a section.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2754-2756</code></div>
+      <div class="why">No visual separator from real sections. Eye doesn't know it's a meta-action.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Push the "+ New" button to the right of a divider; lower-weight typography; render the icon, not the prefix.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">"Visibility" dropdown labels ("Directed" / "Open") aren't intuitive.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:2575-2615</code></div>
+      <div class="why">"Directed" means "agents only see messages addressed to them"; "Open" means "all agents see all messages". The desc lives inside <code class="inline">title</code>. The label leaves the user guessing.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Either rename ("Whisper / Loudspeaker", "Private / Public") or render the desc inline as a second line, like the workflow dropdown items already do.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">"messages-end" anchor has no role.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3969</code></div>
+      <div class="why">A 0-height div as a scroll anchor. Screen readers announce nothing when "newest message" jumps in. The <code class="inline">role="status"</code> belongs upstream of the timeline, on the new-messages-indicator button — but the indicator is only mounted when needed.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Add an <code class="inline">aria-live="polite"</code> region near the timeline that announces "N new messages" when the indicator surfaces.</div>
+    </div>
+
+    <div class="finding sev-LOW">
+      <div class="finding-head">
+        <span class="badge LOW">Low</span>
+        <span class="finding-title">Setup checklist's success state doesn't auto-celebrate or auto-dismiss.</span>
+      </div>
+      <div class="receipts"><code>CollabTab.tsx:3407-3409</code></div>
+      <div class="why">"All set!" is a flat sentence inside the same banner. No motion, no auto-dismiss, no re-affirming visual that the work is done. Banner stays until user clicks ✕.</div>
+      <div class="fix"><span class="fix-label">Fix</span>Once all three steps go green, fade the banner over 1.5s and unmount. Persist <code class="inline">setupDismissed</code> automatically.</div>
+    </div>
+  </section>
+
+  <!-- ============================================================ -->
+  <!-- BACKLOG -->
+  <div class="backlog">
+    <h2>Backlog — tick as you ship</h2>
+    <ul>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Add <code class="inline">prefers-reduced-motion</code> globally.</li>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Audit every <code class="inline">title=</code>-only button; add <code class="inline">aria-label</code>.</li>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Status dot: pattern + color, not color alone.</li>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Replace all <code class="inline">:focus</code> with one global <code class="inline">:focus-visible</code> ring.</li>
+      <li><input type="checkbox"> <span class="sevtag CRIT">CRIT</span> Verify role-color contrast against <code class="inline">--bg-primary</code>; add lightened-label variants.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Extract role-form modal into its own file.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Extract audience panel into its own file.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Extract roles-and-groups modal into its own file.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Replace <code class="inline">ROLE_COLORS</code> with <code class="inline">--role-${slug}</code> CSS vars.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Codemod inline-style sites — keep only data-driven.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Demote header to: name · mode · behavior cluster · settings.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Build single <code class="inline">&lt;ModalStack&gt;</code> manager; route Esc to top.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Define type / spacing / surface scales in <code class="inline">:root</code>; codemod CSS.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Add 2-3 breakpoints; collapse header on narrow widths.</li>
+      <li><input type="checkbox"> <span class="sevtag HIGH">HIGH</span> Build <code class="inline">&lt;Icon&gt;</code> SVG sprite; migrate entities/escapes/emoji.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Two-tier message-card header; reveal-on-hover actions.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Single <code class="inline">&lt;StatePill&gt;</code> for workflow / visibility / assembly.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Single <code class="inline">STATUS_DEF</code> map; delete dead branches.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Lock-state visual on wizard step dots.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Single <code class="inline">&lt;LoadingButton&gt;</code> with shared spinner + busy verb.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Differentiate <code class="inline">[aria-busy]</code> / <code class="inline">:disabled</code> / <code class="inline">[aria-disabled]</code> visuals.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Visible "↵ Send" hint in compose; consider textarea upgrade.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Replace 7 <code class="inline">autoFocus</code> sites with <code class="inline">useFocusOnMount</code>.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Replace all <code class="inline">alert()</code> with confirm-dialog or toast.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Single <code class="inline">&lt;CloseButton&gt;</code>; retire 11 close-X classes.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Three-tier destruction confirm ladder; reclassify each dialog.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Single <code class="inline">&lt;Dialog&gt;</code> primitive for all confirm/dialog variants.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Confirm or delete <code class="inline">closingRound</code> / <code class="inline">continuousTimeout</code> dead handlers.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Sync sort-order maps with actual return values of <code class="inline">computeInstanceStatus</code>.</li>
+      <li><input type="checkbox"> <span class="sevtag MED">MED</span> Drop the six <code class="inline">_</code>-prefixed unused stubs.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Stagger or remove status-dot pulse synchronisation.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Burst-detect smooth scroll; switch to auto for bursts.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Pretty-format relative-time tooltips; use <code class="inline">&lt;time&gt;</code>.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Pick one minute/hour/day grammar.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Pull provider labels into one <code class="inline">PROVIDER_LABELS</code> map.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Project-stable role-color assignment; avoid adjacency collisions.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Audience subtitle: skeleton, not hardcoded fallback.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Move "Discuss" out of the header.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Visually separate "+ New" from real section tabs.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Rename or annotate "Directed / Open" visibility labels.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Add <code class="inline">aria-live</code> announcement for new-messages indicator.</li>
+      <li><input type="checkbox"> <span class="sevtag LOW">LOW</span> Auto-dismiss setup checklist when all green.</li>
+    </ul>
+  </div>
+
+  <footer class="foot">
+    <div>Generated 2026-04-29 by ui-architect:0 · audit branch <code>audit/collab-tab-ui-2026-04-29</code> · open this file in a browser to read.</div>
+    <div style="margin-top:6px">North star: <i>Elegance is not optional. The UI is the product.</i></div>
+  </footer>
+
+</div>
+</body>
+</html>
