@@ -11,6 +11,7 @@ import { ProtocolPanel } from "./ProtocolPanel";
 import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
+import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
 import { trimVoiceAssignments } from "../lib/storageManager";
 import "../styles/collab.css";
@@ -989,9 +990,15 @@ export function CollabTab() {
         ),
       } : { roles: {} };
       const apiUrl = (import.meta as any).env?.VITE_API_URL || "http://127.0.0.1:19836";
+      // Fix per dev-chall #1189 + tech-leader #1191: backend's /roles/design
+      // requires `Depends(get_current_user)` and rejects 401 if no Bearer
+      // token. Send the auth token same shape as `lib/speak.ts` does.
+      const token = getAuthToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`${apiUrl}/api/v1/roles/design`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ messages: newMessages, project_context: projectContext }),
       });
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
