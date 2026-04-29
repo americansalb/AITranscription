@@ -1,14 +1,19 @@
 /* ProtocolPanel — single section-pinned widget (spec §1.1).
-   Replaces AssemblyBanner + scattered roster status dots. */
+   Replaces AssemblyBanner + scattered roster status dots.
+
+   ui-architect 2026-04-29 (human #1283): retheming for the dark app shell.
+   Was hardcoded white/light. Now uses the same surface tokens collab.css
+   uses (rgba whites + collab-* vars) so the panel reads as part of the
+   shell, not a foreign light-theme widget. */
 
 .protocol-panel {
-  background: #ffffff;
-  border: 1px solid #e3e6ec;
-  border-radius: 12px;
-  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 10px 14px;
   margin: 8px 0 12px;
   font-size: 0.93rem;
-  color: #1a1f2e;
+  color: var(--collab-text-primary, #e7e9ee);
 }
 
 .protocol-panel__row {
@@ -17,7 +22,7 @@
   gap: 12px;
   flex-wrap: wrap;
   padding: 8px 0;
-  border-bottom: 1px solid #eef2ff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .protocol-panel__row:last-child { border-bottom: none; }
 
@@ -32,7 +37,7 @@
   flex: 1;
   height: 8px;
   min-width: 120px;
-  background: #e3e6ec;
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 4px;
   overflow: hidden;
   position: relative;
@@ -40,7 +45,7 @@
 .protocol-panel__progress-fill {
   position: absolute;
   top: 0; left: 0; bottom: 0;
-  background: #4f46e5;
+  background: #818cf8;
   border-radius: 4px;
   transition: width 0.3s ease;
 }
@@ -49,12 +54,13 @@
   display: inline-block;
   padding: 4px 12px;
   border-radius: 20px;
-  background: #fafbfc;
-  border: 1px solid #e3e6ec;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--collab-text-primary, #e7e9ee);
   font-size: 0.85rem;
   cursor: pointer;
 }
-.protocol-panel__pill:hover { background: #eef2ff; }
+.protocol-panel__pill:hover { background: rgba(255, 255, 255, 0.12); }
 .protocol-panel__pill:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .protocol-panel__mic-line {
@@ -79,8 +85,8 @@
   flex-wrap: wrap;
 }
 .protocol-panel__queue-item {
-  background: #eef2ff;
-  color: #4f46e5;
+  background: rgba(129, 140, 248, 0.18);
+  color: #c7d2fe;
   padding: 4px 10px;
   border-radius: 16px;
   font-size: 0.85rem;
@@ -94,8 +100,8 @@
 }
 
 .protocol-panel__section-header {
-  background: #eef2ff;
-  color: #4f46e5;
+  background: rgba(129, 140, 248, 0.15);
+  color: #c7d2fe;
   font-weight: 600;
   font-size: 0.78rem;
   letter-spacing: 0.04em;
@@ -331,32 +337,32 @@
   flex-wrap: wrap;
 }
 .protocol-mic-icon { font-size: 1.05rem; line-height: 1; }
-.protocol-mic-speaker { font-weight: 700; color: #1a1f2e; }
-.protocol-mic-idle { font-style: italic; color: #5b6478; font-weight: 400; }
+.protocol-mic-speaker { font-weight: 700; color: var(--collab-text-primary, #e7e9ee); }
+.protocol-mic-idle { font-style: italic; color: var(--collab-text-muted, #71717a); font-weight: 400; }
 .protocol-mic-age {
-  color: #5b6478;
+  color: var(--collab-text-muted, #71717a);
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
 }
-.protocol-mic-preset { color: #5b6478; font-size: 0.85rem; }
+.protocol-mic-preset { color: var(--collab-text-secondary, #a1a1aa); font-size: 0.85rem; }
 .protocol-mic-yield-btn {
   margin-left: auto;
   padding: 4px 12px;
   border-radius: 6px;
-  background: #4f46e5;
+  background: #6366f1;
   color: white;
   border: none;
   font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
 }
-.protocol-mic-yield-btn:hover { background: #4338ca; }
-.protocol-mic-yield-btn:focus-visible { outline: 2px solid #1a1f2e; outline-offset: 2px; }
+.protocol-mic-yield-btn:hover { background: #818cf8; }
+.protocol-mic-yield-btn:focus-visible { outline: 2px solid #818cf8; outline-offset: 2px; }
 
 /* "ASSEMBLY LINE" badge — small label at the start of the top row to
-   make the mode unmistakable at a glance. */
+   make the mode unmistakable at a glance. Themed for dark shell. */
 .protocol-al-badge {
-  background: #4f46e5;
+  background: #6366f1;
   color: white;
   padding: 3px 10px;
   border-radius: 4px;
@@ -384,12 +390,13 @@
 }
 
 .protocol-al-arrow {
-  color: #94a3b8;
+  color: var(--collab-text-muted, #71717a);
   font-size: 0.85rem;
   user-select: none;
 }
 
-/* Seat pill — three states. ALL same shape; differ only in color/weight. */
+/* Seat pill — three states. ALL same shape; differ only in color/weight.
+   Re-themed for dark shell (human #1283: was light-on-light). */
 .protocol-al-seat-pill {
   display: inline-flex;
   align-items: center;
@@ -404,30 +411,49 @@
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-/* Current speaker — filled, bright. Gentle pulse to draw the eye. */
+/* Current speaker — filled indigo, white text. Gentle pulse to draw the eye. */
 .protocol-al-seat-pill.is-current {
-  background: #4f46e5;
-  border-color: #4f46e5;
+  background: #6366f1;
+  border-color: #818cf8;
   color: white;
   font-weight: 700;
   animation: protocol-al-current-pulse 2.4s ease-in-out infinite;
 }
 @keyframes protocol-al-current-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0); }
-  50%      { box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.22); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(129, 140, 248, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(129, 140, 248, 0.28); }
 }
 
-/* Next-up — outlined, primed. */
+/* Next-up — outlined indigo, light text on dark surface. */
 .protocol-al-seat-pill.is-next {
-  background: #eef2ff;
-  border-color: #4f46e5;
-  color: #1a1f2e;
+  background: rgba(129, 140, 248, 0.18);
+  border-color: #818cf8;
+  color: #c7d2fe;
 }
 
-/* Idle — muted but legible. */
+/* Idle — muted but legible against dark shell. */
 .protocol-al-seat-pill.is-idle {
-  background: #f8fafc;
-  border-color: #e3e6ec;
-  color: #64748b;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--collab-text-secondary, #a1a1aa);
   font-weight: 500;
 }
+
+/* ConsensusRow — re-themed (was light-on-light inline). */
+.protocol-consensus-row {
+  background: rgba(129, 140, 248, 0.12);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.protocol-consensus-phase {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--collab-text-primary, #e7e9ee);
+}
+.protocol-consensus-close-btn {
+  margin-left: auto;
+  background: #6366f1;
+  color: white;
+  border-color: #818cf8;
+}
+.protocol-consensus-close-btn:hover { background: #818cf8; }

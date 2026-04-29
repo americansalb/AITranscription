@@ -252,18 +252,17 @@ function ConsensusRow({
     phase;
 
   return (
-    <div className="protocol-panel__row" style={{ background: '#eef2ff', borderRadius: 6, padding: '8px 12px' }}>
+    <div className="protocol-panel__row protocol-consensus-row">
       <span style={{ fontSize: '1.05rem' }}>📊</span>
       <span style={{ fontWeight: 600 }}>{round.topic || 'Round in progress'}</span>
-      <span className="protocol-panel__pill" style={{ background: '#fff' }}>{phaseLabel}</span>
+      <span className="protocol-panel__pill protocol-consensus-phase">{phaseLabel}</span>
       {round.opened_by && (
-        <span style={{ color: '#5b6478', fontSize: '0.85rem' }}>opener: {round.opened_by}</span>
+        <span className="protocol-mic-preset">opener: {round.opened_by}</span>
       )}
       {phase === "submitting" && (
         <button
           type="button"
-          className="protocol-panel__pill"
-          style={{ marginLeft: 'auto', background: '#4f46e5', color: 'white', borderColor: '#4f46e5' }}
+          className="protocol-panel__pill protocol-consensus-close-btn"
           onClick={() => { void mutate('close_round', {}); }}
           title="Close this consensus round"
         >
