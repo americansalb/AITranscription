@@ -5594,43 +5594,36 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
             if cur != from_label {
-                // Gap H — 10-min auto-grab per human #903 + architect #1082.
-                // If the current speaker has been silent for >MIC_AUTOROTATE_SECS
-                // (600s = 10min), the next sender claims the mic. Closes the
-                // recurring deadlock pattern where a vacant/idle speaker
-                // freezes assembly mode (tech-leader's #1075 emergency disable
-                // was the symptom).
-                const MIC_AUTOROTATE_SECS: u64 = 600;
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let speaker_silent_secs: u64 = if cur.is_empty() {
-                    // No current speaker — first send claims (cold-open).
-                    u64::MAX
+                // Gap H — connectedness-based auto-grab (team vote #1340: 5-of-7
+                // option B). Replaces the prior 10-min silence threshold which
+                // bypassed AL whenever the speaker was quiet, defeating strict
+                // turn-taking (human #1337). Now: speaker keeps mic if their
+                // session is alive in sessions.json (silent-but-present is
+                // legitimate per memory #25 liveness ≠ activity); auto-grab
+                // only fires when the holder has no live binding (closes the
+                // original Gap H deadlock — tech-leader #1075).
+                let speaker_is_live = if cur.is_empty() {
+                    false
                 } else {
-                    // Find the most recent message from the current speaker.
-                    let board = read_board_filtered(&state.project_dir);
-                    let last_speaker_ts = board.iter().rev()
-                        .find(|m| m.get("from").and_then(|f| f.as_str()) == Some(cur))
-                        .and_then(|m| m.get("timestamp").and_then(|t| t.as_str()).map(String::from))
-                        .and_then(|t| parse_iso_to_epoch_secs(&t));
-                    match last_speaker_ts {
-                        Some(t) => now_secs.saturating_sub(t),
-                        None => u64::MAX, // never spoke → effectively infinite silence
-                    }
+                    let sessions = read_sessions(&state.project_dir);
+                    let mut parts = cur.splitn(2, ':');
+                    let speaker_role = parts.next().unwrap_or("");
+                    let speaker_inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    sessions.get("bindings").and_then(|b| b.as_array())
+                        .map(|arr| arr.iter().any(|b| {
+                            b.get("role").and_then(|r| r.as_str()) == Some(speaker_role)
+                                && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == speaker_inst
+                                && b.get("status").and_then(|s| s.as_str()) == Some("active")
+                        }))
+                        .unwrap_or(false)
                 };
 
-                if speaker_silent_secs > MIC_AUTOROTATE_SECS {
-                    // Auto-grab — caller becomes new speaker. Advance assembly
-                    // state inline so the post-append auto-rotate (line ~5641)
-                    // sees from_label as cur.
+                if !speaker_is_live {
                     eprintln!(
-                        "[assembly_line] auto-grab: prior speaker '{}' silent {}s (> {}s threshold); '{}' claims mic per human #903",
-                        cur, speaker_silent_secs, MIC_AUTOROTATE_SECS, from_label
+                        "[assembly_line] auto-grab: prior speaker '{}' has no live session; '{}' claims mic (vote-B gate)",
+                        if cur.is_empty() { "(none)" } else { cur },
+                        from_label
                     );
-                    // Human #1252 fix — write auto-grab to protocol.json
-                    // (single source of truth) instead of legacy assembly.json.
                     let mut current = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
                     if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
                         floor.insert("current_speaker".to_string(), serde_json::json!(from_label));
@@ -5656,12 +5649,9 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     updated["current_speaker"] = serde_json::json!(from_label);
                     asm_auto_grabbed = Some(updated);
                 } else {
-                    let remaining = MIC_AUTOROTATE_SECS.saturating_sub(speaker_silent_secs);
                     return Err(format!(
-                        "Assembly Line active — not your turn. Current speaker: {}. Silent {}s; auto-grab in {}s. Or wait for the mic to rotate.",
-                        if cur.is_empty() { "(none)" } else { cur },
-                        speaker_silent_secs,
-                        remaining
+                        "Assembly Line active — not your turn. Current speaker: {} (session live). Wait for them to yield or rotate.",
+                        cur
                     ));
                 }
             }
