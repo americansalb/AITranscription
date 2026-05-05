@@ -335,6 +335,21 @@ function CompactMicLine({
             Yield
           </button>
         )}
+        {/* Human force-release (V3 spec follow-up). Visible only to the human
+            (selfSeat === null) when there's a speaker to release. No
+            confirmation — visibility is the safety mechanism, the resulting
+            mic_released board event is the audit trail. Distinct red styling
+            so it's obviously different from normal actions. */}
+        {selfSeat === null && speaker && (
+          <button
+            type="button"
+            className="protocol-mic-force-release-btn"
+            onClick={() => { void mutate('force_release', {}); }}
+            title={`Force-release the mic from ${speaker}. Posts a mic_released audit event to the board.`}
+          >
+            Force release
+          </button>
+        )}
       </div>
       {/* Second line (AL only): horizontal pill row, one pill per seat. */}
       {isAssemblyLine && rotation.length > 0 && (

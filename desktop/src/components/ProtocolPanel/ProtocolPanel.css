@@ -359,6 +359,24 @@
 .protocol-mic-yield-btn:hover { background: #818cf8; }
 .protocol-mic-yield-btn:focus-visible { outline: 2px solid #818cf8; outline-offset: 2px; }
 
+/* Force-release — V3 spec follow-up. Distinct red styling so it's visually
+   different from the indigo Yield button. No confirmation dialog (visibility
+   is the safety mechanism — see apply_force_release narrative comment in
+   vaak-mcp.rs); the red color signals destructive intent enough on its own. */
+.protocol-mic-force-release-btn {
+  margin-left: 8px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: #ef4444;
+  color: white;
+  border: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.protocol-mic-force-release-btn:hover { background: #f87171; }
+.protocol-mic-force-release-btn:focus-visible { outline: 2px solid #f87171; outline-offset: 2px; }
+
 /* "ASSEMBLY LINE" badge — small label at the start of the top row to
    make the mode unmistakable at a glance. Themed for dark shell. */
 .protocol-al-badge {

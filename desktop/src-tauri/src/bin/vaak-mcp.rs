@@ -231,6 +231,38 @@ fn read_last_seen_id(project_dir: &str, session_id: &str, section: &str) -> u64 
         .unwrap_or(0)
 }
 
+/// Touch this seat's per-seat session file with a fresh last_alive_at_ms.
+/// Mirrors the body of run_keep_alive's stamping logic, callable from any
+/// non-hook context that needs to keep the seat observably alive (notably
+/// project_wait's poll loop, where pure-standby seats wouldn't otherwise
+/// fire the PreToolUse/PostToolUse hooks). Fail-open on every error — must
+/// never block the calling tool.
+fn update_seat_alive_at_ms(project_dir: &str, role: &str, instance: u32) {
+    let sessions_dir = std::path::Path::new(project_dir).join(".vaak").join("sessions");
+    if !sessions_dir.exists() {
+        return;
+    }
+    let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+    let mut state: serde_json::Value = std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("last_alive_at_ms".to_string(), serde_json::json!(now_ms));
+        // Deliberately do NOT update last_active_at_ms — pure project_wait is
+        // standby, not "active" work. last_active_at_ms is reserved for the
+        // keep-alive hook (PreToolUse/PostToolUse) so the watchdog's stall
+        // criterion stays meaningful.
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = atomic_write(&seat_file, serialized.as_bytes());
+        }
+    }
+}
+
 fn send_tracker_path(project_dir: &str, session_id: &str) -> PathBuf {
     let safe_id = session_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
     let dir = vaak_dir(project_dir).join("last-send");
@@ -3346,6 +3378,7 @@ fn do_protocol_mutate(
                 "set_preset" => apply_set_preset(&mut current, &args),
                 "transfer_mic" => apply_transfer_mic(&mut current, &args, actor, pd),
                 "yield" => apply_yield(&mut current, &args, actor),
+                "force_release" => apply_force_release(&mut current, actor, pd),
                 "toggle_queue" => apply_toggle_queue(&mut current, &args, actor),
                 "set_phase_plan" => apply_set_phase_plan(&mut current, &args),
                 "advance_phase" => apply_advance_phase(&mut current, pd),
@@ -3554,6 +3587,71 @@ fn apply_yield(
                 queue.retain(|v| v.as_str() != Some(target_seat));
             }
         }
+    }
+    Ok(())
+}
+
+/// force_release — human-only (or system) action that clears current_speaker
+/// without the freshness gate that transfer_mic enforces. Posts a mic_released
+/// board event with from="human" so the action is visible to the team and to
+/// the human's later self. Visibility is the safety mechanism — confirmations
+/// train dismissal (evil-arch msg 171), audit events deter reckless use.
+///
+/// Caller must be "human" — agents cannot force-release each other; they yield
+/// or wait for the watchdog. Returns Err if invoked by an agent.
+fn apply_force_release(
+    state: &mut serde_json::Value,
+    actor: &str,
+    project_dir: &str,
+) -> Result<(), String> {
+    if actor != "human" {
+        return Err(format!(
+            "[NotPermitted] force_release is human-only (caller: '{}'). Agents must yield or wait for the watchdog.",
+            actor
+        ));
+    }
+    let prior_speaker = state
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if prior_speaker.is_none() {
+        return Err("[NoOp] force_release called but current_speaker is already null".to_string());
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+    }
+
+    // Audit event: append mic_released to board.jsonl so the team sees who
+    // got yanked and by whom. Best-effort — failure logs but the release
+    // still applies (the floor mutation is the load-bearing change).
+    let prior = prior_speaker.unwrap_or_default();
+    let now = utc_now_iso();
+    let board_path = board_jsonl_path(project_dir);
+    let count = std::fs::read_to_string(&board_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    let event = serde_json::json!({
+        "id": (count + 1) as u64,
+        "from": "human",
+        "to": "all",
+        "type": "mic_released",
+        "timestamp": now,
+        "subject": format!("[mic_released] {} — human_force_release", prior),
+        "body": format!(
+            "Human force-released the mic from {}. Mic is now free — next sender will auto-grab.",
+            prior
+        ),
+        "metadata": {
+            "from_speaker": prior,
+            "reason": "human_force_release",
+        }
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", serde_json::to_string(&event).unwrap_or_default());
     }
     Ok(())
 }
@@ -6355,6 +6453,14 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             }
             let _ = send_heartbeat(&session_id);
             update_session_heartbeat_in_file();
+            // Disconnect-bug fix (evil-arch msg 171 diagnosis): standby seats in
+            // pure project_wait don't fire PreToolUse/PostToolUse keep-alive
+            // hooks because there's no tool call between waits. Without this
+            // tick, supervise's last_alive_at_ms staleness check can't tell
+            // "session legitimately idle" from "session disconnected" and the
+            // health pill's Layer 1 reads the seat as dead. Touching the
+            // per-seat session file here keeps standby seats observably alive.
+            update_seat_alive_at_ms(&state.project_dir, &state.role, state.instance);
             polls_since_heartbeat = 0;
         }
 

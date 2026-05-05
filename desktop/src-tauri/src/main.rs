@@ -3599,6 +3599,56 @@ fn do_protocol_mutate_inner(
                         Ok(())
                     }
                 }
+                // Human force-release (V3 follow-up): clears current_speaker
+                // without the freshness gate transfer_mic enforces. Audit
+                // event posted to board so the action is visible to the team
+                // (visibility is the safety mechanism — confirmations train
+                // dismissal, evil-arch msg 171). Human-only — agents must
+                // yield or wait for the watchdog.
+                "force_release" => {
+                    if actor != "human" {
+                        Err(format!(
+                            "[NotPermitted] force_release is human-only (caller: '{}'). Agents must yield or wait for the watchdog.",
+                            actor
+                        ))
+                    } else if current.floor.current_speaker.is_none() {
+                        Err("[NoOp] force_release called but current_speaker is already null".to_string())
+                    } else {
+                        let prior = current.floor.current_speaker.clone().unwrap_or_default();
+                        current.floor.current_speaker = None;
+                        // Append mic_released event to board.jsonl. Best-effort —
+                        // the floor mutation above is the load-bearing change;
+                        // event-append failure logs but doesn't roll back.
+                        let board_path = collab::active_board_path(pd);
+                        let count = std::fs::read_to_string(&board_path)
+                            .unwrap_or_default()
+                            .lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .count();
+                        let now_iso = collab::iso_now();
+                        let event = serde_json::json!({
+                            "id": (count + 1) as u64,
+                            "from": "human",
+                            "to": "all",
+                            "type": "mic_released",
+                            "timestamp": now_iso,
+                            "subject": format!("[mic_released] {} — human_force_release", prior),
+                            "body": format!(
+                                "Human force-released the mic from {}. Mic is now free — next sender will auto-grab.",
+                                prior
+                            ),
+                            "metadata": {
+                                "from_speaker": prior,
+                                "reason": "human_force_release",
+                            }
+                        });
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+                            use std::io::Write;
+                            let _ = writeln!(f, "{}", serde_json::to_string(&event).unwrap_or_default());
+                        }
+                        Ok(())
+                    }
+                }
                 // Slice 5 phase actions (spec §7).
                 "pause_plan" => {
                     if current.phase_plan.paused_at.is_some() {
