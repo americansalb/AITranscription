@@ -4637,7 +4637,7 @@ fn check_assembly_floor_watchdog(
     //     last_working_at fresh)
     let (release_reason, release_detail) = if rev_age_secs > ASSEMBLY_MAX_FLOOR_SECS {
         (
-            "watchdog_max_floor",
+            "max_floor_exceeded",
             format!(
                 "held mic {}s past absolute max floor of {}s — presumed stuck in a tool loop",
                 rev_age_secs, ASSEMBLY_MAX_FLOOR_SECS
@@ -4645,7 +4645,7 @@ fn check_assembly_floor_watchdog(
         )
     } else if idle_secs > stall_threshold_secs {
         (
-            "watchdog_stall",
+            "floor_stall",
             format!(
                 "no working activity in {}s (stall threshold: {}s)",
                 idle_secs, stall_threshold_secs
