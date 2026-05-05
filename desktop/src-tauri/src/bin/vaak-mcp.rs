@@ -6839,10 +6839,47 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         String::new()
     };
 
-    let mut output = format!(
+    let mut output = String::new();
+
+    // V3 Phase 2.1 (rule 3): if there's an unread mic_landed message addressed
+    // to this seat, surface it AT THE TOP of the prompt so the agent doesn't
+    // need to scan the message list to discover their turn. The mic_landed
+    // message itself is already in the new_messages list (so the seat sees it
+    // either way), but pulling it up to a banner makes the contract impossible
+    // to miss when the agent's prompt loads.
+    let mic_arrival = new_messages.iter()
+        .filter(|m| m.get("type").and_then(|t| t.as_str()) == Some("mic_landed"))
+        .filter(|m| m.get("to").and_then(|t| t.as_str()) == Some(my_instance_label.as_str()))
+        .max_by_key(|m| m.get("id").and_then(|i| i.as_u64()).unwrap_or(0));
+    if let Some(arrival) = mic_arrival {
+        let meta = arrival.get("metadata").cloned().unwrap_or(serde_json::json!({}));
+        let ask = meta.get("ask").and_then(|v| v.as_str()).unwrap_or("");
+        let expected = meta.get("expected_output").and_then(|v| v.as_str()).unwrap_or("");
+        let floor = meta.get("floor_time_seconds").and_then(|v| v.as_u64()).unwrap_or(60);
+        let triggered = meta.get("triggered_by").and_then(|v| v.as_str()).unwrap_or("");
+        output.push_str("=================================================================\n");
+        output.push_str("[YOUR TURN] Assembly mode mic just landed on you.\n");
+        if !triggered.is_empty() {
+            output.push_str(&format!("Handed forward by: {}\n", triggered));
+        }
+        output.push_str(&format!("Floor time: {}s (Phase 3 watchdog auto-yields after this).\n", floor));
+        if !ask.is_empty() && !ask.starts_with("(missing") {
+            output.push_str(&format!("Ask: {}\n", ask));
+        }
+        if !expected.is_empty() && !expected.starts_with("(missing") {
+            output.push_str(&format!("Expected output: {}\n", expected));
+        }
+        if ask.starts_with("(missing") {
+            output.push_str("(No yield_to context — legacy caller. Use your judgment on what to send next.)\n");
+        }
+        output.push_str("Discharge by sending with metadata.yield_to.{target,ask,expected_output} pointing at the next seat.\n");
+        output.push_str("=================================================================\n\n");
+    }
+
+    output.push_str(&format!(
         "TEAM: You are the {} (instance {}) on project \"{}\".{} Team: {}.",
         role_title, my_instance, project_name, section_label, team_parts.join(", ")
-    );
+    ));
 
     // Inject human-in-loop / auto-collab mode
     let human_in_loop = config.get("settings")
