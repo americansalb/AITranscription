@@ -2644,6 +2644,70 @@ fn active_assembly_seats(project_dir: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// V3 Phase 2.5 — resolve a yield_to.target to a concrete live seat label.
+/// Returns None if the target is "human" (caller falls back to round-robin
+/// because humans aren't in rotation_order), if the named role has no
+/// fresh-heartbeat instance, or if an explicit "role:N" target is offline.
+///
+/// Resolution order:
+/// - "human" → None (round-robin fallback)
+/// - "role:N" → Some(target) if active_assembly_seats contains it; None otherwise
+/// - "role" → freshest-heartbeat active instance, ties broken by lowest instance
+///
+/// Caller (handle_project_send auto-advance) prefers this over
+/// next_assembly_speaker so the mic actually lands where the speaker yielded
+/// to it — closing the "mic on wrong person" complaint that round-robin alone
+/// cannot solve (architect msg 107 gap fix).
+fn resolve_yield_target(project_dir: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target == "human" {
+        return None;
+    }
+    let active: std::collections::HashSet<String> =
+        active_assembly_seats(project_dir).into_iter().collect();
+    if target.contains(':') {
+        if active.contains(target) {
+            return Some(target.to_string());
+        }
+        return None;
+    }
+    let sessions = read_sessions(project_dir);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut candidates: Vec<(u64, u64, String)> = sessions
+        .get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings
+                .iter()
+                .filter(|b| b.get("role").and_then(|r| r.as_str()) == Some(target))
+                .filter(|b| {
+                    let st = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    st == "active" || st == "idle"
+                })
+                .filter_map(|b| {
+                    let inst = b.get("instance").and_then(|i| i.as_u64())?;
+                    let hb = b.get("last_heartbeat").and_then(|v| v.as_str())?;
+                    let hb_secs = parse_iso_to_epoch_secs(hb)?;
+                    let age = now_secs.saturating_sub(hb_secs);
+                    if age > ASSEMBLY_SEAT_FRESHNESS_SECS {
+                        return None;
+                    }
+                    let label = format!("{}:{}", target, inst);
+                    if !active.contains(&label) {
+                        return None;
+                    }
+                    Some((age, inst, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Sort by age (newest heartbeat first), then by instance (lowest first).
+    candidates.sort_by_key(|(age, inst, _)| (*age, *inst));
+    candidates.into_iter().next().map(|(_, _, label)| label)
+}
+
 /// Given the current assembly state and the seat that just sent, return the next
 /// speaker in rotation_order — skipping seats that are no longer active/idle.
 /// Returns None if no live seat is found (caller leaves current_speaker as-is).
@@ -5846,10 +5910,11 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // emitted on auto-advance can carry the contract forward. After Phase 1
         // these fields are guaranteed populated when assembly is active and
         // sender is non-human (either supplied or legacy_compat placeholder).
-        let (yield_ask, yield_expected) = metadata
+        let (yield_target, yield_ask, yield_expected) = metadata
             .as_ref()
             .and_then(|m| m.get("yield_to"))
             .map(|y| (
+                y.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("ask").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("expected_output").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             ))
@@ -5877,7 +5942,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // human-origin sends skip the advance (caller-supplied msg_type is
         // not trusted here either, per #113.A).
         if asm_active && state.role != "human" {
-            if let Some(next) = next_assembly_speaker(&asm, &state.project_dir, &from_label) {
+            // V3 Phase 2.5 (architect msg 107 gap fix): consult yield_to.target
+            // before falling back to round-robin. When the speaker named a real
+            // next seat, the mic must land there — round-robin alone cannot
+            // close the "mic on wrong person" complaint. Self-yield (target ==
+            // sender, e.g. fan-out pattern) also returns None here so the mic
+            // stays put and round-robin doesn't kick the speaker off their own
+            // turn.
+            let target_resolved = if !yield_target.is_empty() {
+                let r = resolve_yield_target(&state.project_dir, &yield_target);
+                match r.as_deref() {
+                    Some(label) if label == from_label => None, // self-yield
+                    _ => r,
+                }
+            } else {
+                None
+            };
+            let next_speaker = target_resolved
+                .or_else(|| next_assembly_speaker(&asm, &state.project_dir, &from_label));
+            if let Some(next) = next_speaker {
                 // Write the new current_speaker into protocol.json under the
                 // existing lock window.
                 let mut current = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
@@ -9234,6 +9317,86 @@ mod assembly_v3_phase1_tests {
         let seats = active_assembly_seats(&dir);
         assert!(seats.contains(&"developer:0".to_string()), "at-threshold seat included");
         assert!(!seats.contains(&"architect:0".to_string()), "over-threshold seat excluded");
+    }
+
+    /// Phase 2.5 — resolve_yield_target with explicit "role:N" returns the
+    /// seat when active, None when offline.
+    #[test]
+    fn resolve_explicit_seat_label_when_active() {
+        let fresh = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": fresh},
+            {"role": "architect", "instance": 1, "session_id": "s-a1", "status": "active", "last_heartbeat": fresh},
+        ]));
+        assert_eq!(resolve_yield_target(&dir, "architect:1"), Some("architect:1".to_string()));
+        assert_eq!(resolve_yield_target(&dir, "tester:0"), None, "offline seat returns None");
+    }
+
+    /// Phase 2.5 — resolve_yield_target with bare "role" picks the freshest-
+    /// heartbeat instance, ties broken by lowest instance number.
+    #[test]
+    fn resolve_role_picks_freshest_instance() {
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": iso_now_minus_secs(40)},
+            {"role": "developer", "instance": 1, "session_id": "s-d1", "status": "active", "last_heartbeat": iso_now_minus_secs(5)},
+            {"role": "developer", "instance": 2, "session_id": "s-d2", "status": "active", "last_heartbeat": iso_now_minus_secs(20)},
+        ]));
+        assert_eq!(
+            resolve_yield_target(&dir, "developer"),
+            Some("developer:1".to_string()),
+            "instance 1 has freshest heartbeat (5s ago)"
+        );
+    }
+
+    /// Phase 2.5 — resolve_yield_target with bare "role" tie-breaks on lowest
+    /// instance number when multiple instances share the freshest heartbeat.
+    #[test]
+    fn resolve_role_tie_breaks_on_lowest_instance() {
+        let same = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 2, "session_id": "s-d2", "status": "active", "last_heartbeat": same.clone()},
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": same.clone()},
+            {"role": "developer", "instance": 1, "session_id": "s-d1", "status": "active", "last_heartbeat": same},
+        ]));
+        assert_eq!(
+            resolve_yield_target(&dir, "developer"),
+            Some("developer:0".to_string()),
+            "tied freshness → lowest instance"
+        );
+    }
+
+    /// Phase 2.5 — yield_to.target = "human" returns None so caller falls back
+    /// to round-robin (humans aren't in rotation_order).
+    #[test]
+    fn resolve_human_target_returns_none() {
+        let fresh = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": fresh},
+        ]));
+        assert_eq!(resolve_yield_target(&dir, "human"), None);
+    }
+
+    /// Phase 2.5 — empty target returns None (caller falls back to round-robin).
+    /// This covers the case where the source send had no yield_to at all.
+    #[test]
+    fn resolve_empty_target_returns_none() {
+        let fresh = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": fresh},
+        ]));
+        assert_eq!(resolve_yield_target(&dir, ""), None);
+    }
+
+    /// Phase 2.5 — bare role with all instances stale returns None.
+    /// The zombie filter applies here too — yield_to a role whose only live
+    /// instances have died falls back to round-robin.
+    #[test]
+    fn resolve_role_with_only_zombie_instances_returns_none() {
+        let zombie = iso_now_minus_secs(120);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": zombie},
+        ]));
+        assert_eq!(resolve_yield_target(&dir, "developer"), None);
     }
 }
 
