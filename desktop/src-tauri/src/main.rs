@@ -4545,6 +4545,14 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
     });
 }
 
+/// V3 Phase 3.1 (architect msg 134) — absolute ceiling on how long any
+/// single speaker can hold the mic regardless of working-activity. Without
+/// this cap, a speaker stuck in a tool-calling loop (cargo build that never
+/// finishes, polling for a never-firing condition, Read of an enormous file)
+/// keeps last_working_at fresh and the watchdog never fires — infinite hold.
+/// 5 minutes is the floor of "this is genuinely stuck, not just slow."
+const ASSEMBLY_MAX_FLOOR_SECS: u64 = 300;
+
 fn check_assembly_floor_watchdog(
     dir: &str,
     active_section: &str,
@@ -4607,9 +4615,6 @@ fn check_assembly_floor_watchdog(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let idle_secs = now_secs.saturating_sub(last_working_secs);
-    if idle_secs <= stall_threshold_secs {
-        return;
-    }
 
     // Also gate on rev_at — if the protocol has been mutated recently, the
     // mic may have just landed and the speaker hasn't had a full floor cycle
@@ -4623,6 +4628,32 @@ fn check_assembly_floor_watchdog(
     if rev_age_secs < stall_threshold_secs {
         return;
     }
+
+    // Two release reasons (V3 spec rule 4 + Phase 3.1 ceiling). Either fires
+    // the same release path; only the reason metadata differs:
+    //   - stall: working-activity has been silent past 2× threshold
+    //   - max_floor: speaker has held the mic past the absolute ceiling
+    //     regardless of activity (catches stuck tool-loops that keep
+    //     last_working_at fresh)
+    let (release_reason, release_detail) = if rev_age_secs > ASSEMBLY_MAX_FLOOR_SECS {
+        (
+            "watchdog_max_floor",
+            format!(
+                "held mic {}s past absolute max floor of {}s — presumed stuck in a tool loop",
+                rev_age_secs, ASSEMBLY_MAX_FLOOR_SECS
+            ),
+        )
+    } else if idle_secs > stall_threshold_secs {
+        (
+            "watchdog_stall",
+            format!(
+                "no working activity in {}s (stall threshold: {}s)",
+                idle_secs, stall_threshold_secs
+            ),
+        )
+    } else {
+        return;
+    };
 
     // Release: write protocol.json with current_speaker=null, bump rev, post
     // mic_released event to board.jsonl. Same direct-write pattern as the
@@ -4638,7 +4669,7 @@ fn check_assembly_floor_watchdog(
     let now_iso = iso_now();
     if let Some(obj) = current.as_object_mut() {
         obj.insert("last_writer_seat".to_string(), serde_json::json!("watchdog"));
-        obj.insert("last_writer_action".to_string(), serde_json::json!("watchdog_release"));
+        obj.insert("last_writer_action".to_string(), serde_json::json!(release_reason));
         obj.insert("rev_at".to_string(), serde_json::json!(now_iso));
     }
     if let Err(e) = std::fs::write(
@@ -4663,18 +4694,19 @@ fn check_assembly_floor_watchdog(
         "to": "all",
         "type": "mic_released",
         "timestamp": now_iso,
-        "subject": format!("[mic_released] {} idle past floor", speaker),
+        "subject": format!("[mic_released] {} — {}", speaker, release_reason),
         "body": format!(
-            "Watchdog released the mic from {} after {}s of no working activity (floor threshold: {}s × 2). \
-             Mic is now free — next sender will auto-grab.",
-            speaker, idle_secs, threshold_ms / 1000
+            "Watchdog released the mic from {}: {}. Mic is now free — next sender will auto-grab.",
+            speaker, release_detail
         ),
         "metadata": {
             "from_speaker": speaker,
             "idle_secs": idle_secs,
             "stall_threshold_secs": stall_threshold_secs,
+            "max_floor_secs": ASSEMBLY_MAX_FLOOR_SECS,
+            "rev_age_secs": rev_age_secs,
             "section": active_section,
-            "reason": "watchdog_floor_expired"
+            "reason": release_reason,
         }
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
@@ -4683,8 +4715,8 @@ fn check_assembly_floor_watchdog(
     }
 
     log_error(&format!(
-        "[watchdog] released mic from {} after {}s idle (section: {})",
-        speaker, idle_secs, active_section
+        "[watchdog] released mic from {} — reason={}, idle={}s, rev_age={}s, section={}",
+        speaker, release_reason, idle_secs, rev_age_secs, active_section
     ));
 
     // Push protocol_changed so UI refreshes immediately rather than waiting
