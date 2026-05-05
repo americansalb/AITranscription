@@ -1004,10 +1004,42 @@ fn setup_claude_code_integration() {
             .unwrap_or(false)
     };
 
+    // Layer 3 keep-alive hook (vaak-mcp --keep-alive). Without this, the per-
+    // seat session files (.vaak/sessions/<role>-<inst>.json) only get refreshed
+    // when an MCP call goes through, so the supervisor's last_alive_at_ms goes
+    // stale during long tool calls and the health pill's Layer 1 reads "0 of N
+    // agents heartbeated recently". Installed as PreToolUse + PostToolUse so
+    // every Claude tool call (not just MCP) keeps the seat alive.
+    let keep_alive_command;
+    #[cfg(windows)]
+    {
+        let ka_path = hooks_dir.join("vaak-keep-alive.cmd");
+        let ka_content = format!("@echo off\n\"{}\" --keep-alive\n", sidecar_path.replace('/', "\\"));
+        if let Err(e) = fs::write(&ka_path, &ka_content) {
+            log_error(&format!("Failed to write keep-alive hook wrapper: {}", e));
+            return;
+        }
+        keep_alive_command = ka_path.to_string_lossy().replace('\\', "/");
+    }
+    #[cfg(not(windows))]
+    {
+        let ka_sh_path = hooks_dir.join("vaak-keep-alive.sh");
+        let ka_sh_content = format!("#!/bin/sh\n\"{}\" --keep-alive\n", sidecar_path);
+        if let Err(e) = fs::write(&ka_sh_path, &ka_sh_content) {
+            log_error(&format!("Failed to write keep-alive hook wrapper: {}", e));
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&ka_sh_path, fs::Permissions::from_mode(0o755));
+        keep_alive_command = ka_sh_path.to_string_lossy().to_string();
+    }
+
     let prompt_hook_ok = check_hook_configured(&settings, "UserPromptSubmit", &hook_command);
     let stop_hook_ok = check_hook_configured(&settings, "Stop", &stop_hook_command);
+    let pre_keep_alive_ok = check_hook_configured(&settings, "PreToolUse", &keep_alive_command);
+    let post_keep_alive_ok = check_hook_configured(&settings, "PostToolUse", &keep_alive_command);
 
-    if !prompt_hook_ok || !stop_hook_ok {
+    if !prompt_hook_ok || !stop_hook_ok || !pre_keep_alive_ok || !post_keep_alive_ok {
         if settings.get("hooks").is_none() {
             settings["hooks"] = serde_json::json!({});
         }
@@ -1038,6 +1070,32 @@ fn setup_claude_code_integration() {
             ]);
         }
 
+        if !pre_keep_alive_ok {
+            settings["hooks"]["PreToolUse"] = serde_json::json!([
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": keep_alive_command.clone()
+                        }
+                    ]
+                }
+            ]);
+        }
+
+        if !post_keep_alive_ok {
+            settings["hooks"]["PostToolUse"] = serde_json::json!([
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": keep_alive_command.clone()
+                        }
+                    ]
+                }
+            ]);
+        }
+
         match serde_json::to_string_pretty(&settings) {
             Ok(json_str) => {
                 if let Err(e) = fs::write(&settings_path, json_str) {
@@ -1049,6 +1107,12 @@ fn setup_claude_code_integration() {
                     if !stop_hook_ok {
                         log_error(&format!("Configured Stop hook: {}", stop_hook_command));
                     }
+                    if !pre_keep_alive_ok {
+                        log_error(&format!("Configured PreToolUse keep-alive: {}", keep_alive_command));
+                    }
+                    if !post_keep_alive_ok {
+                        log_error(&format!("Configured PostToolUse keep-alive: {}", keep_alive_command));
+                    }
                 }
             }
             Err(e) => {
@@ -1056,7 +1120,7 @@ fn setup_claude_code_integration() {
             }
         }
     } else {
-        log_error("Both hooks already configured");
+        log_error("All hooks (UserPromptSubmit, Stop, PreToolUse, PostToolUse) already configured");
     }
 }
 
@@ -4285,9 +4349,79 @@ fn stop_watching_project() -> Result<(), String> {
 }
 
 /// Start a background thread that polls .vaak/ project files for changes (1-second interval)
+/// Layer 2: ensure the supervisor process is running for this project.
+/// Reads .vaak/supervisor.pid; if absent or the recorded PID is dead, spawns
+/// a fresh `vaak-mcp.exe --supervise <project_dir>` daemon. Idempotent so
+/// it's safe to call from the watcher loop.
+///
+/// Without this, the supervisor only runs if the user manually launches it,
+/// which the health pill correctly reports as "Not running — restart vaak to
+/// enable" but tonight's bug is that nothing in the Vaak app actually starts
+/// it on restart. Architect msg 119 placement: call from the watcher loop so
+/// it spawns once per watched-project, not per-app-startup (which would
+/// happen before any project is selected).
+fn ensure_supervise_running(project_dir: &str) {
+    use std::path::Path;
+    let supervisor_pid_path = Path::new(project_dir).join(".vaak").join("supervisor.pid");
+    let alive = std::fs::read_to_string(&supervisor_pid_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|pid| {
+            #[cfg(windows)]
+            {
+                use std::process::Command;
+                Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+                    .output()
+                    .map(|o| {
+                        let stdout = String::from_utf8_lossy(&o.stdout);
+                        stdout.contains(&format!("\"{}\"", pid))
+                    })
+                    .unwrap_or(false)
+            }
+            #[cfg(not(windows))]
+            {
+                use std::process::Command;
+                Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        })
+        .unwrap_or(false);
+
+    if alive {
+        return;
+    }
+
+    let sidecar = match get_sidecar_path() {
+        Some(p) => p.to_string_lossy().to_string().trim_start_matches(r"\\?\").to_string(),
+        None => {
+            log_error("[supervise] cannot auto-launch — vaak-mcp sidecar not found");
+            return;
+        }
+    };
+    log_error(&format!("[supervise] auto-launching for project: {}", project_dir));
+    let spawn_result = std::process::Command::new(&sidecar)
+        .args(["--supervise", project_dir])
+        // Detach: don't inherit stdio, don't tie lifetime to parent.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawn_result {
+        Ok(child) => log_error(&format!("[supervise] spawned pid={}", child.id())),
+        Err(e) => log_error(&format!("[supervise] spawn failed: {}", e)),
+    }
+}
+
 fn start_project_watcher(app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
         let mut cleanup_counter: u32 = 0;
+        // Start at the threshold so the first iteration with a watched dir
+        // fires the supervise check immediately, not after a 10s delay.
+        let mut supervise_check_counter: u32 = 10;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
 
@@ -4303,10 +4437,20 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
                     Some(d) => d.clone(),
                     None => {
                         cleanup_counter = 0;
+                        supervise_check_counter = 0;
                         continue;
                     }
                 }
             };
+
+            // Layer 2 auto-launch: check every ~10s whether the supervisor is
+            // alive for the watched project, spawn if dead. Idempotent inside
+            // ensure_supervise_running so repeated checks are cheap.
+            supervise_check_counter += 1;
+            if supervise_check_counter >= 10 {
+                supervise_check_counter = 0;
+                ensure_supervise_running(&dir);
+            }
 
             // Run cleanup every 30 seconds to remove gone sessions
             cleanup_counter += 1;
