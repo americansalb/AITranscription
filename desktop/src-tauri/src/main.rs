@@ -4529,8 +4529,172 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
                     }
                 }
             }
+
+            // V3 Phase 3 (rule 4) — floor-time watchdog. If Assembly Line is
+            // active and the current speaker has been idle (no working activity
+            // in sessions.json) for more than 2× threshold_ms, release the mic
+            // so the line doesn't wedge on a stalled seat. Spec rule 4 calls
+            // for last_drafting_at_ms-aware auto-extend; this MINIMAL form uses
+            // sessions.json:last_working_at as the proxy because it's already
+            // updated by every keep-alive hook tick (PreToolUse + PostToolUse
+            // installed in setup_claude_code_integration). 2× multiplier so a
+            // freshly-grabbed mic isn't insta-released by lingering pre-mic
+            // standby state.
+            check_assembly_floor_watchdog(&dir, &active_section, &proto_path, &app_handle);
         }
     });
+}
+
+fn check_assembly_floor_watchdog(
+    dir: &str,
+    active_section: &str,
+    proto_path: &std::path::Path,
+    app_handle: &tauri::AppHandle,
+) {
+    let proto: serde_json::Value = match std::fs::read_to_string(proto_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(p) => p,
+        None => return,
+    };
+    if proto.get("preset").and_then(|p| p.as_str()) != Some("Assembly Line") {
+        return;
+    }
+    let floor = match proto.get("floor") {
+        Some(f) => f,
+        None => return,
+    };
+    let speaker = match floor.get("current_speaker").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return,
+    };
+    let threshold_ms = floor
+        .get("threshold_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60_000);
+    let stall_threshold_secs = (threshold_ms / 1000) * 2;
+
+    // Compare against sessions.json:last_working_at for the speaker.
+    let sessions_path = std::path::Path::new(dir).join(".vaak").join("sessions.json");
+    let sessions: serde_json::Value = match std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(s) => s,
+        None => return,
+    };
+    let mut parts = speaker.splitn(2, ':');
+    let speaker_role = parts.next().unwrap_or("");
+    let speaker_inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let last_working_iso = sessions
+        .get("bindings")
+        .and_then(|b| b.as_array())
+        .and_then(|arr| {
+            arr.iter().find(|b| {
+                b.get("role").and_then(|r| r.as_str()) == Some(speaker_role)
+                    && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == speaker_inst
+            })
+        })
+        .and_then(|b| b.get("last_working_at").and_then(|v| v.as_str()))
+        .map(String::from);
+    let last_working_secs = match last_working_iso.as_ref().and_then(|s| collab::parse_iso_epoch_pub(s)) {
+        Some(s) => s,
+        None => return, // no working timestamp — don't release on missing data
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let idle_secs = now_secs.saturating_sub(last_working_secs);
+    if idle_secs <= stall_threshold_secs {
+        return;
+    }
+
+    // Also gate on rev_at — if the protocol has been mutated recently, the
+    // mic may have just landed and the speaker hasn't had a full floor cycle
+    // yet. Don't release a mic that hasn't held its floor at least once.
+    let rev_at_secs = proto
+        .get("rev_at")
+        .and_then(|v| v.as_str())
+        .and_then(collab::parse_iso_epoch_pub)
+        .unwrap_or(0);
+    let rev_age_secs = now_secs.saturating_sub(rev_at_secs);
+    if rev_age_secs < stall_threshold_secs {
+        return;
+    }
+
+    // Release: write protocol.json with current_speaker=null, bump rev, post
+    // mic_released event to board.jsonl. Same direct-write pattern as the
+    // auto-grab in handle_project_send (vaak-mcp.rs).
+    let mut current = proto.clone();
+    if let Some(floor_obj) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor_obj.insert("current_speaker".to_string(), serde_json::Value::Null);
+    }
+    let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Some(rev_field) = current.get_mut("rev") {
+        *rev_field = serde_json::json!(cur_rev + 1);
+    }
+    let now_iso = iso_now();
+    if let Some(obj) = current.as_object_mut() {
+        obj.insert("last_writer_seat".to_string(), serde_json::json!("watchdog"));
+        obj.insert("last_writer_action".to_string(), serde_json::json!("watchdog_release"));
+        obj.insert("rev_at".to_string(), serde_json::json!(now_iso));
+    }
+    if let Err(e) = std::fs::write(
+        proto_path,
+        serde_json::to_string_pretty(&current).unwrap_or_default(),
+    ) {
+        log_error(&format!("[watchdog] protocol.json write failed: {}", e));
+        return;
+    }
+
+    // Append mic_released event to board.jsonl so the team sees who lost it
+    // and why. Best-effort — failure logs but doesn't roll back the release.
+    let board_path = collab::active_board_path(dir);
+    let count = std::fs::read_to_string(&board_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    let event = serde_json::json!({
+        "id": (count + 1) as u64,
+        "from": "system",
+        "to": "all",
+        "type": "mic_released",
+        "timestamp": now_iso,
+        "subject": format!("[mic_released] {} idle past floor", speaker),
+        "body": format!(
+            "Watchdog released the mic from {} after {}s of no working activity (floor threshold: {}s × 2). \
+             Mic is now free — next sender will auto-grab.",
+            speaker, idle_secs, threshold_ms / 1000
+        ),
+        "metadata": {
+            "from_speaker": speaker,
+            "idle_secs": idle_secs,
+            "stall_threshold_secs": stall_threshold_secs,
+            "section": active_section,
+            "reason": "watchdog_floor_expired"
+        }
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", serde_json::to_string(&event).unwrap_or_default());
+    }
+
+    log_error(&format!(
+        "[watchdog] released mic from {} after {}s idle (section: {})",
+        speaker, idle_secs, active_section
+    ));
+
+    // Push protocol_changed so UI refreshes immediately rather than waiting
+    // for the file-watch tick to notice.
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.emit(
+            "protocol_changed",
+            serde_json::json!({"section": active_section, "source": "watchdog"}),
+        );
+    }
 }
 
 fn main() {
