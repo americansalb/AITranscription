@@ -188,9 +188,47 @@ fn role_briefing_path(project_dir: &str, role: &str) -> PathBuf {
     vaak_dir(project_dir).join("roles").join(format!("{}.md", role))
 }
 
-fn last_seen_path(project_dir: &str, session_id: &str) -> PathBuf {
+/// Path to the per-session last-seen-id tracker file.
+///
+/// Keyed on (session_id, section) because board.jsonl is itself section-scoped
+/// (see board_jsonl_path). If we only keyed on session_id, the last_seen_id
+/// from the most-recently-active section would silence the agent in any other
+/// section whose max id is below that carried value — agents go quiet on
+/// section switches and stay quiet until the new section's id catches up.
+fn last_seen_path(project_dir: &str, session_id: &str, section: &str) -> PathBuf {
+    let safe_id = session_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    let safe_section = section.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    vaak_dir(project_dir).join("last-seen").join(format!("{}__{}.json", safe_id, safe_section))
+}
+
+/// Legacy session-only last-seen path used before the section-key fix.
+/// Only consulted as a one-shot read fallback by read_last_seen_id; new writes
+/// always go to the section-scoped path. The legacy file is left in place so a
+/// downgrade doesn't lose state — it idles out naturally.
+fn legacy_last_seen_path(project_dir: &str, session_id: &str) -> PathBuf {
     let safe_id = session_id.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
     vaak_dir(project_dir).join("last-seen").join(format!("{}.json", safe_id))
+}
+
+/// Read the stored last_seen_id for (session_id, section).
+/// Falls back to the legacy session-only file when the section-scoped one is
+/// missing, so agents upgrading mid-session don't re-process old messages.
+fn read_last_seen_id(project_dir: &str, session_id: &str, section: &str) -> u64 {
+    let new_path = last_seen_path(project_dir, session_id, section);
+    if let Ok(s) = std::fs::read_to_string(&new_path) {
+        if let Some(id) = serde_json::from_str::<serde_json::Value>(&s)
+            .ok()
+            .and_then(|j| j.get("last_seen_id")?.as_u64())
+        {
+            return id;
+        }
+    }
+    let legacy = legacy_last_seen_path(project_dir, session_id);
+    std::fs::read_to_string(&legacy)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|j| j.get("last_seen_id")?.as_u64())
+        .unwrap_or(0)
 }
 
 fn send_tracker_path(project_dir: &str, session_id: &str) -> PathBuf {
@@ -5425,7 +5463,7 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         .max()
         .unwrap_or(0);
     if max_recent_id > 0 {
-        let ls_path = last_seen_path(&normalized, session_id);
+        let ls_path = last_seen_path(&normalized, session_id, &active_section);
         if let Some(parent) = ls_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -5984,14 +6022,11 @@ fn handle_project_check(last_seen: u64) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
     // If caller passes last_seen=0, use the stored last_seen_id from file
-    // to prevent re-delivering messages already seen via project_join or hook
+    // to prevent re-delivering messages already seen via project_join or hook.
+    // Section-scoped: each section keeps its own last_seen_id (see last_seen_path).
     let effective_last_seen = if last_seen == 0 {
-        let ls_path = last_seen_path(&state.project_dir, &state.session_id);
-        std::fs::read_to_string(&ls_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|j| j.get("last_seen_id")?.as_u64())
-            .unwrap_or(0)
+        let active_section = get_active_section(&state.project_dir);
+        read_last_seen_id(&state.project_dir, &state.session_id, &active_section)
     } else {
         last_seen
     };
@@ -6051,7 +6086,6 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
     let session_id = read_cached_session_id().unwrap_or_else(get_session_id);
-    let ls_path = last_seen_path(&state.project_dir, &session_id);
 
     // Mark this session as in standby
     update_session_activity("standby");
@@ -6076,12 +6110,12 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             polls_since_heartbeat = 0;
         }
 
-        // Read current last_seen
-        let last_seen_id: u64 = std::fs::read_to_string(&ls_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|j| j.get("last_seen_id")?.as_u64())
-            .unwrap_or(0);
+        // Re-resolve active section every poll: read_board_filtered itself reads
+        // section-scoped board.jsonl on each call (see board_jsonl_path), so
+        // last_seen must track whatever section is live right now — otherwise
+        // a mid-wait section switch silences the agent.
+        let active_section = get_active_section(&state.project_dir);
+        let last_seen_id = read_last_seen_id(&state.project_dir, &session_id, &active_section);
 
         // Check for new messages
         let wait_instance_label = format!("{}:{}", state.role, state.instance);
@@ -6102,8 +6136,10 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
                 .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
                 .max()
             {
-                let ls_dir = vaak_dir(&state.project_dir).join("last-seen");
-                let _ = std::fs::create_dir_all(&ls_dir);
+                let ls_path = last_seen_path(&state.project_dir, &session_id, &active_section);
+                if let Some(parent) = ls_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 let _ = std::fs::write(&ls_path, serde_json::json!({
                     "last_seen_id": max_id,
                     "updated_at": utc_now_iso()
@@ -6482,13 +6518,9 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         })
         .collect();
 
-    // Read last-seen tracking
-    let ls_path = last_seen_path(&project_dir, session_id);
-    let last_seen_id: u64 = std::fs::read_to_string(&ls_path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|j| j.get("last_seen_id")?.as_u64())
-        .unwrap_or(0);
+    // Read last-seen tracking (section-scoped — see last_seen_path)
+    let active_section = get_active_section(&project_dir);
+    let last_seen_id = read_last_seen_id(&project_dir, session_id, &active_section);
 
     // Filter new messages
     let new_messages: Vec<&&serde_json::Value> = my_messages.iter()
@@ -6882,7 +6914,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
         .max();
     if let Some(max_id) = max_hook_id {
-        let hook_ls_path = last_seen_path(&project_dir, session_id);
+        let hook_ls_path = last_seen_path(&project_dir, session_id, &active_section);
         if let Some(parent) = hook_ls_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -8771,6 +8803,89 @@ mod supervise_tests {
     }
 }
 
+#[cfg(test)]
+mod last_seen_path_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_project() -> String {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("vaak-ls-test-{}-{}", std::process::id(), n));
+        let vaak = dir.join(".vaak").join("last-seen");
+        std::fs::create_dir_all(&vaak).unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+
+    fn write_id(path: &std::path::Path, id: u64) {
+        std::fs::write(
+            path,
+            serde_json::json!({"last_seen_id": id, "updated_at": "test"}).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Acceptance (a): cold-start — neither new nor legacy file exists, returns 0.
+    #[test]
+    fn cold_start_returns_zero() {
+        let dir = temp_project();
+        assert_eq!(read_last_seen_id(&dir, "sess-A", "alpha"), 0);
+    }
+
+    /// Acceptance (b): cross-section isolation — sectionA's id does not bleed
+    /// into sectionB. This is the original silence bug.
+    #[test]
+    fn section_a_id_does_not_silence_section_b() {
+        let dir = temp_project();
+        let a_path = last_seen_path(&dir, "sess-X", "alpha");
+        write_id(&a_path, 999);
+        // Section beta has no file — must read 0, not 999.
+        assert_eq!(read_last_seen_id(&dir, "sess-X", "beta"), 0);
+        // Section alpha still reads its own value.
+        assert_eq!(read_last_seen_id(&dir, "sess-X", "alpha"), 999);
+    }
+
+    /// Acceptance (c): backward-compat — legacy session-only file is read
+    /// when section-scoped file is absent. After a write to the new path,
+    /// the new value is preferred.
+    #[test]
+    fn legacy_file_read_then_overridden_by_new() {
+        let dir = temp_project();
+        let legacy = legacy_last_seen_path(&dir, "sess-Y");
+        write_id(&legacy, 42);
+        // No new file yet — fallback to legacy.
+        assert_eq!(read_last_seen_id(&dir, "sess-Y", "default"), 42);
+        // Migrate-on-write: new path takes precedence.
+        let new_path = last_seen_path(&dir, "sess-Y", "default");
+        write_id(&new_path, 100);
+        assert_eq!(read_last_seen_id(&dir, "sess-Y", "default"), 100);
+    }
+
+    /// Path differs by section even with identical session id — guards against
+    /// regression to the single-key bug.
+    #[test]
+    fn path_differs_by_section() {
+        let dir = "/tmp/anywhere";
+        let a = last_seen_path(dir, "sess-Z", "alpha");
+        let b = last_seen_path(dir, "sess-Z", "beta");
+        assert_ne!(a, b);
+    }
+
+    /// Filename-unsafe chars in section are sanitized so the path resolves.
+    #[test]
+    fn section_with_unsafe_chars_is_sanitized() {
+        let dir = "/tmp/anywhere";
+        let p = last_seen_path(dir, "sess-Q", "weird/name:with*chars");
+        let fname = p.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!fname.contains('/'));
+        assert!(!fname.contains(':'));
+        assert!(!fname.contains('*'));
+        assert!(fname.ends_with(".json"));
+    }
+}
+
 fn try_acquire_supervisor_lock(lock_path: &std::path::Path) -> bool {
     if let Ok(content) = std::fs::read_to_string(lock_path) {
         // Existing lock: parse PID, verify it's a live vaak-mcp process.
@@ -8983,13 +9098,9 @@ fn run_stop_hook() {
             })
             .collect();
 
+        let stop_active_section = get_active_section(&project_dir);
         let last_seen_id: u64 = session_id.as_ref()
-            .and_then(|sid| {
-                let ls_path = last_seen_path(&project_dir, sid);
-                fs::read_to_string(&ls_path).ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|j| j.get("last_seen_id")?.as_u64())
-            })
+            .map(|sid| read_last_seen_id(&project_dir, sid, &stop_active_section))
             .unwrap_or(0);
 
         let new_messages: Vec<&&serde_json::Value> = my_messages.iter()
