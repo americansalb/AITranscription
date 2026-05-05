@@ -157,7 +157,7 @@ _PAGE_HTML = r"""<!doctype html>
     margin-bottom: 16px; flex-wrap: wrap;
   }
   label { font-size: 14px; color: var(--muted); }
-  select, button {
+  select, button, input[type="text"] {
     background: var(--panel);
     color: var(--text);
     border: 1px solid var(--border);
@@ -167,6 +167,14 @@ _PAGE_HTML = r"""<!doctype html>
     font-family: inherit;
   }
   select { min-width: 280px; }
+  input[type="text"] { min-width: 220px; }
+  input[type="text"]:focus, select:focus {
+    outline: 2px solid var(--accent); outline-offset: -1px;
+  }
+  .custom-label { margin-left: 8px; }
+  .hint {
+    margin: 0 0 16px; color: var(--muted); font-size: 12px; max-width: 760px;
+  }
   button {
     background: var(--accent);
     border-color: var(--accent);
@@ -241,8 +249,16 @@ _PAGE_HTML = r"""<!doctype html>
     <select id="model" disabled>
       <option>Loading models…</option>
     </select>
+    <label for="custom-model" class="custom-label">Or custom ID:</label>
+    <input type="text" id="custom-model" placeholder="e.g. llama3-70b-8192" autocomplete="off" />
     <button id="translate-btn" disabled>Translate</button>
   </div>
+  <p class="hint">
+    The dropdown lists every chat model your Groq API key currently supports
+    (whisper / TTS / guard models are excluded since they can't do chat).
+    To use a model not in the list, type its exact Groq ID into the
+    "custom ID" field — it overrides the dropdown.
+  </p>
 
   <div class="grid">
     <div class="panel">
@@ -263,12 +279,18 @@ _PAGE_HTML = r"""<!doctype html>
 <script>
 (function () {
   const modelSelect = document.getElementById("model");
+  const customModelEl = document.getElementById("custom-model");
   const inputEl = document.getElementById("input");
   const outputEl = document.getElementById("output");
   const btn = document.getElementById("translate-btn");
   const copyBtn = document.getElementById("copy-btn");
   const statusEl = document.getElementById("status");
   const metaEl = document.getElementById("meta");
+
+  function chosenModel() {
+    const custom = (customModelEl.value || "").trim();
+    return custom || modelSelect.value;
+  }
 
   // Preferred default models in priority order.
   const PREFERRED = [
@@ -323,7 +345,7 @@ _PAGE_HTML = r"""<!doctype html>
       setStatus("Please enter some text to translate.", "error");
       return;
     }
-    const model = modelSelect.value;
+    const model = chosenModel();
     if (!model) {
       setStatus("No model selected.", "error");
       return;
