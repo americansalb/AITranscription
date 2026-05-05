@@ -2603,6 +2603,12 @@ fn write_assembly_state_unlocked(project_dir: &str, state: &serde_json::Value) -
 /// observable signal that the seat is genuinely reachable.
 const ASSEMBLY_SEAT_FRESHNESS_SECS: u64 = 90;
 
+/// Default floor-time advertised in mic-arrival messages (V3 spec rule 4).
+/// The watchdog isn't enforced yet — Phase 3 ships it. This constant is what
+/// the [YOUR TURN] body tells the new speaker to expect, so when Phase 3
+/// lands the advertised floor matches the actual auto-yield boundary.
+const ASSEMBLY_FLOOR_DEFAULT_SECS: u64 = 60;
+
 /// List active+idle session seats as "role:instance" strings, in roster order.
 /// Used to seed rotation_order on enable and to find the next live speaker.
 /// Filters bindings with stale heartbeats (>ASSEMBLY_SEAT_FRESHNESS_SECS) so a
@@ -5836,6 +5842,19 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             ));
         }
 
+        // V3 Phase 2: stash the yield_to fields so the mic-arrival message
+        // emitted on auto-advance can carry the contract forward. After Phase 1
+        // these fields are guaranteed populated when assembly is active and
+        // sender is non-human (either supplied or legacy_compat placeholder).
+        let (yield_ask, yield_expected) = metadata
+            .as_ref()
+            .and_then(|m| m.get("yield_to"))
+            .map(|y| (
+                y.get("ask").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                y.get("expected_output").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            ))
+            .unwrap_or_default();
+
         let msg_id = next_message_id(&state.project_dir);
         let message = serde_json::json!({
             "id": msg_id,
@@ -5875,6 +5894,46 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
                 }
                 let _ = write_protocol_for_section_value(&state.project_dir, &section_for_gate, &current);
+
+                // V3 Phase 2 (rule 3): post a directed [YOUR TURN] message to
+                // the new speaker so they wake on the next project_wait poll
+                // with explicit context — what to do, what shape of output,
+                // who handed it to them. Closes the "I don't know it's my
+                // turn" failure that wedged tonight's session for 30+ min.
+                // Same lock window as the source message + protocol write —
+                // no observer can see a state where the mic moved but the
+                // arrival signal is missing.
+                let arrival_id = next_message_id(&state.project_dir);
+                let body_text = if yield_ask.is_empty() {
+                    format!(
+                        "[YOUR TURN] mic from {}. Floor: {}s. (No yield_to context — legacy caller.)",
+                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS
+                    )
+                } else {
+                    format!(
+                        "[YOUR TURN] mic from {}. Floor: {}s.\nAsk: {}\nExpected: {}",
+                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, yield_ask, yield_expected
+                    )
+                };
+                let arrival_msg = serde_json::json!({
+                    "id": arrival_id,
+                    "from": "system",
+                    "to": next.clone(),
+                    "type": "mic_landed",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("[YOUR TURN] {}", next),
+                    "body": body_text,
+                    "metadata": {
+                        "ask": yield_ask,
+                        "expected_output": yield_expected,
+                        "floor_time_seconds": ASSEMBLY_FLOOR_DEFAULT_SECS,
+                        "triggered_by": from_label.clone(),
+                        "trigger_msg_id": msg_id,
+                    }
+                });
+                if let Err(e) = append_to_board(&state.project_dir, &arrival_msg) {
+                    eprintln!("[assembly-v3] mic_landed append failed: {} — mic moved but signal lost. New speaker will discover their turn via project_wait timeout.", e);
+                }
             }
         }
 
