@@ -3616,6 +3616,36 @@ fn do_protocol_mutate_inner(
                     } else {
                         let prior = current.floor.current_speaker.clone().unwrap_or_default();
                         current.floor.current_speaker = None;
+                        // idle_secs from sessions.json:last_working_at — same
+                        // signal as the watchdog's stall criterion. Lets
+                        // observers distinguish kicked-while-working from
+                        // kicked-while-stalled. -1 if last_working_at is
+                        // missing or unparseable. Per evil-arch msg 180 #3.
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let idle_secs: i64 = {
+                            let sessions_path = std::path::Path::new(pd).join(".vaak").join("sessions.json");
+                            let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+                                .ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or(serde_json::Value::Null);
+                            let mut parts = prior.splitn(2, ':');
+                            let pr_role = parts.next().unwrap_or("");
+                            let pr_inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                            sessions
+                                .get("bindings")
+                                .and_then(|b| b.as_array())
+                                .and_then(|arr| arr.iter().find(|b| {
+                                    b.get("role").and_then(|r| r.as_str()) == Some(pr_role)
+                                        && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == pr_inst
+                                }))
+                                .and_then(|b| b.get("last_working_at").and_then(|v| v.as_str()))
+                                .and_then(collab::parse_iso_epoch_pub)
+                                .map(|w| now_secs.saturating_sub(w) as i64)
+                                .unwrap_or(-1)
+                        };
                         // Append mic_released event to board.jsonl. Best-effort —
                         // the floor mutation above is the load-bearing change;
                         // event-append failure logs but doesn't roll back.
@@ -3634,12 +3664,13 @@ fn do_protocol_mutate_inner(
                             "timestamp": now_iso,
                             "subject": format!("[mic_released] {} — human_force_release", prior),
                             "body": format!(
-                                "Human force-released the mic from {}. Mic is now free — next sender will auto-grab.",
-                                prior
+                                "Human force-released the mic from {} (idle: {}s). Mic is now free — next sender will auto-grab.",
+                                prior, idle_secs
                             ),
                             "metadata": {
                                 "from_speaker": prior,
                                 "reason": "human_force_release",
+                                "idle_secs_at_release": idle_secs,
                             }
                         });
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {

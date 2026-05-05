@@ -3625,8 +3625,33 @@ fn apply_force_release(
     // Audit event: append mic_released to board.jsonl so the team sees who
     // got yanked and by whom. Best-effort — failure logs but the release
     // still applies (the floor mutation is the load-bearing change).
+    // Includes idle_secs from sessions.json:last_working_at so observers can
+    // distinguish "kicked an actively-working speaker (suspicious)" from
+    // "kicked a long-stalled speaker (just routine cleanup)" — evil-arch
+    // msg 180 #3.
     let prior = prior_speaker.unwrap_or_default();
     let now = utc_now_iso();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let idle_secs: i64 = {
+        let sessions = read_sessions(project_dir);
+        let mut parts = prior.splitn(2, ':');
+        let pr_role = parts.next().unwrap_or("");
+        let pr_inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        sessions
+            .get("bindings")
+            .and_then(|b| b.as_array())
+            .and_then(|arr| arr.iter().find(|b| {
+                b.get("role").and_then(|r| r.as_str()) == Some(pr_role)
+                    && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == pr_inst
+            }))
+            .and_then(|b| b.get("last_working_at").and_then(|v| v.as_str()))
+            .and_then(parse_iso_to_epoch_secs)
+            .map(|w| now_secs.saturating_sub(w) as i64)
+            .unwrap_or(-1)
+    };
     let board_path = board_jsonl_path(project_dir);
     let count = std::fs::read_to_string(&board_path)
         .unwrap_or_default()
@@ -3641,12 +3666,13 @@ fn apply_force_release(
         "timestamp": now,
         "subject": format!("[mic_released] {} — human_force_release", prior),
         "body": format!(
-            "Human force-released the mic from {}. Mic is now free — next sender will auto-grab.",
-            prior
+            "Human force-released the mic from {} (idle: {}s). Mic is now free — next sender will auto-grab.",
+            prior, idle_secs
         ),
         "metadata": {
             "from_speaker": prior,
             "reason": "human_force_release",
+            "idle_secs_at_release": idle_secs,
         }
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
