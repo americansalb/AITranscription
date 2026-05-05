@@ -2071,12 +2071,24 @@ fn set_recording_state(app: tauri::AppHandle, recording: bool, state: Option<Str
 static PROJECT_WATCHED_DIR: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
 static PROJECT_LAST_MTIMES: std::sync::OnceLock<Mutex<(Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>)>> = std::sync::OnceLock::new();
 
+/// Per-section protocol.json mtime tracking — separate from the four-tuple
+/// above because protocol.json is section-scoped (different file per section)
+/// and is written by the sidecar without going through Tauri's protocol_mutate
+/// path. Without this watch, sidecar mutations (assembly auto-advance, yield,
+/// etc.) silently update protocol.json on disk but never reach useProtocolState
+/// — the UI's mic indicator becomes stale until the next Tauri-side mutation.
+static PROTOCOL_LAST_MTIME: std::sync::OnceLock<Mutex<Option<(String, std::time::SystemTime)>>> = std::sync::OnceLock::new();
+
 fn get_project_watched_dir() -> &'static Mutex<Option<String>> {
     PROJECT_WATCHED_DIR.get_or_init(|| Mutex::new(None))
 }
 
 fn get_project_last_mtimes() -> &'static Mutex<(Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>)> {
     PROJECT_LAST_MTIMES.get_or_init(|| Mutex::new((None, None, None, None)))
+}
+
+fn get_protocol_last_mtime() -> &'static Mutex<Option<(String, std::time::SystemTime)>> {
+    PROTOCOL_LAST_MTIME.get_or_init(|| Mutex::new(None))
 }
 
 /// Tauri command: start watching a project directory for .vaak/ file changes
@@ -4343,6 +4355,33 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
                         if let Some(window) = app_handle.get_webview_window("transcript") {
                             let _ = window.emit("project-update", &json);
                         }
+                    }
+                }
+            }
+
+            // Watch protocol.json for the active section. Sidecar writes to
+            // this file directly (assembly auto-advance, yield, etc.) without
+            // going through protocol_mutate_cmd, so without this watch the UI
+            // never sees those updates — that's the "top-right indicator
+            // doesn't update" bug from board msg 74. Section-keyed so a
+            // section switch triggers a re-emit (UI re-fetches for the new
+            // section).
+            let active_section = collab::get_active_section(&dir);
+            let proto_path = protocol::protocol_path_for_section(&dir, &active_section);
+            if let Some(proto_mtime) = proto_path.metadata().ok().and_then(|m| m.modified().ok()) {
+                let mut last = get_protocol_last_mtime().lock();
+                let proto_changed = match last.as_ref() {
+                    Some((sec, mt)) => sec != &active_section || mt != &proto_mtime,
+                    None => true,
+                };
+                if proto_changed {
+                    *last = Some((active_section.clone(), proto_mtime));
+                    drop(last);
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.emit("protocol_changed", serde_json::json!({
+                            "section": active_section,
+                            "source": "watcher",
+                        }));
                     }
                 }
             }
