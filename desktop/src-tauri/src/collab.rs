@@ -1131,9 +1131,25 @@ pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_jso
     with_board_lock(dir, || {
         let new_state = match action {
             "enable" => {
+                // V3 spec rule 10: assembly mode and discussion modes are mutually
+                // exclusive — Delphi blind submissions and continuous-review auto-
+                // triggers both violate the single-speaker contract. Closing the
+                // door at enable is cheaper than negotiating precedence at runtime.
+                let disc_path = Path::new(dir).join(".vaak").join("discussion.json");
+                let disc_active = std::fs::read_to_string(&disc_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("active").and_then(|a| a.as_bool()))
+                    .unwrap_or(false);
+                if disc_active {
+                    return Err("Cannot enable Assembly Line while a discussion is active. \
+                        End the discussion first via discussion_control(end_discussion).".to_string());
+                }
                 let order = active_assembly_seats(dir);
                 if order.is_empty() {
-                    return Err("Cannot enable Assembly Line: no active or idle seats found.".to_string());
+                    return Err("Cannot enable Assembly Line: no active seats with fresh heartbeats. \
+                        (Bindings older than 90s are excluded as zombies — V3 rule 5. \
+                        If you expect a seat to be eligible, have it call project_join again.)".to_string());
                 }
                 let first = order[0].clone();
                 serde_json::json!({
@@ -1160,13 +1176,25 @@ pub fn set_assembly_v0(dir: &str, action: &str, actor: &str) -> Result<serde_jso
     })
 }
 
+/// Heartbeat freshness threshold for assembly seat eligibility, in seconds.
+/// Spec V3 rule 5: bindings whose last_heartbeat is older than this are treated
+/// as zombies and excluded from rotation_order at seed time. Mirrors the same
+/// constant in vaak-mcp.rs (sidecar mid-rotation skip uses its own copy).
+const ASSEMBLY_SEAT_FRESHNESS_SECS: u64 = 90;
+
 /// List active+idle session seats as "role:instance" in the order they appear in sessions.json.
+/// Filters bindings with stale heartbeats (>ASSEMBLY_SEAT_FRESHNESS_SECS) so a
+/// dead binding doesn't end up holding the mic at seed — V3 spec rule 5.
 pub fn active_assembly_seats(dir: &str) -> Vec<String> {
     let sessions_path = Path::new(dir).join(".vaak").join("sessions.json");
     let json: serde_json::Value = std::fs::read_to_string(&sessions_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     json.get("bindings")
         .and_then(|b| b.as_array())
         .map(|bindings| {
@@ -1174,6 +1202,13 @@ pub fn active_assembly_seats(dir: &str) -> Vec<String> {
                 .filter(|b| {
                     let st = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
                     st == "active" || st == "idle"
+                })
+                .filter(|b| {
+                    let hb = b.get("last_heartbeat").and_then(|v| v.as_str()).unwrap_or("");
+                    match parse_iso_epoch(hb) {
+                        Some(hb_secs) => now_secs.saturating_sub(hb_secs) <= ASSEMBLY_SEAT_FRESHNESS_SECS,
+                        None => false,
+                    }
                 })
                 .filter_map(|b| {
                     let role = b.get("role").and_then(|r| r.as_str())?;

@@ -2595,10 +2595,24 @@ fn write_assembly_state_unlocked(project_dir: &str, state: &serde_json::Value) -
         .map_err(|e| format!("Failed to write assembly.json: {}", e))
 }
 
+/// Heartbeat freshness threshold for assembly seat eligibility, in seconds.
+/// Spec V3 rule 5: bindings whose last_heartbeat is older than this are treated
+/// as zombies and excluded from rotation_order at seed time. Tonight's stuck-mic
+/// failure was a status="active" binding whose process had died — its heartbeat
+/// stopped updating but no one cleared the binding. Heartbeat freshness is the
+/// observable signal that the seat is genuinely reachable.
+const ASSEMBLY_SEAT_FRESHNESS_SECS: u64 = 90;
+
 /// List active+idle session seats as "role:instance" strings, in roster order.
 /// Used to seed rotation_order on enable and to find the next live speaker.
+/// Filters bindings with stale heartbeats (>ASSEMBLY_SEAT_FRESHNESS_SECS) so a
+/// dead binding doesn't end up holding the mic — V3 spec rule 5.
 fn active_assembly_seats(project_dir: &str) -> Vec<String> {
     let sessions = read_sessions(project_dir);
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     sessions.get("bindings")
         .and_then(|b| b.as_array())
         .map(|bindings| {
@@ -2606,6 +2620,13 @@ fn active_assembly_seats(project_dir: &str) -> Vec<String> {
                 .filter(|b| {
                     let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
                     status == "active" || status == "idle"
+                })
+                .filter(|b| {
+                    let hb = b.get("last_heartbeat").and_then(|v| v.as_str()).unwrap_or("");
+                    match parse_iso_to_epoch_secs(hb) {
+                        Some(hb_secs) => now_secs.saturating_sub(hb_secs) <= ASSEMBLY_SEAT_FRESHNESS_SECS,
+                        None => false,
+                    }
                 })
                 .filter_map(|b| {
                     let role = b.get("role").and_then(|r| r.as_str())?;
@@ -3314,6 +3335,31 @@ fn apply_set_preset(
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or("[InvalidArgs] set_preset requires args.name (string)")?;
+    // V3 spec rule 10: assembly mode and discussion presets are mutually
+    // exclusive. Reject any transition INTO Assembly Line from a discussion
+    // preset (and vice versa) instead of arbitrating precedence at runtime —
+    // that's the class of bug we already lived through with two systems
+    // owning the same state. The state.preset check uses the pre-mutation
+    // value (we haven't written the new preset yet).
+    let prev_preset = state
+        .get("preset")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+    let is_discussion = |p: &str| matches!(p, "Continuous Review" | "Delphi" | "Oxford");
+    if name == "Assembly Line" && is_discussion(prev_preset) {
+        return Err(format!(
+            "[ConflictWithDiscussion] cannot set preset to 'Assembly Line' while a discussion preset ('{}') is active. \
+             Set preset to 'Default chat' first, then enable Assembly Line.",
+            prev_preset
+        ));
+    }
+    if is_discussion(name) && prev_preset == "Assembly Line" {
+        return Err(format!(
+            "[ConflictWithAssembly] cannot set preset to '{}' while Assembly Line is active. \
+             Disable Assembly Line first (set preset to 'Default chat'), then start the discussion.",
+            name
+        ));
+    }
     // Spec §6 matrix: preset → (floor.mode, consensus.mode).
     let (floor_mode, consensus_mode) = match name {
         "Default chat" => ("none", "none"),
@@ -5522,6 +5568,17 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
     let config = read_project_config(&state.project_dir)?;
 
+    // V3 spec rule 1: every assembly-mode send carries a yield_to contract.
+    // legacy_compat is ON by default (Phase 1 of the rollout) so legacy callers
+    // get a structured warning + auto-attached placeholder, not a hard error.
+    // Flipping it off (Phase 5) makes the missing-field check a real reject.
+    let legacy_compat = config
+        .get("settings")
+        .and_then(|s| s.get("assembly_legacy_compat"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let mut metadata = metadata;
+
     // Check if this session has been revoked
     let sessions = read_sessions(&state.project_dir);
     if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
@@ -5628,6 +5685,55 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "current_speaker": proto_for_gate.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
             "rotation_order": proto_for_gate.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
         });
+        // V3 spec rule 1 — yield_to validation. Runs BEFORE the speaker gate
+        // because every assembly-mode send (whether speaker or auto-grab
+        // candidate) is supposed to terminate with an explicit handoff.
+        // Human is exempt per rule 6.
+        if asm_active && state.role != "human" {
+            let yt = metadata.as_ref().and_then(|m| m.get("yield_to"));
+            let target = yt.and_then(|y| y.get("target")).and_then(|v| v.as_str()).unwrap_or("");
+            let ask = yt.and_then(|y| y.get("ask")).and_then(|v| v.as_str()).unwrap_or("");
+            let expected = yt.and_then(|y| y.get("expected_output")).and_then(|v| v.as_str()).unwrap_or("");
+            let missing: Vec<&str> = [
+                ("target", target),
+                ("ask", ask),
+                ("expected_output", expected),
+            ]
+            .iter()
+            .filter_map(|(name, val)| if val.is_empty() { Some(*name) } else { None })
+            .collect();
+            if !missing.is_empty() {
+                if legacy_compat {
+                    eprintln!(
+                        "[assembly-v3:legacy-compat] {} sent without yield_to.{} — auto-attaching placeholder. \
+                         Migrate caller to send required fields before settings.assembly_legacy_compat flips to false.",
+                        from_label,
+                        missing.join(",")
+                    );
+                    let placeholder = serde_json::json!({
+                        "target": "human",
+                        "ask": "(missing — legacy caller, no yield supplied)",
+                        "expected_output": "(missing — legacy caller, no expected_output supplied)",
+                        "_legacy_compat": true
+                    });
+                    let new_meta = match metadata.take() {
+                        Some(serde_json::Value::Object(mut obj)) => {
+                            obj.insert("yield_to".to_string(), placeholder);
+                            serde_json::Value::Object(obj)
+                        }
+                        _ => serde_json::json!({"yield_to": placeholder}),
+                    };
+                    metadata = Some(new_meta);
+                } else {
+                    return Err(format!(
+                        "[MissingYieldTo] Assembly Line v3 requires metadata.yield_to.{{target,ask,expected_output}} on every send. \
+                         Missing: {}. Either supply the fields or set settings.assembly_legacy_compat=true to auto-attach a placeholder.",
+                        missing.join(", ")
+                    ));
+                }
+            }
+        }
+
         let mut asm_auto_grabbed: Option<serde_json::Value> = None;
         if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
@@ -8883,6 +8989,192 @@ mod last_seen_path_tests {
         assert!(!fname.contains(':'));
         assert!(!fname.contains('*'));
         assert!(fname.ends_with(".json"));
+    }
+}
+
+#[cfg(test)]
+mod assembly_v3_phase1_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_project_with_sessions(bindings: serde_json::Value) -> String {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("vaak-asm-test-{}-{}", std::process::id(), n));
+        let vaak = dir.join(".vaak");
+        std::fs::create_dir_all(&vaak).unwrap();
+        let sessions = serde_json::json!({"bindings": bindings});
+        std::fs::write(
+            vaak.join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            vaak.join("project.json"),
+            r#"{"name":"test","roles":{},"settings":{"active_section":"default"}}"#,
+        )
+        .unwrap();
+        dir.to_string_lossy().into_owned()
+    }
+
+    fn iso_now_minus_secs(secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let then = now - secs;
+        let mut total_days = then / 86400;
+        let secs_of_day = then % 86400;
+        let h = secs_of_day / 3600;
+        let m = (secs_of_day % 3600) / 60;
+        let s = secs_of_day % 60;
+        let mut year: u64 = 1970;
+        loop {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let yd = if leap { 366 } else { 365 };
+            if total_days < yd { break; }
+            total_days -= yd;
+            year += 1;
+        }
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let dim = [31u64, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        let mut month = 0u64;
+        while month < 12 && total_days >= dim[month as usize] {
+            total_days -= dim[month as usize];
+            month += 1;
+        }
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month + 1, total_days + 1, h, m, s)
+    }
+
+    /// V3 rule 5: bindings whose last_heartbeat is older than 90s are zombies
+    /// and excluded from the assembly seed. Tonight's specific failure mode.
+    #[test]
+    fn zombie_bindings_excluded_from_seat_seed() {
+        let fresh = iso_now_minus_secs(10);
+        let zombie = iso_now_minus_secs(120);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": fresh},
+            {"role": "architect", "instance": 0, "session_id": "s-a0", "status": "active", "last_heartbeat": zombie},
+        ]));
+        let seats = active_assembly_seats(&dir);
+        assert!(seats.contains(&"developer:0".to_string()), "fresh seat must be included");
+        assert!(!seats.contains(&"architect:0".to_string()), "zombie seat must be excluded");
+    }
+
+    /// Bindings without a last_heartbeat field are treated as zombies — we have
+    /// no proof of life, default to excluding rather than poisoning the rotation.
+    #[test]
+    fn missing_heartbeat_field_excluded() {
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active"},
+        ]));
+        let seats = active_assembly_seats(&dir);
+        assert!(seats.is_empty(), "missing heartbeat must exclude the binding");
+    }
+
+    /// Status="revoked" bindings are excluded regardless of heartbeat freshness.
+    #[test]
+    fn revoked_bindings_excluded_even_when_fresh() {
+        let fresh = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "revoked", "last_heartbeat": fresh},
+        ]));
+        let seats = active_assembly_seats(&dir);
+        assert!(seats.is_empty(), "revoked binding must be excluded");
+    }
+
+    /// Multiple fresh seats end up in the order they appear in sessions.json
+    /// (deterministic seed for round-robin).
+    #[test]
+    fn multiple_fresh_seats_preserve_binding_order() {
+        let fresh = iso_now_minus_secs(5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": fresh},
+            {"role": "tech-leader", "instance": 0, "session_id": "s-t0", "status": "active", "last_heartbeat": fresh},
+            {"role": "architect", "instance": 1, "session_id": "s-a1", "status": "active", "last_heartbeat": fresh},
+        ]));
+        let seats = active_assembly_seats(&dir);
+        assert_eq!(
+            seats,
+            vec!["developer:0".to_string(), "tech-leader:0".to_string(), "architect:1".to_string()]
+        );
+    }
+
+    /// V3 rule 10: setting preset to Assembly Line while a discussion preset is
+    /// active is rejected. The reverse (discussion while Assembly Line is active)
+    /// is also rejected. apply_set_preset enforces both directions.
+    #[test]
+    fn set_preset_assembly_rejects_when_in_discussion() {
+        let mut state = serde_json::json!({
+            "preset": "Delphi",
+            "floor": {"mode": "round-robin"},
+            "consensus": {"mode": "vote"}
+        });
+        let res = apply_set_preset(&mut state, &serde_json::json!({"name": "Assembly Line"}));
+        assert!(res.is_err(), "Assembly Line from Delphi must be rejected");
+        let err = res.unwrap_err();
+        assert!(err.contains("ConflictWithDiscussion"), "error must name the conflict: {}", err);
+        assert!(err.contains("Delphi"), "error must mention the active discussion: {}", err);
+    }
+
+    #[test]
+    fn set_preset_discussion_rejects_when_in_assembly() {
+        let mut state = serde_json::json!({
+            "preset": "Assembly Line",
+            "floor": {"mode": "round-robin"},
+            "consensus": {"mode": "none"}
+        });
+        for disc in ["Delphi", "Oxford", "Continuous Review"] {
+            let res = apply_set_preset(
+                &mut state.clone(),
+                &serde_json::json!({"name": disc}),
+            );
+            assert!(res.is_err(), "{} from Assembly Line must be rejected", disc);
+            let err = res.unwrap_err();
+            assert!(err.contains("ConflictWithAssembly"), "{}: {}", disc, err);
+        }
+    }
+
+    /// Default chat → Assembly Line is allowed (the standard enable path).
+    #[test]
+    fn set_preset_assembly_from_default_chat_allowed() {
+        let mut state = serde_json::json!({
+            "preset": "Default chat",
+            "floor": {"mode": "none"},
+            "consensus": {"mode": "none"}
+        });
+        let res = apply_set_preset(&mut state, &serde_json::json!({"name": "Assembly Line"}));
+        assert!(res.is_ok(), "Default chat → Assembly Line must succeed: {:?}", res);
+        assert_eq!(state["preset"], serde_json::json!("Assembly Line"));
+        assert_eq!(state["floor"]["mode"], serde_json::json!("round-robin"));
+    }
+
+    /// Cold-open (no preset set yet) → Assembly Line is allowed.
+    #[test]
+    fn set_preset_assembly_from_empty_preset_allowed() {
+        let mut state = serde_json::json!({
+            "floor": {"mode": "none"},
+            "consensus": {"mode": "none"}
+        });
+        let res = apply_set_preset(&mut state, &serde_json::json!({"name": "Assembly Line"}));
+        assert!(res.is_ok(), "empty preset → Assembly Line must succeed: {:?}", res);
+    }
+
+    /// Heartbeat freshness threshold is exactly 90s — a 90s-old binding is
+    /// still in (boundary), 91s is out.
+    #[test]
+    fn freshness_threshold_boundary() {
+        let at_threshold = iso_now_minus_secs(ASSEMBLY_SEAT_FRESHNESS_SECS);
+        let over_threshold = iso_now_minus_secs(ASSEMBLY_SEAT_FRESHNESS_SECS + 5);
+        let dir = temp_project_with_sessions(serde_json::json!([
+            {"role": "developer", "instance": 0, "session_id": "s-d0", "status": "active", "last_heartbeat": at_threshold},
+            {"role": "architect", "instance": 0, "session_id": "s-a0", "status": "active", "last_heartbeat": over_threshold},
+        ]));
+        let seats = active_assembly_seats(&dir);
+        assert!(seats.contains(&"developer:0".to_string()), "at-threshold seat included");
+        assert!(!seats.contains(&"architect:0".to_string()), "over-threshold seat excluded");
     }
 }
 
