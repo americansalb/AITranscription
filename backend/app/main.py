@@ -31,6 +31,7 @@ from app.api.learning import router as learning_router
 from app.api.gamification import router as gamification_router
 from app.api.audience import router as audience_router
 from app.api.roles import router as roles_router
+from app.api.translate_page import router as translate_page_router
 from app.core.config import settings
 from app.core.database import engine
 from app.models.base import Base
@@ -101,6 +102,9 @@ app.include_router(learning_router, prefix="/api/v1")
 app.include_router(gamification_router, prefix="/api/v1")
 app.include_router(audience_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
+
+# Standalone Spanish translator page (no auth, mounted at /translate)
+app.include_router(translate_page_router)
 
 
 # Mount Vaak Lite sub-app at /vaaklite
