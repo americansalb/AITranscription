@@ -5852,6 +5852,18 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    // Activity-field signal (school-of-fish, 2026-05-13 spec): extract
+    // metadata.activity here, BEFORE the with_file_lock closure consumes
+    // metadata. Written post-send (after the closure returns Ok) so it
+    // only persists on accepted sends, not rejected ones. Cap length at
+    // 32 chars; trim whitespace; reject empty.
+    let activity_hint: Option<String> = metadata
+        .as_ref()
+        .and_then(|m| m.get("activity"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 32);
+
     let result = with_file_lock(&state.project_dir, || {
         let from_label = format!("{}:{}", state.role, state.instance);
 
@@ -6489,6 +6501,18 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     })?;
 
     update_session_heartbeat_in_file();
+
+    // Activity-field signal (school-of-fish, 2026-05-13 spec):
+    // Caller may pass metadata.activity (free-form string: "discussing",
+    // "implementing", "reviewing", "waiting", "idle", etc.) to declare
+    // what they're doing now. Server writes it to bindings[i].activity so
+    // project_status surfaces it to peers and the human — the visible
+    // "water" each fish in the school sees. Captured from metadata above
+    // before the move; written here after the successful append.
+    if let Some(activity) = activity_hint.as_deref() {
+        update_session_activity(activity);
+    }
+
     notify_desktop();
 
     // Reset hook compliance tracker — this session just sent a message
@@ -6679,6 +6703,17 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
         })
         .collect();
 
+    // TTL for the activity-field signal (2026-05-13 spec): if a binding's
+    // last_heartbeat is older than ACTIVITY_TTL_SECS, the stored activity is
+    // stale (the school of fish would have moved on by now) — return "idle"
+    // instead of the cached value. Evil-architect msg 267 flagged this as
+    // necessary or the field decays into noise.
+    const ACTIVITY_TTL_SECS: i64 = 60;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     let mut roles_status = Vec::new();
     if let Some(roles_obj) = config.get("roles").and_then(|r| r.as_object()) {
         for (slug, rdef) in roles_obj {
@@ -6688,12 +6723,36 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
                 .filter(|b| b.get("role").and_then(|r| r.as_str()) == Some(slug.as_str())
                     && b.get("status").and_then(|s| s.as_str()) == Some("active"))
                 .count();
+
+            // Surface the most-recently-heartbeated active binding's activity,
+            // with TTL fallback to "idle" when the heartbeat is stale.
+            let activity = bindings.iter()
+                .filter(|b| b.get("role").and_then(|r| r.as_str()) == Some(slug.as_str())
+                    && b.get("status").and_then(|s| s.as_str()) == Some("active"))
+                .filter_map(|b| {
+                    let stored = b.get("activity").and_then(|v| v.as_str())?.to_string();
+                    let hb_secs = b.get("last_heartbeat").and_then(|v| v.as_str())
+                        .and_then(parse_iso_to_epoch_secs)
+                        .map(|s| s as i64)
+                        .unwrap_or(0);
+                    Some((hb_secs, stored))
+                })
+                .max_by_key(|(hb, _)| *hb)
+                .map(|(hb, stored)| {
+                    if now_secs - hb > ACTIVITY_TTL_SECS {
+                        "idle".to_string()
+                    } else {
+                        stored
+                    }
+                });
+
             roles_status.push(serde_json::json!({
                 "slug": slug,
                 "title": title,
                 "active_instances": active,
                 "max_instances": max,
-                "status": if active > 0 { "active" } else { "vacant" }
+                "status": if active > 0 { "active" } else { "vacant" },
+                "activity": activity,
             }));
         }
     }
