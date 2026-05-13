@@ -2035,7 +2035,9 @@ When multiple instances of this role are active:
         await invoke("set_continuous_timeout", { dir: projectDir, timeoutSeconds: seconds });
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to set continuous timeout:", e);
+      showToast(`Couldn't set continuous timeout — ${msg}`, "error");
     }
   };
 
@@ -2058,7 +2060,9 @@ When multiple instances of this role are active:
         });
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to send vote:", e);
+      showToast(`Couldn't send vote — ${msg}`, "error");
     }
   };
 
@@ -2073,7 +2077,9 @@ When multiple instances of this role are active:
             await invoke("delete_message", { dir: projectDir, messageId: id });
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to delete message:", e);
+          showToast(`Couldn't delete message — ${msg}`, "error");
         }
         setConfirmAction(null);
       },
@@ -2091,7 +2097,9 @@ When multiple instances of this role are active:
             await invoke("clear_all_messages", { dir: projectDir });
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to clear messages:", e);
+          showToast(`Couldn't clear messages — ${msg}`, "error");
         }
         setConfirmAction(null);
       },
@@ -2106,7 +2114,9 @@ When multiple instances of this role are active:
         setRetentionDays(days);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to set retention:", e);
+      showToast(`Couldn't set retention — ${msg}`, "error");
     }
   };
 
@@ -2143,7 +2153,9 @@ When multiple instances of this role are active:
         });
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to send answer:", e);
+      showToast(`Couldn't send answer — ${msg}`, "error");
     }
   };
 
@@ -2507,7 +2519,9 @@ When multiple instances of this role are active:
         setMicToHintDismissed(false);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to send message:", e);
+      showToast(`Couldn't send message — ${msg}`, "error");
     } finally {
       setSending(false);
     }
