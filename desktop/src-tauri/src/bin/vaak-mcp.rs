@@ -6156,8 +6156,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             // restores rotation from that seat. This stops the "AI clique
             // ignores yield-to-human and keeps the mic moving" failure mode
             // we lived earlier today.
-            let yield_to_human =
+            // Rule 4 firing condition tightened (evil-architect msg 349
+            // observation, 2026-05-13): the legacy_compat path auto-attaches
+            // `yield_to: {target: "human", ask: "(missing — legacy caller…)",
+            // expected_output: "(missing …)"}` on every send that omits the
+            // field. Treating those as deliberate human-stall triggers fired
+            // rule 4 on routine status ships (msg 335, 344 observed). True
+            // human-decision yields supply real ask + expected_output text.
+            // Require both to be non-empty AND not match the legacy-compat
+            // placeholder strings before firing the halt — otherwise routine
+            // legacy-compat sends fall through to strict rotation.
+            let yield_to_human_targeted =
                 yield_target == "human" || yield_target == "human:0";
+            let ask_is_substantive = !yield_ask.is_empty()
+                && !yield_ask.starts_with("(missing");
+            let expected_is_substantive = !yield_expected.is_empty()
+                && !yield_expected.starts_with("(missing");
+            let yield_to_human = yield_to_human_targeted
+                && ask_is_substantive
+                && expected_is_substantive;
 
             if yield_to_human {
                 let mut current =
