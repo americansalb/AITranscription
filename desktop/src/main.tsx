@@ -28,16 +28,18 @@ const isScreenReader = hash === "#/screen-reader";
 const isQueue = hash === "#/queue";
 const isCollaborateV2 = hash === "#/collaborate-v2";
 
-// Disabled StrictMode to prevent duplicate event listener registration
+// Disabled StrictMode to prevent duplicate event listener registration.
+// ToastProvider wraps the entire route switch so any route — current or
+// future — can call useToast without recreating the c43f917 regression
+// (TranscriptApp had no provider in scope after CollabTab started calling
+// useToast in 8f2b97a).
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <>
+  <ToastProvider>
     {isOverlay ? (
       <OverlayApp />
     ) : isTranscript ? (
       <ErrorBoundary fallbackLabel="The Claude integration panel encountered an error.">
-        <ToastProvider>
-          <TranscriptApp />
-        </ToastProvider>
+        <TranscriptApp />
       </ErrorBoundary>
     ) : isScreenReader ? (
       <ErrorBoundary fallbackLabel="The screen reader settings encountered an error.">
@@ -51,10 +53,8 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       </ErrorBoundary>
     ) : (
       <ErrorBoundary fallbackLabel="The main application encountered an error.">
-        <ToastProvider>
-          <App />
-        </ToastProvider>
+        <App />
       </ErrorBoundary>
     )}
-  </>
+  </ToastProvider>
 );
