@@ -3332,7 +3332,9 @@ When multiple instances of this role are active:
                               return;
                             }
                           } catch (e) {
+                            const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
                             console.error("[CollabTab] Failed to open URL via Tauri:", e);
+                            showToast(`Couldn't open URL via Tauri (${msg}); falling back to browser`, "warning");
                           }
                           // Fallback: try window.open
                           window.open("https://nodejs.org", "_blank");
@@ -3660,7 +3662,9 @@ When multiple instances of this role are active:
                                                 await invoke("kill_team_member", { role: card.slug, instance: inst });
                                               }
                                             } catch (e) {
+                                              const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
                                               console.error("[CollabTab] Failed to disconnect:", e);
+                                              showToast(`Couldn't disconnect ${card.slug}:${inst} — ${msg}`, "error");
                                             }
                                             setConfirmAction(null);
                                           },
