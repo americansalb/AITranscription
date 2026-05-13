@@ -6700,6 +6700,44 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
 
     let active_section = get_active_section(&state.project_dir);
 
+    // Assembly v1.0 acceptance surface (spec 2026-05-13): the acceptance test
+    // for v1.0 — verifying a pre-placed joiner's turn arrives by rotation
+    // alone — must be runnable from tool output, not by reading .vaak/mic.json
+    // manually. Surface assembly_active, rotation_order, current_speaker, and
+    // mic_held_secs so the human and any role can verify routing live.
+    let asm = read_assembly_state(&state.project_dir);
+    let assembly_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+    let current_speaker = asm
+        .get("current_speaker")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let rotation_order: Vec<String> = asm
+        .get("rotation_order")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mic_held_secs: Option<u64> = if assembly_active && current_speaker.is_some() {
+        let proto = read_protocol_for_section_value(&state.project_dir, &active_section);
+        proto
+            .get("floor")
+            .and_then(|f| f.get("started_at"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_to_epoch_secs)
+            .and_then(|started| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .ok()?;
+                Some(now.saturating_sub(started))
+            })
+    } else {
+        None
+    };
+
     Ok(serde_json::json!({
         "project_name": project_name,
         "your_role": state.role,
@@ -6707,7 +6745,11 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
         "roles": roles_status,
         "pending_messages": my_messages.len(),
         "total_messages": all_messages.len(),
-        "active_section": active_section
+        "active_section": active_section,
+        "assembly_active": assembly_active,
+        "current_speaker": current_speaker,
+        "rotation_order": rotation_order,
+        "mic_held_secs": mic_held_secs,
     }))
 }
 
