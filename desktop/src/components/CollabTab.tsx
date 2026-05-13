@@ -1544,7 +1544,9 @@ When multiple instances of this role are active:
         await invoke("launch_team_member", { projectDir, role, instance, skipCompanions: skipCompanions || false });
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to launch team member:", e);
+      showToast(`Couldn't launch ${role}:${instance} — ${msg}`, "error");
     }
     setTimeout(() => setLaunchCooldown(false), 3000);
   };
@@ -1584,7 +1586,9 @@ When multiple instances of this role are active:
         });
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to send interrupt:", e);
+      showToast(`Couldn't send interrupt — ${msg}`, "error");
     }
     setInterruptTarget(null);
     setInterruptReason("");
