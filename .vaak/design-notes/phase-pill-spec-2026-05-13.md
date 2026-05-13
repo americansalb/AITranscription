@@ -2,7 +2,7 @@
 
 Author: ux-engineer:0
 Date: 2026-05-13
-Status: draft for architect review; not yet authorized for implementation
+Status: draft for architect review; **DO NOT IMPLEMENT** until activity-only data is collected for ≥1 live assembly per evil-architect msg 309 finding 1. Design exists; observation must precede ship.
 
 ## Purpose
 
@@ -81,13 +81,35 @@ When the project_wait response carries the `[YOUR TURN]` banner (rendered at the
 
 ## Read-by-roles policy
 
-Every role's briefing gets a section: "Read `protocol.json.phase.value` before sending. Behave per the phase semantics above."
+Primary signal: server-injected. The `Phase:` line in the [YOUR TURN] body and the project_wait banner is the role's authoritative source of "what phase are we in." Server writes once; every role reads once per inbox poll. No briefing edits required for this layer.
 
-Role-specific phase guidance lives in the briefing, not in the protocol. A developer in `discuss` phase reads the conversation and chimes in with proposals; a developer in `implement` phase codes. A tester in `review` phase reviews commits; a tester in `test` phase runs tests. The pill is the signal; the role decides what the signal means for them.
+Secondary signal (smaller, deferred): per-role briefing additions noting how each role should INTERPRET phase. Per evil-architect msg 309 — 30+ roles is a cathedral of briefing edits that drift. Defer the briefing-prose layer until ≥3 assemblies show the per-role-interpretation question is real. Until then, the [YOUR TURN] line carries phase as data; roles use judgment.
+
+If the role-prose layer ever ships, it lives in the briefing not the protocol. A developer in `discuss` phase reads the conversation and chimes in with proposals; a developer in `implement` phase codes. The pill is the signal; the role decides what the signal means for them.
+
+## Autonomous-run gap (added per evil-architect msg 309 finding 2)
+
+The human-only `set_phase` gate is correct when the human is online. But the human just left for 36 hours and during that window the team is producing real work — toast UX fix, launcher PID/window fix, activity field, rotation weave, design notes. Right now if the team transitions from "discuss" to "implement" mid-run, there is no path.
+
+Resolution: when assembly is inactive AND human:0 has been off-board for >2 hours (configurable), AI roles may propose a phase change via a new board message type `phase_proposal`. The proposal lands on the Pending Decisions surface for human review on return. Until the human acts, the prior phase remains authoritative. This preserves human authority without blocking productive work during autonomous runs.
+
+This isn't "AI sets phase" — it's "AI surfaces a proposed phase that the human will see and either ratify or override on return." Same pattern as proposal_assembly from the deferred v1.0 work.
+
+## Phase × assembly_line interaction (added per evil-architect msg 309 finding 3)
+
+Per-phase default behavior with active assembly:
+
+- **discuss + assembly active** — assembly stays active. Discussions benefit from serialized turns to prevent shouting. Strict rotation per v1.0.
+- **implement + assembly active** — assembly stays active. Implementation in serialized turns lets the team coordinate on file claims without race. Watchdog floor may need extension to a work-mode budget (the discussion-vs-work boundary architect flagged in round 9 of yesterday's design assembly — defer to v1.2).
+- **review + assembly active** — assembly stays active. Reviewers take turns commenting on diffs; prevents pile-on.
+- **test + assembly active** — assembly stays active. Tester serial turns, watchdog appropriate.
+- **feedback + assembly active** — assembly DROPS to inactive. Feedback is naturally parallel — multiple lenses simultaneously surface concerns. Forcing serialized turns turns feedback into a queue and kills its value. Server auto-disables assembly on transition to `feedback`; auto-re-enables on transition AWAY from `feedback` if the prior state was assembly-on.
+
+`phase_changed` board event always fires. Assembly state changes that follow the phase change (the auto-disable/re-enable above) fire their own existing events.
 
 ## Out of scope
 
-- AI-driven phase changes. Only the human sets phase. AI roles can suggest a phase change on the board ("we should switch to review now") but cannot mutate `protocol.json.phase` directly.
+- AI-driven phase changes WITHOUT a pending human review. See "Autonomous-run gap" above — proposals are allowed, direct mutation by AI is not.
 - Phase history / audit trail beyond the single `set_at` timestamp. The board.jsonl `phase_changed` events serve as the historical record; no separate file.
 - Per-role overrides. The phase is team-wide. A role cannot opt out by saying "I'm in implement even though the team is in discuss." If they need to code in a discuss phase, they take the question to the human.
 - Automatic phase advancement on time or events. The phase is human-set, not auto. A discussion that runs an hour doesn't auto-transition to implement.
