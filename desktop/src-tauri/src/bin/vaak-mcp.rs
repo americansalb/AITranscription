@@ -6715,6 +6715,25 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
 fn handle_project_leave() -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
+    // Rule 3a (assembly-mode-v1.0-corrected-spec, evil-architect msg 169 finding):
+    // AI roles cannot call project_leave during active assembly. project_join is
+    // intentionally NOT gated — the append-on-join behavior at line 5626 is the
+    // legitimate late-summoner mechanism the human uses to bring challengers into
+    // a running rotation. The actual mutation risk is unilateral exit: an AI
+    // calling leave mid-rotation shrinks the active set without human approval
+    // and can be used to game position. Restrict the dangerous side; keep the
+    // useful side.
+    if state.role != "human" {
+        let asm = read_assembly_state(&state.project_dir);
+        let asm_active = asm.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        if asm_active {
+            return Err(format!(
+                "Assembly Line active — project_leave blocked for AI roles. Ask human:0 to remove '{}:{}' via the UI or disable assembly first.",
+                state.role, state.instance
+            ));
+        }
+    }
+
     with_file_lock(&state.project_dir, || {
         let mut sessions = read_sessions(&state.project_dir);
         if let Some(bindings) = sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
