@@ -6113,13 +6113,14 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // emitted on auto-advance can carry the contract forward. After Phase 1
         // these fields are guaranteed populated when assembly is active and
         // sender is non-human (either supplied or legacy_compat placeholder).
-        let (yield_target, yield_ask, yield_expected) = metadata
+        let (yield_target, yield_ask, yield_expected, yield_is_legacy_compat) = metadata
             .as_ref()
             .and_then(|m| m.get("yield_to"))
             .map(|y| (
                 y.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("ask").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("expected_output").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                y.get("_legacy_compat").and_then(|v| v.as_bool()).unwrap_or(false),
             ))
             .unwrap_or_default();
 
@@ -6156,25 +6157,24 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             // restores rotation from that seat. This stops the "AI clique
             // ignores yield-to-human and keeps the mic moving" failure mode
             // we lived earlier today.
-            // Rule 4 firing condition tightened (evil-architect msg 349
-            // observation, 2026-05-13): the legacy_compat path auto-attaches
-            // `yield_to: {target: "human", ask: "(missing — legacy caller…)",
-            // expected_output: "(missing …)"}` on every send that omits the
-            // field. Treating those as deliberate human-stall triggers fired
-            // rule 4 on routine status ships (msg 335, 344 observed). True
-            // human-decision yields supply real ask + expected_output text.
-            // Require both to be non-empty AND not match the legacy-compat
-            // placeholder strings before firing the halt — otherwise routine
-            // legacy-compat sends fall through to strict rotation.
+            // Rule 4 firing condition (v1.0.2, dev-challenger msg 377 fix):
+            // the writer at vaak-mcp.rs:5986-5991 stamps `_legacy_compat: true`
+            // on the auto-attached yield_to placeholder specifically as a
+            // machine-readable marker. The earlier c687249 used a fragile
+            // string-prefix check (`starts_with("(missing")`) that depended
+            // on the placeholder copy — if the prose changed, rule 4 silently
+            // re-fired on every routine status ship. Now reads the boolean
+            // marker the writer already supplies; copy of the placeholder is
+            // irrelevant. Also tighten the "substantive content" check: both
+            // ask and expected_output must be non-empty so callers that pass
+            // an explicit (non-legacy) yield_to but omit content still don't
+            // trigger spurious halts.
             let yield_to_human_targeted =
                 yield_target == "human" || yield_target == "human:0";
-            let ask_is_substantive = !yield_ask.is_empty()
-                && !yield_ask.starts_with("(missing");
-            let expected_is_substantive = !yield_expected.is_empty()
-                && !yield_expected.starts_with("(missing");
+            let yield_has_content = !yield_ask.is_empty() && !yield_expected.is_empty();
             let yield_to_human = yield_to_human_targeted
-                && ask_is_substantive
-                && expected_is_substantive;
+                && !yield_is_legacy_compat
+                && yield_has_content;
 
             if yield_to_human {
                 let mut current =
