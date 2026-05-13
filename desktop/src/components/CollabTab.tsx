@@ -3346,7 +3346,7 @@ When multiple instances of this role are active:
                             const installed = await invoke<boolean>("check_npm_installed");
                             setNpmInstalled(installed);
                             if (!installed) {
-                              alert("Node.js/npm not detected yet. Install Node.js, then click Re-check.");
+                              showToast("Node.js/npm not detected yet. Install Node.js, then click Re-check.", "warning");
                             }
                           } catch { /* ignore */ }
                         }}
@@ -3379,7 +3379,7 @@ When multiple instances of this role are active:
                             if (!npmOk) {
                               setInstallingCli(false);
                               setNpmInstalled(false);
-                              alert("Node.js/npm is not installed. Complete Step 1 first.");
+                              showToast("Node.js/npm is not installed. Complete Step 1 first.", "warning");
                               return;
                             }
                             await invoke<string>("install_claude_cli");
@@ -3388,11 +3388,11 @@ When multiple instances of this role are active:
                               setClaudeInstalled(true);
                             } else {
                               setInstallingCli(false);
-                              alert("Installation completed but Claude CLI was not found. Try restarting the app.");
+                              showToast("Installation completed but Claude CLI was not found. Try restarting the app.", "warning");
                             }
                           } catch (e: any) {
                             setInstallingCli(false);
-                            alert(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`);
+                            showToast(`Install failed: ${e?.message || e}. Try manually: npm install -g @anthropic-ai/claude-code`, "error");
                           }
                         }}
                       >{installingCli ? "Installing..." : "Express Install"}</button>
@@ -3450,7 +3450,7 @@ When multiple instances of this role are active:
                             const status = await invoke<{ has_key: boolean; key_source: string | null }>("check_anthropic_key");
                             setApiKeyStatus(status);
                             if (!status.has_key) {
-                              alert("API key not detected in environment variables. If you logged in via OAuth, you may still be able to launch agents — try launching one to test.");
+                              showToast("API key not detected in environment variables. If you logged in via OAuth, you may still be able to launch agents — try launching one to test.", "info");
                             }
                           } catch { /* ignore */ }
                         }}
