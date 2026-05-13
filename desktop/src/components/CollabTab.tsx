@@ -2433,7 +2433,9 @@ When multiple instances of this role are active:
             if (state) setDiscussionState(state);
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to start discussion:", e);
+          showToast(`Couldn't start discussion — ${msg}`, "error");
         } finally {
           setSending(false);
         }
@@ -2451,7 +2453,9 @@ When multiple instances of this role are active:
             if (state) setDiscussionState(state);
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to end discussion:", e);
+          showToast(`Couldn't end discussion — ${msg}`, "error");
         } finally {
           setSending(false);
         }
@@ -2469,7 +2473,9 @@ When multiple instances of this role are active:
             if (state) setDiscussionState(state);
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to close round:", e);
+          showToast(`Couldn't close round — ${msg}`, "error");
         } finally {
           setSending(false);
         }
