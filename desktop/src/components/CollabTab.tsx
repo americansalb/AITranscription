@@ -1319,7 +1319,9 @@ When multiple instances of this role are active:
       const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
       if (result) setProject(result);
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to create section:", e);
+      showToast(`Couldn't create section — ${msg}`, "error");
     } finally {
       setSectionLoading(false);
     }
@@ -1336,7 +1338,9 @@ When multiple instances of this role are active:
       const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
       if (result) setProject(result);
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to switch section:", e);
+      showToast(`Couldn't switch to section "${slug}" — ${msg}`, "error");
     } finally {
       setSectionLoading(false);
     }
