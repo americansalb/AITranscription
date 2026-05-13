@@ -4710,18 +4710,55 @@ fn check_assembly_floor_watchdog(
         return;
     }
 
-    // Two release reasons (V3 spec rule 4 + Phase 3.1 ceiling). Either fires
-    // the same release path; only the reason metadata differs:
-    //   - stall: working-activity has been silent past 2× threshold
-    //   - max_floor: speaker has held the mic past the absolute ceiling
-    //     regardless of activity (catches stuck tool-loops that keep
-    //     last_working_at fresh)
-    let (release_reason, release_detail) = if rev_age_secs > ASSEMBLY_MAX_FLOOR_SECS {
+    // V1.0.6 (human msg 567, 2026-05-13): watchdog must distinguish stalled
+    // from working-but-mid-tool-call. The agent's per-seat session file
+    // `.vaak/sessions/<role>-<n>.json` records `last_alive_at_ms` and bumps
+    // it on every MCP tool call — distinct from `bindings[i].last_working_at`
+    // (which only updates on activity-state transitions) and from `rev_at`
+    // (which only updates on protocol mutations, so a long-running tool call
+    // that doesn't mutate protocol.json leaves rev_at stale even while the
+    // agent is actively working).
+    //
+    // Read the per-seat file and compute heartbeat freshness in ms. If the
+    // speaker is heartbeating within the WORKING_HEARTBEAT_FRESH window,
+    // suppress the max_floor_exceeded release — they're not stuck in a
+    // tool-loop, they're working productively. floor_stall is unaffected
+    // because that already gates on last_working_at which bumps via the
+    // existing assembly send path.
+    const WORKING_HEARTBEAT_FRESH_MS: u64 = 30_000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let seat_file = std::path::Path::new(dir)
+        .join(".vaak")
+        .join("sessions")
+        .join(format!("{}-{}.json", speaker_role, speaker_inst));
+    let speaker_alive_ms = std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("last_alive_at_ms").and_then(|x| x.as_u64()))
+        .unwrap_or(0);
+    let heartbeat_age_ms = if speaker_alive_ms > 0 {
+        now_ms.saturating_sub(speaker_alive_ms)
+    } else {
+        u64::MAX // no heartbeat data → treat as stale, fall through to release
+    };
+    let heartbeat_fresh = heartbeat_age_ms < WORKING_HEARTBEAT_FRESH_MS;
+
+    // Two release reasons (V3 spec rule 4 + Phase 3.1 ceiling, v1.0.6 heartbeat gate).
+    //   - max_floor: speaker has held the mic past the absolute ceiling AND
+    //     their per-seat heartbeat is stale (last MCP tool call > 30s ago).
+    //     If heartbeat is fresh, they're working through a long tool call;
+    //     extend grace rather than kick.
+    //   - stall: working-activity has been silent past 2× threshold (governed
+    //     by last_working_at, unaffected by the new heartbeat gate).
+    let (release_reason, release_detail) = if rev_age_secs > ASSEMBLY_MAX_FLOOR_SECS && !heartbeat_fresh {
         (
             "max_floor_exceeded",
             format!(
-                "held mic {}s past absolute max floor of {}s — presumed stuck in a tool loop",
-                rev_age_secs, ASSEMBLY_MAX_FLOOR_SECS
+                "held mic {}s past absolute max floor of {}s with heartbeat stale {}ms — presumed stuck in a tool loop",
+                rev_age_secs, ASSEMBLY_MAX_FLOOR_SECS, heartbeat_age_ms
             ),
         )
     } else if idle_secs > stall_threshold_secs {
