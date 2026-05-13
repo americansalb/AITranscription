@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
+import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
 // section-pinned widget. Legacy `assembly_line` MCP tool still alive
@@ -579,6 +580,7 @@ function removeSavedProject(path: string): void {
 }
 
 export function CollabTab() {
+  const { showToast } = useToast();
   const [project, setProject] = useState<ParsedProject | null>(null);
   const [projectDir, setProjectDir] = useState(() => loadPersistedDir());
   const [watching, setWatching] = useState(false);
@@ -1754,7 +1756,16 @@ When multiple instances of this role are active:
         await invoke("focus_agent_window", { role: slug, instance });
       }
     } catch (e) {
+      // Surface the error so the user knows the click was handled.
+      // Previously this was console.error only — silent failure made the
+      // View button feel broken (human msg 276 on 2026-05-13: "doesn't
+      // even pop up its PowerShell window"). Common causes: PID/window
+      // mismatch when the terminal is owned by Windows Terminal or
+      // conhost rather than the spawned PowerShell, or the agent's
+      // window was closed externally.
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to focus agent window:", e);
+      showToast(`Couldn't focus ${slug}:${instance} — ${msg}`, "error");
     }
   };
 
