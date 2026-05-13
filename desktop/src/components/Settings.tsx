@@ -11,6 +11,7 @@ import {
   ApiError,
 } from "../lib/api";
 import { getStoredVoiceEnabled, saveVoiceEnabled, getStoredBlindMode, saveBlindMode, getStoredVoiceAuto, saveVoiceAuto, getStoredVoiceDetail, saveVoiceDetail } from "../lib/voiceStream";
+import { useToast } from "./Toast";
 import { formatHotkeyForDisplay } from "../lib/platform";
 import { getPolishEnabled, savePolishEnabled } from "../App";
 
@@ -426,6 +427,7 @@ interface PreferencesProps {
 }
 
 function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange, onVoiceEnabledChange }: PreferencesProps) {
+  const { showToast } = useToast();
   const [autoPaste, setAutoPaste] = useState(true);
   const [playSound, setPlaySound] = useState(true);
   const [hotkey, setHotkey] = useState(() => getStoredHotkey());
@@ -470,7 +472,9 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("update_claude_md", { enabled, blindMode, detail: voiceDetail });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to update CLAUDE.md:", e);
+        showToast(`Couldn't save voice setting — ${msg}`, "error");
       }
     }
   };
@@ -486,7 +490,9 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
         await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode: enabled, detail: voiceDetail });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to save voice settings:", e);
+        showToast(`Couldn't save blind-mode setting — ${msg}`, "error");
       }
     }
   };
@@ -502,7 +508,9 @@ function Preferences({ onHotkeyChange, onModelChange, onNoiseCancellationChange,
         await invoke("save_voice_settings_cmd", { enabled: voiceEnabled, blindMode, detail });
         await invoke("update_claude_md", { enabled: voiceEnabled, blindMode, detail });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to save voice settings:", e);
+        showToast(`Couldn't save voice detail level — ${msg}`, "error");
       }
     }
   };

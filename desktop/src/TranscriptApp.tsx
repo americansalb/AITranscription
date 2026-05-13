@@ -11,6 +11,7 @@ import {
 } from "./lib/sessionManager";
 import { transcriptListener } from "./lib/transcriptListener";
 import { CollabTab } from "./components/CollabTab";
+import { useToast } from "./components/Toast";
 import { PreferencesTab } from "./components/PreferencesTab";
 import { SessionsPanel } from "./components/SessionsPanel";
 import {
@@ -33,6 +34,7 @@ type TabType = "preferences" | "sessions" | "collab";
 
 
 export function TranscriptApp() {
+  const { showToast } = useToast();
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions());
   const [activeTab, setActiveTab] = useState<TabType>("preferences");
 
@@ -68,10 +70,12 @@ export function TranscriptApp() {
           detail: voiceDetail
         });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to update CLAUDE.md:", e);
+        showToast(`Couldn't save voice setting — ${msg}`, "error");
       }
     }
-  }, [blindMode, voiceDetail]);
+  }, [blindMode, voiceDetail, showToast]);
 
   const handleBlindModeChange = useCallback(async (enabled: boolean) => {
     setBlindMode(enabled);
@@ -91,10 +95,12 @@ export function TranscriptApp() {
           detail: voiceDetail
         });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to save voice settings:", e);
+        showToast(`Couldn't save blind-mode setting — ${msg}`, "error");
       }
     }
-  }, [voiceEnabled, voiceDetail]);
+  }, [voiceEnabled, voiceDetail, showToast]);
 
   const handleVoiceDetailChange = useCallback(async (detail: number) => {
     setVoiceDetail(detail);
@@ -114,10 +120,12 @@ export function TranscriptApp() {
           detail
         });
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to save voice settings:", e);
+        showToast(`Couldn't save voice detail level — ${msg}`, "error");
       }
     }
-  }, [voiceEnabled, blindMode]);
+  }, [voiceEnabled, blindMode, showToast]);
 
   const handleVoiceAutoChange = useCallback((auto: boolean) => {
     setVoiceAuto(auto);

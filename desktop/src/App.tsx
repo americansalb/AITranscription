@@ -166,6 +166,7 @@ function saveSetting<T>(key: string, value: T): void {
 }
 
 function ScreenReaderButton() {
+  const { showToast } = useToast();
   return (
     <button
       className="screen-reader-btn"
@@ -176,7 +177,11 @@ function ScreenReaderButton() {
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("toggle_screen_reader_window");
         } catch (err) {
+          // Surface to the user — silent failure was the regression class
+          // UI architect swept across CollabTab; same pattern here.
+          const msg = typeof err === "string" ? err : (err instanceof Error ? err.message : String(err));
           console.error("Failed to open screen reader window:", err);
+          showToast(`Couldn't open screen reader settings — ${msg}`, "error");
         }
       }}
     >
@@ -251,7 +256,11 @@ function App() {
 
         showToast(newEnabled ? "Vaak Speak enabled" : "Vaak Speak disabled", "info");
       } catch (err) {
+        // Success path toasts but failure was silent — same regression
+        // class as the View-button bug. Surface to user.
+        const msg = typeof err === "string" ? err : (err instanceof Error ? err.message : String(err));
         console.error("[App] Failed to update CLAUDE.md:", err);
+        showToast(`Couldn't update voice settings — ${msg}`, "error");
       }
     }
   }, [voiceEnabled, showToast]);
