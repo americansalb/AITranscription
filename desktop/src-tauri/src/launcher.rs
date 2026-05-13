@@ -865,16 +865,85 @@ pub fn get_spawned_agents(state: State<'_, LauncherState>) -> Result<Vec<Spawned
     Ok(spawned.clone())
 }
 
-/// Find the main window handle (HWND) for a given process ID.
-/// Uses EnumWindows to iterate all top-level windows, checking each one's PID.
-/// Returns the first visible window belonging to the target PID.
+/// Collect every descendant PID of `root_pid`, including root_pid itself.
+///
+/// Walks `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` to build a parent-PID
+/// → children map in one pass, then does a BFS from root_pid. Returns an empty
+/// set if the snapshot can't be taken (caller treats that as "no window").
+///
+/// **Why this exists:** Vaak spawns agents as PowerShell.exe children, but on
+/// modern Windows the actual terminal WINDOW is owned by Windows Terminal
+/// (`wt.exe`), `conhost.exe`, or `OpenConsole.exe` — NOT PowerShell. So
+/// `EnumWindows` looking for a window whose PID matches the tracked
+/// PowerShell PID never finds one, and `find_window_for_agent` returns None
+/// (which surfaced as "View doesn't pop the window" — UX msg 279, 2026-05-13).
+/// Searching the descendant set instead lands on the wt.exe/conhost.exe child
+/// that actually owns the window.
+#[cfg(target_os = "windows")]
+fn descendant_pids(root_pid: u32) -> std::collections::HashSet<u32> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+
+    let mut result: HashSet<u32> = HashSet::new();
+    result.insert(root_pid);
+
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return result;
+        }
+
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        let mut parent_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                parent_to_children
+                    .entry(entry.th32ParentProcessID)
+                    .or_default()
+                    .push(entry.th32ProcessID);
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+
+        let mut queue: VecDeque<u32> = VecDeque::new();
+        queue.push_back(root_pid);
+        while let Some(pid) = queue.pop_front() {
+            if let Some(children) = parent_to_children.get(&pid) {
+                for &child in children {
+                    if result.insert(child) {
+                        queue.push_back(child);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Find the visible window handle (HWND) belonging to `target_pid` or any
+/// descendant process. Uses EnumWindows to iterate all top-level windows,
+/// then checks each one's PID against the descendant set computed by
+/// `descendant_pids`.
+///
+/// Returns the first visible window owned by the tree. The function name is
+/// kept for callers but the search is now "PID-or-descendant" — see
+/// `descendant_pids` doc-comment for the rationale.
 #[cfg(target_os = "windows")]
 fn find_window_by_pid(target_pid: u32) -> Option<windows_sys::Win32::Foundation::HWND> {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+    let pids = descendant_pids(target_pid);
+
     struct SearchState {
-        target_pid: u32,
+        pids: std::collections::HashSet<u32>,
         found_hwnd: HWND,
     }
 
@@ -882,7 +951,7 @@ fn find_window_by_pid(target_pid: u32) -> Option<windows_sys::Win32::Foundation:
         let state = &mut *(lparam as *mut SearchState);
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == state.target_pid && IsWindowVisible(hwnd) != 0 {
+        if state.pids.contains(&pid) && IsWindowVisible(hwnd) != 0 {
             state.found_hwnd = hwnd;
             return 0; // Stop enumeration
         }
@@ -890,7 +959,7 @@ fn find_window_by_pid(target_pid: u32) -> Option<windows_sys::Win32::Foundation:
     }
 
     let mut state = SearchState {
-        target_pid,
+        pids,
         found_hwnd: std::ptr::null_mut(),
     };
     unsafe {
