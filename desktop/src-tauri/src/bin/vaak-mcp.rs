@@ -2601,30 +2601,90 @@ fn assembly_json_path(project_dir: &str) -> PathBuf {
     }
 }
 
+/// Read the assembly-state view, projected from protocol.json.
+///
+/// v1.0.3 migration (dev-challenger msg 414, 2026-05-13): Slice 6 removed the
+/// legacy `.vaak/sections/<section>/assembly.json` writer but left this
+/// reader pointing at the now-absent file. Three callers — handle_project_join
+/// (append-on-join), handle_project_status (acceptance surface from
+/// commit 1c26267), handle_project_leave (rule 3a gate from commit e582e6e)
+/// — silently no-op'd against the default `{active: false, …}` return for
+/// the entire time between Slice 6 closer and 2026-05-13. Migrating the
+/// reader to project protocol.json into the legacy shape revives all three
+/// callers without touching their call sites.
+///
+/// The projection: `preset == "Assembly Line"` → `active: true`; floor
+/// fields read directly. `started_by` has no protocol.json equivalent
+/// (legacy-only field) and is reported `null` — no current reader cares.
 fn read_assembly_state(project_dir: &str) -> serde_json::Value {
-    std::fs::read_to_string(assembly_json_path(project_dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({
-            "active": false,
-            "current_speaker": null,
-            "rotation_order": [],
-            "started_at": null,
-            "started_by": null
-        }))
+    let section = get_active_section(project_dir);
+    let proto = read_protocol_for_section_value(project_dir, &section);
+    let preset = proto.get("preset").and_then(|p| p.as_str()).unwrap_or("");
+    let active = preset == "Assembly Line";
+    serde_json::json!({
+        "active": active,
+        "current_speaker": proto
+            .get("floor")
+            .and_then(|f| f.get("current_speaker"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "rotation_order": proto
+            .get("floor")
+            .and_then(|f| f.get("rotation_order"))
+            .cloned()
+            .unwrap_or(serde_json::json!([])),
+        "started_at": proto
+            .get("floor")
+            .and_then(|f| f.get("started_at"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "started_by": serde_json::Value::Null,
+    })
 }
 
-/// Write assembly state. Caller must hold with_file_lock (board.lock) — that lock
-/// already serializes the post-accept advance path inside handle_project_send.
+/// Write the assembly-state view back into protocol.json. Caller must hold
+/// with_file_lock (board.lock). Pre-v1.0.3 this wrote to the legacy
+/// assembly.json path which no longer has any readers; the migration
+/// targets protocol.json's `floor.current_speaker` and
+/// `floor.rotation_order` so the existing handle_project_join append at
+/// line ~5709 actually persists.
 fn write_assembly_state_unlocked(project_dir: &str, state: &serde_json::Value) -> Result<(), String> {
-    let path = assembly_json_path(project_dir);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let section = get_active_section(project_dir);
+    let mut proto = read_protocol_for_section_value(project_dir, &section);
+
+    // Only update fields the caller supplied; leave everything else
+    // (rev, consensus, phase_plan, preset, mode, threshold_ms, etc.)
+    // untouched so this targeted write doesn't clobber other state.
+    if let Some(floor) = proto.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        if let Some(cs) = state.get("current_speaker") {
+            floor.insert("current_speaker".to_string(), cs.clone());
+        }
+        if let Some(order) = state.get("rotation_order") {
+            floor.insert("rotation_order".to_string(), order.clone());
+        }
+        if let Some(started) = state.get("started_at") {
+            floor.insert("started_at".to_string(), started.clone());
+        }
     }
-    let content = serde_json::to_string_pretty(state)
-        .map_err(|e| format!("Failed to serialize assembly state: {}", e))?;
-    atomic_write(&path, content.as_bytes())
-        .map_err(|e| format!("Failed to write assembly.json: {}", e))
+
+    // Bump rev so any CAS-style reader sees a fresh state and audit-track
+    // who/what/when, matching the pattern used by the auto-advance block.
+    let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Some(rev_field) = proto.get_mut("rev") {
+        *rev_field = serde_json::json!(cur_rev + 1);
+    }
+    if let Some(obj) = proto.as_object_mut() {
+        obj.insert(
+            "last_writer_action".to_string(),
+            serde_json::json!("assembly_state_write"),
+        );
+        obj.insert(
+            "rev_at".to_string(),
+            serde_json::json!(utc_now_iso()),
+        );
+    }
+
+    write_protocol_for_section_value(project_dir, &section, &proto)
 }
 
 /// Heartbeat freshness threshold for assembly seat eligibility, in seconds.
@@ -6113,7 +6173,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // emitted on auto-advance can carry the contract forward. After Phase 1
         // these fields are guaranteed populated when assembly is active and
         // sender is non-human (either supplied or legacy_compat placeholder).
-        let (yield_target, yield_ask, yield_expected, yield_is_legacy_compat) = metadata
+        let (yield_target, yield_ask, yield_expected, yield_is_legacy_compat, yield_surface_to_next) = metadata
             .as_ref()
             .and_then(|m| m.get("yield_to"))
             .map(|y| (
@@ -6121,6 +6181,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 y.get("ask").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("expected_output").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 y.get("_legacy_compat").and_then(|v| v.as_bool()).unwrap_or(false),
+                y.get("surface_to_next_speaker").and_then(|v| v.as_bool()).unwrap_or(false),
             ))
             .unwrap_or_default();
 
@@ -6356,15 +6417,31 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         format!("\nRotation: {}", parts.join(" → "))
                     }
                 };
-                let body_text = if yield_ask.is_empty() {
+                // Body composition (human msg 411, 2026-05-13): the prior
+                // speaker's ask + expected_output anchored the next speaker's
+                // thinking on every turn ("limits us in our thinking"). The
+                // server now omits those lines from the body by default and
+                // only surfaces them when the prior speaker explicitly opts
+                // in via `metadata.yield_to.surface_to_next_speaker == true`
+                // — the moderator override path. Ask + expected still live
+                // in metadata for record-keeping and rule 4's substantive-
+                // yield check, so this is a body-only change.
+                let body_text = if yield_surface_to_next
+                    && !yield_ask.is_empty()
+                    && !yield_is_legacy_compat
+                {
                     format!(
-                        "[YOUR TURN] mic from {}. Floor: {}s. (No yield_to context — legacy caller.){}",
-                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, rotation_line
+                        "[YOUR TURN] mic from {}. Floor: {}s.\nAsk: {}\nExpected: {}{}",
+                        from_label,
+                        ASSEMBLY_FLOOR_DEFAULT_SECS,
+                        yield_ask,
+                        yield_expected,
+                        rotation_line
                     )
                 } else {
                     format!(
-                        "[YOUR TURN] mic from {}. Floor: {}s.\nAsk: {}\nExpected: {}{}",
-                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, yield_ask, yield_expected, rotation_line
+                        "[YOUR TURN] mic from {}. Floor: {}s.{}",
+                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, rotation_line
                     )
                 };
                 let arrival_msg = serde_json::json!({
