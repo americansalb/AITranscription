@@ -6066,24 +6066,106 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // human-origin sends skip the advance (caller-supplied msg_type is
         // not trusted here either, per #113.A).
         if asm_active && state.role != "human" {
-            // V3 Phase 2.5 (architect msg 107 gap fix): consult yield_to.target
-            // before falling back to round-robin. When the speaker named a real
-            // next seat, the mic must land there — round-robin alone cannot
-            // close the "mic on wrong person" complaint. Self-yield (target ==
-            // sender, e.g. fan-out pattern) also returns None here so the mic
-            // stays put and round-robin doesn't kick the speaker off their own
-            // turn.
-            let target_resolved = if !yield_target.is_empty() {
-                let r = resolve_yield_target(&state.project_dir, &yield_target);
-                match r.as_deref() {
-                    Some(label) if label == from_label => None, // self-yield
-                    _ => r,
+            // Rule 4 (human-stall on yield-to-human, spec 2026-05-13):
+            // When the speaker explicitly yields to the human, the floor
+            // halts rather than rotating to the next AI seat. Server clears
+            // current_speaker (which causes the asm gate above to let ANY
+            // AI auto-grab the mic once it reactivates) and writes a
+            // `floor_halted_for_human` event to the board so observers see
+            // the transition. Mic-gating effectively pauses until the
+            // human posts and another AI sends — at which point auto-grab
+            // restores rotation from that seat. This stops the "AI clique
+            // ignores yield-to-human and keeps the mic moving" failure mode
+            // we lived earlier today.
+            let yield_to_human =
+                yield_target == "human" || yield_target == "human:0";
+
+            if yield_to_human {
+                let mut current =
+                    read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+                if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                    floor.insert("current_speaker".to_string(), serde_json::Value::Null);
                 }
+                let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(rev_field) = current.get_mut("rev") {
+                    *rev_field = serde_json::json!(cur_rev + 1);
+                }
+                if let Some(obj) = current.as_object_mut() {
+                    obj.insert(
+                        "last_writer_seat".to_string(),
+                        serde_json::json!(from_label.clone()),
+                    );
+                    obj.insert(
+                        "last_writer_action".to_string(),
+                        serde_json::json!("al_halted_for_human"),
+                    );
+                    obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+                }
+                let _ = write_protocol_for_section_value(
+                    &state.project_dir,
+                    &section_for_gate,
+                    &current,
+                );
+
+                let halt_id = next_message_id(&state.project_dir);
+                let halt_msg = serde_json::json!({
+                    "id": halt_id,
+                    "from": "system",
+                    "to": "all",
+                    "type": "floor_halted_for_human",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("[floor halted] {} yielded to human:0", from_label),
+                    "body": format!(
+                        "Floor halted by {}'s yield to human:0. Mic-gating paused until human responds; rotation resumes from the next live seat after the human posts.",
+                        from_label
+                    ),
+                    "metadata": {
+                        "triggered_by": from_label.clone(),
+                        "trigger_msg_id": msg_id,
+                    }
+                });
+                if let Err(e) = append_to_board(&state.project_dir, &halt_msg) {
+                    eprintln!(
+                        "[assembly-v3] floor_halted_for_human append failed: {} — floor cleared but signal lost.",
+                        e
+                    );
+                }
+            }
+
+            // Strict-rotation fix (team consensus 2026-05-13, section 5-12):
+            // yield_to.target is a COURTESY HINT only — it does NOT override
+            // rotation_order for mic advancement. Earlier behavior consulted
+            // resolve_yield_target() first and only fell back to round-robin
+            // when target was empty/self/unresolvable. That allowed a clique
+            // of N speakers to yield among themselves indefinitely while a
+            // live seat further along rotation_order never received the mic
+            // (lived this for 10 rounds on 2026-05-13: evil-architect:0 sat
+            // at rotation_order[3] and was structurally skipped every turn).
+            //
+            // New rule: the mic ALWAYS advances via next_assembly_speaker
+            // (strict modular increment through rotation_order, skipping
+            // standby/disconnected seats). The one exception is explicit
+            // self-yield (fan-out pattern) where the speaker names themselves
+            // as target — mic stays put rather than kicking them off their
+            // own turn. yield_to.target remains in message metadata as a
+            // courtesy hint readable by the next speaker, but the server
+            // does not honor it for routing.
+            //
+            // yield-to-human is handled by the Rule 4 branch above and falls
+            // through here with current_speaker already cleared; we skip the
+            // auto-advance entirely so the floor stays halted.
+            let yield_is_self = if !yield_target.is_empty() {
+                resolve_yield_target(&state.project_dir, &yield_target)
+                    .as_deref()
+                    == Some(from_label.as_str())
             } else {
-                None
+                false
             };
-            let next_speaker = target_resolved
-                .or_else(|| next_assembly_speaker(&asm, &state.project_dir, &from_label));
+            let next_speaker = if yield_to_human || yield_is_self {
+                None
+            } else {
+                next_assembly_speaker(&asm, &state.project_dir, &from_label)
+            };
             if let Some(next) = next_speaker {
                 // Write the new current_speaker into protocol.json under the
                 // existing lock window.
@@ -6111,15 +6193,43 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 // no observer can see a state where the mic moved but the
                 // arrival signal is missing.
                 let arrival_id = next_message_id(&state.project_dir);
+                // UX-lane (human #140 — rotation visibility): show the full
+                // rotation_order with current+prev markers so an excluded seat
+                // is visible in the notification. Today's incident — evil-
+                // architect:0 sat at position 4 for 10 rounds while a clique
+                // yielded around them — was invisible because the body only
+                // named ask/expected, not the queue.
+                let rotation_line = {
+                    let order: Vec<String> = asm.get("rotation_order")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect())
+                        .unwrap_or_default();
+                    if order.is_empty() {
+                        String::new()
+                    } else {
+                        let parts: Vec<String> = order.iter().map(|seat| {
+                            if seat == &next {
+                                format!("{}(YOU)", seat)
+                            } else if seat == &from_label {
+                                format!("{}(prev)", seat)
+                            } else {
+                                seat.clone()
+                            }
+                        }).collect();
+                        format!("\nRotation: {}", parts.join(" → "))
+                    }
+                };
                 let body_text = if yield_ask.is_empty() {
                     format!(
-                        "[YOUR TURN] mic from {}. Floor: {}s. (No yield_to context — legacy caller.)",
-                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS
+                        "[YOUR TURN] mic from {}. Floor: {}s. (No yield_to context — legacy caller.){}",
+                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, rotation_line
                     )
                 } else {
                     format!(
-                        "[YOUR TURN] mic from {}. Floor: {}s.\nAsk: {}\nExpected: {}",
-                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, yield_ask, yield_expected
+                        "[YOUR TURN] mic from {}. Floor: {}s.\nAsk: {}\nExpected: {}{}",
+                        from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, yield_ask, yield_expected, rotation_line
                     )
                 };
                 let arrival_msg = serde_json::json!({
@@ -6136,6 +6246,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         "floor_time_seconds": ASSEMBLY_FLOOR_DEFAULT_SECS,
                         "triggered_by": from_label.clone(),
                         "trigger_msg_id": msg_id,
+                        "rotation": rotation_line.trim_start_matches("\nRotation: "),
                     }
                 });
                 if let Err(e) = append_to_board(&state.project_dir, &arrival_msg) {
@@ -6989,10 +7100,14 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         let expected = meta.get("expected_output").and_then(|v| v.as_str()).unwrap_or("");
         let floor = meta.get("floor_time_seconds").and_then(|v| v.as_u64()).unwrap_or(60);
         let triggered = meta.get("triggered_by").and_then(|v| v.as_str()).unwrap_or("");
+        let rotation = meta.get("rotation").and_then(|v| v.as_str()).unwrap_or("");
         output.push_str("=================================================================\n");
         output.push_str("[YOUR TURN] Assembly mode mic just landed on you.\n");
         if !triggered.is_empty() {
             output.push_str(&format!("Handed forward by: {}\n", triggered));
+        }
+        if !rotation.is_empty() {
+            output.push_str(&format!("Rotation: {}\n", rotation));
         }
         output.push_str(&format!("Floor time: {}s (Phase 3 watchdog auto-yields after this).\n", floor));
         if !ask.is_empty() && !ask.starts_with("(missing") {
