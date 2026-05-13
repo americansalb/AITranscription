@@ -2870,6 +2870,73 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
         append_to_board(&pd, &event)
     });
 
+    // First-speaker [YOUR TURN] on enable (human msg 327 finding, 2026-05-13).
+    // The moderation broadcast above goes to "all" — visible but undirected.
+    // Without a directed mic_landed event, the first speaker has no clear
+    // signal it's their turn (they have to read the moderation prose and
+    // infer). The auto-advance block in project_send already posts a
+    // directed mic_landed on every rotation — this brings parity for the
+    // very first turn after enable.
+    if action == "enable" {
+        if let Some(first_speaker) = new_state
+            .get("current_speaker")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            let first_speaker = first_speaker.to_string();
+            let _ = with_file_lock(&pd, || {
+                let mic_msg_id = next_message_id(&pd);
+                let rotation_line = {
+                    let order: Vec<String> = new_state
+                        .get("rotation_order")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if order.is_empty() {
+                        String::new()
+                    } else {
+                        let parts: Vec<String> = order
+                            .iter()
+                            .map(|seat| {
+                                if seat == &first_speaker {
+                                    format!("{}(YOU)", seat)
+                                } else {
+                                    seat.clone()
+                                }
+                            })
+                            .collect();
+                        format!("\nRotation: {}", parts.join(" → "))
+                    }
+                };
+                let mic_event = serde_json::json!({
+                    "id": mic_msg_id,
+                    "from": "system",
+                    "to": first_speaker.clone(),
+                    "type": "mic_landed",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("[YOUR TURN] {}", first_speaker),
+                    "body": format!(
+                        "[YOUR TURN] Assembly Line just enabled by {}. Floor: {}s. You are the first speaker.{}",
+                        actor, ASSEMBLY_FLOOR_DEFAULT_SECS, rotation_line
+                    ),
+                    "metadata": {
+                        "ask": "Open the assembly — first turn is yours.",
+                        "expected_output": "first round contribution",
+                        "floor_time_seconds": ASSEMBLY_FLOOR_DEFAULT_SECS,
+                        "triggered_by": actor.clone(),
+                        "assembly_action": "enable",
+                        "rotation": rotation_line.trim_start_matches("\nRotation: "),
+                    }
+                });
+                append_to_board(&pd, &mic_event)
+            });
+        }
+    }
+
     notify_desktop();
     Ok(new_state)
 }
