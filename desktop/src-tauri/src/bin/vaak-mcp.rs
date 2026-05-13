@@ -6720,19 +6720,26 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // tech-leader:0 finding (msg 192), architect msg 196 selected option A:
+    // mic_held_secs reads `proto.rev_at` rather than `proto.floor.started_at`.
+    // rev_at is stamped by the assembly auto-advance block (line ~6183) on
+    // every accepted mic rotation, with per-speaker-grabbed-at semantics.
+    // floor.started_at is set once at assembly enable and never refreshed,
+    // so it would report seconds-since-enable rather than seconds-since-
+    // current-speaker-grabbed — the opposite of what the acceptance test
+    // requires.
     let mic_held_secs: Option<u64> = if assembly_active && current_speaker.is_some() {
         let proto = read_protocol_for_section_value(&state.project_dir, &active_section);
         proto
-            .get("floor")
-            .and_then(|f| f.get("started_at"))
+            .get("rev_at")
             .and_then(|v| v.as_str())
             .and_then(parse_iso_to_epoch_secs)
-            .and_then(|started| {
+            .and_then(|stamped| {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .ok()?;
-                Some(now.saturating_sub(started))
+                Some(now.saturating_sub(stamped))
             })
     } else {
         None
