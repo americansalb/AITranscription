@@ -6272,6 +6272,38 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     &section_for_gate,
                     &current,
                 );
+
+                // V1.0.5 (dev-challenger msg 482): symmetric audit primitive.
+                // The halt path writes a `floor_halted_for_human` board event
+                // — observers (UI badges, test harnesses, replay tools)
+                // watching board.jsonl see halts but had no corresponding
+                // resume signal because the clear above only touched
+                // protocol.json. Asymmetric audit channels for two halves of
+                // the same state transition. Posting a parallel
+                // `floor_resumed_after_human` event closes the gap.
+                let resume_id = next_message_id(&state.project_dir);
+                let resume_event = serde_json::json!({
+                    "id": resume_id,
+                    "from": "system",
+                    "to": "all",
+                    "type": "floor_resumed_after_human",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("[floor resumed] human:0 posted after halt"),
+                    "body": format!(
+                        "Floor halt cleared by human:0's send (msg id {}). Mic-gating restored; rotation resumes from current_speaker.",
+                        msg_id
+                    ),
+                    "metadata": {
+                        "triggered_by": from_label.clone(),
+                        "trigger_msg_id": msg_id,
+                    }
+                });
+                if let Err(e) = append_to_board(&state.project_dir, &resume_event) {
+                    eprintln!(
+                        "[assembly-v3] floor_resumed_after_human append failed: {} — flag cleared but signal lost.",
+                        e
+                    );
+                }
             }
         }
 
