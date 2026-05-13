@@ -6205,12 +6205,13 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 // no observer can see a state where the mic moved but the
                 // arrival signal is missing.
                 let arrival_id = next_message_id(&state.project_dir);
-                // UX-lane (human #140 — rotation visibility): show the full
-                // rotation_order with current+prev markers so an excluded seat
-                // is visible in the notification. Today's incident — evil-
-                // architect:0 sat at position 4 for 10 rounds while a clique
-                // yielded around them — was invisible because the body only
-                // named ask/expected, not the queue.
+                // UX-lane rotation visibility (extends human #140 + msg 264):
+                // show the full rotation_order with current+prev markers AND
+                // each seat's current activity (per developer a627daf's
+                // activity-field + TTL). The school-of-fish signal — every
+                // role sees who's discussing, implementing, reviewing, idle
+                // at a glance in the [YOUR TURN] body, without separately
+                // calling project_status.
                 let rotation_line = {
                     let order: Vec<String> = asm.get("rotation_order")
                         .and_then(|v| v.as_array())
@@ -6221,13 +6222,51 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     if order.is_empty() {
                         String::new()
                     } else {
+                        // Read sessions.json once for per-seat activity lookup.
+                        // TTL matches handle_project_status: 60s after the
+                        // seat's last_heartbeat, stored activity decays to
+                        // "idle" (evil-architect msg 267 requirement).
+                        let sessions = read_sessions(&state.project_dir);
+                        const ACTIVITY_TTL_SECS: i64 = 60;
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        let seat_activity = |seat: &str| -> Option<String> {
+                            let mut parts = seat.splitn(2, ':');
+                            let role = parts.next()?;
+                            let inst: u64 = parts.next().and_then(|s| s.parse().ok())?;
+                            sessions.get("bindings").and_then(|b| b.as_array())?
+                                .iter()
+                                .find(|b| b.get("role").and_then(|r| r.as_str()) == Some(role)
+                                    && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == inst)
+                                .and_then(|b| {
+                                    let stored = b.get("activity").and_then(|v| v.as_str())?.to_string();
+                                    let hb_secs = b.get("last_heartbeat").and_then(|v| v.as_str())
+                                        .and_then(parse_iso_to_epoch_secs)
+                                        .map(|s| s as i64)
+                                        .unwrap_or(0);
+                                    Some(if now_secs - hb_secs > ACTIVITY_TTL_SECS {
+                                        "idle".to_string()
+                                    } else {
+                                        stored
+                                    })
+                                })
+                        };
                         let parts: Vec<String> = order.iter().map(|seat| {
-                            if seat == &next {
-                                format!("{}(YOU)", seat)
+                            let activity = seat_activity(seat);
+                            let role_marker = if seat == &next {
+                                Some("YOU")
                             } else if seat == &from_label {
-                                format!("{}(prev)", seat)
+                                Some("prev")
                             } else {
-                                seat.clone()
+                                None
+                            };
+                            match (role_marker, activity) {
+                                (None, None) => seat.clone(),
+                                (None, Some(a)) => format!("{}({})", seat, a),
+                                (Some(m), None) => format!("{}({})", seat, m),
+                                (Some(m), Some(a)) => format!("{}({}, {})", seat, m, a),
                             }
                         }).collect();
                         format!("\nRotation: {}", parts.join(" → "))
