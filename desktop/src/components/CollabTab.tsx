@@ -1698,7 +1698,9 @@ When multiple instances of this role are active:
       setCreateGroupOpen(false);
     } catch (e) {
       // Fallback: if Tauri command doesn't exist yet, store locally
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to save group:", e);
+      showToast(`Couldn't save group "${group.name}" — ${msg}`, "error");
       setCreateGroupOpen(false);
     }
   };
@@ -1710,7 +1712,9 @@ When multiple instances of this role are active:
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("delete_role_group", { projectDir, slug });
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to delete group:", e);
+      showToast(`Couldn't delete group "${slug}" — ${msg}`, "error");
     }
   };
 
@@ -1814,7 +1818,9 @@ When multiple instances of this role are active:
         if (result) setProject(result);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to add roster slot:", e);
+      showToast(`Couldn't add roster slot for "${role}" — ${msg}`, "error");
     }
   };
 
@@ -1844,7 +1850,9 @@ When multiple instances of this role are active:
             if (result) setProject(result);
           }
         } catch (e) {
+          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
           console.error("[CollabTab] Failed to remove roster slot:", e);
+          showToast(`Couldn't remove ${role}:${instance} from roster — ${msg}`, "error");
         }
         setConfirmAction(null);
       },
