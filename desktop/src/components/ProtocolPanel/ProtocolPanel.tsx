@@ -351,13 +351,30 @@ function CompactMicLine({
           </button>
         )}
       </div>
-      {/* Second line (AL only): horizontal pill row, one pill per seat. */}
+      {/* Second line (AL only): horizontal pill row, one pill per seat.
+          If the current speaker is NOT in rotation_order (mid-assembly join
+          before v1.0.3's read_assembly_state migration took effect, or any
+          future drift between active_assembly_seats and rotation_order),
+          render a distinct "guest" pill so the human sees who's actually
+          speaking instead of an unexplained empty current-speaker label.
+          Defensive UI per architect msg 412 path A. */}
       {isAssemblyLine && rotation.length > 0 && (
         <div
           className="protocol-al-rotation"
           role="list"
           aria-label="Assembly line rotation order"
         >
+          {speaker && speakerIdx === -1 && (
+            <span className="protocol-al-rotation-item" role="listitem">
+              <span
+                className="protocol-al-seat-pill is-guest"
+                title={`${speaker} is the current speaker but is not in rotation_order — likely joined mid-assembly. Rotation may not advance to them again.`}
+              >
+                {speaker} <span className="protocol-al-guest-marker" aria-hidden="true">(guest)</span>
+              </span>
+              <span className="protocol-al-arrow" aria-hidden="true">·</span>
+            </span>
+          )}
           {rotation.map((seat, i) => {
             const isCurrent = seat === speaker;
             const isNext = nextUp === seat;

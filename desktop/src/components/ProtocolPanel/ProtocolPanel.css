@@ -457,6 +457,26 @@
   font-weight: 500;
 }
 
+/* Guest — current speaker who is NOT in rotation_order (mid-assembly
+   join before v1.0.3 read_assembly_state migration took effect, or
+   future drift between active_assembly_seats and rotation_order).
+   Amber tint distinguishes from indigo "is-current" so the human
+   can see at a glance the speaker is operating outside the normal
+   rotation. Defensive UI per architect msg 412 path A. */
+.protocol-al-seat-pill.is-guest {
+  background: rgba(245, 158, 11, 0.18);
+  border-color: var(--warning, #f59e0b);
+  color: #fcd34d;
+  font-weight: 600;
+}
+
+.protocol-al-guest-marker {
+  margin-left: 4px;
+  font-size: 0.85em;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
 /* ConsensusRow — re-themed (was light-on-light inline). */
 .protocol-consensus-row {
   background: rgba(129, 140, 248, 0.12);
