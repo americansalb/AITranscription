@@ -6067,6 +6067,35 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             }
         }
 
+        // Rule 4 full-halt gate (v1.0.4, dev-challenger msg 454 → architect
+        // msg 460 reversal): when a prior speaker yielded substantively to
+        // human:0, protocol.json's `floor.halted_for_human` is set to true.
+        // Until human:0 posts, AI sends are rejected with [FloorHalted].
+        // Human-role sends bypass this entire gate via the
+        // `state.role != "human"` guard. Once the human posts, the post-
+        // accept block below clears `halted_for_human` and rotation resumes
+        // from the preserved current_speaker position.
+        //
+        // Read protocol.json fresh here so the gate is atomic with the
+        // halt flag — written under the same lock window by the rule 4
+        // block when the halt fires.
+        if asm_active && state.role != "human" {
+            let section_for_halt = get_active_section(&state.project_dir);
+            let proto_for_halt =
+                read_protocol_for_section_value(&state.project_dir, &section_for_halt);
+            let halted_for_human = proto_for_halt
+                .get("floor")
+                .and_then(|f| f.get("halted_for_human"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if halted_for_human {
+                return Err(
+                    "[FloorHalted] Floor halted for human:0; rotation resumes after the human posts. \
+                     This send is not lost — re-send after the human responds.".to_string()
+                );
+            }
+        }
+
         let mut asm_auto_grabbed: Option<serde_json::Value> = None;
         if asm_active && state.role != "human" {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
@@ -6198,6 +6227,54 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         });
         append_to_board(&state.project_dir, &message)?;
 
+        // V1.0.4 — clear `halted_for_human` after a human:0 send. Rule 4
+        // halts the floor by setting halted_for_human=true; this is the
+        // matching clear. Atomic with the append above (same lock). After
+        // this, the gate at the top of the function lets AI sends through
+        // and rotation resumes from the preserved current_speaker.
+        if asm_active && state.role == "human" {
+            let mut current =
+                read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+            let was_halted = current
+                .get("floor")
+                .and_then(|f| f.get("halted_for_human"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if was_halted {
+                if let Some(floor) =
+                    current.get_mut("floor").and_then(|f| f.as_object_mut())
+                {
+                    floor.insert(
+                        "halted_for_human".to_string(),
+                        serde_json::json!(false),
+                    );
+                }
+                let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                if let Some(rev_field) = current.get_mut("rev") {
+                    *rev_field = serde_json::json!(cur_rev + 1);
+                }
+                if let Some(obj) = current.as_object_mut() {
+                    obj.insert(
+                        "last_writer_seat".to_string(),
+                        serde_json::json!(from_label.clone()),
+                    );
+                    obj.insert(
+                        "last_writer_action".to_string(),
+                        serde_json::json!("al_resumed_after_human"),
+                    );
+                    obj.insert(
+                        "rev_at".to_string(),
+                        serde_json::json!(utc_now_iso()),
+                    );
+                }
+                let _ = write_protocol_for_section_value(
+                    &state.project_dir,
+                    &section_for_gate,
+                    &current,
+                );
+            }
+        }
+
         // Assembly Line auto-advance (atomic with the append above).
         // Human #1252 fix — write to protocol.json (single source of truth)
         // instead of legacy assembly.json. The asm view above was projected
@@ -6241,7 +6318,15 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 let mut current =
                     read_protocol_for_section_value(&state.project_dir, &section_for_gate);
                 if let Some(floor) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
-                    floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+                    // V1.0.4: set halted_for_human=true so the gate at the
+                    // top of this function rejects subsequent AI sends until
+                    // human:0 posts. Preserve current_speaker (don't null it)
+                    // so when rotation resumes after the human, it picks up
+                    // from the same position rather than auto-grab-shuffling.
+                    floor.insert(
+                        "halted_for_human".to_string(),
+                        serde_json::json!(true),
+                    );
                 }
                 let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
                 if let Some(rev_field) = current.get_mut("rev") {
