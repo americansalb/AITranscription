@@ -35,7 +35,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <OverlayApp />
     ) : isTranscript ? (
       <ErrorBoundary fallbackLabel="The Claude integration panel encountered an error.">
-        <TranscriptApp />
+        <ToastProvider>
+          <TranscriptApp />
+        </ToastProvider>
       </ErrorBoundary>
     ) : isScreenReader ? (
       <ErrorBoundary fallbackLabel="The screen reader settings encountered an error.">
