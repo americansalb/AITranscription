@@ -1896,7 +1896,9 @@ When multiple instances of this role are active:
         setWorkflowDropdownOpen(false);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to set workflow type:", e);
+      showToast(`Couldn't set workflow type — ${msg}`, "error");
     }
   };
 
@@ -1914,7 +1916,9 @@ When multiple instances of this role are active:
         if (result) setProject(result);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to set discussion mode:", e);
+      showToast(`Couldn't set discussion mode — ${msg}`, "error");
     }
   };
 
@@ -1933,8 +1937,10 @@ When multiple instances of this role are active:
         setAssemblyState(next);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to toggle Assembly Line:", e);
-      setError(typeof e === "string" ? e : "Failed to toggle Assembly Line");
+      setError(msg || "Failed to toggle Assembly Line");
+      showToast(`Couldn't toggle Assembly Line — ${msg}`, "error");
     } finally {
       setAssemblyToggling(false);
     }
@@ -1951,7 +1957,9 @@ When multiple instances of this role are active:
         if (state) setDiscussionState(state);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to close round:", e);
+      showToast(`Couldn't close round — ${msg}`, "error");
     } finally {
       setClosingRound(false);
     }
@@ -1966,7 +1974,9 @@ When multiple instances of this role are active:
         setDiscussionState(null);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to end discussion:", e);
+      showToast(`Couldn't end discussion — ${msg}`, "error");
     }
   };
 
