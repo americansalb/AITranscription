@@ -178,6 +178,13 @@ export function OverlayApp() {
   };
 
   const isActive = state.isRecording || state.isProcessing;
+  // Render priority: recording > processing > idle. State transitions
+  // (e.g., when recording stops and processing begins) can leave both
+  // isRecording and isProcessing true for a frame; without explicit
+  // priority both blocks would render simultaneously inside the 160×48
+  // overlay capsule and look like visual chaos.
+  const renderState: "rec" | "proc" | "idle" =
+    state.isRecording ? "rec" : state.isProcessing ? "proc" : "idle";
 
   return (
     <div
@@ -186,8 +193,7 @@ export function OverlayApp() {
       style={{ cursor: isDragging ? "grabbing" : "grab" }}
     >
       <div className={`overlay-capsule ${state.isRecording ? "rec" : ""} ${state.isProcessing ? "proc" : ""} ${isActive ? "active" : "idle"}`}>
-        {/* Recording: dot + bars + duration */}
-        {state.isRecording && (
+        {renderState === "rec" && (
           <>
             <div className="overlay-rec-dot" />
             <div className="overlay-bars">
@@ -203,16 +209,14 @@ export function OverlayApp() {
           </>
         )}
 
-        {/* Processing: spinner + text */}
-        {state.isProcessing && (
+        {renderState === "proc" && (
           <>
             <div className="overlay-proc-spinner" />
             <span className="overlay-label">Processing</span>
           </>
         )}
 
-        {/* Idle: subtle ready dot */}
-        {!isActive && (
+        {renderState === "idle" && (
           <>
             <div className="overlay-idle-dot" />
             <span className="overlay-label idle-label">Vaak</span>
