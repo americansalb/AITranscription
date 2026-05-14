@@ -44,8 +44,20 @@ use std::sync::Mutex;
 // per architect #156 (two front doors, one impl). Imported via #[path] because
 // vaak-mcp.rs is a separate binary crate from the desktop app and does not share
 // a lib.rs with main.rs.
+// Renamed from `collab_shared` → `collab` so protocol.rs's
+// `use crate::collab::{...}` resolves when protocol.rs is included into
+// this binary via the #[path] block below. v1.5.0 commit 2/6 needs the
+// Preset enum from protocol.rs; that file shares helpers with collab.rs.
 #[path = "../collab.rs"]
-mod collab_shared;
+mod collab;
+
+// v1.5.0 commit 2/6 (architect msg 644 + tech-leader msg 674): the Preset
+// enum lives in protocol.rs (commit 1 1cd488d). Imported via the same
+// #[path] pattern. Inner module name differs from the file name to avoid
+// the `protocol_slice2_tests` mod below shadowing the import.
+#[path = "../protocol.rs"]
+mod protocol_module;
+use protocol_module::Preset;
 
 /// Atomic file write: write to .tmp, fsync, rename. Prevents partial writes on macOS.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
@@ -3637,25 +3649,33 @@ fn apply_set_preset(
         ));
     }
 
-    // Spec §6 matrix: preset → (floor.mode, consensus.mode).
-    let (floor_mode, consensus_mode) = match name {
-        PRESET_DEFAULT_CHAT => ("none", "none"),
-        PRESET_DEBATE => ("reactive", "none"),
-        PRESET_ASSEMBLY_LINE => ("round-robin", "none"),
-        PRESET_TOWN_HALL => ("queue", "none"),
-        PRESET_BRAINSTORM => ("free-grab", "none"),
-        PRESET_CONTINUOUS_REVIEW => ("free-grab", "tally"),
-        PRESET_DELPHI => ("round-robin", "vote"),
-        PRESET_OXFORD => ("queue", "vote"),
-        other => {
+    // V1.5.0 commit 2/6 — migrate apply_set_preset matrix to the typed
+    // Preset enum (commit 1: 1cd488d). Wire string → Preset variant via
+    // serde; matrix dispatch via exhaustive match on the variant. Compiler
+    // now guarantees every variant is handled at this site; the wildcard
+    // arm is reachable only when the JSON wire is unrecognized (strict
+    // failure mode per dev-challenger Finding 2).
+    let preset: Preset = match serde_json::from_value(serde_json::Value::String(name.to_string())) {
+        Ok(p) => p,
+        Err(_) => {
             return Err(format!(
                 "[InvalidArgs] unknown preset '{}' — see spec §6 matrix for valid names",
-                other
+                name
             ));
         }
     };
+    let (floor_mode, consensus_mode) = match preset {
+        Preset::DefaultChat => ("none", "none"),
+        Preset::Debate => ("reactive", "none"),
+        Preset::AssemblyLine => ("round-robin", "none"),
+        Preset::TownHall => ("queue", "none"),
+        Preset::Brainstorm => ("free-grab", "none"),
+        Preset::ContinuousReview => ("free-grab", "tally"),
+        Preset::Delphi => ("round-robin", "vote"),
+        Preset::Oxford => ("queue", "vote"),
+    };
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("preset".to_string(), serde_json::json!(name));
+        obj.insert("preset".to_string(), serde_json::json!(preset.as_wire_str()));
     }
     if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
         floor.insert("mode".to_string(), serde_json::json!(floor_mode));
