@@ -3529,15 +3529,79 @@ fn parse_iso_to_epoch_secs_main(ts: &str) -> Option<u64> {
     if secs < 0 { None } else { Some(secs as u64) }
 }
 
+/// Two-controls v1 helpers (commit A.5 — mirror of vaak-mcp.rs's helpers
+/// for the desktop UI's protocol_mutate_cmd path). Same semantics, same
+/// validation. Suffixed `_main` to avoid collision if a future shared module
+/// re-exports these.
+fn sha256_hex_main(bytes: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn caller_role_main(actor: &str) -> &str {
+    actor.splitn(2, ':').next().unwrap_or(actor)
+}
+
+fn parse_scope_block_main(plan_content: &str) -> Option<Vec<String>> {
+    let needle_open = "<!-- scope:";
+    let pos = plan_content.find(needle_open)?;
+    let after = &plan_content[pos + needle_open.len()..];
+    let close = after.find("-->")?;
+    let body = after[..close].trim();
+    if body == "*" || body.is_empty() {
+        Some(vec![])
+    } else {
+        Some(body.split_whitespace().map(String::from).collect())
+    }
+}
+
+fn validate_plan_path_main(project_dir: &str, plan_path: &str) -> Result<std::path::PathBuf, String> {
+    if !plan_path.ends_with(".md") {
+        return Err(format!("[PlanPathNotMarkdown] plan_path must end in .md: {}", plan_path));
+    }
+    if plan_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(format!("[PlanPathOutsideDesignNotes] plan_path contains '..' segments: {}", plan_path));
+    }
+    if std::path::Path::new(plan_path).is_absolute() {
+        return Err(format!("[PlanPathOutsideDesignNotes] plan_path must be repo-relative under .vaak/design-notes/, not absolute: {}", plan_path));
+    }
+    let normalized = plan_path.replace('\\', "/");
+    let starts_under_design = normalized.starts_with(".vaak/design-notes/");
+    let has_separator = normalized.contains('/');
+    if has_separator && !starts_under_design {
+        return Err(format!("[PlanPathOutsideDesignNotes] plan_path must resolve under .vaak/design-notes/: {}", plan_path));
+    }
+    let base = std::path::Path::new(project_dir).join(".vaak").join("design-notes");
+    let candidate = if starts_under_design {
+        std::path::Path::new(project_dir).join(plan_path)
+    } else {
+        base.join(plan_path)
+    };
+    let canon_cand = candidate.canonicalize()
+        .map_err(|_| format!("[PlanPathMissing] plan_path file does not exist or is not readable: {}", plan_path))?;
+    let canon_base = base.canonicalize().unwrap_or(base.clone());
+    if !canon_cand.starts_with(&canon_base) {
+        return Err(format!("[PlanPathOutsideDesignNotes] plan_path resolves outside .vaak/design-notes/ after canonicalization: {}", plan_path));
+    }
+    let content = std::fs::read_to_string(&canon_cand)
+        .map_err(|e| format!("[PlanPathMissing] cannot read plan_path: {}", e))?;
+    if parse_scope_block_main(&content).is_none() {
+        return Err("[PlanScopeBlockMissing] plan file lacks <!-- scope: path1 path2 -->. Use <!-- scope: * --> for unrestricted plans.".to_string());
+    }
+    Ok(canon_cand)
+}
+
 /// Inner of `protocol_mutate_cmd` — pure-input version that runs the same
 /// CAS gate + dispatch as vaak-mcp.rs's `do_protocol_mutate`. Mirrored by
 /// design (vaak-mcp and vaak-desktop are separate binaries with no shared
 /// crate; both serialize to the same JSON shape via OS-level board.lock).
 ///
-/// For Slice 3 we ship only the floor actions exposed to the UI:
-/// `toggle_queue` / `yield`. Everything else is rejected with the
-/// MCP-equivalent error code so the UI never accidentally shadows the
-/// MCP authoritative path.
+/// As of A.5: handles toggle_queue/yield/force_release/phase_plan ops PLUS
+/// the 8 two-controls v1 actions (set_assembly, accept_plan, open_planning,
+/// revise_plan, set_mic_passing, raise_hand, grant_mic, set_moderator).
+/// Mirror parity with vaak-mcp.rs's apply_* functions.
 fn do_protocol_mutate_inner(
     pd: &str,
     actor: &str,
@@ -3772,8 +3836,169 @@ fn do_protocol_mutate_inner(
                     current.phase_plan.paused_total_secs = 0;
                     Ok(())
                 }
+                // Two-controls v1 (commit A.5 — mirror of vaak-mcp.rs's apply_*
+                // functions for the desktop UI's protocol_mutate_cmd path).
+                // Per main.rs:3534 "mirrored by design" comment, both binaries
+                // must dispatch the same actions. Commit A added these to
+                // vaak-mcp.rs only; the desktop UI's clicks were silently
+                // failing here with [InvalidAction] until A.5.
+                "set_assembly" => {
+                    let active = args.get("active").and_then(|v| v.as_bool());
+                    match active {
+                        Some(a) => {
+                            // Coordinate preset (matches apply_set_assembly).
+                            // The v1.0.7 interim gate in apply_set_preset
+                            // rejects direct cross-preset transitions, so
+                            // route through "Default chat" first if needed.
+                            let target_preset = if a { "Assembly Line" } else { "Default chat" };
+                            current.preset = target_preset.to_string();
+                            current.floor.mode = if a { "round-robin".to_string() } else { "none".to_string() };
+                            current.floor.assembly_active = Some(a);
+                            if !a {
+                                current.floor.current_speaker = None;
+                            }
+                            Ok(())
+                        }
+                        None => Err("[InvalidArgs] set_assembly requires args.active (bool)".to_string()),
+                    }
+                }
+                "accept_plan" => {
+                    let plan_path = args.get("plan_path").and_then(|v| v.as_str());
+                    match plan_path {
+                        Some(p) => match validate_plan_path_main(pd, p) {
+                            Ok(canon) => {
+                                let content = std::fs::read(&canon)
+                                    .map_err(|e| format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e))?;
+                                let hash = sha256_hex_main(&content);
+                                current.floor.phase = Some("execution".to_string());
+                                current.floor.plan_path = Some(p.to_string());
+                                current.floor.plan_hash = Some(hash);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
+                        None => Err("[InvalidArgs] accept_plan requires args.plan_path (string)".to_string()),
+                    }
+                }
+                "open_planning" => {
+                    current.floor.phase = Some("planning".to_string());
+                    current.floor.plan_path = None;
+                    current.floor.plan_hash = None;
+                    Ok(())
+                }
+                "revise_plan" => {
+                    let role = caller_role_main(actor);
+                    if !matches!(role, "architect" | "manager" | "human") {
+                        Err(format!(
+                            "[RevisePlanForbidden] caller role '{}' may not call revise_plan — gated to architect/manager/human only.",
+                            role
+                        ))
+                    } else {
+                        let plan_path = args.get("plan_path").and_then(|v| v.as_str());
+                        match plan_path {
+                            Some(p) => match validate_plan_path_main(pd, p) {
+                                Ok(canon) => {
+                                    let content = std::fs::read(&canon)
+                                        .map_err(|e| format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e))?;
+                                    let new_hash = sha256_hex_main(&content);
+                                    current.floor.plan_path = Some(p.to_string());
+                                    current.floor.plan_hash = Some(new_hash);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            },
+                            None => Err("[InvalidArgs] revise_plan requires args.plan_path (string)".to_string()),
+                        }
+                    }
+                }
+                "set_mic_passing" => {
+                    let mode = args.get("mode").and_then(|v| v.as_str());
+                    match mode {
+                        Some(m) if matches!(m, "rotation" | "hand_raise" | "moderator") => {
+                            let prev = current.floor.mic_passing_mode.clone().unwrap_or_else(|| "rotation".to_string());
+                            // Defer-silent: mid-turn mode change is no-op
+                            // (matches vaak-mcp.rs apply_set_mic_passing).
+                            if current.floor.current_speaker.is_some() && prev != m {
+                                Ok(())
+                            } else if prev == m {
+                                // Idempotent no-op.
+                                Ok(())
+                            } else {
+                                current.floor.mic_passing_mode = Some(m.to_string());
+                                // Cascading state cleanup.
+                                match m {
+                                    "rotation" => {
+                                        current.floor.hand_queue = Some(vec![]);
+                                        current.floor.moderator = None;
+                                    }
+                                    "hand_raise" => {
+                                        current.floor.moderator = None;
+                                    }
+                                    "moderator" => {
+                                        current.floor.hand_queue = Some(vec![]);
+                                    }
+                                    _ => {}
+                                }
+                                Ok(())
+                            }
+                        }
+                        Some(m) => Err(format!("[UnknownMicMechanism] mic_passing_mode must be rotation|hand_raise|moderator: {}", m)),
+                        None => Err("[InvalidArgs] set_mic_passing requires args.mode (string)".to_string()),
+                    }
+                }
+                "raise_hand" => {
+                    let mode_str = current.floor.mic_passing_mode.clone().unwrap_or_else(|| "rotation".to_string());
+                    if mode_str != "hand_raise" {
+                        Err(format!("[NotPermitted] raise_hand requires mic_passing_mode == 'hand_raise' (current: {})", mode_str))
+                    } else {
+                        let mut queue = current.floor.hand_queue.clone().unwrap_or_default();
+                        if !queue.contains(&actor.to_string()) {
+                            queue.push(actor.to_string());
+                        }
+                        current.floor.hand_queue = Some(queue);
+                        Ok(())
+                    }
+                }
+                "grant_mic" => {
+                    let target = args.get("target").and_then(|v| v.as_str());
+                    let mode_str = current.floor.mic_passing_mode.clone().unwrap_or_else(|| "rotation".to_string());
+                    match target {
+                        Some(t) => {
+                            if mode_str != "moderator" {
+                                Err(format!("[NotPermitted] grant_mic requires mic_passing_mode == 'moderator' (current: {})", mode_str))
+                            } else {
+                                let mod_label = current.floor.moderator.clone();
+                                if mod_label.as_deref() != Some(actor) {
+                                    Err(format!("[NotPermitted] grant_mic restricted to moderator '{:?}' (caller: {})", mod_label, actor))
+                                } else {
+                                    current.floor.current_speaker = Some(t.to_string());
+                                    Ok(())
+                                }
+                            }
+                        }
+                        None => Err("[InvalidArgs] grant_mic requires args.target (string)".to_string()),
+                    }
+                }
+                "set_moderator" => {
+                    let role = caller_role_main(actor);
+                    if !matches!(role, "architect" | "manager" | "human") {
+                        Err(format!(
+                            "[SetModeratorForbidden] caller role '{}' may not call set_moderator — gated to architect/manager/human only.",
+                            role
+                        ))
+                    } else {
+                        let target = args.get("seat").and_then(|v| v.as_str());
+                        match target {
+                            Some(t) => {
+                                current.floor.moderator = Some(t.to_string());
+                                Ok(())
+                            }
+                            None => Err("[InvalidArgs] set_moderator requires args.seat (string)".to_string()),
+                        }
+                    }
+                }
                 other => Err(format!(
-                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase; '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator); '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };

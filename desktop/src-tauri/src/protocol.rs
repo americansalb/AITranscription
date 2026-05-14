@@ -67,6 +67,26 @@ pub struct Floor {
     pub threshold_ms: u64,
     #[serde(default)]
     pub started_at: Option<String>,
+
+    // Two-controls v1 fields (spec 2026-05-14, items 1-9). Optional via
+    // #[serde(default)] so legacy protocol.json files (pre-commit-A) still
+    // deserialize cleanly. UI's B.2 back-compat default render handles None
+    // semantics on the frontend; server actions write Some(...) on first
+    // mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_passing_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moderator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand_queue: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
 }
 
 fn default_threshold_ms() -> u64 { MIC_GRAB_THRESHOLD_MS }
@@ -246,6 +266,14 @@ impl Protocol {
                 rotation_order: vec![],
                 threshold_ms: MIC_GRAB_THRESHOLD_MS,
                 started_at: Some(iso_now()),
+                // Two-controls v1 fields — None on fresh; populated on first mutation.
+                assembly_active: None,
+                phase: None,
+                mic_passing_mode: None,
+                moderator: None,
+                hand_queue: None,
+                plan_path: None,
+                plan_hash: None,
             },
             consensus: Consensus {
                 mode: "none".to_string(),
