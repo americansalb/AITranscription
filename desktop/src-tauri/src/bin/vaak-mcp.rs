@@ -2620,7 +2620,7 @@ fn read_assembly_state(project_dir: &str) -> serde_json::Value {
     let section = get_active_section(project_dir);
     let proto = read_protocol_for_section_value(project_dir, &section);
     let preset = proto.get("preset").and_then(|p| p.as_str()).unwrap_or("");
-    let active = preset == "Assembly Line";
+    let active = preset == PRESET_ASSEMBLY_LINE;
     serde_json::json!({
         "active": active,
         "current_speaker": proto
@@ -2700,6 +2700,26 @@ const ASSEMBLY_SEAT_FRESHNESS_SECS: u64 = 90;
 /// the [YOUR TURN] body tells the new speaker to expect, so when Phase 3
 /// lands the advertised floor matches the actual auto-yield boundary.
 const ASSEMBLY_FLOOR_DEFAULT_SECS: u64 = 60;
+
+/// V1.5 inaugural pattern-(c) work (dev-challenger msg 441, architect msg 443).
+/// Preset names previously appeared as raw string literals at ~25+ sites; a
+/// rename, case shift, or i18n shift in any one site would silently drift the
+/// others. Centralizing to a single source of truth means a rename becomes
+/// one constant edit + N compile errors at all touch points, not a
+/// 25-site grep that misses corners.
+///
+/// Wire strings preserved exactly so existing on-disk protocol.json files
+/// continue to parse. Test fixtures intentionally keep raw strings — they
+/// exercise the wire-string interface and should fail loudly if a rename
+/// breaks that contract.
+const PRESET_DEFAULT_CHAT: &str = "Default chat";
+const PRESET_DEBATE: &str = "Debate";
+const PRESET_ASSEMBLY_LINE: &str = "Assembly Line";
+const PRESET_TOWN_HALL: &str = "Town hall";
+const PRESET_BRAINSTORM: &str = "Brainstorm";
+const PRESET_CONTINUOUS_REVIEW: &str = "Continuous Review";
+const PRESET_DELPHI: &str = "Delphi";
+const PRESET_OXFORD: &str = "Oxford";
 
 /// List active+idle session seats as "role:instance" strings, in roster order.
 /// Used to seed rotation_order on enable and to find the next live speaker.
@@ -2858,7 +2878,7 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
         // write to).
         let proto = read_protocol_for_section_value(&pd, &section);
         let preset = proto.get("preset").and_then(|p| p.as_str()).unwrap_or("");
-        let active = preset == "Assembly Line";
+        let active = preset == PRESET_ASSEMBLY_LINE;
         return Ok(serde_json::json!({
             "active": active,
             "current_speaker": proto.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
@@ -2872,8 +2892,8 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     // (spec §6 matrix: Assembly Line preset = round-robin floor; Default
     // chat = none).
     let preset_name = match action {
-        "enable" => "Assembly Line",
-        "disable" => "Default chat",
+        "enable" => PRESET_ASSEMBLY_LINE,
+        "disable" => PRESET_DEFAULT_CHAT,
         other => return Err(format!("[InvalidAction] assembly_line action '{}' must be enable|disable|get_state", other)),
     };
     // CAS read current rev from protocol.json.
@@ -2891,7 +2911,7 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     // old callers' result-handling code keeps working through the
     // compat tail.
     let new_state = serde_json::json!({
-        "active": preset_name == "Assembly Line",
+        "active": preset_name == PRESET_ASSEMBLY_LINE,
         "current_speaker": new_state.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
         "rotation_order": new_state.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
         "started_at": new_state.get("floor").and_then(|f| f.get("started_at")).cloned().unwrap_or(serde_json::Value::Null),
@@ -3131,7 +3151,7 @@ fn synthesize_protocol_from_legacy(project_dir: &str, section: &str) -> (serde_j
             let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(false);
             if active {
                 if let Some(obj) = p.as_object_mut() {
-                    obj.insert("preset".to_string(), serde_json::json!("Assembly Line"));
+                    obj.insert("preset".to_string(), serde_json::json!(PRESET_ASSEMBLY_LINE));
                 }
                 if let Some(floor) = p.get_mut("floor").and_then(|f| f.as_object_mut()) {
                     floor.insert("mode".to_string(), serde_json::json!("round-robin"));
@@ -3575,15 +3595,16 @@ fn apply_set_preset(
         .get("preset")
         .and_then(|p| p.as_str())
         .unwrap_or("");
-    let is_discussion = |p: &str| matches!(p, "Continuous Review" | "Delphi" | "Oxford");
-    if name == "Assembly Line" && is_discussion(prev_preset) {
+    let is_discussion =
+        |p: &str| matches!(p, PRESET_CONTINUOUS_REVIEW | PRESET_DELPHI | PRESET_OXFORD);
+    if name == PRESET_ASSEMBLY_LINE && is_discussion(prev_preset) {
         return Err(format!(
-            "[ConflictWithDiscussion] cannot set preset to 'Assembly Line' while a discussion preset ('{}') is active. \
-             Set preset to 'Default chat' first, then enable Assembly Line.",
-            prev_preset
+            "[ConflictWithDiscussion] cannot set preset to '{}' while a discussion preset ('{}') is active. \
+             Set preset to '{}' first, then enable {}.",
+            PRESET_ASSEMBLY_LINE, prev_preset, PRESET_DEFAULT_CHAT, PRESET_ASSEMBLY_LINE
         ));
     }
-    if is_discussion(name) && prev_preset == "Assembly Line" {
+    if is_discussion(name) && prev_preset == PRESET_ASSEMBLY_LINE {
         return Err(format!(
             "[ConflictWithAssembly] cannot set preset to '{}' while Assembly Line is active. \
              Disable Assembly Line first (set preset to 'Default chat'), then start the discussion.",
@@ -3592,14 +3613,14 @@ fn apply_set_preset(
     }
     // Spec §6 matrix: preset → (floor.mode, consensus.mode).
     let (floor_mode, consensus_mode) = match name {
-        "Default chat" => ("none", "none"),
-        "Debate" => ("reactive", "none"),
-        "Assembly Line" => ("round-robin", "none"),
-        "Town hall" => ("queue", "none"),
-        "Brainstorm" => ("free-grab", "none"),
-        "Continuous Review" => ("free-grab", "tally"),
-        "Delphi" => ("round-robin", "vote"),
-        "Oxford" => ("queue", "vote"),
+        PRESET_DEFAULT_CHAT => ("none", "none"),
+        PRESET_DEBATE => ("reactive", "none"),
+        PRESET_ASSEMBLY_LINE => ("round-robin", "none"),
+        PRESET_TOWN_HALL => ("queue", "none"),
+        PRESET_BRAINSTORM => ("free-grab", "none"),
+        PRESET_CONTINUOUS_REVIEW => ("free-grab", "tally"),
+        PRESET_DELPHI => ("round-robin", "vote"),
+        PRESET_OXFORD => ("queue", "vote"),
         other => {
             return Err(format!(
                 "[InvalidArgs] unknown preset '{}' — see spec §6 matrix for valid names",
@@ -6011,7 +6032,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         let proto_for_gate = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
         let asm_active = proto_for_gate
             .get("preset").and_then(|p| p.as_str())
-            .map(|s| s == "Assembly Line")
+            .map(|s| s == PRESET_ASSEMBLY_LINE)
             .unwrap_or(false);
         let asm = serde_json::json!({
             "active": asm_active,
