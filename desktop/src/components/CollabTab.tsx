@@ -1871,7 +1871,10 @@ When multiple instances of this role are active:
         await invoke("set_auto_collab", { enabled: newVal });
         setAutoCollab(newVal);
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      showToast(`Couldn't toggle auto-collab — ${msg}`, "error");
+    }
   };
 
   const toggleHumanInLoop = async () => {
@@ -1882,7 +1885,10 @@ When multiple instances of this role are active:
         await invoke("set_human_in_loop", { enabled: newVal });
         setHumanInLoop(newVal);
       }
-    } catch { /* ignore */ }
+    } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+      showToast(`Couldn't toggle human-in-loop — ${msg}`, "error");
+    }
   };
 
   const handleSetWorkflow = async (type: string | null) => {
