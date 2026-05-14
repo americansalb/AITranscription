@@ -3562,8 +3562,8 @@ fn do_protocol_mutate(
                 "close_round" => apply_close_round(&mut current, &args, actor),
                 // Two-controls v1 (spec 2026-05-14, items 1-9):
                 "set_assembly" => apply_set_assembly(&mut current, &args),
-                "accept_plan" => apply_accept_plan(&mut current, &args, pd),
-                "open_planning" => apply_open_planning(&mut current),
+                "accept_plan" => apply_accept_plan(&mut current, &args, actor, pd),
+                "open_planning" => apply_open_planning(&mut current, actor),
                 "revise_plan" => apply_revise_plan(&mut current, &args, actor, pd),
                 "set_mic_passing" => match apply_set_mic_passing(&mut current, &args) {
                     Ok(MutateOutcome::Applied) => Ok(()),
@@ -4641,11 +4641,53 @@ fn apply_set_assembly(
     Ok(())
 }
 
+/// is_seat_exempt — derived helper per moderator-authority spec line 25.
+/// A seat is "exempt" (out of the pipeline) when assembly is in moderator
+/// mic-passing mode AND the seat IS the designated moderator. No new Floor
+/// field — computed inline from existing `mic_passing_mode` + `moderator`.
+fn is_seat_exempt(state: &serde_json::Value, seat: &str) -> bool {
+    let floor = match state.get("floor") {
+        Some(f) => f,
+        None => return false,
+    };
+    let mode = floor
+        .get("mic_passing_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation");
+    if mode != "moderator" {
+        return false;
+    }
+    floor
+        .get("moderator")
+        .and_then(|v| v.as_str())
+        .map(|m| m == seat)
+        .unwrap_or(false)
+}
+
+/// accept_plan — gated to moderator OR architect/manager/human per
+/// feature/moderator-authority spec Item 4 (closes evil-arch msg 1490
+/// CRITICAL phase-gate gap). Pre-A.5.2: this function had no gate; any
+/// agent could flip phase via MCP, voiding plan_hash and bypassing the
+/// destructive-confirm modal entirely.
 fn apply_accept_plan(
     state: &mut serde_json::Value,
     args: &serde_json::Value,
+    actor: &str,
     project_dir: &str,
 ) -> Result<(), String> {
+    let role = caller_role(actor);
+    let is_moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        == Some(actor);
+    let is_privileged = matches!(role, "architect" | "manager" | "human");
+    if !is_moderator && !is_privileged {
+        return Err(format!(
+            "[AcceptPlanForbidden] caller '{}' (role '{}') may not call accept_plan — gated to current moderator OR architect/manager/human (evil-arch msg 1490 CRITICAL closure, moderator-authority Item 4).",
+            actor, role
+        ));
+    }
     let plan_path = args
         .get("plan_path")
         .and_then(|v| v.as_str())
@@ -4663,7 +4705,22 @@ fn apply_accept_plan(
     Ok(())
 }
 
-fn apply_open_planning(state: &mut serde_json::Value) -> Result<(), String> {
+/// open_planning — same gate pattern as apply_accept_plan per
+/// feature/moderator-authority spec Item 4.
+fn apply_open_planning(state: &mut serde_json::Value, actor: &str) -> Result<(), String> {
+    let role = caller_role(actor);
+    let is_moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        == Some(actor);
+    let is_privileged = matches!(role, "architect" | "manager" | "human");
+    if !is_moderator && !is_privileged {
+        return Err(format!(
+            "[OpenPlanningForbidden] caller '{}' (role '{}') may not call open_planning — gated to current moderator OR architect/manager/human (evil-arch msg 1490 CRITICAL closure, moderator-authority Item 4).",
+            actor, role
+        ));
+    }
     if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
         floor.insert("phase".to_string(), serde_json::json!("planning"));
         floor.insert("plan_path".to_string(), serde_json::Value::Null);
@@ -6252,6 +6309,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "other/p.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6273,6 +6331,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "/etc/passwd.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6296,6 +6355,122 @@ mod protocol_slice2_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A7c — moderator-authority Item 4: moderator can call accept_plan.
+    /// Closes evil-arch msg 1490 CRITICAL phase-gate gap.
+    #[test]
+    fn a7c_accept_plan_moderator_accepts() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        let dir = plan_test_dir("a7c_mod");
+        let plan_rel = write_plan(&dir, "p.md", "*");
+        let pd = dir.to_string_lossy().to_string();
+        apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel}),
+            "ux-engineer:0",
+            &pd,
+        )
+        .expect("moderator must be accepted");
+        assert_eq!(s["floor"]["phase"], "execution");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A7d — non-moderator non-privileged caller of accept_plan rejected.
+    #[test]
+    fn a7d_accept_plan_unauthorized_rejected() {
+        let mut s = fresh_state();
+        // moderator is ux-engineer:0; developer:0 is neither moderator nor privileged.
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        let dir = plan_test_dir("a7d_unauth");
+        let plan_rel = write_plan(&dir, "p.md", "*");
+        let pd = dir.to_string_lossy().to_string();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel}),
+            "developer:0",
+            &pd,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[AcceptPlanForbidden]"),
+            "developer:0 must be rejected, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A7e — privileged role (architect) bypasses moderator requirement.
+    #[test]
+    fn a7e_accept_plan_architect_accepts_no_moderator() {
+        let mut s = fresh_state();
+        // No moderator set, but architect role is privileged → still accepts.
+        let dir = plan_test_dir("a7e_arch");
+        let plan_rel = write_plan(&dir, "p.md", "*");
+        let pd = dir.to_string_lossy().to_string();
+        apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel}),
+            "architect:0",
+            &pd,
+        )
+        .expect("architect bypass must accept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A8c — moderator-authority Item 4: moderator can call open_planning.
+    #[test]
+    fn a8c_open_planning_moderator_accepts() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_open_planning(&mut s, "ux-engineer:0").expect("moderator accepted");
+        assert_eq!(s["floor"]["phase"], "planning");
+    }
+
+    /// A8d — non-moderator non-privileged caller of open_planning rejected.
+    #[test]
+    fn a8d_open_planning_unauthorized_rejected() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        let err = apply_open_planning(&mut s, "developer:0").unwrap_err();
+        assert!(
+            err.starts_with("[OpenPlanningForbidden]"),
+            "developer:0 must be rejected, got: {}",
+            err
+        );
+    }
+
+    /// is_seat_exempt helper — derived per moderator-authority spec line 25.
+    #[test]
+    fn is_seat_exempt_moderator_mode_with_moderator_set() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        assert!(is_seat_exempt(&s, "ux-engineer:0"));
+        assert!(!is_seat_exempt(&s, "developer:0"));
+    }
+
+    #[test]
+    fn is_seat_exempt_not_moderator_mode_returns_false() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("rotation");
+        s["floor"]["moderator"] = serde_json::json!("ux-engineer:0");
+        // Even though moderator field is set, mode != moderator → not exempt.
+        assert!(!is_seat_exempt(&s, "ux-engineer:0"));
+    }
+
+    #[test]
+    fn is_seat_exempt_moderator_mode_no_moderator_set_returns_false() {
+        let mut s = fresh_state();
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        // moderator field null → no one is exempt.
+        assert!(!is_seat_exempt(&s, "ux-engineer:0"));
+    }
+
     /// A8 — scope-block required at accept_plan time (architect msg 992 G2).
     #[test]
     fn a8_scope_block_required() {
@@ -6307,6 +6482,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": ".vaak/design-notes/noscope.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6327,6 +6503,7 @@ mod protocol_slice2_tests {
         apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": &plan_rel}),
+            "architect:0",
             &pd,
         )
         .expect("scope:* must accept");
@@ -6347,6 +6524,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "other/p.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6367,6 +6545,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "../escape/p.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6386,6 +6565,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "foo.txt"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6401,6 +6581,7 @@ mod protocol_slice2_tests {
         let err = apply_accept_plan(
             &mut s,
             &serde_json::json!({"plan_path": "ghost.md"}),
+            "architect:0",
             &pd,
         )
         .unwrap_err();
@@ -6453,7 +6634,7 @@ mod protocol_slice2_tests {
         let mut s = fresh_state();
         s["floor"]["assembly_active"] = serde_json::json!(true);
         s["preset"] = serde_json::json!("Assembly Line");
-        apply_open_planning(&mut s).unwrap();
+        apply_open_planning(&mut s, "architect:0").unwrap();
         assert_eq!(s["floor"]["assembly_active"], true);
         assert_eq!(s["preset"], "Assembly Line");
     }
@@ -6600,7 +6781,7 @@ mod protocol_slice2_tests {
         s["floor"]["phase"] = serde_json::json!("execution");
         s["floor"]["plan_path"] = serde_json::json!(".vaak/design-notes/x.md");
         s["floor"]["plan_hash"] = serde_json::json!("abc123");
-        apply_open_planning(&mut s).unwrap();
+        apply_open_planning(&mut s, "architect:0").unwrap();
         assert_eq!(s["floor"]["phase"], "planning");
         assert_eq!(s["floor"]["plan_path"], serde_json::Value::Null);
         assert_eq!(s["floor"]["plan_hash"], serde_json::Value::Null);
@@ -7259,7 +7440,24 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
 
         let mut asm_auto_grabbed: Option<serde_json::Value> = None;
-        if asm_active && state.role != "human" {
+        // moderator-authority Item 3 (spec line 49-51): exempt seats bypass the
+        // assembly-mode mic-gate. The moderator manages the pipeline; they're
+        // not subject to it. is_seat_exempt is true iff mic_passing_mode is
+        // "moderator" AND from_label IS the designated moderator. Read from
+        // proto_for_gate.floor (asm is a synthesized subset that doesn't carry
+        // mic_passing_mode/moderator fields).
+        let caller_is_exempt = {
+            let floor = proto_for_gate.get("floor");
+            let mic_mode = floor
+                .and_then(|f| f.get("mic_passing_mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("rotation");
+            let moderator = floor
+                .and_then(|f| f.get("moderator"))
+                .and_then(|v| v.as_str());
+            mic_mode == "moderator" && moderator == Some(from_label.as_str())
+        };
+        if asm_active && state.role != "human" && !caller_is_exempt {
             let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
             if cur != from_label {
                 // Gap H — connectedness-based auto-grab (team vote #1340: 5-of-7

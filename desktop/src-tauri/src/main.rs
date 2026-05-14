@@ -3909,28 +3909,51 @@ fn do_protocol_mutate_inner(
                     }
                 }
                 "accept_plan" => {
-                    let plan_path = args.get("plan_path").and_then(|v| v.as_str());
-                    match plan_path {
-                        Some(p) => match validate_plan_path_main(pd, p) {
-                            Ok(canon) => {
-                                let content = std::fs::read(&canon)
-                                    .map_err(|e| format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e))?;
-                                let hash = sha256_hex_main(&content);
-                                current.floor.phase = Some("execution".to_string());
-                                current.floor.plan_path = Some(p.to_string());
-                                current.floor.plan_hash = Some(hash);
-                                Ok(())
-                            }
-                            Err(e) => Err(e),
-                        },
-                        None => Err("[InvalidArgs] accept_plan requires args.plan_path (string)".to_string()),
+                    // moderator-authority Item 4 gate — moderator OR architect/manager/human.
+                    // Closes evil-arch msg 1490 CRITICAL.
+                    let role = caller_role_main(actor);
+                    let is_moderator = current.floor.moderator.as_deref() == Some(actor);
+                    let is_privileged = matches!(role, "architect" | "manager" | "human");
+                    if !is_moderator && !is_privileged {
+                        Err(format!(
+                            "[AcceptPlanForbidden] caller '{}' (role '{}') may not call accept_plan — gated to current moderator OR architect/manager/human (evil-arch msg 1490 CRITICAL closure, moderator-authority Item 4).",
+                            actor, role
+                        ))
+                    } else {
+                        let plan_path = args.get("plan_path").and_then(|v| v.as_str());
+                        match plan_path {
+                            Some(p) => match validate_plan_path_main(pd, p) {
+                                Ok(canon) => {
+                                    let content = std::fs::read(&canon)
+                                        .map_err(|e| format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e))?;
+                                    let hash = sha256_hex_main(&content);
+                                    current.floor.phase = Some("execution".to_string());
+                                    current.floor.plan_path = Some(p.to_string());
+                                    current.floor.plan_hash = Some(hash);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            },
+                            None => Err("[InvalidArgs] accept_plan requires args.plan_path (string)".to_string()),
+                        }
                     }
                 }
                 "open_planning" => {
-                    current.floor.phase = Some("planning".to_string());
-                    current.floor.plan_path = None;
-                    current.floor.plan_hash = None;
-                    Ok(())
+                    // moderator-authority Item 4 gate — same pattern as accept_plan.
+                    let role = caller_role_main(actor);
+                    let is_moderator = current.floor.moderator.as_deref() == Some(actor);
+                    let is_privileged = matches!(role, "architect" | "manager" | "human");
+                    if !is_moderator && !is_privileged {
+                        Err(format!(
+                            "[OpenPlanningForbidden] caller '{}' (role '{}') may not call open_planning — gated to current moderator OR architect/manager/human (evil-arch msg 1490 CRITICAL closure, moderator-authority Item 4).",
+                            actor, role
+                        ))
+                    } else {
+                        current.floor.phase = Some("planning".to_string());
+                        current.floor.plan_path = None;
+                        current.floor.plan_hash = None;
+                        Ok(())
+                    }
                 }
                 "revise_plan" => {
                     let role = caller_role_main(actor);
