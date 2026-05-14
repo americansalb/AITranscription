@@ -1,5 +1,6 @@
 // Stats panel - restored overview layout
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { useToast } from "./Toast";
 import {
   getUserStats,
   getTranscriptHistory,
@@ -123,6 +124,7 @@ const RARITY_ORDER: Record<string, number> = { legendary: 0, epic: 1, rare: 2, c
 const PAGE_SIZE = 24;
 
 export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
+  const { showToast } = useToast();
   const [stats, setStats] = useState<UserStats | null>(null);
   const [detailedStats, setDetailedStats] = useState<DetailedStatsResponse | null>(null);
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
@@ -284,7 +286,9 @@ export function StatsPanel({ onClose, refreshTrigger }: StatsPanelProps) {
       setEditingWpm(false);
       loadData();
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       console.error("Failed to update WPM:", err);
+      showToast(`Couldn't update WPM — ${msg}`, "error");
     }
   };
 
