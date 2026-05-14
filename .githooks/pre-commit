@@ -180,7 +180,11 @@ def main() -> None:
     # OR directory-prefix matches (path ending in "/"). Path normalization:
     # forward-slash form, no leading "./".
     def normalize(p: str) -> str:
-        return p.replace("\\", "/").lstrip("./")
+        # Forward-slash form + strip a single leading "./" prefix.
+        # `lstrip("./")` is character-set stripping (per tester msg 1147 catch)
+        # which would corrupt dotfile names like `.gitignore` → `gitignore`.
+        p2 = p.replace("\\", "/")
+        return p2[2:] if p2.startswith("./") else p2
 
     scope_set = {normalize(p) for p in scope}
     out_of_scope = []
