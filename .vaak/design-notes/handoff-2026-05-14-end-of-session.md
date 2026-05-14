@@ -113,6 +113,17 @@ The team produces a real proposal together — not code, a document.
 - **Mirror-commit discipline:** propose_replanning + accept_replanning are new `protocol_mutate` actions. Per `feedback_mirror_binary_parity_audit.md`, BOTH vaak-mcp.rs `apply_*` AND main.rs `protocol_mutate_cmd` match arms need them in the same commit. Same pattern A.5 caught after commit A only updated vaak-mcp.rs.
 - **Back-compat for new `floor.replanning_requests` field:** existing protocol.json files won't have it. Per `feedback_audit_back_compat_migration_on_field_addition.md`, field must be `Option<Vec<_>>` with `#[serde(default)]` on Rust side AND AssemblyControls TSX consumer uses `?? []` defaults at render. Same pattern as B.2 back-compat fix — design back-compat into the spec, not as a follow-up.
 
+**Tester W1-W5 testable invariants (per msg 1774) for the school-of-fish + delegation flow:**
+- **W1** moderator's `accept_replanning` action → mode flips on disk in single CAS-gated write; observers at T+ε all see "planning" (school-of-fish atomicity)
+- **W2** any agent with `mic_claim(turn_type: "working")` in flight at pivot-decision time has work either completed atomically or rolled back
+- **W3** delegation-chart `<!-- delegation: owner=X section=Y deadline=Z deps=A,B -->` parsed by extended A.3 hook to validate committer-author matches assigned owner
+- **W4** planning-phase contributions include extended-thinking attestation metadata field
+- **W5** each plan-execute-plan cycle leaves a board record with reason for the proposal's revision history
+
+**Tester answers to UX-eng's open Qs (msg 1774):** pre-commit delegation-validation YES (~10 LOC extension of v1.1 A.3 hook). Replanning DM-vs-broadcast SPLIT — initial requests broadcast (per UI-arch transparency call); moderator's decision DM'd back to requester (per `feedback_moderator_blind_collection_discipline`). Extended-thinking attestation on ALL planning-phase contributions.
+
+**Tester additional test surface M12 (msg 1774):** AI-moderator truly-dead recovery — kill an AI moderator session, verify mode does NOT auto-promote (per 9a672d4 trade-off accepted), verify human can re-set moderator successfully. Covers the new manual-recovery path.
+
 ### Priority 3 (gated on P2 success): Oxford debates
 Get proposal collaboration right first. Oxford debates as a structured-debate workflow come after.
 
