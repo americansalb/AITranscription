@@ -3565,10 +3565,19 @@ fn do_protocol_mutate(
                 "accept_plan" => apply_accept_plan(&mut current, &args, pd),
                 "open_planning" => apply_open_planning(&mut current),
                 "revise_plan" => apply_revise_plan(&mut current, &args, actor, pd),
-                "set_mic_passing" => apply_set_mic_passing(&mut current, &args),
+                "set_mic_passing" => match apply_set_mic_passing(&mut current, &args) {
+                    Ok(MutateOutcome::Applied) => Ok(()),
+                    Ok(MutateOutcome::NoOp) => {
+                        // Defer-silent / idempotent — skip rev bump + emit
+                        // (tester msg 1111 T-FINDING). Return early via a
+                        // pre-applied current state with no mutations carried.
+                        return Ok(Ok(pre_state));
+                    }
+                    Err(e) => Err(e),
+                },
                 "raise_hand" => apply_raise_hand(&mut current, actor),
                 "grant_mic" => apply_grant_mic(&mut current, &args, actor),
-                "set_moderator" => apply_set_moderator(&mut current, &args),
+                "set_moderator" => apply_set_moderator(&mut current, &args, actor),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -4536,6 +4545,15 @@ fn parse_scope_block(plan_content: &str) -> Option<Vec<String>> {
 
 /// Validate plan_path per spec § plan_path validation.
 /// Returns canonical absolute path on success.
+///
+/// Per dev-challenger msg 1115 F5 + evil-arch msg 1117 F5: pre-resolution
+/// outside-check fires BEFORE canonicalize so the [PlanPathOutsideDesignNotes]
+/// variant is reachable for paths the resolver wouldn't naturally land
+/// outside design-notes. Specifically: absolute paths, paths starting with
+/// repo-relative segments not under .vaak/design-notes/, and paths with `..`
+/// segments. Without this, [PlanPathMissing] swallows what should be
+/// [PlanPathOutsideDesignNotes] for any valid-on-disk file outside the
+/// allowlist.
 fn validate_plan_path(project_dir: &str, plan_path: &str) -> Result<PathBuf, String> {
     if !plan_path.ends_with(".md") {
         return Err(format!(
@@ -4543,18 +4561,34 @@ fn validate_plan_path(project_dir: &str, plan_path: &str) -> Result<PathBuf, Str
             plan_path
         ));
     }
+    // Pre-resolution outside-checks (run BEFORE canonicalize):
     if plan_path.split(['/', '\\']).any(|seg| seg == "..") {
         return Err(format!(
             "[PlanPathOutsideDesignNotes] plan_path contains '..' segments: {}",
             plan_path
         ));
     }
+    if Path::new(plan_path).is_absolute() {
+        return Err(format!(
+            "[PlanPathOutsideDesignNotes] plan_path must be repo-relative under .vaak/design-notes/, not absolute: {}",
+            plan_path
+        ));
+    }
+    let normalized_prefix = plan_path.replace('\\', "/");
+    let starts_under_design = normalized_prefix.starts_with(".vaak/design-notes/");
+    let has_repo_path_separator = normalized_prefix.contains('/');
+    if has_repo_path_separator && !starts_under_design {
+        // Repo-relative path with separators that doesn't start under
+        // .vaak/design-notes/ → declared outside. Plain filename without a
+        // separator is fine — resolver will join with the design-notes base.
+        return Err(format!(
+            "[PlanPathOutsideDesignNotes] plan_path must resolve under .vaak/design-notes/: {}",
+            plan_path
+        ));
+    }
+
     let base = Path::new(project_dir).join(".vaak").join("design-notes");
-    let candidate = if Path::new(plan_path).is_absolute() {
-        PathBuf::from(plan_path)
-    } else if plan_path.starts_with(".vaak/design-notes/")
-        || plan_path.starts_with(".vaak\\design-notes\\")
-    {
+    let candidate = if starts_under_design {
         Path::new(project_dir).join(plan_path)
     } else {
         base.join(plan_path)
@@ -4563,9 +4597,11 @@ fn validate_plan_path(project_dir: &str, plan_path: &str) -> Result<PathBuf, Str
         format!("[PlanPathMissing] plan_path file does not exist or is not readable: {}", plan_path)
     })?;
     let canon_base = base.canonicalize().unwrap_or(base.clone());
+    // Defense-in-depth: even after the pre-resolution checks, refuse
+    // anything that canonicalizes outside the allowlist (symlinks etc.).
     if !canon_cand.starts_with(&canon_base) {
         return Err(format!(
-            "[PlanPathOutsideDesignNotes] plan_path must resolve under .vaak/design-notes/: {}",
+            "[PlanPathOutsideDesignNotes] plan_path resolves outside .vaak/design-notes/ after canonicalization: {}",
             plan_path
         ));
     }
@@ -4668,10 +4704,15 @@ fn apply_revise_plan(
     Ok(())
 }
 
+/// set_mic_passing — returns `MutateOutcome::NoOp` when defer-silent fires
+/// (mid-turn mode change with current_speaker set). Dispatch checks the
+/// outcome and skips normalize/rev/write/emit on NoOp so observers don't see
+/// phantom mic_passing_mode_changed events with old==new + spurious rev bumps
+/// (tester msg 1111 T-FINDING).
 fn apply_set_mic_passing(
     state: &mut serde_json::Value,
     args: &serde_json::Value,
-) -> Result<(), String> {
+) -> Result<MutateOutcome, String> {
     let mode = args
         .get("mode")
         .and_then(|v| v.as_str())
@@ -4699,7 +4740,13 @@ fn apply_set_mic_passing(
     // TODO(consolidated-findings #13): surface pending mechanism via
     // floor.mic_mechanism_pending field in status strip when item 13 is taken up.
     if current_speaker.is_some() && prev != mode {
-        return Ok(());
+        return Ok(MutateOutcome::NoOp);
+    }
+
+    // No-op also when caller specified the same mode that's already active —
+    // avoids spurious old==new event emission on idempotent calls.
+    if prev == mode {
+        return Ok(MutateOutcome::NoOp);
     }
 
     if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
@@ -4726,7 +4773,17 @@ fn apply_set_mic_passing(
             _ => {}
         }
     }
-    Ok(())
+    Ok(MutateOutcome::Applied)
+}
+
+/// Outcome variant for apply_* functions that may legitimately no-op (e.g.
+/// defer-silent set_mic_passing per architect msg 1070 (b)). Dispatch reads
+/// this to decide whether to fire post-mutation side effects (normalize, rev
+/// bump, write, board event). NoOp = leave protocol.json + board untouched.
+#[derive(Debug, PartialEq, Eq)]
+enum MutateOutcome {
+    Applied,
+    NoOp,
 }
 
 fn apply_raise_hand(state: &mut serde_json::Value, actor: &str) -> Result<(), String> {
@@ -4789,13 +4846,24 @@ fn apply_grant_mic(
     Ok(())
 }
 
-/// set_moderator — item 14 (moderator-set authority) is in the deferred set
-/// per human msg 1044; v1 accepts all callers and emits moderator_set event.
-/// Human-only enforcement is at UI layer per phase_change_human_only precedent.
+/// set_moderator — gated to architect/manager/human per dev-challenger msg 1115
+/// F2 + evil-arch msg 1117 CRITICAL upgrade. Same structural-floor parity as
+/// apply_revise_plan: without the gate, any agent can self-elect moderator and
+/// then call set_mic_passing(moderator) to wedge mic-passing in two calls.
+/// Item 14's deferred question is "what authority gate?" (human-only via UI vs
+/// vote vs delegation) — NOT "no gate at all." Server-side floor is required.
 fn apply_set_moderator(
     state: &mut serde_json::Value,
     args: &serde_json::Value,
+    actor: &str,
 ) -> Result<(), String> {
+    let role = caller_role(actor);
+    if !matches!(role, "architect" | "manager" | "human") {
+        return Err(format!(
+            "[SetModeratorForbidden] caller role '{}' may not call set_moderator — gated to architect/manager/human only (dev-challenger msg 1115 F2 + evil-arch msg 1117 CRITICAL).",
+            role
+        ));
+    }
     let target = args
         .get("seat")
         .and_then(|v| v.as_str())
@@ -6115,6 +6183,103 @@ mod protocol_slice2_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A7b — set_moderator role gate (CRITICAL per dev-challenger msg 1115 F2
+    /// + evil-arch msg 1117 upgrade). Same structural class as A7 revise_plan.
+    #[test]
+    fn a7b_set_moderator_role_gate_rejects_developer() {
+        let mut s = fresh_state();
+        let err = apply_set_moderator(
+            &mut s,
+            &serde_json::json!({"seat": "developer:0"}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[SetModeratorForbidden]"),
+            "developer must be rejected, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn a7b_set_moderator_role_gate_rejects_dev_challenger() {
+        let mut s = fresh_state();
+        let err = apply_set_moderator(
+            &mut s,
+            &serde_json::json!({"seat": "dev-challenger:0"}),
+            "dev-challenger:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[SetModeratorForbidden]"), "got: {}", err);
+    }
+
+    #[test]
+    fn a7b_set_moderator_role_gate_accepts_architect() {
+        let mut s = fresh_state();
+        apply_set_moderator(
+            &mut s,
+            &serde_json::json!({"seat": "architect:0"}),
+            "architect:0",
+        )
+        .expect("architect must be accepted");
+        assert_eq!(s["floor"]["moderator"], "architect:0");
+    }
+
+    #[test]
+    fn a7b_set_moderator_role_gate_accepts_human() {
+        let mut s = fresh_state();
+        apply_set_moderator(
+            &mut s,
+            &serde_json::json!({"seat": "tester:0"}),
+            "human:0",
+        )
+        .expect("human must be accepted");
+        assert_eq!(s["floor"]["moderator"], "tester:0");
+    }
+
+    /// F5 (dev-challenger msg 1115): A9 PlanPathOutsideDesignNotes must fire
+    /// for outside paths, not get swallowed by PlanPathMissing.
+    #[test]
+    fn f5_outside_path_with_separator_rejects_with_correct_variant() {
+        let dir = plan_test_dir("f5_outside");
+        // Create the file at the outside path so PlanPathMissing wouldn't fire
+        // on its own — we want to verify the pre-resolution outside-check.
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let outside = dir.join("other").join("p.md");
+        std::fs::write(&outside, "# x\n<!-- scope: * -->\n").unwrap();
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "other/p.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        // F5 fix: should now fire PlanPathOutsideDesignNotes specifically,
+        // not the PlanPathMissing fallback the original test accepted.
+        assert!(
+            err.starts_with("[PlanPathOutsideDesignNotes]"),
+            "expected outside-variant, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn f5_absolute_path_rejects_with_outside_variant() {
+        let dir = plan_test_dir("f5_abs");
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "/etc/passwd.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[PlanPathOutsideDesignNotes]"), "got: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a7_revise_plan_role_gate_accepts_human() {
         let mut s = fresh_state();
@@ -6185,9 +6350,9 @@ mod protocol_slice2_tests {
             &pd,
         )
         .unwrap_err();
-        // Hits PlanPathMissing because the resolver looks under design-notes/other/p.md.
+        // F5 fix: pre-resolution outside-check now fires the correct variant.
         assert!(
-            err.starts_with("[PlanPathMissing]") || err.starts_with("[PlanPathOutsideDesignNotes]"),
+            err.starts_with("[PlanPathOutsideDesignNotes]"),
             "got: {}",
             err
         );
