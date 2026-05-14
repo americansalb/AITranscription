@@ -34,6 +34,8 @@ once_cell = "1.19"
 # MCP server dependencies (for vaak-mcp binary)
 ureq = "2.9"
 hostname = "0.4"
+sha2 = "0.10"
+hex = "0.4"
 
 # Screen capture for screen_read MCP tool
 screenshots = "0.8"

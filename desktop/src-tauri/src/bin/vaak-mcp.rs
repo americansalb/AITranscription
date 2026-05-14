@@ -3075,7 +3075,15 @@ fn protocol_fresh_value() -> serde_json::Value {
             "queue": [],
             "rotation_order": [],
             "threshold_ms": PROTOCOL_DEFAULT_THRESHOLD_MS,
-            "started_at": utc_now_iso()
+            "started_at": utc_now_iso(),
+            // Two-controls v1 fields (spec 2026-05-14, items 1-9):
+            "assembly_active": false,        // Control A — coordinated with preset == "Assembly Line"
+            "phase": "execution",            // Control B — back-compat default. TODO(consolidated-findings #18): explicit v1.X migration question — back-compat vs forced-accept_plan for new sections.
+            "mic_passing_mode": "rotation",  // Only used when assembly_active is true
+            "moderator": null,               // seat slug if mic_passing_mode == "moderator"
+            "hand_queue": [],                // seat slugs in raise-hand order
+            "plan_path": null,               // accepted plan when phase == "execution"
+            "plan_hash": null                // SHA-256 of plan_path file at accept_plan time
         },
         "consensus": {
             "mode": "none",
@@ -3533,6 +3541,10 @@ fn do_protocol_mutate(
                 )));
             }
 
+            // Capture pre-state for two-controls event-emission (finding #3
+            // observability invariant). Cheap clone before apply_* mutates.
+            let pre_state = current.clone();
+
             let dispatch_result = match action {
                 "set_preset" => apply_set_preset(&mut current, &args),
                 "transfer_mic" => apply_transfer_mic(&mut current, &args, actor, pd),
@@ -3548,6 +3560,15 @@ fn do_protocol_mutate(
                 "open_round" => apply_open_round(&mut current, &args, actor),
                 "submit" => apply_submit(&mut current, &args, actor),
                 "close_round" => apply_close_round(&mut current, &args, actor),
+                // Two-controls v1 (spec 2026-05-14, items 1-9):
+                "set_assembly" => apply_set_assembly(&mut current, &args),
+                "accept_plan" => apply_accept_plan(&mut current, &args, pd),
+                "open_planning" => apply_open_planning(&mut current),
+                "revise_plan" => apply_revise_plan(&mut current, &args, actor, pd),
+                "set_mic_passing" => apply_set_mic_passing(&mut current, &args),
+                "raise_hand" => apply_raise_hand(&mut current, actor),
+                "grant_mic" => apply_grant_mic(&mut current, &args, actor),
+                "set_moderator" => apply_set_moderator(&mut current, &args),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -3580,6 +3601,11 @@ fn do_protocol_mutate(
             if let Err(e) = write_protocol_for_section_value(pd, section, &current) {
                 return Ok(Err(e));
             }
+
+            // Two-controls observability events (finding #3, A12). Inside the
+            // lock so observers see protocol.json + board event consistently.
+            emit_two_controls_event(pd, actor, action, &pre_state, &current);
+
             Ok(Ok(current))
         });
 
@@ -4470,6 +4496,388 @@ fn auto_advance_if_outcome_met(state: &mut serde_json::Value, project_dir: &str)
     // already inside a get_protocol path that holds no lock).
     let _ = apply_advance_phase(state, project_dir);
     true
+}
+
+// ============================================================
+// Two-controls v1 (spec 2026-05-14, items 1-9 from consolidated
+// findings list). Adds 8 new protocol_mutate actions:
+//   set_assembly, accept_plan, open_planning, revise_plan,
+//   set_mic_passing, raise_hand, grant_mic, set_moderator
+// + plan_path validation, scope-block parsing, role-gate for revise_plan.
+// ============================================================
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn caller_role(actor: &str) -> &str {
+    actor.splitn(2, ':').next().unwrap_or(actor)
+}
+
+/// Parse `<!-- scope: ... -->` block. Returns Some(vec) on found,
+/// None on absent. `*` body returns Some(empty vec) for unrestricted.
+fn parse_scope_block(plan_content: &str) -> Option<Vec<String>> {
+    let needle_open = "<!-- scope:";
+    let pos = plan_content.find(needle_open)?;
+    let after = &plan_content[pos + needle_open.len()..];
+    let close = after.find("-->")?;
+    let body = after[..close].trim();
+    if body == "*" {
+        Some(vec![])
+    } else if body.is_empty() {
+        Some(vec![])
+    } else {
+        Some(body.split_whitespace().map(String::from).collect())
+    }
+}
+
+/// Validate plan_path per spec § plan_path validation.
+/// Returns canonical absolute path on success.
+fn validate_plan_path(project_dir: &str, plan_path: &str) -> Result<PathBuf, String> {
+    if !plan_path.ends_with(".md") {
+        return Err(format!(
+            "[PlanPathNotMarkdown] plan_path must end in .md: {}",
+            plan_path
+        ));
+    }
+    if plan_path.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(format!(
+            "[PlanPathOutsideDesignNotes] plan_path contains '..' segments: {}",
+            plan_path
+        ));
+    }
+    let base = Path::new(project_dir).join(".vaak").join("design-notes");
+    let candidate = if Path::new(plan_path).is_absolute() {
+        PathBuf::from(plan_path)
+    } else if plan_path.starts_with(".vaak/design-notes/")
+        || plan_path.starts_with(".vaak\\design-notes\\")
+    {
+        Path::new(project_dir).join(plan_path)
+    } else {
+        base.join(plan_path)
+    };
+    let canon_cand = candidate.canonicalize().map_err(|_| {
+        format!("[PlanPathMissing] plan_path file does not exist or is not readable: {}", plan_path)
+    })?;
+    let canon_base = base.canonicalize().unwrap_or(base.clone());
+    if !canon_cand.starts_with(&canon_base) {
+        return Err(format!(
+            "[PlanPathOutsideDesignNotes] plan_path must resolve under .vaak/design-notes/: {}",
+            plan_path
+        ));
+    }
+    let content = std::fs::read_to_string(&canon_cand)
+        .map_err(|e| format!("[PlanPathMissing] cannot read plan_path: {}", e))?;
+    if parse_scope_block(&content).is_none() {
+        return Err(
+            "[PlanScopeBlockMissing] plan file lacks <!-- scope: path1 path2 -->. \
+             Use <!-- scope: * --> for unrestricted plans."
+                .to_string(),
+        );
+    }
+    Ok(canon_cand)
+}
+
+fn apply_set_assembly(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    let active = args
+        .get("active")
+        .and_then(|v| v.as_bool())
+        .ok_or("[InvalidArgs] set_assembly requires args.active (bool)")?;
+    // Coordinate with existing preset model: assembly_active==true ⇒ preset=Assembly Line.
+    let target_preset = if active {
+        PRESET_ASSEMBLY_LINE
+    } else {
+        PRESET_DEFAULT_CHAT
+    };
+    apply_set_preset(state, &serde_json::json!({ "name": target_preset }))?;
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("assembly_active".to_string(), serde_json::json!(active));
+        if !active {
+            floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+        }
+    }
+    Ok(())
+}
+
+fn apply_accept_plan(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    project_dir: &str,
+) -> Result<(), String> {
+    let plan_path = args
+        .get("plan_path")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] accept_plan requires args.plan_path (string)")?;
+    let canon = validate_plan_path(project_dir, plan_path)?;
+    let content = std::fs::read(&canon).map_err(|e| {
+        format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e)
+    })?;
+    let hash = sha256_hex(&content);
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("phase".to_string(), serde_json::json!("execution"));
+        floor.insert("plan_path".to_string(), serde_json::json!(plan_path));
+        floor.insert("plan_hash".to_string(), serde_json::json!(hash));
+    }
+    Ok(())
+}
+
+fn apply_open_planning(state: &mut serde_json::Value) -> Result<(), String> {
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("phase".to_string(), serde_json::json!("planning"));
+        floor.insert("plan_path".to_string(), serde_json::Value::Null);
+        floor.insert("plan_hash".to_string(), serde_json::Value::Null);
+    }
+    Ok(())
+}
+
+/// revise_plan — gated to architect/manager/human only per spec §64 / finding #1.
+/// Without this gate the entire pre-commit-hook structural floor is bypassable
+/// by any single rogue or confused agent (evil-arch msg 988 CRITICAL).
+fn apply_revise_plan(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+    project_dir: &str,
+) -> Result<(), String> {
+    let role = caller_role(actor);
+    if !matches!(role, "architect" | "manager" | "human") {
+        return Err(format!(
+            "[RevisePlanForbidden] caller role '{}' may not call revise_plan — gated to architect/manager/human only (spec §64, finding #1).",
+            role
+        ));
+    }
+    let plan_path = args
+        .get("plan_path")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] revise_plan requires args.plan_path (string)")?;
+    let canon = validate_plan_path(project_dir, plan_path)?;
+    let content = std::fs::read(&canon).map_err(|e| {
+        format!("[PlanPathMissing] cannot read plan_path post-validation: {}", e)
+    })?;
+    let new_hash = sha256_hex(&content);
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("plan_path".to_string(), serde_json::json!(plan_path));
+        floor.insert("plan_hash".to_string(), serde_json::json!(new_hash));
+    }
+    Ok(())
+}
+
+fn apply_set_mic_passing(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] set_mic_passing requires args.mode (string)")?;
+    if !matches!(mode, "rotation" | "hand_raise" | "moderator") {
+        return Err(format!(
+            "[UnknownMicMechanism] mic_passing_mode must be rotation|hand_raise|moderator: {}",
+            mode
+        ));
+    }
+    let prev = state
+        .get("floor")
+        .and_then(|f| f.get("mic_passing_mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation")
+        .to_string();
+    let current_speaker = state
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Mid-turn semantics per architect msg 1070: defer-silent. If a current_speaker
+    // exists AND mode is changing, this is a no-op (caller must retry after yield).
+    // TODO(consolidated-findings #13): surface pending mechanism via
+    // floor.mic_mechanism_pending field in status strip when item 13 is taken up.
+    if current_speaker.is_some() && prev != mode {
+        return Ok(());
+    }
+
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("mic_passing_mode".to_string(), serde_json::json!(mode));
+        // Cascading state cleanup so mode-switches don't leak stale state
+        // (rotation→moderator clears hand_queue; moderator→rotation nulls moderator; etc.).
+        match mode {
+            "rotation" => {
+                floor.insert(
+                    "hand_queue".to_string(),
+                    serde_json::Value::Array(vec![]),
+                );
+                floor.insert("moderator".to_string(), serde_json::Value::Null);
+            }
+            "hand_raise" => {
+                floor.insert("moderator".to_string(), serde_json::Value::Null);
+            }
+            "moderator" => {
+                floor.insert(
+                    "hand_queue".to_string(),
+                    serde_json::Value::Array(vec![]),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn apply_raise_hand(state: &mut serde_json::Value, actor: &str) -> Result<(), String> {
+    let mode = state
+        .get("floor")
+        .and_then(|f| f.get("mic_passing_mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation");
+    if mode != "hand_raise" {
+        return Err(format!(
+            "[NotPermitted] raise_hand requires mic_passing_mode == 'hand_raise' (current: {})",
+            mode
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        if let Some(queue) = floor.get_mut("hand_queue").and_then(|q| q.as_array_mut()) {
+            // Idempotent: don't re-add if already queued.
+            if !queue.iter().any(|v| v.as_str() == Some(actor)) {
+                queue.push(serde_json::json!(actor));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_grant_mic(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] grant_mic requires args.target (string)")?;
+    let mode = state
+        .get("floor")
+        .and_then(|f| f.get("mic_passing_mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation");
+    if mode != "moderator" {
+        return Err(format!(
+            "[NotPermitted] grant_mic requires mic_passing_mode == 'moderator' (current: {})",
+            mode
+        ));
+    }
+    let moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    if moderator.as_deref() != Some(actor) {
+        return Err(format!(
+            "[NotPermitted] grant_mic restricted to moderator '{:?}' (caller: {})",
+            moderator, actor
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("current_speaker".to_string(), serde_json::json!(target));
+    }
+    Ok(())
+}
+
+/// set_moderator — item 14 (moderator-set authority) is in the deferred set
+/// per human msg 1044; v1 accepts all callers and emits moderator_set event.
+/// Human-only enforcement is at UI layer per phase_change_human_only precedent.
+fn apply_set_moderator(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    let target = args
+        .get("seat")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] set_moderator requires args.seat (string)")?;
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("moderator".to_string(), serde_json::json!(target));
+    }
+    Ok(())
+}
+
+/// Emit a board event after a successful protocol_mutate. Captures pre/post
+/// state diff for the spec's 9-event observability invariant (finding #3).
+fn emit_two_controls_event(
+    project_dir: &str,
+    actor: &str,
+    action: &str,
+    pre: &serde_json::Value,
+    post: &serde_json::Value,
+) {
+    let event_type = match action {
+        "set_assembly" => "assembly_toggled",
+        "accept_plan" | "open_planning" => "phase_toggled",
+        "revise_plan" => "plan_revised",
+        "set_mic_passing" => "mic_passing_mode_changed",
+        "raise_hand" => "hand_raised",
+        "grant_mic" => "mic_granted",
+        "set_moderator" => "moderator_set",
+        _ => return,
+    };
+    let pre_floor = pre.get("floor").cloned().unwrap_or(serde_json::Value::Null);
+    let post_floor = post.get("floor").cloned().unwrap_or(serde_json::Value::Null);
+    let mut payload = serde_json::Map::new();
+    let pre_get = |k: &str| pre_floor.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let post_get = |k: &str| post_floor.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    match action {
+        "set_assembly" => {
+            payload.insert("old".into(), pre_get("assembly_active"));
+            payload.insert("new".into(), post_get("assembly_active"));
+        }
+        "accept_plan" | "open_planning" => {
+            payload.insert("old".into(), pre_get("phase"));
+            payload.insert("new".into(), post_get("phase"));
+            payload.insert("plan_path".into(), post_get("plan_path"));
+            payload.insert("plan_hash".into(), post_get("plan_hash"));
+        }
+        "revise_plan" => {
+            payload.insert("old_hash".into(), pre_get("plan_hash"));
+            payload.insert("new_hash".into(), post_get("plan_hash"));
+            payload.insert("plan_path".into(), post_get("plan_path"));
+        }
+        "set_mic_passing" => {
+            payload.insert("old".into(), pre_get("mic_passing_mode"));
+            payload.insert("new".into(), post_get("mic_passing_mode"));
+        }
+        "raise_hand" => {
+            payload.insert("seat".into(), serde_json::json!(actor));
+            payload.insert("queue".into(), post_get("hand_queue"));
+        }
+        "grant_mic" => {
+            payload.insert("moderator".into(), pre_get("moderator"));
+            payload.insert("target".into(), post_get("current_speaker"));
+        }
+        "set_moderator" => {
+            payload.insert("old".into(), pre_get("moderator"));
+            payload.insert("new".into(), post_get("moderator"));
+        }
+        _ => return,
+    }
+    payload.insert("ts".into(), serde_json::json!(utc_now_iso()));
+
+    let msg_id = next_message_id(project_dir);
+    let event = serde_json::json!({
+        "id": msg_id,
+        "from": "system",
+        "to": "all",
+        "type": event_type,
+        "timestamp": utc_now_iso(),
+        "subject": format!("[{}] {}", event_type, actor),
+        "body": format!("{} fired by {}", event_type, actor),
+        "metadata": serde_json::Value::Object(payload),
+    });
+    let _ = append_to_board(project_dir, &event);
 }
 
 // ============================================================
@@ -5639,6 +6047,398 @@ mod protocol_slice2_tests {
         )
         .unwrap_err();
         assert!(err.starts_with("[NotSpeaker]"), "got: {}", err);
+    }
+
+    // ============================================================
+    // Two-controls v1 fixture tests (spec 2026-05-14, items 1-9)
+    // ============================================================
+
+    /// Helper — create a unique-named tempdir for plan-file fixtures.
+    fn plan_test_dir(test_name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("vaak-test-{}-{}", test_name, nanos));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vaak").join("design-notes")).unwrap();
+        dir
+    }
+
+    fn write_plan(project_dir: &std::path::Path, name: &str, scope_body: &str) -> String {
+        let path = project_dir.join(".vaak").join("design-notes").join(name);
+        let body = format!(
+            "# Plan {}\n\n<!-- scope: {} -->\n\nbody.\n",
+            name, scope_body
+        );
+        std::fs::write(&path, body).unwrap();
+        format!(".vaak/design-notes/{}", name)
+    }
+
+    /// A7 — revise_plan role gate (CRITICAL per evil-arch msg 988).
+    /// Non-architect / non-manager / non-human callers reject.
+    #[test]
+    fn a7_revise_plan_role_gate_rejects_developer() {
+        let mut s = fresh_state();
+        let dir = plan_test_dir("a7_dev");
+        let plan_rel = write_plan(&dir, "p.md", "src/foo.rs");
+        let pd = dir.to_string_lossy().to_string();
+        let err = apply_revise_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel, "revision_note": "nope"}),
+            "developer:0",
+            &pd,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[RevisePlanForbidden]"),
+            "developer must be rejected, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a7_revise_plan_role_gate_accepts_architect() {
+        let mut s = fresh_state();
+        let dir = plan_test_dir("a7_arch");
+        let plan_rel = write_plan(&dir, "p.md", "src/foo.rs");
+        let pd = dir.to_string_lossy().to_string();
+        apply_revise_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel, "revision_note": "ok"}),
+            "architect:0",
+            &pd,
+        )
+        .expect("architect must be accepted");
+        assert!(s["floor"]["plan_hash"].as_str().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a7_revise_plan_role_gate_accepts_human() {
+        let mut s = fresh_state();
+        let dir = plan_test_dir("a7_human");
+        let plan_rel = write_plan(&dir, "p.md", "*");
+        let pd = dir.to_string_lossy().to_string();
+        apply_revise_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel, "revision_note": "human override"}),
+            "human:0",
+            &pd,
+        )
+        .expect("human must be accepted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A8 — scope-block required at accept_plan time (architect msg 992 G2).
+    #[test]
+    fn a8_scope_block_required() {
+        let dir = plan_test_dir("a8_missing");
+        let path = dir.join(".vaak").join("design-notes").join("noscope.md");
+        std::fs::write(&path, "# Plan\n\nNo scope block.\n").unwrap();
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": ".vaak/design-notes/noscope.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[PlanScopeBlockMissing]"),
+            "got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a8_scope_block_unrestricted_accepts() {
+        let dir = plan_test_dir("a8_star");
+        let plan_rel = write_plan(&dir, "p.md", "*");
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": &plan_rel}),
+            &pd,
+        )
+        .expect("scope:* must accept");
+        assert_eq!(s["floor"]["phase"], "execution");
+        assert_eq!(s["floor"]["plan_path"], plan_rel);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A9 — plan_path allowlist (evil-arch msg 988 M2).
+    #[test]
+    fn a9_plan_path_outside_design_notes_rejects() {
+        let dir = plan_test_dir("a9_out");
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        let outside = dir.join("other").join("p.md");
+        std::fs::write(&outside, "# x\n<!-- scope: * -->\n").unwrap();
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "other/p.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        // Hits PlanPathMissing because the resolver looks under design-notes/other/p.md.
+        assert!(
+            err.starts_with("[PlanPathMissing]") || err.starts_with("[PlanPathOutsideDesignNotes]"),
+            "got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a9_plan_path_dotdot_rejects() {
+        let dir = plan_test_dir("a9_dotdot");
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "../escape/p.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[PlanPathOutsideDesignNotes]"),
+            "got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a9_plan_path_not_markdown_rejects() {
+        let dir = plan_test_dir("a9_ext");
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "foo.txt"}),
+            &pd,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[PlanPathNotMarkdown]"), "got: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a9_plan_path_missing_rejects() {
+        let dir = plan_test_dir("a9_miss");
+        let pd = dir.to_string_lossy().to_string();
+        let mut s = fresh_state();
+        let err = apply_accept_plan(
+            &mut s,
+            &serde_json::json!({"plan_path": "ghost.md"}),
+            &pd,
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[PlanPathMissing]"), "got: {}", err);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A3 — mic-mechanism strict serde.
+    #[test]
+    fn a3_mic_mechanism_unknown_rejects() {
+        let mut s = fresh_state();
+        let err = apply_set_mic_passing(
+            &mut s,
+            &serde_json::json!({"mode": "telepathy"}),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[UnknownMicMechanism]"), "got: {}", err);
+    }
+
+    #[test]
+    fn a3_mic_mechanism_three_canonical_modes_accept() {
+        for mode in ["rotation", "hand_raise", "moderator"] {
+            let mut s = fresh_state();
+            apply_set_mic_passing(&mut s, &serde_json::json!({"mode": mode}))
+                .expect(mode);
+            assert_eq!(s["floor"]["mic_passing_mode"], mode);
+        }
+    }
+
+    /// A4 — independence axiom: assembly toggle leaves phase unchanged, vice versa.
+    /// Note: preset starts as "Default chat" to clear the v1.0.7 interim gate
+    /// that blocks direct cross-preset transitions; same setup the production
+    /// `assembly_line` MCP tool relies on (caller has already routed through
+    /// Default chat before calling enable).
+    #[test]
+    fn a4_independence_assembly_leaves_phase() {
+        let mut s = fresh_state();
+        s["preset"] = serde_json::json!("Default chat");
+        s["floor"]["phase"] = serde_json::json!("execution");
+        s["floor"]["plan_path"] = serde_json::json!(".vaak/design-notes/x.md");
+        apply_set_assembly(&mut s, &serde_json::json!({"active": true})).unwrap();
+        assert_eq!(s["floor"]["phase"], "execution");
+        assert_eq!(s["floor"]["plan_path"], ".vaak/design-notes/x.md");
+        apply_set_assembly(&mut s, &serde_json::json!({"active": false})).unwrap();
+        assert_eq!(s["floor"]["phase"], "execution");
+    }
+
+    #[test]
+    fn a4_independence_phase_leaves_assembly() {
+        let mut s = fresh_state();
+        s["floor"]["assembly_active"] = serde_json::json!(true);
+        s["preset"] = serde_json::json!("Assembly Line");
+        apply_open_planning(&mut s).unwrap();
+        assert_eq!(s["floor"]["assembly_active"], true);
+        assert_eq!(s["preset"], "Assembly Line");
+    }
+
+    /// raise_hand requires hand_raise mode; queue is idempotent.
+    #[test]
+    fn raise_hand_requires_mode() {
+        let mut s = fresh_state();
+        let err = apply_raise_hand(&mut s, "developer:0").unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    #[test]
+    fn raise_hand_idempotent() {
+        let mut s = fresh_state();
+        apply_set_mic_passing(&mut s, &serde_json::json!({"mode": "hand_raise"})).unwrap();
+        apply_raise_hand(&mut s, "developer:0").unwrap();
+        apply_raise_hand(&mut s, "developer:0").unwrap();
+        let q = s["floor"]["hand_queue"].as_array().unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0], "developer:0");
+    }
+
+    /// grant_mic restricted to moderator role + moderator mode.
+    #[test]
+    fn grant_mic_requires_moderator_mode() {
+        let mut s = fresh_state();
+        let err = apply_grant_mic(
+            &mut s,
+            &serde_json::json!({"target": "developer:0"}),
+            "moderator:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    #[test]
+    fn grant_mic_only_moderator_seat() {
+        let mut s = fresh_state();
+        apply_set_mic_passing(&mut s, &serde_json::json!({"mode": "moderator"})).unwrap();
+        s["floor"]["moderator"] = serde_json::json!("moderator:0");
+        let err = apply_grant_mic(
+            &mut s,
+            &serde_json::json!({"target": "developer:0"}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[NotPermitted]"), "got: {}", err);
+    }
+
+    #[test]
+    fn grant_mic_happy_path_sets_speaker() {
+        let mut s = fresh_state();
+        apply_set_mic_passing(&mut s, &serde_json::json!({"mode": "moderator"})).unwrap();
+        s["floor"]["moderator"] = serde_json::json!("moderator:0");
+        apply_grant_mic(
+            &mut s,
+            &serde_json::json!({"target": "developer:0"}),
+            "moderator:0",
+        )
+        .unwrap();
+        assert_eq!(s["floor"]["current_speaker"], "developer:0");
+    }
+
+    /// scope-block parser cases.
+    #[test]
+    fn scope_block_parse_missing_returns_none() {
+        assert!(parse_scope_block("# Plan\n\nNo block here.\n").is_none());
+    }
+
+    #[test]
+    fn scope_block_parse_star_returns_empty_vec() {
+        let out = parse_scope_block("<!-- scope: * -->").unwrap();
+        assert!(out.is_empty(), "* unrestricted is empty vec");
+    }
+
+    #[test]
+    fn scope_block_parse_paths_split_on_whitespace() {
+        let out = parse_scope_block("<!-- scope: src/a.rs src/b.rs   src/c.rs -->").unwrap();
+        assert_eq!(out, vec!["src/a.rs", "src/b.rs", "src/c.rs"]);
+    }
+
+    /// Cascading state cleanup — set_mic_passing(rotation) clears moderator + hand_queue.
+    #[test]
+    fn set_mic_passing_rotation_clears_stale_state() {
+        let mut s = fresh_state();
+        // Pretend we were in moderator mode with a moderator + a stale hand_queue entry.
+        s["floor"]["mic_passing_mode"] = serde_json::json!("moderator");
+        s["floor"]["moderator"] = serde_json::json!("moderator:0");
+        s["floor"]["hand_queue"] = serde_json::json!(["developer:0"]);
+        apply_set_mic_passing(&mut s, &serde_json::json!({"mode": "rotation"})).unwrap();
+        assert_eq!(s["floor"]["moderator"], serde_json::Value::Null);
+        let q = s["floor"]["hand_queue"].as_array().unwrap();
+        assert!(q.is_empty(), "hand_queue must be cleared");
+    }
+
+    /// Mid-turn set_mic_passing is defer-silent per architect msg 1070 (b).
+    #[test]
+    fn set_mic_passing_mid_turn_is_noop() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        s["floor"]["mic_passing_mode"] = serde_json::json!("rotation");
+        apply_set_mic_passing(&mut s, &serde_json::json!({"mode": "hand_raise"})).unwrap();
+        // Defer-silent: mode stays at rotation while a speaker holds the floor.
+        assert_eq!(s["floor"]["mic_passing_mode"], "rotation");
+    }
+
+    /// caller_role helper.
+    #[test]
+    fn caller_role_splits_on_colon() {
+        assert_eq!(caller_role("architect:0"), "architect");
+        assert_eq!(caller_role("manager:1"), "manager");
+        assert_eq!(caller_role("human:0"), "human");
+        assert_eq!(caller_role("noslot"), "noslot");
+    }
+
+    /// set_assembly toggles assembly_active and coordinates with preset.
+    #[test]
+    fn set_assembly_true_sets_preset_and_field() {
+        let mut s = fresh_state();
+        s["preset"] = serde_json::json!("Default chat");
+        apply_set_assembly(&mut s, &serde_json::json!({"active": true})).unwrap();
+        assert_eq!(s["floor"]["assembly_active"], true);
+        assert_eq!(s["preset"], "Assembly Line");
+        assert_eq!(s["floor"]["mode"], "round-robin");
+    }
+
+    #[test]
+    fn set_assembly_false_clears_speaker_and_resets_preset() {
+        let mut s = fresh_state();
+        s["preset"] = serde_json::json!("Default chat");
+        apply_set_assembly(&mut s, &serde_json::json!({"active": true})).unwrap();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        apply_set_assembly(&mut s, &serde_json::json!({"active": false})).unwrap();
+        assert_eq!(s["floor"]["assembly_active"], false);
+        assert_eq!(s["preset"], "Default chat");
+        assert_eq!(s["floor"]["current_speaker"], serde_json::Value::Null);
+    }
+
+    /// open_planning clears plan_hash + plan_path.
+    #[test]
+    fn open_planning_clears_plan_state() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        s["floor"]["plan_path"] = serde_json::json!(".vaak/design-notes/x.md");
+        s["floor"]["plan_hash"] = serde_json::json!("abc123");
+        apply_open_planning(&mut s).unwrap();
+        assert_eq!(s["floor"]["phase"], "planning");
+        assert_eq!(s["floor"]["plan_path"], serde_json::Value::Null);
+        assert_eq!(s["floor"]["plan_hash"], serde_json::Value::Null);
     }
 }
 
