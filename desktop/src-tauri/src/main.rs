@@ -5351,6 +5351,18 @@ fn check_two_controls_dead_seats(
                 return;
             }
         };
+        // Per human msg 1699: when moderator is "human:0", skip the
+        // staleness check entirely. The human is the desktop UI user,
+        // not an MCP-bound agent — they have no sessions/<role>-<inst>.json
+        // heartbeat file. seat_alive_ms returns 0, watchdog interpreted as
+        // stale, fired mic_mechanism_promoted=moderator_stale immediately
+        // after the human set themselves as moderator (system msg 1696
+        // verified this firing in production at 21:23:59Z right after the
+        // human's set_moderator at 21:23:xxZ). The human is structurally
+        // always alive from Vaak's perspective; no auto-recovery needed.
+        if mod_label == "human:0" {
+            return;
+        }
         let mod_alive = seat_alive_ms(&mod_label);
         let mod_stale = mod_alive == 0
             || now_ms.saturating_sub(mod_alive) > DEAD_SEAT_THRESHOLD_MS;
