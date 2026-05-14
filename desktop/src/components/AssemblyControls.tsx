@@ -250,11 +250,30 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
 
   // 2x2 combination map cell highlight per UI-arch msg 986 minor 3 fold.
   const activeCell = `${assemblyActive ? 'on' : 'off'}-${phase}`;
-  const cellMeta: Record<string, { label: string; tooltip: string }> = {
-    'on-planning': { label: 'Orderly', tooltip: 'Sequential planning. Mic-gated sends. Commits blocked.' },
-    'off-planning': { label: 'Brainstorm', tooltip: 'Free planning. Anyone speaks. Commits blocked.' },
-    'on-execution': { label: 'Sequential', tooltip: 'Mic-gated execution. One author at a time. Commits allowed under plan scope.' },
-    'off-execution': { label: 'Parallel', tooltip: 'Free execution. Multiple authors at once. Commits allowed under plan scope.' },
+  // B.3a (per tester msg 1429 + human msg 1420): plain-language labels.
+  // Cell labels keep their category name AND show the consequence subtitle
+  // inline so first-contact users don't need to hover-discover tooltips.
+  const cellMeta: Record<string, { label: string; subtitle: string; tooltip: string }> = {
+    'on-planning': {
+      label: 'Orderly planning',
+      subtitle: 'Mic-gated · No commits',
+      tooltip: 'One voice at a time. Code commits blocked until a plan is accepted.',
+    },
+    'off-planning': {
+      label: 'Free brainstorm',
+      subtitle: 'Anyone speaks · No commits',
+      tooltip: 'Everyone contributes simultaneously. Code commits blocked until a plan is accepted.',
+    },
+    'on-execution': {
+      label: 'Sequential build',
+      subtitle: 'Mic-gated · Commits OK',
+      tooltip: 'One author at a time. Code commits allowed under the accepted plan scope.',
+    },
+    'off-execution': {
+      label: 'Parallel build',
+      subtitle: 'Anyone codes · Commits OK',
+      tooltip: 'Multiple authors at once. Code commits allowed under the accepted plan scope.',
+    },
   };
 
   return (
@@ -289,6 +308,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
             {phase === 'planning' ? '✎' : '▷'}
           </span>
           <span className="assembly-phase-label">{phase === 'planning' ? 'PLANNING' : 'EXECUTING'}</span>
+          {canTogglePhase && <span className="assembly-phase-chevron" aria-hidden="true">▾</span>}
         </button>
       </div>
 
@@ -302,9 +322,9 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
             disabled={!assemblyActive}
             title={assemblyActive ? 'Choose how the mic passes between seats' : 'Mic-passing mode is only meaningful when Assembly is ON'}
           >
-            <option value="rotation">Rotation</option>
-            <option value="hand_raise">Hand raise</option>
-            <option value="moderator">Moderator</option>
+            <option value="rotation">Round-robin (cyclic)</option>
+            <option value="hand_raise">Raise hand to speak</option>
+            <option value="moderator">Moderator picks next</option>
           </select>
         </label>
 
@@ -375,12 +395,12 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
           <div role="columnheader" className="assembly-combo-cell is-header">Execution</div>
         </div>
         <div className="assembly-combo-row" role="row">
-          <div role="rowheader" className="assembly-combo-cell is-rowheader">Asm ON</div>
+          <div role="rowheader" className="assembly-combo-cell is-rowheader">Assembly: On</div>
           <ComboCell active={activeCell === 'on-planning'} meta={cellMeta['on-planning']} />
           <ComboCell active={activeCell === 'on-execution'} meta={cellMeta['on-execution']} />
         </div>
         <div className="assembly-combo-row" role="row">
-          <div role="rowheader" className="assembly-combo-cell is-rowheader">Asm OFF</div>
+          <div role="rowheader" className="assembly-combo-cell is-rowheader">Assembly: Off</div>
           <ComboCell active={activeCell === 'off-planning'} meta={cellMeta['off-planning']} />
           <ComboCell active={activeCell === 'off-execution'} meta={cellMeta['off-execution']} />
         </div>
@@ -484,14 +504,15 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
   );
 }
 
-function ComboCell({ active, meta }: { active: boolean; meta: { label: string; tooltip: string } }) {
+function ComboCell({ active, meta }: { active: boolean; meta: { label: string; subtitle: string; tooltip: string } }) {
   return (
     <div
       role="cell"
       className={`assembly-combo-cell${active ? ' is-active' : ''}`}
       title={meta.tooltip}
     >
-      {meta.label}
+      <div className="assembly-combo-label">{meta.label}</div>
+      <div className="assembly-combo-subtitle">{meta.subtitle}</div>
     </div>
   );
 }

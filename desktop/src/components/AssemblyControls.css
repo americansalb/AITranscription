@@ -333,6 +333,36 @@
   box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.5);
 }
 
+.assembly-combo-label {
+  font-weight: inherit;
+}
+
+.assembly-combo-subtitle {
+  font-size: 10px;
+  color: #94a3b8;
+  margin-top: 2px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.assembly-combo-cell.is-active .assembly-combo-subtitle {
+  color: #c7d2fe;
+}
+
+/* Phase-pill chevron — added in B.3a per tester msg 1429 click-affordance gap.
+ * Small ▾ next to the phase label tells users the pill is interactive (opens
+ * a menu) rather than just a state indicator. */
+
+.assembly-phase-chevron {
+  font-size: 10px;
+  margin-left: 2px;
+  opacity: 0.7;
+}
+
+.assembly-phase-pill:hover .assembly-phase-chevron {
+  opacity: 1;
+}
+
 /* Modal — destructive-confirm pattern for open_planning + plan-path entry.
  * Mirrors the existing .confirm-dialog idiom in collab.css. */
 
