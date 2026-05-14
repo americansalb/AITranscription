@@ -3914,11 +3914,14 @@ fn apply_mic_claim(
         .get("expected_duration_secs")
         .and_then(|v| v.as_u64())
         .unwrap_or(match turn_type {
-            "working" => 900,
+            // Defaults set inside the 30-600 bounds so a no-arg claim
+            // of any turn_type succeeds. Evil-architect msg 896 caught
+            // the prior "working => 900" default rejecting itself.
+            "working" => 600,
             "reviewing" => 120,
             "passing" => 30,
             "thinking" => 300,
-            _ => 900,
+            _ => 120,
         });
     if !(30..=600).contains(&expected_duration_secs) {
         return Err(format!(
@@ -5584,22 +5587,23 @@ mod protocol_slice2_tests {
     fn mic_claim_defaults_per_turn_type() {
         let mut s = fresh_state();
         s["floor"]["current_speaker"] = serde_json::json!("developer:0");
-        // working defaults to 900 but is capped at 600 by bounds — rejects.
-        let err = apply_mic_claim(
-            &mut s,
-            &serde_json::json!({"turn_type": "working"}),
-            "developer:0",
-        )
-        .unwrap_err();
-        assert!(err.starts_with("[ClaimOutOfBounds]"), "got: {}", err);
-        // reviewing defaults to 120 — within bounds.
-        apply_mic_claim(
-            &mut s,
-            &serde_json::json!({"turn_type": "reviewing"}),
-            "developer:0",
-        )
-        .unwrap();
-        assert_eq!(s["floor"]["expected_duration_secs"], 120);
+        // Each turn type's default is inside the 30-600 bounds (evil-arch
+        // msg 896 fix — prior "working => 900" default rejected itself).
+        for (tt, want) in [
+            ("working", 600u64),
+            ("reviewing", 120),
+            ("passing", 30),
+            ("thinking", 300),
+        ] {
+            let mut s2 = s.clone();
+            apply_mic_claim(
+                &mut s2,
+                &serde_json::json!({"turn_type": tt}),
+                "developer:0",
+            )
+            .unwrap_or_else(|e| panic!("no-arg claim for {} should succeed, got: {}", tt, e));
+            assert_eq!(s2["floor"]["expected_duration_secs"], want, "default for {}", tt);
+        }
     }
 
     #[test]
@@ -6752,6 +6756,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         from_label, ASSEMBLY_FLOOR_DEFAULT_SECS, rotation_line
                     )
                 };
+                // v1.5.1 follow-up (ui-arch msg 892 + evil-arch msg 896):
+                // include the floor's typed-turn fields in mic_landed metadata
+                // so the UI-arch renderer can badge waiting agents with the
+                // outgoing speaker's claim ("X just finished Working ~10min").
+                // Until v1.5.2 ships the auto-claim shim, the NEW speaker has
+                // not yet claimed at mic_landed time — these fields reflect
+                // the floor as written by the PREVIOUS speaker's mic_claim
+                // (if any), giving the team historical context.
+                let floor_for_emit = read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+                let prev_turn_type = floor_for_emit
+                    .get("floor")
+                    .and_then(|f| f.get("turn_type"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let prev_expected_duration_secs = floor_for_emit
+                    .get("floor")
+                    .and_then(|f| f.get("expected_duration_secs"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let arrival_msg = serde_json::json!({
                     "id": arrival_id,
                     "from": "system",
@@ -6767,6 +6790,8 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         "triggered_by": from_label.clone(),
                         "trigger_msg_id": msg_id,
                         "rotation": rotation_line.trim_start_matches("\nRotation: "),
+                        "prev_turn_type": prev_turn_type,
+                        "prev_expected_duration_secs": prev_expected_duration_secs,
                     }
                 });
                 if let Err(e) = append_to_board(&state.project_dir, &arrival_msg) {
