@@ -1,0 +1,5 @@
+# Two-controls v1 (spec 2026-05-14) — keep .githooks/* with LF line endings
+# so the Python shebang (#!/usr/bin/env python3) is not corrupted by Windows
+# CRLF auto-conversion. Required per platform-engineer msg 985 F2 + spec
+# § Pre-commit hook install steps.
+.githooks/* text eol=lf

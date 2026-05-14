@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Two-controls v1 pre-commit hook (spec 2026-05-14, finding #8).
+
+Reads .vaak/active-section to determine the active section, then reads that
+section's protocol.json:floor and gates the commit per spec § Pre-commit hook:
+
+  - phase == "planning" → reject unconditionally with [planning_blocks_commit].
+  - phase == "execution" + plan_hash set → verify (a) plan_path file SHA-256
+    matches stored plan_hash ([plan_hash_mismatch]), (b) staged files are a
+    subset of the plan's <!-- scope: path1 path2 ... --> block, or
+    unrestricted if the block is `* ` ([staged_outside_scope]).
+  - phase == "execution" + no plan → allow (back-compat / opt-out path).
+
+Bypass via `git commit --no-verify`. Note (per spec §103): standard git does
+NOT record --no-verify in commit metadata, so there is no reliable post-hoc
+detection of bypass. Marker-file mechanism deferred to v1.5.3.
+
+Implementation language is Python (platform-engineer msg 985 F1, option b):
+stdlib only — `json`, `hashlib`, `subprocess`, `re` — works on every dev
+machine that has the Vaak backend (Python ≥3.x). git-for-Windows ships with
+MSYS bash and dispatches the shebang to `python3` on PATH; Microsoft-Store
+Python users may need to install python.org Python or alias `python3`.
+
+Exit codes: 0 = allow commit, 1 = reject commit (git aborts the commit).
+"""
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def repo_root() -> Path:
+    """Resolve git toplevel from cwd (works whether the hook is invoked from
+    a subdirectory or the repo root)."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL
+        )
+        return Path(out.decode().strip())
+    except subprocess.CalledProcessError:
+        # Not in a git repo — defensive; git wouldn't run hooks in this case.
+        return Path.cwd()
+
+
+def read_active_section(root: Path) -> str:
+    """Read .vaak/active-section marker (commit A.2 collab.rs writer). Falls
+    back to "default" if absent or empty — matches read_active_section_marker
+    in collab.rs."""
+    marker = root / ".vaak" / "active-section"
+    try:
+        slug = marker.read_text(encoding="utf-8").strip()
+        return slug if slug else "default"
+    except OSError:
+        return "default"
+
+
+def protocol_path_for_section(root: Path, section: str) -> Path:
+    """Mirror of vaak-mcp.rs protocol_path_for_section."""
+    if section == "default":
+        return root / ".vaak" / "protocol.json"
+    return root / ".vaak" / "sections" / section / "protocol.json"
+
+
+def parse_scope_block(plan_text: str):
+    """Mirror of vaak-mcp.rs parse_scope_block. Returns:
+      - None         → no <!-- scope: ... --> block found.
+      - []           → `* ` unrestricted scope.
+      - [str, ...]   → declared scope paths."""
+    m = re.search(r"<!--\s*scope:\s*([^>]*?)\s*-->", plan_text)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    if body == "*" or body == "":
+        return []
+    return body.split()
+
+
+def staged_files() -> list:
+    """Files in the index, relative to repo root."""
+    out = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only"], stderr=subprocess.DEVNULL
+    )
+    return [line for line in out.decode().splitlines() if line.strip()]
+
+
+def reject(code: str, msg: str) -> None:
+    sys.stderr.write(f"[{code}] {msg}\n")
+    sys.stderr.write(
+        "\nBypass with `git commit --no-verify` (audit caveat: standard git does\n"
+        "not record --no-verify in commit metadata; bypasses are not post-hoc\n"
+        "auditable per spec §103).\n"
+    )
+    sys.exit(1)
+
+
+def main() -> None:
+    root = repo_root()
+    section = read_active_section(root)
+    proto_path = protocol_path_for_section(root, section)
+
+    if not proto_path.exists():
+        # No protocol state → no two-controls gate engaged. Allow commit.
+        sys.exit(0)
+
+    try:
+        proto = json.loads(proto_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # Malformed protocol → don't block, but warn so the user knows the
+        # gate isn't active.
+        sys.stderr.write(
+            f"[two-controls-hook] warning: could not parse {proto_path} — "
+            "two-controls gate is OFF for this commit.\n"
+        )
+        sys.exit(0)
+
+    floor = proto.get("floor") or {}
+    phase = floor.get("phase", "execution")
+
+    if phase == "planning":
+        reject(
+            "planning_blocks_commit",
+            f"Team is in planning phase for section '{section}'. accept_plan first "
+            "before committing code.",
+        )
+
+    if phase != "execution":
+        # Unknown phase — don't block but warn.
+        sys.stderr.write(
+            f"[two-controls-hook] warning: unknown phase '{phase}' — gate OFF.\n"
+        )
+        sys.exit(0)
+
+    plan_path = floor.get("plan_path")
+    plan_hash = floor.get("plan_hash")
+
+    if not plan_path or not plan_hash:
+        # No plan accepted → back-compat / opt-out path per spec §102. Allow.
+        sys.exit(0)
+
+    # plan_path is repo-relative under .vaak/design-notes/.
+    plan_full = root / plan_path
+    if not plan_full.exists():
+        reject(
+            "plan_path_missing",
+            f"Accepted plan_path '{plan_path}' is missing on disk. "
+            "Re-run accept_plan or open_planning to recover.",
+        )
+
+    # Verify plan_hash (a) — SHA-256 of plan file matches stored hash.
+    actual_hash = hashlib.sha256(plan_full.read_bytes()).hexdigest()
+    if actual_hash != plan_hash:
+        reject(
+            "plan_hash_mismatch",
+            f"plan_path '{plan_path}' was edited since accept_plan. "
+            f"Stored hash: {plan_hash[:16]}... Actual: {actual_hash[:16]}... "
+            "Call protocol_mutate(revise_plan, ...) to re-bind the hash before "
+            "committing (architect/manager/human only).",
+        )
+
+    # Verify scope block (b) — staged files are subset of declared scope.
+    scope = parse_scope_block(plan_full.read_text(encoding="utf-8"))
+    if scope is None:
+        # accept_plan should have rejected this on the server side; defensive.
+        reject(
+            "plan_scope_block_missing",
+            f"plan_path '{plan_path}' lacks <!-- scope: ... --> block. "
+            "Use <!-- scope: * --> for unrestricted plans.",
+        )
+
+    if not scope:
+        # Unrestricted * → no scope check.
+        sys.exit(0)
+
+    # Convert scope entries to a comparable set. Scope entries are exact paths
+    # OR directory-prefix matches (path ending in "/"). Path normalization:
+    # forward-slash form, no leading "./".
+    def normalize(p: str) -> str:
+        return p.replace("\\", "/").lstrip("./")
+
+    scope_set = {normalize(p) for p in scope}
+    out_of_scope = []
+    for staged in staged_files():
+        s = normalize(staged)
+        if s in scope_set:
+            continue
+        # Directory-prefix match: any scope entry ending with '/' allows
+        # files under that directory.
+        if any(p.endswith("/") and s.startswith(p) for p in scope_set):
+            continue
+        out_of_scope.append(staged)
+
+    if out_of_scope:
+        reject(
+            "staged_outside_scope",
+            f"Staged files outside the plan's declared scope:\n  "
+            + "\n  ".join(out_of_scope)
+            + f"\n\nDeclared scope from {plan_path}:\n  "
+            + "\n  ".join(sorted(scope_set))
+            + "\n\nEither (a) re-stage only in-scope files, or (b) call "
+            "protocol_mutate(revise_plan, ...) to widen the plan's scope "
+            "block (architect/manager/human only).",
+        )
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
