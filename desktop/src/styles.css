@@ -15,6 +15,15 @@
   --warning: #f59e0b;
   --border: #27272a;
 
+  /* Turn-type colors (v1.5.1 typed turn declaration) — paired with text label
+   * for color-blind accessibility per phase-pill spec recipe. Hue-distinct
+   * 500-shade backgrounds; foreground text uses --text-primary against
+   * --bg-primary for ≥4.5:1 contrast in the mic-landed card header. */
+  --turn-working: #6366f1;     /* indigo — long-form deep work */
+  --turn-reviewing: #14b8a6;   /* teal — short focused critique */
+  --turn-passing: #6b7280;     /* slate — pass-by-default neutral */
+  --turn-thinking: #a855f7;    /* purple — synthesis across prior turns */
+
   /* Spacing */
   --radius-sm: 6px;
   --radius-md: 10px;

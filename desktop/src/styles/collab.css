@@ -1679,6 +1679,62 @@
   white-space: pre-wrap;
 }
 
+/* ==================== Mic-landed cards (v1.5.1 typed turn) ==================== */
+/* Special-case render of mic_landed system messages that carry typed turn
+ * metadata (turn_type + expected_duration_secs from v1.5.1 mic_claim).
+ * Falls back to default .message-card render when those fields are absent
+ * (back-compat for pre-v1.5.1 mic_landed events in scrollback). */
+
+.mic-landed-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 10px 12px;
+  border-left: 3px solid #657786;
+}
+
+.mic-landed-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.mic-landed-label {
+  font-weight: 700;
+  color: var(--collab-text-primary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.mic-landed-target {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.mic-landed-prev-turn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.turn-type-working { color: var(--turn-working); }
+.turn-type-reviewing { color: var(--turn-reviewing); }
+.turn-type-passing { color: var(--turn-passing); }
+.turn-type-thinking { color: var(--turn-thinking); }
+
+.mic-landed-body {
+  color: #ccd6dd;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  margin-top: 4px;
+  opacity: 0.85;
+}
+
 /* ==================== Message Type Badges ==================== */
 
 .message-type-badge {

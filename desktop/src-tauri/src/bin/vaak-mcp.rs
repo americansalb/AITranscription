@@ -3915,9 +3915,11 @@ fn apply_mic_claim(
         .and_then(|v| v.as_u64())
         .unwrap_or(match turn_type {
             // Defaults set inside the 30-600 bounds so a no-arg claim
-            // of any turn_type succeeds. Evil-architect msg 896 caught
-            // the prior "working => 900" default rejecting itself.
-            "working" => 600,
+            // of any turn_type succeeds. Architect msg 898 sets working
+            // default to 300 (between routine review at 120s and the
+            // 600s cap) — forces explicit declaration for genuinely
+            // long working turns rather than silently using the ceiling.
+            "working" => 300,
             "reviewing" => 120,
             "passing" => 30,
             "thinking" => 300,
@@ -5590,7 +5592,7 @@ mod protocol_slice2_tests {
         // Each turn type's default is inside the 30-600 bounds (evil-arch
         // msg 896 fix — prior "working => 900" default rejected itself).
         for (tt, want) in [
-            ("working", 600u64),
+            ("working", 300u64),
             ("reviewing", 120),
             ("passing", 30),
             ("thinking", 300),

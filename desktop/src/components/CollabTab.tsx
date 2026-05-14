@@ -3970,6 +3970,37 @@ When multiple instances of this role are active:
                 );
               }
 
+              if (msg.type === "mic_landed" && typeof msg.metadata?.prev_turn_type === "string") {
+                const targetRole = msg.to.split(":")[0];
+                const targetColor = getRoleColor(targetRole);
+                const prevTurnType = msg.metadata.prev_turn_type as string;
+                const prevSecs = typeof msg.metadata.prev_expected_duration_secs === "number"
+                  ? (msg.metadata.prev_expected_duration_secs as number)
+                  : null;
+                const prevDisplay = prevSecs !== null
+                  ? prevSecs >= 60
+                    ? `~${Math.round(prevSecs / 60)}min`
+                    : `~${prevSecs}s`
+                  : "";
+                const prevLabel = prevTurnType.charAt(0).toUpperCase() + prevTurnType.slice(1);
+                const prevSpeaker = typeof msg.metadata.from_speaker === "string"
+                  ? (msg.metadata.from_speaker as string)
+                  : null;
+                return (
+                  <div key={msg.id} className="mic-landed-card" style={{ borderLeftColor: targetColor }}>
+                    <div className="mic-landed-header">
+                      <span className="mic-landed-label">[YOUR TURN]</span>
+                      <span className="mic-landed-target" style={{ color: targetColor }}>{msg.to}</span>
+                      <span className={`mic-landed-prev-turn turn-type-${prevTurnType}`}>
+                        prev{prevSpeaker ? `: ${prevSpeaker}` : ""} was {prevLabel}{prevDisplay ? ` ${prevDisplay}` : ""}
+                      </span>
+                      <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
+                    </div>
+                    {msg.body && <div className="mic-landed-body">{msg.body}</div>}
+                  </div>
+                );
+              }
+
               const fromRole = msg.from.split(":")[0];
               const borderColor = getRoleColor(fromRole);
               return (
