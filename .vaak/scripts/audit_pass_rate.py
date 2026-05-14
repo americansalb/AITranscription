@@ -33,11 +33,20 @@ PASS_PATTERNS = [
 def classify(msg: dict) -> tuple[str, str | None]:
     """Return (category, signal) where category is one of:
     pass | ack | substantive
+
+    Proposal 1's `turn_type` field is the authoritative signal once present.
+    Heuristic fallbacks handle messages from before the typed-turn rollout.
     """
     body = (msg.get("body") or "").strip()
     md = msg.get("metadata") or {}
+    turn_type = md.get("turn_type") or ""
     activity = md.get("activity") or ""
 
+    # Authoritative: caller declared turn_type explicitly (proposal 1 wire format).
+    if turn_type == "passing":
+        return "pass", "turn_type:passing"
+
+    # Heuristic fallbacks (pre-proposal-1 corpus or omitting turn_type).
     if not body or len(body) < 30:
         return "pass", "empty_or_tiny"
 

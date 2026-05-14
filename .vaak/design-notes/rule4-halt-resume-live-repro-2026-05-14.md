@@ -2,11 +2,15 @@
 
 Authored by tester:0 during the 30h autonomous window opened by human msg 725. Documents the live reproduction of the rule 4 halt-clear failure that paralyzed the team for ~30 minutes around 01:11Z – 01:45Z and was independently confirmed by tester:0, evil-architect:0, ui-architect:0, and developer:0.
 
-## Diagnosis (already converged)
+## Diagnosis (converged through three corrections)
 
 Per ui-architect msg 728: `vaak-mcp.rs:6310-6373` code path is correct — writes `floor_resumed_after_human` when `state.halted_for_human` flips false on a human post. Per ui-architect grep: zero `floor_resumed_after_human` events on `.vaak/sections/5-12/board.jsonl` across 724 messages, despite 11+ `floor_halted_for_human` events on the same board.
 
-Conclusion: **deployment gap, not code bug.** Pre-v1.0.5 (`fdae942`) sidecar processes do not contain the resume-event write logic. Active agent sessions retain the sidecar process they were spawned with (per `feedback_sidecar_rebuild_per_process_stale`), so any session predating `fdae942` is a permanent halt-trap for the role it owns. The halt only clears when one of the post-fdae942 sidecars triggers `al_auto_advance`, which has a halt-clear side effect — but the timing of that side effect is not the design intent (immediate-on-human-post). It is whatever timing `al_auto_advance` has.
+**Sharpened diagnosis (tester msg 745 code-trace correction):** the resume logic at vaak-mcp.rs:6297-6375 is gated by `if asm_active && state.role == "human"` at line 6302. The `state.role == "human"` check confines this code path to **the human's vaak.exe process specifically** — AI agent sidecars never have `state.role == "human"`, so they never run the resume write regardless of build version. The "stale sidecars in rotation" framing was directionally wrong; the actual gap is the human's binary build.
+
+Conclusion: **deployment gap is specifically the human's running vaak.exe**, not the multi-cohort agent sidecars. The human's currently-running vaak.exe predates `fdae942`, so when human:0 posts a message, their own sidecar processes the send but the v1.0.5 resume-write code does not exist in their binary. The halt-clear side effect via `al_auto_advance` (which AI sidecars write) is the only observed organic clearing — and its timing is incidental, not the design intent.
+
+This sharper diagnosis matters for the v1.5.1 spec acceptance gate: A1 ("Human posts a plain message... Within 5 seconds, halted_for_human == false") will fail today regardless of which AI sidecars are in rotation; it depends entirely on the human's vaak.exe build being ≥ `fdae942`. Architect msg 749 folded this into the spec (A1 is now explicitly out-of-PR-scope; the fix is the pending vaak.exe reinstall, not new code).
 
 ## Timeline (msg ids from `.vaak/sections/5-12/board.jsonl`)
 
@@ -51,11 +55,13 @@ Edit `.vaak/sections/<section>/protocol.json` directly:
 
 The file write is atomic; no file lock needed for this single-field flip. Other agents will pick up the new state on their next `get_protocol` or `project_send` attempt.
 
-## Permanent fix (next vaak.exe reinstall by human)
+## Permanent fix (human's vaak.exe reinstall)
 
-Reinstalling vaak.exe rolls every active agent's sidecar to a post-fdae942 build. Once every sidecar in the rotation contains the `floor_resumed_after_human` write logic, every human post triggers the resume event correctly. This is the deployment gap closing organically.
+Reinstalling vaak.exe replaces the **human's** running binary with a post-fdae942 build. Once the human's vaak.exe contains the v1.0.5 `floor_resumed_after_human` write logic (gated to `state.role == "human"` per vaak-mcp.rs:6302), every human post will trigger the resume event correctly. AI agent sidecar versions are irrelevant — they never execute the resume code path regardless of build.
 
-Until then, treat any `floor_halted_for_human` event as a candidate stuck state and apply the manual workaround if the halt persists past one human post.
+The wrap doc's pending decision #1 — deploy the existing build at `desktop/src-tauri/target/release/vaak-desktop.exe` — is the permanent fix. No additional code changes needed; v1.0.5 is already on disk waiting to be installed.
+
+Until that deploy, treat any `floor_halted_for_human` event as a candidate stuck state and apply the manual workaround if the halt persists past one human post.
 
 ## Relation to msg 717 proposals
 
@@ -63,4 +69,4 @@ Evil-architect msg 723 gap 2 (human-as-hard-interrupt for proposal 1) is the str
 
 ## Relation to multi-writer audit doc
 
-This case is a concrete failure under Instance 9 (binary deployment per-process / fragmented cohort) in `.vaak/design-notes/multi-writer-audit-2026-05-13.md`. The fragmented-cohort thesis: when different sidecar versions coexist, behavioral contracts that depend on writer-side participation (like the resume event) silently fail for the older cohort. Architect-lane should consider folding this as a worked example into the audit doc.
+This case is a concrete failure under Instance 9 (binary deployment per-process / fragmented cohort) in `.vaak/design-notes/multi-writer-audit-2026-05-13.md`. The fragmented-cohort thesis: behavioral contracts that depend on a specific writer (here, the human's sidecar) silently fail when that writer's binary version lags the contract. The "single-writer gap" in this case is sharper than the typical multi-writer audit instance — there is only one writer for this code path (the human's vaak.exe), and its version determines whether the contract holds at all. Worth folding as a worked example into the audit doc.
