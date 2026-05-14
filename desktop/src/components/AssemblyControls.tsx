@@ -42,10 +42,14 @@ export type AssemblyControlsProps = {
 const REVISE_ALLOWED_ROLES = new Set(['architect', 'manager', 'human']);
 
 export function AssemblyControls({ protocol, mutate, lastError, selfRole }: AssemblyControlsProps) {
-  // Render only on commit-A-protocol surface — v1.5.1 sections lack these fields.
-  if (protocol.floor.assembly_active === undefined) return null;
-
-  const assemblyActive = protocol.floor.assembly_active;
+  // B.2 back-compat default render (per architect msg 1298 + human msg 1296).
+  // Pre-commit-A sections (5-12 et al.) lack the new floor fields. Original B.1
+  // gate `if (assembly_active === undefined) return null` made the UI invisible
+  // in every legacy section, blocking the human's live-click verification.
+  // Resolution: render with nullish-coalesce defaults — assembly OFF, execution
+  // phase, rotation mic. User opts in via the toggle; server-side state only
+  // changes once they actually issue protocol_mutate.
+  const assemblyActive = protocol.floor.assembly_active ?? false;
   const phase = protocol.floor.phase ?? 'execution';
   const micMode = protocol.floor.mic_passing_mode ?? 'rotation';
   const planPath = protocol.floor.plan_path ?? null;
