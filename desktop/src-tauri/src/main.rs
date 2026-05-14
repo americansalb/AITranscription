@@ -4959,6 +4959,23 @@ fn check_assembly_floor_watchdog(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => return,
     };
+    // moderator-authority Item 1 (spec line 28-29 / evil-arch msg 1601 #2):
+    // skip FLOOR-time stall check when the current_speaker IS the designated
+    // moderator. Moderator going silent on the floor is NORMAL — they're
+    // managing, not participating. HEARTBEAT-stale check stays in
+    // check_two_controls_dead_seats (separate function, fires on
+    // sessions.json:last_alive_at_ms staleness > 120s) — that's the legit
+    // auto-recovery path for a truly-dead moderator.
+    let mic_passing_mode = floor
+        .get("mic_passing_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation");
+    let moderator = floor
+        .get("moderator")
+        .and_then(|v| v.as_str());
+    if mic_passing_mode == "moderator" && moderator == Some(speaker.as_str()) {
+        return;
+    }
     let threshold_ms = floor
         .get("threshold_ms")
         .and_then(|v| v.as_u64())

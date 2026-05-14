@@ -2844,15 +2844,41 @@ fn next_assembly_speaker(asm: &serde_json::Value, project_dir: &str, just_sent: 
         return None;
     }
     let live: std::collections::HashSet<String> = active_assembly_seats(project_dir).into_iter().collect();
-    // Find the sender's index, then walk forward (with wrap) until we hit a live seat.
+
+    // moderator-authority Item 1+2 (spec line 31-32 + line 38-46):
+    // when mic_passing_mode == "moderator" AND a moderator is set, the moderator
+    // seat is EXEMPT from rotation — they manage the pipeline rather than
+    // participate. Read mic_passing_mode + moderator from current protocol.json
+    // (not from `asm` which is a synthesized subset). Same derived semantics
+    // as is_seat_exempt() helper.
+    let section = get_active_section(project_dir);
+    let proto = read_protocol_for_section_value(project_dir, &section);
+    let exempt_moderator: Option<String> = {
+        let floor = proto.get("floor");
+        let mic_mode = floor
+            .and_then(|f| f.get("mic_passing_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("rotation");
+        if mic_mode == "moderator" {
+            floor
+                .and_then(|f| f.get("moderator"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        } else {
+            None
+        }
+    };
+
+    // Find the sender's index, then walk forward (with wrap) until we hit a
+    // live seat that is NOT the exempt moderator.
     let start = order.iter().position(|s| s == just_sent).unwrap_or(0);
     for offset in 1..=order.len() {
         let candidate = &order[(start + offset) % order.len()];
-        if live.contains(candidate) {
+        if live.contains(candidate) && exempt_moderator.as_deref() != Some(candidate.as_str()) {
             return Some(candidate.clone());
         }
     }
-    // No live seat anywhere in rotation — degenerate; mic stays with sender.
+    // No live non-exempt seat anywhere in rotation — degenerate; mic stays with sender.
     None
 }
 
