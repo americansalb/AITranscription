@@ -151,6 +151,21 @@
   color: #a0aec0;
 }
 
+/* Item 6 (per UX-eng msg 1449 + architect msg 1464): inline notice when
+ * "Moderator" mode is picked without a moderator assigned. Amber-style hint
+ * distinct from the red-amber .assembly-modal-error (which is destructive
+ * failure). This is a soft "you need to do X first" advisory. */
+.assembly-mic-mode-hint {
+  color: #fbbf24;
+  font-size: 12px;
+  font-style: italic;
+  margin-left: 8px;
+  padding: 2px 8px;
+  background: rgba(251, 191, 36, 0.08);
+  border-left: 2px solid #fbbf24;
+  border-radius: 2px;
+}
+
 .assembly-plan-link {
   display: inline-flex;
   align-items: center;

@@ -178,11 +178,24 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
     }
   };
 
+  // Item 6 (UX-eng msg 1449 per human msg 1447 + architect msg 1464): when
+  // user picks "Moderator picks next" without a moderator assigned, watchdog
+  // would auto-promote back to rotation silently with no UI feedback. Short-
+  // circuit at the change handler — show inline notice next to the dropdown,
+  // don't fire the mutate (avoids rejection round-trip and the silent revert
+  // confusion that human msg 1447 hit).
+  const [micModeHint, setMicModeHint] = useState<string | null>(null);
   const handleMicModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const mode = e.target.value;
-    if (mode !== micMode) {
-      void mutate('set_mic_passing', { mode });
+    if (mode === micMode) return;
+    if (mode === 'moderator' && !moderator) {
+      setMicModeHint('"Moderator picks next" requires a moderator. Set one first.');
+      // Revert the select to its prior value so the dropdown reflects actual state.
+      e.target.value = micMode;
+      return;
     }
+    setMicModeHint(null);
+    void mutate('set_mic_passing', { mode });
   };
 
   // Per-mechanism status strip second line (UI-arch msg 969 fold).
@@ -325,6 +338,12 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
             <option value="moderator">Moderator</option>
           </select>
         </label>
+
+        {micModeHint && (
+          <span className="assembly-mic-mode-hint" role="alert">
+            {micModeHint}
+          </span>
+        )}
 
         {phase === 'execution' && planPath && (
           <div className="assembly-plan-link">
