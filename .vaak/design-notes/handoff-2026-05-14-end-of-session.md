@@ -82,7 +82,23 @@ The team produces a real proposal together — not code, a document.
 
 **Deliverable:** proposal document on disk with delegation chart + timelines + flow. Not code.
 
-**Test target:** pick something AALB (American Sign Language for Babies? — payments@aalb.org from the user's email) needs. Real-world proposal, not a meta-exercise.
+**Test target:** pick something AALB needs (payments@aalb.org from user's email). Real-world proposal, not a meta-exercise.
+
+**UX gaps to spec/build for P2 (per UX-eng msg 1762):**
+
+- **Affordance A — "Propose switch back to planning" button.** No UI for the school-of-fish rule's "any agent proposes switching back." Need per-seat button during execution: `[⚠ Plan gap — propose replanning]` → `protocol_mutate('propose_replanning', {reason})` → `floor.replanning_requests: [{seat, reason, ts}]` array → moderator-queue UI surfaces requests for accept/reject decision.
+- **Affordance B — Delegation chart embedded in markdown.** Use `<!-- delegation: owner=architect:0 section=I.A deadline=phase-2 deps=intro -->` blocks in the proposal document itself. Pre-commit hook extends the existing `<!-- scope: -->` convention from v1.1's A.3 to validate committer-author matches assigned owner for each delegated section. Proposal IS source of truth; no parallel Vaak-UI tracking-board needed.
+- **Affordance C — Moderator accepts/rejects replanning request.** `[Pause execution & open planning — REVIEW: <N> requests]` button in moderator-self view → expand to see reasons → Accept fires `open_planning(triggered_by=requester_seat)`. School-of-fish atomic pivot via the existing `phase_toggled` separator-card pattern from B/B.3.
+
+**Scope estimate:** ~80-100 LOC. New `propose_replanning` + `accept_replanning` `protocol_mutate` actions (both with `actor: &str` + role gate from inception per the apply_*-actor-param discipline). New `floor.replanning_requests` field. AssemblyControls.tsx affordance additions + per-section delegation-block parser + extended pre-commit hook. Spec target: `.vaak/design-notes/collaborative-proposal-workflow-spec-2026-05-15.md`.
+
+**Open questions for next-session architect:**
+
+1. **Pre-commit hook validates `<!-- delegation: -->` committer-author match?** Yes — extends v1.1 A.3 pattern. Committer must be the assigned owner (or moderator override).
+2. **Replanning requests collected DM (anti-bias per msg 1528) or broadcast (transparency)?** Trade-off: DM keeps moderator's accept/reject from being pressured by visible peer-pile-on, broadcast makes the team aware of brewing issues. Probably DM-collected by default with broadcast option per request. Architect call next session.
+3. **Claude extended thinking per seat in planning mode — each thinks pre-broadcast, or only current-mic-holder?** Each-seat-thinking is the deeper-consideration premise human msg 1757 asked for; mic-holder-only thinking is faster. Probably each-seat in planning, mic-holder-only in execution. Architect call.
+
+**Test scenario suggestion (UX-eng msg 1762):** team drafts Vaak's own next-quarter roadmap as the meta-proposal. The team has full subject-matter context; deliverable becomes next-session input. Validates the workflow with a real document the team can iterate on rather than a hypothetical exercise.
 
 ### Priority 3 (gated on P2 success): Oxford debates
 Get proposal collaboration right first. Oxford debates as a structured-debate workflow come after.
