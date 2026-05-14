@@ -3979,6 +3979,39 @@ When multiple instances of this role are active:
                 );
               }
 
+              // Moderator-authority Item 5 follow-up — stale-moderator
+              // recovery card. When the watchdog auto-promotes mic-passing
+              // mode from moderator → rotation (reason: moderator_stale or
+              // moderator_vacant), render a compact recovery notice so the
+              // human knows the moderator slot was reclaimed by the team
+              // safety net. Compact (no animation) since it's a recovery
+              // event, not a school-of-fish state transition.
+              if (msg.type === "mic_mechanism_promoted") {
+                const fromMode = (msg.metadata?.from as string) ?? "moderator";
+                const toMode = (msg.metadata?.to as string) ?? "rotation";
+                const reason = (msg.metadata?.reason as string) ?? "";
+                const reasonLabel =
+                  reason === "moderator_stale" ? "moderator went stale" :
+                  reason === "moderator_vacant" ? "moderator seat vacated" :
+                  reason || "auto-recovery";
+                return (
+                  <div
+                    key={msg.id}
+                    className="mic-mechanism-promoted-card"
+                    role="status"
+                    aria-label={`Mic-passing mode auto-promoted from ${fromMode} to ${toMode}`}
+                  >
+                    <span className="mic-mechanism-promoted-icon" aria-hidden="true">⚙</span>
+                    <span className="mic-mechanism-promoted-text">
+                      Mic-passing auto-promoted: <strong>{fromMode}</strong> → <strong>{toMode}</strong> ({reasonLabel})
+                    </span>
+                    <span className="mic-mechanism-promoted-time" title={msg.timestamp}>
+                      {formatRelativeTime(msg.timestamp)}
+                    </span>
+                  </div>
+                );
+              }
+
               // Discussion events render as distinct inline cards
               if (msg.type === "moderation" && msg.metadata?.discussion_action) {
                 const action = msg.metadata.discussion_action as string;

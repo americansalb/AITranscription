@@ -176,6 +176,47 @@
   cursor: pointer;
 }
 
+/* Moderator fast-flip row — moderator-authority Item 5 (per UX-eng msg 1587
+ * split-by-surface + UI-arch msg 1589 per-actor variants). Compact below-row
+ * for the moderator seat to flip phase without the destructive-confirm modal.
+ * Distinct from the universal phase-pill which keeps the modal. */
+
+.assembly-moderator-fast-flip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 0;
+  font-size: 12px;
+  color: #a0aec0;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.assembly-fast-flip-label {
+  color: #fbbf24;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.assembly-fast-flip-btn {
+  padding: 3px 10px;
+  background: rgba(91, 108, 184, 0.15);
+  color: #c7d2fe;
+  border: 1px solid rgba(91, 108, 184, 0.4);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.assembly-fast-flip-btn:hover:not(:disabled) {
+  background: rgba(91, 108, 184, 0.25);
+}
+
+.assembly-fast-flip-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Item 6 (per UX-eng msg 1449 + architect msg 1464): inline notice when
  * "Moderator" mode is picked without a moderator assigned. Amber-style hint
  * distinct from the red-amber .assembly-modal-error (which is destructive
@@ -543,4 +584,45 @@
   .phase-toggled-separator {
     animation: none;
   }
+}
+
+/* Mic-mechanism-promoted recovery card (moderator-authority Item 5 follow-up).
+ * Compact one-line notice rendered in the message stream when the watchdog
+ * auto-promotes mic-passing mode (e.g., moderator_stale → rotation). Distinct
+ * from the phase_toggled separator card — recovery events are subtler. */
+
+.mic-mechanism-promoted-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 6px 0;
+  background: rgba(251, 191, 36, 0.06);
+  border-left: 3px solid #fbbf24;
+  border-radius: 3px;
+  font-size: 12px;
+  color: #cbd5e0;
+}
+
+.mic-mechanism-promoted-icon {
+  font-size: 14px;
+  color: #fbbf24;
+}
+
+.mic-mechanism-promoted-text {
+  flex: 1;
+}
+
+.mic-mechanism-promoted-text strong {
+  color: #e2e8f0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 11px;
+  padding: 1px 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 2px;
+}
+
+.mic-mechanism-promoted-time {
+  color: #5b6478;
+  font-size: 11px;
 }

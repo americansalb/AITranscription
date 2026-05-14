@@ -106,6 +106,31 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   const canRevise = selfRole !== null && REVISE_ALLOWED_ROLES.has(selfRole);
   const canTogglePhase = selfRole === null || selfRole === 'human';
 
+  // Item 5 — moderator fast-flip row. Renders when the current viewer IS the
+  // moderator (per UX-eng msg 1587 split-by-surface design + UI-arch msg 1589
+  // per-actor render variants). Self-seat-label derived from selfRole; human
+  // view (selfRole === null) maps to "human:0" canonical seat.
+  const selfSeatLabel = selfRole === null ? 'human:0' : `${selfRole}:0`;
+  const isSelfModerator = micMode === 'moderator' && moderator !== null && moderator === selfSeatLabel;
+
+  // Per the spec line 70-103, moderator-driven phase flips skip the modal
+  // — the explicit moderator-only surface IS the intent declaration.
+  const handleFastFlipPlanning = () => {
+    void mutate('open_planning', {});
+  };
+  const handleFastFlipExecuting = () => {
+    // For the fast-flip path, we don't open the plan-entry modal. Server
+    // requires plan_path for accept_plan — moderator must use the regular
+    // phase pill to enter a path on first flip TO execution. Fast-flip TO
+    // execution only works mid-back-and-forth when a plan_path is already
+    // bound on the section. If plan_path is null, surface a transient hint.
+    if (!planPath) {
+      setMicModeHint('No plan accepted yet. Use the phase pill to enter a plan path first; fast-flip is for back-and-forth after the initial accept.');
+      return;
+    }
+    void mutate('accept_plan', { plan_path: planPath });
+  };
+
   // ESC-to-close for both modals (Nit 1 per UX-eng msg 1155). One global
   // keydown handler dispatches to whichever modal is currently open.
   useEffect(() => {
@@ -237,16 +262,26 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     void mutate('set_mic_passing', { mode });
   };
 
+  // Item 2 of moderator-authority bundle (per UX-eng msg 1603 inline spec text
+  // + UI-arch msg 1605 endorsement): filter the moderator out of any rendered
+  // rotation/queue list when moderator mode is active. Mirrors the server-side
+  // rotation-advance filter in 9ae070d's next_assembly_speaker. Without this,
+  // the status strip would say "Moderator: ux-eng:0 (out of rotation)" AND
+  // "Next: developer:0 → ux-eng:0 → tester:0" — contradictory.
+  const isModeratorExempt = (seat: string) =>
+    micMode === 'moderator' && moderator !== null && seat === moderator;
+
   // Per-mechanism status strip second line (UI-arch msg 969 fold).
   const renderStatusLine = () => {
     if (micMode === 'rotation') {
       if (rotationOrder.length === 0) {
         return <span className="assembly-status-empty">No rotation set</span>;
       }
-      const currentIdx = currentSpeaker ? rotationOrder.indexOf(currentSpeaker) : -1;
-      const next = rotationOrder
+      const visibleOrder = rotationOrder.filter((seat) => !isModeratorExempt(seat));
+      const currentIdx = currentSpeaker ? visibleOrder.indexOf(currentSpeaker) : -1;
+      const next = visibleOrder
         .slice(currentIdx + 1)
-        .concat(rotationOrder.slice(0, Math.max(0, currentIdx)))
+        .concat(visibleOrder.slice(0, Math.max(0, currentIdx)))
         .slice(0, 3);
       return (
         <>
@@ -263,12 +298,15 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       );
     }
     if (micMode === 'hand_raise') {
+      // Defensive filter (UX-eng msg 1603): moderator shouldn't end up in
+      // hand_queue, but cheap insurance if they ever do.
+      const visibleQueue = handQueue.filter((seat) => !isModeratorExempt(seat));
       return (
         <>
           <span className="assembly-status-label">Queue:</span>{' '}
-          {handQueue.length === 0
+          {visibleQueue.length === 0
             ? <span className="assembly-status-empty">empty</span>
-            : handQueue.map((seat, i) => (
+            : visibleQueue.map((seat, i) => (
                 <span key={seat}>
                   {i > 0 && <span className="assembly-status-sep">, </span>}
                   <span className="assembly-status-seat">{seat}</span>
@@ -452,6 +490,35 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           </div>
         )}
       </div>
+
+      {/* Moderator fast-flip row — moderator-authority Item 5 per UX-eng
+          msg 1587 split-by-surface + UI-arch msg 1589 per-actor render. Only
+          the moderator seat sees this; provides no-modal phase-flip for the
+          "back and forth quite a bit" use case per human msg 1576. Spec
+          line 70-103 of moderator-authority-spec-2026-05-14.md. */}
+      {assemblyActive && isSelfModerator && (
+        <div className="assembly-moderator-fast-flip">
+          <span className="assembly-fast-flip-label">As moderator:</span>
+          <button
+            type="button"
+            className="assembly-fast-flip-btn"
+            onClick={handleFastFlipPlanning}
+            disabled={phase === 'planning'}
+            title="Flip to Planning (no modal — moderator fast-flip)"
+          >
+            → Planning
+          </button>
+          <button
+            type="button"
+            className="assembly-fast-flip-btn"
+            onClick={handleFastFlipExecuting}
+            disabled={phase === 'execution'}
+            title="Flip to Executing (no modal — moderator fast-flip; requires existing plan_path)"
+          >
+            → Executing
+          </button>
+        </div>
+      )}
 
       {/* Per-mechanism status strip — UI-arch msg 969 fold. "Currently:"
           segment dropped in B.3 Item 5 (per UX-eng spec §131): the current
