@@ -2764,6 +2764,7 @@ When multiple instances of this role are active:
             mutate={twoControlsMutate}
             lastError={twoControlsLastError}
             selfRole={null /* human view in CollabTab */}
+            projectDir={projectDir}
           />
         )}
 

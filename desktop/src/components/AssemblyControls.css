@@ -151,6 +151,31 @@
   color: #a0aec0;
 }
 
+/* B.4 Item 7 — moderator-picker dropdown (human view only). Mirrors
+ * .assembly-mic-mode styling so the two select widgets read as siblings. */
+
+.assembly-moderator-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #a0aec0;
+  font-size: 13px;
+}
+
+.assembly-moderator-label {
+  color: #a0aec0;
+}
+
+.assembly-moderator-picker select {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 /* Item 6 (per UX-eng msg 1449 + architect msg 1464): inline notice when
  * "Moderator" mode is picked without a moderator assigned. Amber-style hint
  * distinct from the red-amber .assembly-modal-error (which is destructive

@@ -23,10 +23,23 @@
 // - Combination map (2x2) with filled-accent active cell + hover tooltips
 
 import { useState, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type { Protocol } from '../hooks/useProtocolState';
 import './AssemblyControls.css';
 
 type Mutate = (action: string, args?: object) => Promise<Protocol | null>;
+
+// B.4 Item 7 (per UX-eng spec §104-136 follow-up + human msg 1447 Q1/Q2):
+// active-seats response shape from main.rs's list_active_seats_cmd at
+// commit 7abef44 (developer:0). The `label` field is the canonical
+// "role:instance" seat id used by set_moderator's args.seat.
+type ActiveSeat = {
+  role: string;
+  instance: number;
+  label: string;
+  last_heartbeat: string;
+};
+type ActiveSeatsResponse = { seats: ActiveSeat[] };
 
 export type AssemblyControlsProps = {
   protocol: Protocol;
@@ -37,11 +50,12 @@ export type AssemblyControlsProps = {
   // so the user sees WHY their Accept/Revise/Discard click didn't take.
   lastError: string | null;
   selfRole: string | null; // current user's role slug (null = human view)
+  projectDir: string | null; // for the list_active_seats_cmd IPC (B.4)
 };
 
 const REVISE_ALLOWED_ROLES = new Set(['architect', 'manager', 'human']);
 
-export function AssemblyControls({ protocol, mutate, lastError, selfRole }: AssemblyControlsProps) {
+export function AssemblyControls({ protocol, mutate, lastError, selfRole, projectDir }: AssemblyControlsProps) {
   // B.2 back-compat default render (per architect msg 1298 + human msg 1296).
   // Pre-commit-A sections (5-12 et al.) lack the new floor fields. Original B.1
   // gate `if (assembly_active === undefined) return null` made the UI invisible
@@ -185,6 +199,31 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
   // don't fire the mutate (avoids rejection round-trip and the silent revert
   // confusion that human msg 1447 hit).
   const [micModeHint, setMicModeHint] = useState<string | null>(null);
+
+  // B.4 Item 7 — moderator-picker dropdown wired to list_active_seats_cmd
+  // (developer:0 commit 7abef44). Fetched on mount + when assembly turns on.
+  // Dropdown renders only when selfRole === null (human view) AND
+  // assemblyActive — picking a moderator on a disabled assembly is moot.
+  const [activeSeats, setActiveSeats] = useState<ActiveSeat[]>([]);
+  useEffect(() => {
+    if (!projectDir || !assemblyActive) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await invoke<ActiveSeatsResponse>('list_active_seats_cmd', { dir: projectDir });
+        if (!cancelled) setActiveSeats(resp.seats);
+      } catch (e) {
+        console.warn('[AssemblyControls] list_active_seats_cmd failed:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [projectDir, assemblyActive, currentSpeaker]);
+
+  const handleModeratorChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const seat = e.target.value;
+    if (!seat || seat === moderator) return;
+    void mutate('set_moderator', { seat });
+  };
   const handleMicModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const mode = e.target.value;
     if (mode === micMode) return;
@@ -338,6 +377,28 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
             <option value="moderator">Moderator</option>
           </select>
         </label>
+
+        {/* B.4 Item 7 — moderator-picker dropdown. Only renders for the human
+            view (selfRole === null) since set_moderator is human-only gated
+            at apply_set_moderator per A.2.1's [SetModeratorForbidden] gate.
+            Renders when assembly is ON so the human can stage a moderator
+            BEFORE switching mic-mode to Moderator (Item 6's short-circuit
+            requires this). */}
+        {assemblyActive && selfRole === null && (
+          <label className="assembly-moderator-picker">
+            <span className="assembly-moderator-label">Moderator:</span>
+            <select
+              value={moderator ?? ''}
+              onChange={handleModeratorChange}
+              title="Pick a moderator. Required before switching mic-passing mode to Moderator."
+            >
+              <option value="">— none —</option>
+              {activeSeats.map((seat) => (
+                <option key={seat.label} value={seat.label}>{seat.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
 
         {micModeHint && (
           <span className="assembly-mic-mode-hint" role="alert">
