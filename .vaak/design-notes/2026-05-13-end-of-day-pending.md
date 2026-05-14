@@ -106,6 +106,24 @@ Catalogued as 10 instances in `.vaak/design-notes/multi-writer-audit-2026-05-13.
 - **V2 collaborate work on `pr-pipeline-bundle`** — separate architecture per human id 729 + id 740; full V2 spec at `9cdf4bd:COLLABORATE_V2_SPEC.html` (3158 lines).
 - **Code-translator role restoration** — voice integration dependency.
 
+## Adversarial findings landed today (per dev-challenger msg 705)
+
+Closed-by-fix:
+- `c687249 → af98236` — rule 4 string-prefix → `_legacy_compat` flag check
+- `be2b28d` (v1.0.3) — read_assembly_state dead-path migration; three prior commits (1c26267, e582e6e, 7895a03) were silently inert against the orphaned `assembly.json` read
+- `3e17350` (v1.0.4) — rule 4 actually halts the floor (was theatrical)
+- `fdae942` (v1.0.5) — halt-resume audit symmetry on board.jsonl
+- `1ce917e` (v1.0.6) — watchdog respects heartbeat freshness (awaits desktop deploy)
+- Rule 3 spec drift (corrected via spec corrigendum, no code change needed)
+- Preset literal proliferation → v1.5.0 inaugural PR (commits 1-2 shipped)
+
+Adversarial pre-reviews completed pre-implementation (the process shift today's chain forced):
+- v1.5.0 Preset enum spec: 8 findings folded BEFORE commit 1
+- v1.5.0 commit 1 (1cd488d): PASS + spec-vs-code note (RedTeam/Debate naming alignment)
+- v1.5.0 commit 2 (e6e09a6): PASS + process note (mod rename scope-mixed)
+- typed-CSS spec (a2c1315): 4 findings folded into 584568b corrigendum
+- Multi-writer audit 10-instance stress-test triage: Instance 4 has v1.0.7 interim gate already shipped (7aa8d22)
+
 ## Process discipline established today
 
 Six review-chain shifts from aspirational to operational:
