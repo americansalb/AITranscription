@@ -301,7 +301,24 @@ function CompactMicLine({
   // AL is on. Each seat gets a real pill (not text). Three named states:
   // current speaker (filled), next-up (outlined), idle (muted).
   const isAssemblyLine = protocol.floor.mode === 'round-robin';
-  const rotation = protocol.floor.rotation_order;
+  // Moderator-authority fix (per human msg 1713 + UI-arch msg 1714 ack):
+  // when mic_passing_mode === 'moderator' AND a moderator is set, that seat
+  // is functionally OUT of the rotation per main.rs's next_assembly_speaker
+  // filter (commit 9ae070d). The rotation strip MUST mirror that — otherwise
+  // the human looks at the strip and sees the moderator IN rotation,
+  // contradicting the "moderator is out of pipeline" promise. Same filter
+  // pattern as AssemblyControls.tsx renderStatusLine in d74b021. Class-of-bug
+  // per `feedback_audit_class_not_just_symbol.md` — sibling render-site
+  // missed in the original filter pass.
+  const moderatorExempt = protocol.floor.mic_passing_mode === 'moderator'
+    && protocol.floor.moderator !== null
+    && protocol.floor.moderator !== undefined
+    ? protocol.floor.moderator
+    : null;
+  const rawRotation = protocol.floor.rotation_order;
+  const rotation = moderatorExempt
+    ? rawRotation.filter((seat) => seat !== moderatorExempt)
+    : rawRotation;
   const speakerIdx = speaker ? rotation.indexOf(speaker) : -1;
   const nextUp = isAssemblyLine && rotation.length > 0 && speakerIdx >= 0
     ? rotation[(speakerIdx + 1) % rotation.length]
