@@ -12,12 +12,14 @@ import {
   saveSRVoiceId,
 } from "./lib/voiceStream";
 import { keyEventToHotkey } from "./components/Settings";
+import { useToast } from "./components/Toast";
 import { formatHotkeyForDisplay, isWindows, isMacOS, getModifierKeyName } from "./lib/platform";
 import "./styles/screen-reader.css";
 
 const SR_DETAIL_LABELS = ["Brief", "Concise", "Balanced", "Thorough", "Exhaustive"];
 
 export function ScreenReaderApp() {
+  const { showToast } = useToast();
   const [enabled, setEnabled] = useState(() => localStorage.getItem("vaak_sr_enabled") !== "false");
   const [srModel, setSRModel] = useState(() => getStoredSRModel());
   const [srDetail, setSRDetail] = useState(() => getStoredSRDetail());
@@ -42,7 +44,9 @@ export function ScreenReaderApp() {
           localStorage.setItem("vaak-sr-settings", JSON.stringify({ voice_id: voice }));
         }
       } catch (e) {
+        const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
         console.error("Failed to save SR settings:", e);
+        showToast(`Couldn't save screen-reader settings — ${msg}`, "error");
       }
     }
   };
@@ -105,9 +109,15 @@ export function ScreenReaderApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: "Screen reader is working.", voice_id: srVoiceId }),
       });
-      if (!resp.ok) console.error("Preview failed");
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => `HTTP ${resp.status}`);
+        console.error("Preview failed");
+        showToast(`Voice preview failed — ${text}`, "error");
+      }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("Voice preview error:", e);
+      showToast(`Voice preview error — ${msg}`, "error");
     }
   };
 
@@ -202,7 +212,9 @@ export function ScreenReaderApp() {
                       const { invoke } = await import("@tauri-apps/api/core");
                       await invoke("set_focus_tracking", { enabled: next });
                     } catch (e) {
+                      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
                       console.error("Failed to toggle focus tracking:", e);
+                      showToast(`Couldn't toggle focus tracking — ${msg}`, "error");
                     }
                   }
                 }}
