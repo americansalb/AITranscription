@@ -679,10 +679,11 @@ export function CollabTab() {
   // AssemblyControls. Listener doubles up with ProtocolPanel's internal
   // useProtocolState — both re-render on protocol_changed pushes; cost is
   // one extra get_protocol_cmd per push, accepted for commit B simplicity.
-  const { state: twoControlsProtocol, mutate: twoControlsMutate } = useProtocolState(
-    projectDir,
-    activeSection || "default",
-  );
+  const {
+    state: twoControlsProtocol,
+    mutate: twoControlsMutate,
+    lastError: twoControlsLastError,
+  } = useProtocolState(projectDir, activeSection || "default");
   const [newSectionName, setNewSectionName] = useState("");
   const [creatingSectionMode, setCreatingSectionMode] = useState(false);
   const [sectionLoading, setSectionLoading] = useState(false);
@@ -2755,6 +2756,7 @@ When multiple instances of this role are active:
           <AssemblyControls
             protocol={twoControlsProtocol}
             mutate={twoControlsMutate}
+            lastError={twoControlsLastError}
             selfRole={null /* human view in CollabTab */}
           />
         )}

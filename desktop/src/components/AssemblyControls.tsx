@@ -22,7 +22,7 @@
 // - Per-mechanism status strip below the controls (UI-arch msg 969 fold)
 // - Combination map (2x2) with filled-accent active cell + hover tooltips
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { Protocol } from '../hooks/useProtocolState';
 import './AssemblyControls.css';
 
@@ -31,13 +31,17 @@ type Mutate = (action: string, args?: object) => Promise<Protocol | null>;
 export type AssemblyControlsProps = {
   protocol: Protocol;
   mutate: Mutate;
+  // Latest error from useProtocolState (translated via friendlyError). B.1 fold
+  // per UX-eng msg 1155 FINDING — modal bodies surface server-side rejections
+  // (PlanPathMissing, RevisePlanForbidden, SetModeratorForbidden, etc.) inline
+  // so the user sees WHY their Accept/Revise/Discard click didn't take.
+  lastError: string | null;
   selfRole: string | null; // current user's role slug (null = human view)
 };
 
 const REVISE_ALLOWED_ROLES = new Set(['architect', 'manager', 'human']);
-const HUMAN_ONLY_ROLES = new Set(['human']);
 
-export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControlsProps) {
+export function AssemblyControls({ protocol, mutate, lastError, selfRole }: AssemblyControlsProps) {
   // Render only on commit-A-protocol surface — v1.5.1 sections lack these fields.
   if (protocol.floor.assembly_active === undefined) return null;
 
@@ -58,17 +62,66 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
   const [revisionNote, setRevisionNote] = useState('');
   // ••• menu dropdown open state.
   const [planMenuOpen, setPlanMenuOpen] = useState(false);
+  // Baseline-snapshot pattern for surfacing modal errors (B.1 fold per UX-eng
+  // msg 1155 FINDING). When a modal opens we snapshot the current `lastError`
+  // — any future `lastError` that differs from the baseline is an error that
+  // landed AFTER the modal opened (i.e., from a failed mutate on this attempt).
+  // Avoids stale-closure issues that would come with an async-read approach,
+  // and avoids needing a separate setModalError state.
+  const [errorBaseline, setErrorBaseline] = useState<string | null>(null);
+  const displayError = lastError !== errorBaseline ? lastError : null;
+  // Refs for default-focus targets on each modal (Nit 1 per UX-eng msg 1155).
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  const planInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Nit 2 (UX-eng msg 1155): tighten the phase-toggle authority gate. Original
+  // `selfRole === null` worked for CollabTab's human view but would let any
+  // AI agent with null role lookup also toggle. Explicit human-only allows the
+  // current usage AND blocks future AI-bound contexts where AssemblyControls
+  // might be rendered.
   const canRevise = selfRole !== null && REVISE_ALLOWED_ROLES.has(selfRole);
-  const canTogglePhase = selfRole === null || HUMAN_ONLY_ROLES.has(selfRole);
+  const canTogglePhase = selfRole === null || selfRole === 'human';
 
-  // Action handlers — all use mutate() which is fire-and-forget; state arrives via protocol_changed.
+  // ESC-to-close for both modals (Nit 1 per UX-eng msg 1155). One global
+  // keydown handler dispatches to whichever modal is currently open.
+  useEffect(() => {
+    if (!confirmOpenPlanning && !planEntryMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (confirmOpenPlanning) {
+        setConfirmOpenPlanning(false);
+      } else if (planEntryMode) {
+        setPlanEntryMode(null);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [confirmOpenPlanning, planEntryMode]);
+
+  // Default-focus on open: Cancel for destructive-confirm (safer default per
+  // destructive-action UX convention), input field for plan-entry.
+  useEffect(() => {
+    if (confirmOpenPlanning) {
+      confirmCancelRef.current?.focus();
+    } else if (planEntryMode) {
+      planInputRef.current?.focus();
+    }
+  }, [confirmOpenPlanning, planEntryMode]);
+
+  // FINDING (UX-eng msg 1155): server-side rejections (PlanPathMissing,
+  // RevisePlanForbidden, SetModeratorForbidden, etc.) used to fire-and-forget
+  // — modal closed, nothing happened, user confused. Now await mutate(),
+  // catch error from useProtocolState.friendlyError, surface inline in modal
+  // body. Modal stays open on error so the user can correct and retry.
   const handleAssemblyToggle = () => {
     void mutate('set_assembly', { active: !assemblyActive });
   };
 
   const handlePhaseToggle = () => {
     if (!canTogglePhase) return;
+    // Snapshot lastError baseline so we only show errors that land AFTER this
+    // modal opens (B.1 baseline-snapshot pattern).
+    setErrorBaseline(lastError);
     if (phase === 'planning') {
       // planning → execution requires a plan_path; open the accept-plan entry.
       setPlanEntryMode('accept');
@@ -79,22 +132,40 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
     }
   };
 
-  const confirmOpenPlanningSubmit = () => {
-    void mutate('open_planning', {});
-    setConfirmOpenPlanning(false);
+  // Open revise-plan entry from the ••• menu — snapshot the baseline too.
+  const openReviseModal = () => {
+    setErrorBaseline(lastError);
+    setPlanEntryMode('revise');
+    setPlanPathInput(planPath ?? '');
+    setRevisionNote('');
+    setPlanMenuOpen(false);
   };
 
-  const submitPlanPath = () => {
+  const confirmOpenPlanningSubmit = async () => {
+    const result = await mutate('open_planning', {});
+    // Only close on success. On failure (result === null), the hook has
+    // updated lastError; displayError will surface it on next render.
+    if (result !== null) {
+      setConfirmOpenPlanning(false);
+    }
+  };
+
+  const submitPlanPath = async () => {
     const path = planPathInput.trim();
     if (!path) return;
+    let result: Protocol | null = null;
     if (planEntryMode === 'accept') {
-      void mutate('accept_plan', { plan_path: path });
+      result = await mutate('accept_plan', { plan_path: path });
     } else if (planEntryMode === 'revise') {
-      void mutate('revise_plan', { plan_path: path, revision_note: revisionNote.trim() });
+      result = await mutate('revise_plan', { plan_path: path, revision_note: revisionNote.trim() });
     }
-    setPlanEntryMode(null);
-    setPlanPathInput('');
-    setRevisionNote('');
+    // Only close on success. On failure, modal stays open and displayError
+    // surfaces the friendly translation of the server-side error variant.
+    if (result !== null) {
+      setPlanEntryMode(null);
+      setPlanPathInput('');
+      setRevisionNote('');
+    }
   };
 
   const handleMicModeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -248,12 +319,7 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
                     type="button"
                     role="menuitem"
                     className="assembly-plan-menu-item"
-                    onClick={() => {
-                      setPlanEntryMode('revise');
-                      setPlanPathInput(planPath);
-                      setRevisionNote('');
-                      setPlanMenuOpen(false);
-                    }}
+                    onClick={openReviseModal}
                     disabled={!canRevise}
                     title={
                       canRevise
@@ -325,8 +391,18 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
                 'Switch to planning phase. Commits will be blocked until a new plan is accepted.'
               )}
             </div>
+            {displayError && (
+              <div className="assembly-modal-error" role="alert">
+                {displayError}
+              </div>
+            )}
             <div className="assembly-modal-actions">
-              <button type="button" className="assembly-modal-cancel" onClick={() => setConfirmOpenPlanning(false)}>
+              <button
+                type="button"
+                className="assembly-modal-cancel"
+                onClick={() => setConfirmOpenPlanning(false)}
+                ref={confirmCancelRef}
+              >
                 Cancel
               </button>
               <button type="button" className="assembly-modal-confirm" onClick={confirmOpenPlanningSubmit}>
@@ -348,12 +424,12 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
               <label className="assembly-modal-field">
                 <span>Plan path (under <code>.vaak/design-notes/</code>):</span>
                 <input
+                  ref={planInputRef}
                   type="text"
                   className="assembly-modal-input"
                   value={planPathInput}
                   onChange={(e) => setPlanPathInput(e.target.value)}
                   placeholder=".vaak/design-notes/your-plan-2026-XX-XX.md"
-                  autoFocus
                 />
               </label>
               {planEntryMode === 'revise' && (
@@ -373,6 +449,11 @@ export function AssemblyControls({ protocol, mutate, selfRole }: AssemblyControl
                 Use <code>&lt;!-- scope: * --&gt;</code> for an unrestricted plan.
               </div>
             </div>
+            {displayError && (
+              <div className="assembly-modal-error" role="alert">
+                {displayError}
+              </div>
+            )}
             <div className="assembly-modal-actions">
               <button type="button" className="assembly-modal-cancel" onClick={() => setPlanEntryMode(null)}>
                 Cancel

@@ -414,6 +414,22 @@
   margin-top: 8px;
 }
 
+/* Inline error region in modal body (B.1 fold per UX-eng msg 1155 FINDING).
+ * Renders when a server-side mutate rejection lands while a modal is open;
+ * uses red-amber palette so it's clearly distinguishable from the modal hint
+ * styling and the confirm/cancel buttons. role="alert" surfaces it to AT. */
+
+.assembly-modal-error {
+  margin: 10px 0 12px;
+  padding: 8px 12px;
+  background: rgba(185, 28, 28, 0.12);
+  border-left: 3px solid #dc2626;
+  border-radius: 3px;
+  color: #fca5a5;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .assembly-modal-actions {
   display: flex;
   justify-content: flex-end;
