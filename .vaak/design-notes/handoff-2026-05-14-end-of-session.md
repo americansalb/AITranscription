@@ -98,7 +98,18 @@ The team produces a real proposal together — not code, a document.
 2. **Replanning requests collected DM (anti-bias per msg 1528) or broadcast (transparency)?** Trade-off: DM keeps moderator's accept/reject from being pressured by visible peer-pile-on, broadcast makes the team aware of brewing issues. Probably DM-collected by default with broadcast option per request. Architect call next session.
 3. **Claude extended thinking per seat in planning mode — each thinks pre-broadcast, or only current-mic-holder?** Each-seat-thinking is the deeper-consideration premise human msg 1757 asked for; mic-holder-only thinking is faster. Probably each-seat in planning, mic-holder-only in execution. Architect call.
 
-**Test scenario suggestion (UX-eng msg 1762):** team drafts Vaak's own next-quarter roadmap as the meta-proposal. The team has full subject-matter context; deliverable becomes next-session input. Validates the workflow with a real document the team can iterate on rather than a hypothetical exercise.
+**Test scenario suggestion (UX-eng msg 1762):** team drafts Vaak's own next-quarter roadmap as the meta-proposal. The team has full subject-matter context; deliverable becomes next-session input.
+
+**UI-arch implementation surface (per msg 1764):**
+- Affordance A: per-seat "Propose replanning" button below fast-flip row OR inline near assembly button when `phase==='execution' && selfRole !== null`. Click → text-input modal for reason → `protocol_mutate('propose_replanning', {reason})`. ~10 LOC TSX + ~5 CSS.
+- Affordance B: if active plan has `<!-- delegation: -->` blocks, plan-link area expands to show "Plan: <file>. Owner: <seat>. Deadline: <phase>". ~10 LOC.
+- Affordance C: moderator's queue: `[⚠ N replanning requests ▾]` button when `isSelfModerator && floor.replanning_requests.length > 0` → expand list with Accept/Dismiss → Accept fires `accept_replanning(triggered_by)` → server emits `phase_toggled` with reason `replanning_requested_by:<seat>`. ~15 LOC TSX + ~10 CSS.
+- Total UI: ~50-60 LOC AssemblyControls.tsx + CSS.
+- UI-arch lean on UX-eng's open question 2: broadcast-visible replanning requests (transparency > bias-prevention for this surface, since replanning is collaborative not binary-verdict).
+
+**Platform-engineer reminders (per msg 1766) — critical to fold into v1.Y spec early:**
+- **Mirror-commit discipline:** propose_replanning + accept_replanning are new `protocol_mutate` actions. Per `feedback_mirror_binary_parity_audit.md`, BOTH vaak-mcp.rs `apply_*` AND main.rs `protocol_mutate_cmd` match arms need them in the same commit. Same pattern A.5 caught after commit A only updated vaak-mcp.rs.
+- **Back-compat for new `floor.replanning_requests` field:** existing protocol.json files won't have it. Per `feedback_audit_back_compat_migration_on_field_addition.md`, field must be `Option<Vec<_>>` with `#[serde(default)]` on Rust side AND AssemblyControls TSX consumer uses `?? []` defaults at render. Same pattern as B.2 back-compat fix — design back-compat into the spec, not as a follow-up.
 
 ### Priority 3 (gated on P2 success): Oxford debates
 Get proposal collaboration right first. Oxford debates as a structured-debate workflow come after.
