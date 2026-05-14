@@ -15,7 +15,7 @@
 //   npm run lint:styles -- --formatter json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);let c=0;for(const f of r)c+=f.warnings.length;console.log(c)})"
 // then write that integer into `desktop/scripts/stylelint-baseline.txt`.
 
-const { execFileSync } = require("child_process");
+const { spawnSync } = require("child_process");
 const { readFileSync, existsSync } = require("fs");
 const { resolve, join } = require("path");
 
@@ -35,27 +35,35 @@ if (!Number.isInteger(baseline) || baseline < 0) {
   process.exit(2);
 }
 
-let stylelintOutput;
-try {
-  stylelintOutput = execFileSync(
-    process.platform === "win32" ? "npx.cmd" : "npx",
-    ["stylelint", "src/**/*.css", "--formatter", "json"],
-    { cwd: PROJECT_DIR, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }
-  );
-} catch (err) {
-  // stylelint exits non-zero when warnings or errors are present; that's expected.
-  // Its JSON output is still on stdout.
-  if (err.stdout) {
-    stylelintOutput = err.stdout;
-  } else {
-    console.error("[ratchet] stylelint invocation failed without stdout:", err.message);
-    process.exit(2);
+// shell:true handles Windows .cmd resolution; explicit pipe captures both
+// stdout and stderr. Stylelint emits its JSON report to one or the other
+// depending on version + exit-code path; we coalesce and pull the JSON
+// substring out by `[`-anchor since DeprecationWarnings can lead the stream.
+const result = spawnSync(
+  `npx stylelint "src/**/*.css" --formatter json`,
+  {
+    cwd: PROJECT_DIR,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    shell: true,
   }
+);
+
+const combined = (result.stdout || "") + (result.stderr || "");
+// Stylelint JSON output always begins with `[{`; the deprecation warning
+// noise begins with `[stylelint:` or similar. Anchor on `[{` to skip noise.
+const jsonStart = combined.indexOf("[{");
+const jsonEnd = combined.lastIndexOf("}]");
+if (jsonStart === -1 || jsonEnd === -1 || jsonEnd <= jsonStart) {
+  console.error("[ratchet] could not locate JSON report in stylelint output (status=" + result.status + ")");
+  console.error("[ratchet] first 500 chars of combined output:", combined.slice(0, 500));
+  process.exit(2);
 }
+const jsonText = combined.slice(jsonStart, jsonEnd + 2);
 
 let report;
 try {
-  report = JSON.parse(stylelintOutput);
+  report = JSON.parse(jsonText);
 } catch (err) {
   console.error("[ratchet] failed to parse stylelint JSON output:", err.message);
   process.exit(2);

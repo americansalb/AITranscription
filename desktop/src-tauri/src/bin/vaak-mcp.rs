@@ -5956,15 +5956,11 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
 
     let config = read_project_config(&state.project_dir)?;
 
-    // V3 spec rule 1: every assembly-mode send carries a yield_to contract.
-    // legacy_compat is ON by default (Phase 1 of the rollout) so legacy callers
-    // get a structured warning + auto-attached placeholder, not a hard error.
-    // Flipping it off (Phase 5) makes the missing-field check a real reject.
-    let legacy_compat = config
-        .get("settings")
-        .and_then(|s| s.get("assembly_legacy_compat"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    // v1.5.1 commit 1: legacy-compat yield fabrication removed. When a caller
+    // omits yield_to (or omits any of target/ask/expected_output), the message
+    // is stored as-is — no placeholder fabrication, no _legacy_compat flag, no
+    // fake target=human. The rule-4 reader at line ~6411 handles missing/empty
+    // yield fields defensively (yield_has_content is false → halt won't fire).
     let mut metadata = metadata;
 
     // Check if this session has been revoked
@@ -6085,54 +6081,13 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "current_speaker": proto_for_gate.get("floor").and_then(|f| f.get("current_speaker")).cloned().unwrap_or(serde_json::Value::Null),
             "rotation_order": proto_for_gate.get("floor").and_then(|f| f.get("rotation_order")).cloned().unwrap_or(serde_json::json!([])),
         });
-        // V3 spec rule 1 — yield_to validation. Runs BEFORE the speaker gate
-        // because every assembly-mode send (whether speaker or auto-grab
-        // candidate) is supposed to terminate with an explicit handoff.
-        // Human is exempt per rule 6.
-        if asm_active && state.role != "human" {
-            let yt = metadata.as_ref().and_then(|m| m.get("yield_to"));
-            let target = yt.and_then(|y| y.get("target")).and_then(|v| v.as_str()).unwrap_or("");
-            let ask = yt.and_then(|y| y.get("ask")).and_then(|v| v.as_str()).unwrap_or("");
-            let expected = yt.and_then(|y| y.get("expected_output")).and_then(|v| v.as_str()).unwrap_or("");
-            let missing: Vec<&str> = [
-                ("target", target),
-                ("ask", ask),
-                ("expected_output", expected),
-            ]
-            .iter()
-            .filter_map(|(name, val)| if val.is_empty() { Some(*name) } else { None })
-            .collect();
-            if !missing.is_empty() {
-                if legacy_compat {
-                    eprintln!(
-                        "[assembly-v3:legacy-compat] {} sent without yield_to.{} — auto-attaching placeholder. \
-                         Migrate caller to send required fields before settings.assembly_legacy_compat flips to false.",
-                        from_label,
-                        missing.join(",")
-                    );
-                    let placeholder = serde_json::json!({
-                        "target": "human",
-                        "ask": "(missing — legacy caller, no yield supplied)",
-                        "expected_output": "(missing — legacy caller, no expected_output supplied)",
-                        "_legacy_compat": true
-                    });
-                    let new_meta = match metadata.take() {
-                        Some(serde_json::Value::Object(mut obj)) => {
-                            obj.insert("yield_to".to_string(), placeholder);
-                            serde_json::Value::Object(obj)
-                        }
-                        _ => serde_json::json!({"yield_to": placeholder}),
-                    };
-                    metadata = Some(new_meta);
-                } else {
-                    return Err(format!(
-                        "[MissingYieldTo] Assembly Line v3 requires metadata.yield_to.{{target,ask,expected_output}} on every send. \
-                         Missing: {}. Either supply the fields or set settings.assembly_legacy_compat=true to auto-attach a placeholder.",
-                        missing.join(", ")
-                    ));
-                }
-            }
-        }
+        // v1.5.1 commit 1: V3 spec rule 1 yield_to fabrication path removed.
+        // Per architect msg 739 + evil-architect msg 732 four-data-point finding,
+        // the legacy-compat shim was fabricating `target: "human"` placeholders
+        // on every yield-less send — making "don't yield to human" structurally
+        // impossible to honor through convention. Senders now pass through
+        // whatever yield_to (or none) they supplied; the rule-4 reader handles
+        // missing/empty values defensively. _legacy_compat is no longer written.
 
         // Rule 4 full-halt gate (v1.0.4, dev-challenger msg 454 → architect
         // msg 460 reversal): when a prior speaker yielded substantively to
