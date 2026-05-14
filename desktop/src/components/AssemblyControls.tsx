@@ -49,7 +49,13 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
   // Resolution: render with nullish-coalesce defaults — assembly OFF, execution
   // phase, rotation mic. User opts in via the toggle; server-side state only
   // changes once they actually issue protocol_mutate.
-  const assemblyActive = protocol.floor.assembly_active ?? false;
+  //
+  // B.3.1 backfill-read (per architect msg 1399 layer i + human msg 1397):
+  // when the legacy assembly-line button at CollabTab.tsx:2710 flips preset to
+  // "Assembly Line" without writing the new assembly_active field, this reader
+  // backfills from preset so the new AssemblyControls UI agrees with the
+  // legacy one. Eliminates the dual-UI de-sync the human flagged.
+  const assemblyActive = protocol.floor.assembly_active ?? (protocol.preset === 'Assembly Line');
   const phase = protocol.floor.phase ?? 'execution';
   const micMode = protocol.floor.mic_passing_mode ?? 'rotation';
   const planPath = protocol.floor.plan_path ?? null;
