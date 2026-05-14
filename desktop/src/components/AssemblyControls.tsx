@@ -431,12 +431,6 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
               title="Pick a moderator. Required before switching mic-passing mode to Moderator."
             >
               <option value="">— none —</option>
-              {/* Per human msg 1687: human:0 must be selectable as moderator.
-                  list_active_seats_cmd filters sessions.json:bindings by
-                  status==active which excludes the human (who isn't an AI
-                  session). Static-prepend "human:0" so the human can
-                  self-designate. set_moderator server accepts any string. */}
-              <option value="human:0">human:0</option>
               {activeSeats.map((seat) => (
                 <option key={seat.label} value={seat.label}>{seat.label}</option>
               ))}
