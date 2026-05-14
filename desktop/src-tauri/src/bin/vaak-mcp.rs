@@ -3539,6 +3539,7 @@ fn do_protocol_mutate(
                 "yield" => apply_yield(&mut current, &args, actor),
                 "force_release" => apply_force_release(&mut current, actor, pd),
                 "toggle_queue" => apply_toggle_queue(&mut current, &args, actor),
+                "mic_claim" => apply_mic_claim(&mut current, &args, actor),
                 "set_phase_plan" => apply_set_phase_plan(&mut current, &args),
                 "advance_phase" => apply_advance_phase(&mut current, pd),
                 "pause_plan" => apply_pause_plan(&mut current),
@@ -3872,6 +3873,66 @@ fn apply_force_release(
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&board_path) {
         use std::io::Write;
         let _ = writeln!(f, "{}", serde_json::to_string(&event).unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// v1.5.1 commit 2: mic_claim — caller declares their turn semantics on
+/// the floor. Writes `turn_type` (working|reviewing|passing|thinking) and
+/// `expected_duration_secs` (30-600, hard-capped per evil-arch msg 875) to
+/// `floor`. Caller MUST be current_speaker. The watchdog at main.rs:4665
+/// reads `expected_duration_secs` to compute the dynamic stall threshold
+/// instead of the hard-coded 120s (v1.5.1 change #2). Unknown turn_type
+/// strings reject strictly per v1.5.0 Preset enum precedent.
+fn apply_mic_claim(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let current_speaker = state
+        .get("floor")
+        .and_then(|f| f.get("current_speaker"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if current_speaker != actor {
+        return Err(format!(
+            "[NotSpeaker] mic_claim caller '{}' is not current_speaker '{}'. Only the active speaker can declare turn semantics.",
+            actor, current_speaker
+        ));
+    }
+    let turn_type = args
+        .get("turn_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("working");
+    if !matches!(turn_type, "working" | "reviewing" | "passing" | "thinking") {
+        return Err(format!(
+            "[UnknownTurnType] turn_type='{}' not in working|reviewing|passing|thinking. Strict deserialization per v1.5.0 Preset enum precedent.",
+            turn_type
+        ));
+    }
+    let expected_duration_secs = args
+        .get("expected_duration_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(match turn_type {
+            "working" => 900,
+            "reviewing" => 120,
+            "passing" => 30,
+            "thinking" => 300,
+            _ => 900,
+        });
+    if !(30..=600).contains(&expected_duration_secs) {
+        return Err(format!(
+            "[ClaimOutOfBounds] expected_duration_secs={} out of range [30, 600]. Hard-cap per evil-architect msg 875 to close dodge vector.",
+            expected_duration_secs
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("turn_type".to_string(), serde_json::json!(turn_type));
+        floor.insert(
+            "expected_duration_secs".to_string(),
+            serde_json::json!(expected_duration_secs),
+        );
+        floor.insert("claimed_at".to_string(), serde_json::json!(utc_now_iso()));
     }
     Ok(())
 }
@@ -5488,6 +5549,91 @@ mod protocol_slice2_tests {
             assert!(hit.contains(prefix), "no test fixture reached {}", prefix);
         }
     }
+
+    // v1.5.1 commit 2 fixture tests — per tester msg 873.
+
+    #[test]
+    fn mic_claim_writes_turn_type_and_duration() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("developer:0");
+        apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "working", "expected_duration_secs": 300}),
+            "developer:0",
+        )
+        .unwrap();
+        assert_eq!(s["floor"]["turn_type"], "working");
+        assert_eq!(s["floor"]["expected_duration_secs"], 300);
+        assert!(s["floor"].get("claimed_at").is_some());
+    }
+
+    #[test]
+    fn mic_claim_unknown_turn_type_rejects_strict() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("developer:0");
+        let err = apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "loitering", "expected_duration_secs": 300}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[UnknownTurnType]"), "got: {}", err);
+    }
+
+    #[test]
+    fn mic_claim_defaults_per_turn_type() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("developer:0");
+        // working defaults to 900 but is capped at 600 by bounds — rejects.
+        let err = apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "working"}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[ClaimOutOfBounds]"), "got: {}", err);
+        // reviewing defaults to 120 — within bounds.
+        apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "reviewing"}),
+            "developer:0",
+        )
+        .unwrap();
+        assert_eq!(s["floor"]["expected_duration_secs"], 120);
+    }
+
+    #[test]
+    fn mic_claim_bounds_reject_out_of_range() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("developer:0");
+        for bad in [0u64, 29, 601, 1800, 99999] {
+            let err = apply_mic_claim(
+                &mut s,
+                &serde_json::json!({"turn_type": "working", "expected_duration_secs": bad}),
+                "developer:0",
+            )
+            .unwrap_err();
+            assert!(
+                err.starts_with("[ClaimOutOfBounds]"),
+                "duration {} got: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn mic_claim_not_current_speaker_rejects() {
+        let mut s = fresh_state();
+        s["floor"]["current_speaker"] = serde_json::json!("architect:0");
+        let err = apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "working", "expected_duration_secs": 300}),
+            "developer:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[NotSpeaker]"), "got: {}", err);
+    }
 }
 
 /// Walk up from CWD to find .vaak/project.json
@@ -6088,6 +6234,29 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // impossible to honor through convention. Senders now pass through
         // whatever yield_to (or none) they supplied; the rule-4 reader handles
         // missing/empty values defensively. _legacy_compat is no longer written.
+
+        // v1.5.1 commit 2: permanent yield_to.target="human" rejection per
+        // human msg 871 directive ("you should never [yield to human], why do
+        // you even have the ability to yield to me"). Architect msg 877 folded
+        // this in: change #3 becomes always-on, not conditional on
+        // human_offline_until_ts. Rule 4 halt-on-yield-to-human + v1.0.5
+        // auto-resume become dead code once this gate is in place.
+        if asm_active && state.role != "human" {
+            let target = metadata
+                .as_ref()
+                .and_then(|m| m.get("yield_to"))
+                .and_then(|y| y.get("target"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if target == "human" || target == "human:0" {
+                return Err(format!(
+                    "[HumanYieldDisabled] yield_to.target='{}' rejected. AI sends must yield to peer roles, not human. \
+                     Per human msg 871: AI roles should never be able to yield to human. \
+                     Drop the yield_to field entirely, or set target to a peer role.",
+                    target
+                ));
+            }
+        }
 
         // Rule 4 full-halt gate (v1.0.4, dev-challenger msg 454 → architect
         // msg 460 reversal): when a prior speaker yielded substantively to

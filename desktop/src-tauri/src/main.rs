@@ -4662,7 +4662,16 @@ fn check_assembly_floor_watchdog(
         .get("threshold_ms")
         .and_then(|v| v.as_u64())
         .unwrap_or(60_000);
-    let stall_threshold_secs = (threshold_ms / 1000) * 2;
+    // v1.5.1 commit 2: dynamic stall threshold. If the current speaker
+    // declared `expected_duration_secs` via mic_claim, the watchdog respects
+    // that declaration up to the 600s hard cap (evil-architect msg 875). If
+    // unset (back-compat for unclaimed mics during rollout), falls back to
+    // the legacy `threshold_ms * 2` formula (default 120s).
+    let stall_threshold_secs = floor
+        .get("expected_duration_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|secs| (30..=600).contains(secs))
+        .unwrap_or((threshold_ms / 1000) * 2);
 
     // Compare against sessions.json:last_working_at for the speaker.
     let sessions_path = std::path::Path::new(dir).join(".vaak").join("sessions.json");
