@@ -3288,7 +3288,10 @@ When multiple instances of this role are active:
                       setApiKeyStatus(keyStatus);
                       if (!keyStatus.has_key) {
                         setAutoSetupStatus("Opening terminal for login — follow the browser prompt...");
-                        try { await invoke("open_terminal_in_dir", { dir: projectDir || "" }); } catch {}
+                        try { await invoke("open_terminal_in_dir", { dir: projectDir || "" }); } catch (e) {
+                          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                          showToast(`Couldn't open terminal for login — ${msg}. Try manually: claude login`, "error");
+                        }
                         // Poll for key every 5s for up to 3 minutes
                         for (let i = 0; i < 36; i++) {
                           await new Promise(r => setTimeout(r, 5000));
@@ -3350,7 +3353,10 @@ When multiple instances of this role are active:
                             if (!installed) {
                               showToast("Node.js/npm not detected yet. Install Node.js, then click Re-check.", "warning");
                             }
-                          } catch { /* ignore */ }
+                          } catch (e) {
+                            const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                            showToast(`Couldn't re-check Node.js install — ${msg}`, "error");
+                          }
                         }}
                       >Re-check</button>
                       <span className="setup-check-hint">Required for Claude Code CLI installation</span>
@@ -3404,7 +3410,10 @@ When multiple instances of this role are active:
                           try {
                             const { invoke } = await import("@tauri-apps/api/core");
                             await invoke("open_terminal_in_dir", { dir: projectDir || "" });
-                          } catch { /* ignore */ }
+                          } catch (e) {
+                            const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                            showToast(`Couldn't open terminal — ${msg}`, "error");
+                          }
                         }}
                       >Open Terminal</button>
                       {npmInstalled === false && <span className="setup-check-hint" style={{ color: "#e8912d" }}>Complete Step 1 first</span>}
