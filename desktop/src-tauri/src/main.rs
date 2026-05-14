@@ -3378,6 +3378,52 @@ fn protocol_mutate_cmd(
     Ok(result)
 }
 
+/// Two-controls B.4.1 — list active seats for the moderator-picker dropdown
+/// (Item 7 from UX-eng's spec). Reads `.vaak/sessions.json:bindings` and
+/// returns active seats with their freshness signals so the UI can render a
+/// "Set moderator" dropdown of currently-seated agents.
+///
+/// Tauri-only (not mirrored to vaak-mcp.rs per architect msg 1464 + platform-
+/// engineer msg 1462). Agents don't need active-roster access from inside MCP
+/// sessions; this is purely a frontend-facing list.
+#[tauri::command]
+fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+    let sessions: serde_json::Value = match std::fs::read_to_string(&sessions_path) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| format!("Failed to parse sessions.json: {}", e))?,
+        Err(_) => serde_json::json!({"bindings": []}),
+    };
+    let mut seats: Vec<serde_json::Value> = Vec::new();
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if status != "active" {
+                continue;
+            }
+            let role = b.get("role").and_then(|s| s.as_str()).unwrap_or("");
+            let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+            if role.is_empty() {
+                continue;
+            }
+            let label = format!("{}:{}", role, instance);
+            let last_heartbeat = b.get("last_heartbeat").cloned().unwrap_or(serde_json::Value::Null);
+            seats.push(serde_json::json!({
+                "role": role,
+                "instance": instance,
+                "label": label,
+                "last_heartbeat": last_heartbeat,
+            }));
+        }
+    }
+    // Sort by label (role:instance) alphabetically for stable dropdown order.
+    seats.sort_by(|a, b| {
+        a.get("label").and_then(|l| l.as_str()).unwrap_or("")
+            .cmp(b.get("label").and_then(|l| l.as_str()).unwrap_or(""))
+    });
+    Ok(serde_json::json!({"seats": seats}))
+}
+
 /// Slice 9 health pill — read 4-layer resilience status.
 /// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
 ///
@@ -5983,6 +6029,8 @@ fn main() {
             protocol_mutate_cmd,
             // Slice 9 — health pill (resilience-stack JOIN)
             get_resilience_status,
+            // Two-controls B.4.1 — active seats for moderator picker
+            list_active_seats_cmd,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,
