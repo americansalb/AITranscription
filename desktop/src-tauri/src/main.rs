@@ -3421,7 +3421,21 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
         a.get("label").and_then(|l| l.as_str()).unwrap_or("")
             .cmp(b.get("label").and_then(|l| l.as_str()).unwrap_or(""))
     });
-    Ok(serde_json::json!({"seats": seats}))
+    // Per human msg 1687: prepend the human seat so they can pick themselves
+    // as moderator. The human is the desktop UI user, not an MCP-connected
+    // agent — they don't have a sessions.json:bindings entry. Synthesized
+    // here at the IPC layer so the frontend dropdown sees a human:0 option.
+    // apply_set_moderator accepts any seat string (no roster validation), so
+    // floor.moderator = "human:0" works at the protocol level. is_seat_exempt
+    // exempts the human seat correctly when mic_passing_mode == "moderator".
+    let mut with_human: Vec<serde_json::Value> = vec![serde_json::json!({
+        "role": "human",
+        "instance": 0,
+        "label": "human:0",
+        "last_heartbeat": serde_json::Value::Null,
+    })];
+    with_human.extend(seats.into_iter());
+    Ok(serde_json::json!({"seats": with_human}))
 }
 
 /// Slice 9 health pill — read 4-layer resilience status.
