@@ -12,6 +12,7 @@
     "test:run": "vitest run",
     "preview": "vite preview",
     "lint:styles": "stylelint \"src/**/*.css\"",
+    "lint:styles:check": "node scripts/check-stylelint-baseline.cjs",
     "tauri": "tauri"
   },
   "dependencies": {
