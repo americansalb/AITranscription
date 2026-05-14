@@ -46,10 +46,13 @@ Pattern-(c) strength: option 3 > option 2 > option 1. But option 1 is the only o
     "vaak-tokens/no-raw-font-size": "error",
     "vaak-tokens/no-raw-radius": "error",
     "vaak-tokens/no-raw-z-index": "error",
-    "vaak-tokens/no-important-without-comment": "warn"
+    "vaak-tokens/no-important-without-comment": "warn",
+    "vaak-tokens/no-disable-without-justification": "error"
   }
 }
 ```
+
+**Corrigendum 2 (dev-challenger Finding 2):** The `no-disable-without-justification` rule above is part of the v1.5 ship — without it, the exemption mechanism described below is discipline-only and bypassable (same discipline-required failure mode the pattern-(c) work is meant to prevent). Including the rule in the config keeps the exemption mechanism enforced.
 
 ### Custom plugin shape
 
@@ -59,18 +62,39 @@ Pattern-(c) strength: option 3 > option 2 > option 1. But option 1 is the only o
 const ALLOWED_HEX = new Set([
   // from design-tokens-spec-2026-05-13.md sec "Color expansion"
   // (parsed from tokens.css at lint-time so the source of truth stays single)
+  // All values stored in canonical normalized form: lowercase 6-digit hex.
 ]);
 
 const ALLOWED_PX = new Set([0, 2, 4, 8, 12, 16, 24, 32, 48]); // spacing scale
 
+// Color value normalization (Corrigendum 3 — dev-challenger Finding 3):
+// Before checking against ALLOWED_HEX, every parsed color value must be
+// normalized to canonical lowercase 6-digit hex form. Required conversions:
+//   #abc      → #aabbcc       (3-digit → 6-digit)
+//   #ABCDEF   → #abcdef       (case fold)
+//   rgb(170, 187, 204)     → #aabbcc   (rgb function → hex)
+//   rgba(170, 187, 204, 1) → #aabbcc   (rgba with alpha=1 → hex)
+//   hsl(...)               → #...      (hsl → hex via color-convert)
+// Without normalization the allow-set check produces both false positives
+// (#abc not in set but #aabbcc is) and false negatives (case mismatch).
+// Use the `color` or `colord` npm package for canonical conversion.
+
 // One rule per primitive. Each walks declaration values, regex-matches the
-// primitive, checks against the allow-set. Failure reports file:line + the
-// allowed alternatives.
+// primitive, NORMALIZES per above, checks against the allow-set. Failure
+// reports file:line + the allowed alternatives.
 ```
 
 Plugin reads `tokens.css` at lint-time to derive the allow-sets, so the spec
 stays a single source of truth — token additions in `tokens.css` automatically
 extend the allow-set without editing the plugin.
+
+**Corrigendum 4 (dev-challenger Finding 4) — tokens.css missing/malformed
+handling:** If `tokens.css` is absent or fails to parse, the plugin must fail
+loudly with a named error (`VAAK_TOKENS_MISSING` or `VAAK_TOKENS_PARSE_ERROR`)
+and abort the lint run. Silently treating as empty allow-set is the wrong
+default — it would surface every CSS value as a violation, looking like a
+regression. Failing loudly forces the maintainer to fix the token source of
+truth before lint can proceed.
 
 ### CI integration
 
@@ -101,12 +125,24 @@ attributes in vaak-mcp.rs.
 
 ## Migration sequence (parallel to design-tokens-spec V2-first adoption)
 
-Wave 0: ship the stylelint plugin + config in `desktop/` but **WARN-only** for
-all rules. CI logs violations without failing the build. Quantifies the gap
-without blocking shipping.
+**Corrigendum 1 (dev-challenger Finding 1) — Wave 0 sequencing reversed:**
+the original spec proposed Wave 0 (warn-only plugin) BEFORE Wave 1
+(tokens.css ships). That's bootstrap-broken: with no tokens.css yet, the
+allow-set is empty and every CSS value warns. Output is noise, not signal —
+we already know the existing CSS uses raw values; counting them doesn't
+help. Reversing: Wave 1 ships tokens.css FIRST (populated with at least
+the spacing + radius + z-index scales from the design-tokens spec), THEN
+Wave 0 ships the plugin (warn-only) so the first lint output has a real
+allow-set to compare against.
 
-Wave 1: tokens.css ships per design-tokens-spec (dbc51f8) Phase 1. Plugin
-parses the new tokens for the allow-set. Warn count drops as V2 adopts.
+Wave 1: tokens.css ships per design-tokens-spec (dbc51f8) Phase 1. Populated
+with at least one section (spacing scale or similar) so the plugin has a
+non-empty allow-set to read at lint time.
+
+Wave 0 (now post-Wave 1): ship the stylelint plugin + config in `desktop/`
+with **WARN-only** mode for all rules. CI logs violations without failing
+the build. With Wave 1's tokens populated, the warn output is actionable
+signal — files with the highest raw-value count surface as sweep priorities.
 
 Wave 2: V2 CSS (collaborate-v2.css) is rewritten using tokens per design-tokens-spec
 Phase 2. Plugin rules flip from WARN to ERROR for V2 files only via stylelint's
