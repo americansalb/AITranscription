@@ -43,13 +43,21 @@ ProtocolPanel.tsx had a sibling rotation-strip render path that d74b021 missed. 
 
 ## Next session priorities (per human msg 1755)
 
-### Priority 1: Verify moderation works with fresh sidecars
-Re-run the moderator test from this session with ALL AI sessions freshly launched. Specifically:
-- Human picks human:0 as moderator OR picks an AI seat AFTER all AI sessions have relaunched their Claude Code instances
-- AI moderator's `project_send` should NOT bounce (Item 3 bypass active in fresh sidecars)
-- Watchdog should NOT auto-promote AI moderator (Bug 2 fix must land first)
+### Priority 1: Fix remaining moderation bugs with fresh sidecars (per human msg 1757 revision)
+Re-run moderator-test with ALL AI sessions freshly launched. **Specific verification gates the human flagged:**
 
-This requires shipping Bug 2 fix + full tauri build + human restart of Vaak + each AI agent restarts their Claude Code session (or the v1.Y sidecar-version-mismatch indicator goes in to surface the requirement).
+1. **Verify evil-architect can moderate** — designate evil-arch as moderator AFTER they restart Claude Code (stale sidecar resolves on restart per Bug 1). Their `project_send` should succeed without `[Assembly Line active — not your turn]`.
+2. **Confirm rotation strip excludes moderator in BOTH UI locations** — AssemblyControls (d74b021 covered) AND ProtocolPanel (202119e covered). Both need verification post-fresh-build.
+3. **Confirm AI moderator doesn't get auto-promoted by watchdog** — this is Bug 2 which is NOT YET FIXED. AI moderator going silent for >120s should NOT trigger `mic_mechanism_promoted: moderator_stale`. Requires the Bug 2 fix from architect msg 1745 to ship first.
+
+**If anything still breaks with fresh sessions, fix it before moving on.** Don't proceed to P2 with known mod-feature gaps.
+
+**Sequencing for next session:**
+1. Ship Bug 2 fix (~5 LOC widen 57251b1's staleness-skip to all moderators)
+2. `npm run tauri build` to bake into release exe
+3. Human restarts Vaak; each AI agent restarts their Claude Code session
+4. Re-run the three verification scenarios above
+5. Only when all pass → proceed to P2
 
 ### Priority 2: New workflow — collaborative proposal writing
 
