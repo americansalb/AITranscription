@@ -163,6 +163,18 @@ export function useProtocolState(
     }
   }, [projectDir, section]);
 
+  // Ref bridges closure freshness into the one-time listener below. Without
+  // this, the listener's useEffect depended on [refresh] — which recreates
+  // when projectDir or section changes — causing unlisten → re-listen. Any
+  // `protocol_changed` event emitted during that async re-bind gap was
+  // dropped, leaving the UI deaf to mutations that landed exactly when the
+  // hook was re-subscribing (e.g. set_moderator / set_mic_passing fired
+  // right after a section switch). Toggling assembly forced a NEW emit AFTER
+  // the listener had stabilized, which is why the human's workaround
+  // (toggle off/on) appeared to "fix" stale UI. Class: listener re-bind race.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
   // Initial load + section change.
   useEffect(() => {
     if (!projectDir) {
@@ -175,17 +187,16 @@ export function useProtocolState(
 
   // Listen for protocol_changed push events (spec §4.1 — push best-effort,
   // get_protocol authoritative; we always re-read rather than trusting the
-  // event payload).
+  // event payload). ONE-TIME bind: deps intentionally empty so the listener
+  // is never unsubscribed/rebound during the hook's lifetime. refreshRef
+  // above carries the latest refresh closure into the listener.
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
     let cancelled = false;
     void (async () => {
       try {
         unlisten = await listen('protocol_changed', () => {
-          // Drop replays whose rev <= our last seen (spec §4.1 replay
-          // protection). We always re-read via get_protocol, so rev
-          // comparison is a soft optimization, not a correctness gate.
-          void refresh();
+          void refreshRef.current();
         });
       } catch (e) {
         console.warn('[useProtocolState] failed to subscribe to protocol_changed:', e);
@@ -198,7 +209,8 @@ export function useProtocolState(
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const mutate = useCallback(
     async (action: string, args: object = {}): Promise<Protocol | null> => {
