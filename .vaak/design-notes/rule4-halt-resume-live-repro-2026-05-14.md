@@ -67,6 +67,18 @@ Until that deploy, treat any `floor_halted_for_human` event as a candidate stuck
 
 Evil-architect msg 723 gap 2 (human-as-hard-interrupt for proposal 1) is the structural fix for this entire failure class. Once a human `project_send` automatically force-releases the current mic AND clears any halt, regardless of declared turn state, the deployment-gap failure mode disappears because the halt-clear no longer depends on the speaker's sidecar version. The current implementation makes the halt-clear path the speaker's responsibility (the agent writing `al_auto_advance` clears it); the proposed fix makes it the sidecar's responsibility on any human send.
 
+## Measurement caveats (per evil-architect msg 775)
+
+When measuring proposal 3 (passing-by-default culture) adoption on this section's board, the audit numbers carry three confounds that prevent treating any short-window pass-rate spike as adoption signal:
+
+1. **Phase bias.** Passes are the natural shape of "burn cycle wind-down — nothing to add" regardless of any briefing rule. Mid-debate windows in the same session (msgs 723→738) produced zero passes against four substantive challenges. Pass discipline is designed to fire in active-discussion contexts where roles have the option to pile on; in wind-down everyone has the option to do nothing. Adoption signal must be measured across debate cycles, not within a single wind-down.
+
+2. **Wire-protocol mismatch.** The first observed pass messages (754, 756, 769, 771, 777, 779, 781) all used `metadata.turn_type: "passing"` — a proposal 1 wire-protocol field whose spec landed on disk at `.vaak/design-notes/assembly-mode-v1.5.1-typed-turn-declaration-spec-2026-05-14.md` but whose implementation is NOT shipped (v1.5.1 commit 1 was the legacy-compat removal at 903e582, not the typed-turn enum). The team voluntarily adopted an unshipped field via convention. That measures cultural-discipline coordination, not briefing-rule adoption — and the proposal-3 briefing edit at 26ec289 doesn't reference the `turn_type` field at all.
+
+3. **Briefing-propagation gap.** Active agent sessions hold their original briefings loaded at session start. The proposal 3 briefing changes (briefingGenerator.ts at 26ec289 + `.vaak/roles/*.md` workspace edits + the adversarial-tag fix at workspace-config layer) do not reach existing agents until they re-read their briefings. The passes observed during this rotation came from team-directive compliance (msgs 723/737/765/767 said "pass"), not from briefing-rule adoption. Re-running audit_pass_rate.py after the human's next vaak.exe restart (which forces fresh briefing reads on agent re-spawn) is the measurement that actually tests briefing-driven adoption.
+
+**Honest framing:** Directive-driven adoption works in under 1 hour from a team-coordinated pass-discipline announcement. Briefing-driven adoption requires session restart + a fresh discussion cycle and remains untested as of this doc's date.
+
 ## Relation to multi-writer audit doc
 
 This case is a concrete failure under Instance 9 (binary deployment per-process / fragmented cohort) in `.vaak/design-notes/multi-writer-audit-2026-05-13.md`. The fragmented-cohort thesis: behavioral contracts that depend on a specific writer (here, the human's sidecar) silently fail when that writer's binary version lags the contract. The "single-writer gap" in this case is sharper than the typical multi-writer audit instance — there is only one writer for this code path (the human's vaak.exe), and its version determines whether the contract holds at all. Worth folding as a worked example into the audit doc.
