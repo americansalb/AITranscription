@@ -2709,36 +2709,42 @@ When multiple instances of this role are active:
               &#9998; Discuss
             </button>
           )}
-          {/* Assembly Line toggle — one-speaker-at-a-time mic control. When ON,
-              project_send rejects non-speakers and auto-rotates the mic on
-              each accepted send. Independent of discussion_control / Pipeline. */}
-          <button
-            className="assembly-line-toggle"
-            onClick={handleToggleAssembly}
-            disabled={assemblyToggling}
-            title={
-              assemblyState?.active
-                ? `Assembly Line ON · current speaker: ${assemblyState.current_speaker ?? "(none)"} · click to disable`
-                : "Assembly Line OFF (simultaneous) · click to enable one-speaker-at-a-time"
-            }
-            aria-label={assemblyState?.active ? "Disable Assembly Line" : "Enable Assembly Line"}
-            style={{
-              background: assemblyState?.active ? "#137333" : "transparent",
-              color: assemblyState?.active ? "#fff" : "#137333",
-              border: "1px solid #137333",
-              borderRadius: 6,
-              padding: "4px 10px",
-              marginLeft: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: assemblyToggling ? "wait" : "pointer",
-              opacity: assemblyToggling ? 0.6 : 1,
-            }}
-          >
-            {assemblyState?.active
-              ? `🎙 Assembly: ${assemblyState.current_speaker ?? "—"}`
-              : "Assembly Line"}
-          </button>
+          {/* Assembly Line toggle — legacy v1.5.1 one-speaker-at-a-time mic
+              control. B.3 Item 1 (per spec §16-37): hide when the new
+              AssemblyControls card is rendering (twoControlsProtocol loaded).
+              Legacy is the strict subset of AssemblyControls' capabilities;
+              hiding rather than dual-wiring avoids state divergence on the
+              write side. Falls through to legacy render only on truly
+              pre-commit-A sections (no protocol.json yet). */}
+          {!twoControlsProtocol && (
+            <button
+              className="assembly-line-toggle"
+              onClick={handleToggleAssembly}
+              disabled={assemblyToggling}
+              title={
+                assemblyState?.active
+                  ? `Assembly Line ON · current speaker: ${assemblyState.current_speaker ?? "(none)"} · click to disable`
+                  : "Assembly Line OFF (simultaneous) · click to enable one-speaker-at-a-time"
+              }
+              aria-label={assemblyState?.active ? "Disable Assembly Line" : "Enable Assembly Line"}
+              style={{
+                background: assemblyState?.active ? "#137333" : "transparent",
+                color: assemblyState?.active ? "#fff" : "#137333",
+                border: "1px solid #137333",
+                borderRadius: 6,
+                padding: "4px 10px",
+                marginLeft: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: assemblyToggling ? "wait" : "pointer",
+                opacity: assemblyToggling ? 0.6 : 1,
+              }}
+            >
+              {assemblyState?.active
+                ? `🎙 Assembly: ${assemblyState.current_speaker ?? "—"}`
+                : "Assembly Line"}
+            </button>
+          )}
           <button
             className="project-settings-btn"
             onClick={() => setSettingsOpen(!settingsOpen)}

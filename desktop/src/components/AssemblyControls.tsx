@@ -248,47 +248,48 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
     return null;
   };
 
-  // 2x2 combination map cell highlight per UI-arch msg 986 minor 3 fold.
-  const activeCell = `${assemblyActive ? 'on' : 'off'}-${phase}`;
-  // B.3a (per tester msg 1429 + human msg 1420): plain-language labels.
-  // Cell labels keep their category name AND show the consequence subtitle
-  // inline so first-contact users don't need to hover-discover tooltips.
-  const cellMeta: Record<string, { label: string; subtitle: string; tooltip: string }> = {
-    'on-planning': {
-      label: 'Orderly planning',
-      subtitle: 'Mic-gated · No commits',
-      tooltip: 'One voice at a time. Code commits blocked until a plan is accepted.',
-    },
-    'off-planning': {
-      label: 'Free brainstorm',
-      subtitle: 'Anyone speaks · No commits',
-      tooltip: 'Everyone contributes simultaneously. Code commits blocked until a plan is accepted.',
-    },
-    'on-execution': {
-      label: 'Sequential build',
-      subtitle: 'Mic-gated · Commits OK',
-      tooltip: 'One author at a time. Code commits allowed under the accepted plan scope.',
-    },
-    'off-execution': {
-      label: 'Parallel build',
-      subtitle: 'Anyone codes · Commits OK',
-      tooltip: 'Multiple authors at once. Code commits allowed under the accepted plan scope.',
-    },
-  };
+  // B.3 Item 4 (option c per UX-eng spec §86-102): combination map REMOVED
+  // entirely. Plain-language labels on the two toggle controls now
+  // communicate state directly; the 2x2 matrix was teaching-not-operational
+  // and the human msg 1303 confirmed it added cognitive load without
+  // capability. Negative space replaces it; assembly button + phase pill
+  // labels carry the state-meaning.
+
+  // B.3 Item 5 (per UX-eng spec §104-136 + human msg 1421): embed
+  // current_speaker in the assembly button label so "who has the floor"
+  // reads as the primary state on the primary control. Three button-text
+  // states:
+  //   assembly OFF                          → "Assembly Off — anyone can speak"
+  //   assembly ON + speaker                 → "Assembly On — <seat> has floor"
+  //   assembly ON + no speaker (idle)       → "Assembly On — waiting for next speaker"
+  const assemblyButtonText = !assemblyActive
+    ? 'Assembly Off — anyone can speak'
+    : currentSpeaker
+      ? `Assembly On — ${currentSpeaker} has floor`
+      : 'Assembly On — waiting for next speaker';
+
+  // B.3 Item 3 (per UX-eng spec §63-84): plain-language phase labels.
+  // Drops all-caps, adds action-oriented subtitle hint after the primary
+  // state. Tooltip on hover surfaces the full hint when narrow.
+  const phaseButtonText = phase === 'planning'
+    ? 'Planning — discuss, design, decide'
+    : 'Executing — code, commit, ship';
 
   return (
     <section className="assembly-controls" role="region" aria-label="Assembly and phase controls">
-      {/* Row 1: distinct widgets — mic-icon-button + phase pill */}
+      {/* B.3 Item 2 (per UX-eng spec §43-61): single horizontal row.
+          Was 4 vertical rows (~120px); now one flex-wrap row (~36px).
+          Mic-button + phase-pill + mic-mode (compact) + plan-link all inline. */}
       <div className="assembly-controls-row">
         <button
           type="button"
           className={`assembly-mic-btn${assemblyActive ? ' is-on' : ' is-off'}`}
           onClick={handleAssemblyToggle}
           aria-pressed={assemblyActive}
-          title={assemblyActive ? 'Turn Assembly Line off (free-send mode)' : 'Turn Assembly Line on (mic-gated mode)'}
+          title={assemblyActive ? 'Click to turn Assembly Line off (everyone can speak freely)' : 'Click to turn Assembly Line on (one speaker at a time)'}
         >
           <span aria-hidden="true" className="assembly-mic-icon">🎙</span>
-          <span className="assembly-mic-label">ASSEMBLY: {assemblyActive ? 'ON' : 'OFF'}</span>
+          <span className="assembly-mic-label">{assemblyButtonText}</span>
         </button>
 
         <button
@@ -300,31 +301,28 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
             !canTogglePhase
               ? 'Phase change is human-only (per phase_change_human_only)'
               : phase === 'planning'
-                ? 'Click to accept a plan and switch to EXECUTION'
-                : 'Click to open planning (discards current plan)'
+                ? 'Click to accept a plan and switch to Executing'
+                : 'Click to open Planning (discards current plan)'
           }
         >
           <span className="assembly-phase-marker" aria-hidden="true">
             {phase === 'planning' ? '✎' : '▷'}
           </span>
-          <span className="assembly-phase-label">{phase === 'planning' ? 'PLANNING' : 'EXECUTING'}</span>
+          <span className="assembly-phase-label">{phaseButtonText}</span>
           {canTogglePhase && <span className="assembly-phase-chevron" aria-hidden="true">▾</span>}
         </button>
-      </div>
 
-      {/* Row 2: mic-passing dropdown (greyed when assembly off) + plan link */}
-      <div className="assembly-controls-row">
         <label className={`assembly-mic-mode${assemblyActive ? '' : ' is-disabled'}`}>
-          <span className="assembly-mic-mode-label">Mic passing:</span>
+          <span className="assembly-mic-mode-label">Mic:</span>
           <select
             value={micMode}
             onChange={handleMicModeChange}
             disabled={!assemblyActive}
             title={assemblyActive ? 'Choose how the mic passes between seats' : 'Mic-passing mode is only meaningful when Assembly is ON'}
           >
-            <option value="rotation">Round-robin (cyclic)</option>
-            <option value="hand_raise">Raise hand to speak</option>
-            <option value="moderator">Moderator picks next</option>
+            <option value="rotation">Round-robin</option>
+            <option value="hand_raise">Hand-raise</option>
+            <option value="moderator">Moderator</option>
           </select>
         </label>
 
@@ -375,36 +373,20 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
         )}
       </div>
 
-      {/* Row 3: per-mechanism status strip — UI-arch msg 969 fold */}
+      {/* Per-mechanism status strip — UI-arch msg 969 fold. "Currently:"
+          segment dropped in B.3 Item 5 (per UX-eng spec §131): the current
+          speaker is now embedded in the assembly button's label, making the
+          strip's "Currently:" redundant. The second-line "what's next" info
+          (rotation order, hand-raise queue, moderator) is still useful. */}
       {assemblyActive && (
         <div className="assembly-status-strip">
-          <span className="assembly-status-currently">
-            <span className="assembly-status-label">Currently:</span>{' '}
-            <span className="assembly-status-seat">{currentSpeaker ?? 'idle'}</span>
-          </span>
-          <span className="assembly-status-separator">·</span>
-          <span className="assembly-status-second">{renderStatusLine()}</span>
+          {renderStatusLine()}
         </div>
       )}
 
-      {/* Row 4: 2x2 combination map — filled-accent active cell per UI-arch msg 986 minor 3 */}
-      <div className="assembly-combo-map" role="table" aria-label="Combination map">
-        <div className="assembly-combo-header" role="row">
-          <div role="columnheader" className="assembly-combo-cell is-header"></div>
-          <div role="columnheader" className="assembly-combo-cell is-header">Planning</div>
-          <div role="columnheader" className="assembly-combo-cell is-header">Execution</div>
-        </div>
-        <div className="assembly-combo-row" role="row">
-          <div role="rowheader" className="assembly-combo-cell is-rowheader">Assembly: On</div>
-          <ComboCell active={activeCell === 'on-planning'} meta={cellMeta['on-planning']} />
-          <ComboCell active={activeCell === 'on-execution'} meta={cellMeta['on-execution']} />
-        </div>
-        <div className="assembly-combo-row" role="row">
-          <div role="rowheader" className="assembly-combo-cell is-rowheader">Assembly: Off</div>
-          <ComboCell active={activeCell === 'off-planning'} meta={cellMeta['off-planning']} />
-          <ComboCell active={activeCell === 'off-execution'} meta={cellMeta['off-execution']} />
-        </div>
-      </div>
+      {/* Combination map REMOVED in B.3 Item 4 per UX-eng spec §86-102
+          option (c). Plain-language labels on the assembly button + phase
+          pill now carry the state-meaning directly. */}
 
       {/* Destructive-confirm modal for open_planning per spec §63 */}
       {confirmOpenPlanning && (
@@ -504,15 +486,3 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole }: Asse
   );
 }
 
-function ComboCell({ active, meta }: { active: boolean; meta: { label: string; subtitle: string; tooltip: string } }) {
-  return (
-    <div
-      role="cell"
-      className={`assembly-combo-cell${active ? ' is-active' : ''}`}
-      title={meta.tooltip}
-    >
-      <div className="assembly-combo-label">{meta.label}</div>
-      <div className="assembly-combo-subtitle">{meta.subtitle}</div>
-    </div>
-  );
-}
