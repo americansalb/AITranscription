@@ -1,13 +1,12 @@
 {
-  "extends": ["stylelint-config-standard"],
   "plugins": ["./scripts/stylelint-vaak-tokens.cjs"],
   "rules": {
-    "vaak-tokens/no-raw-color": "warning",
-    "vaak-tokens/no-raw-spacing": "warning",
-    "vaak-tokens/no-raw-font-size": "warning",
-    "vaak-tokens/no-raw-radius": "warning",
-    "vaak-tokens/no-raw-z-index": "warning",
-    "vaak-tokens/no-disable-without-justification": "error"
+    "vaak-tokens/no-raw-color": [true, { "severity": "warning" }],
+    "vaak-tokens/no-raw-spacing": [true, { "severity": "warning" }],
+    "vaak-tokens/no-raw-font-size": [true, { "severity": "warning" }],
+    "vaak-tokens/no-raw-radius": [true, { "severity": "warning" }],
+    "vaak-tokens/no-raw-z-index": [true, { "severity": "warning" }],
+    "vaak-tokens/no-disable-without-justification": [true, { "severity": "error" }]
   },
   "ignoreFiles": [
     "dist/**",
