@@ -1033,7 +1033,12 @@ pub fn get_active_section(dir: &str) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
-/// Set the active section in project.json
+/// Set the active section in project.json AND write the `.vaak/active-section`
+/// marker file (two-controls v1, finding #10 / spec §95). The marker is the
+/// single source of truth for the pre-commit hook's "which section binds this
+/// commit" resolution. Both writes use atomic tempfile-rename; project.json
+/// write happens first because it's the canonical store, marker file is the
+/// hook-side mirror.
 pub fn set_active_section(dir: &str, section: &str) -> Result<(), String> {
     let config_path = Path::new(dir).join(".vaak").join("project.json");
     let content = std::fs::read_to_string(&config_path)
@@ -1048,7 +1053,33 @@ pub fn set_active_section(dir: &str, section: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize project.json: {}", e))?;
     atomic_write(&config_path, json.as_bytes())
         .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    write_active_section_marker(dir, section)?;
     Ok(())
+}
+
+/// Write the `.vaak/active-section` marker file (two-controls v1, finding #10).
+/// Used by the pre-commit hook to resolve "which section binds this commit"
+/// without reading project.json (which carries other state). Single-line file
+/// containing the section slug. Atomic via tempfile-rename — Windows ≥7 stdlib
+/// `std::fs::rename` calls MoveFileExW(REPLACE_EXISTING) by default
+/// (architect msg 1051 + platform-engineer msg 1049).
+pub fn write_active_section_marker(dir: &str, section: &str) -> Result<(), String> {
+    let marker_path = Path::new(dir).join(".vaak").join("active-section");
+    atomic_write(&marker_path, section.as_bytes())
+        .map_err(|e| format!("Failed to write .vaak/active-section marker: {}", e))?;
+    Ok(())
+}
+
+/// Read the `.vaak/active-section` marker file, returning "default" on absence
+/// or read failure (matches pre-commit hook semantics).
+pub fn read_active_section_marker(dir: &str) -> String {
+    let marker_path = Path::new(dir).join(".vaak").join("active-section");
+    std::fs::read_to_string(&marker_path)
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 /// Get the board.jsonl path for a given section.

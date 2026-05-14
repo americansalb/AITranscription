@@ -4622,6 +4622,13 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
             // freshly-grabbed mic isn't insta-released by lingering pre-mic
             // standby state.
             check_assembly_floor_watchdog(&dir, &active_section, &proto_path, &app_handle);
+
+            // Two-controls v1 (consolidated finding #4 / spec §85-91): mode-
+            // aware dead-seat handling for hand_raise and moderator mic_passing
+            // modes. Independent of the current_speaker stall handler above;
+            // these check the queued/designated seats whose stale heartbeats
+            // would wedge the team.
+            check_two_controls_dead_seats(&dir, &active_section, &proto_path, &app_handle);
         }
     });
 }
@@ -4852,6 +4859,264 @@ fn check_assembly_floor_watchdog(
         let _ = window.emit(
             "protocol_changed",
             serde_json::json!({"section": active_section, "source": "watchdog"}),
+        );
+    }
+}
+
+/// Two-controls v1 dead-seat watchdog (consolidated finding #4 / spec §85-91).
+/// Independent of the current_speaker stall path. Two responsibilities:
+///
+///   - **hand_raise mode:** if the head of `floor.hand_queue` has a stale
+///     heartbeat (last_alive_at_ms > stall threshold), strip that seat from
+///     the queue atomically and emit `hand_dequeued` so observers see the
+///     reason. Without this, a disconnected raised-hand seat blocks all
+///     subsequent grants.
+///
+///   - **moderator mode:** if `floor.moderator` has a stale heartbeat OR the
+///     designated moderator seat is no longer active in sessions.json, auto-
+///     promote `mic_passing_mode` to `rotation` with a `mic_mechanism_promoted`
+///     event so the team isn't locked indefinitely waiting on a vacant
+///     moderator. One-way for the current floor; human can re-set moderator
+///     after the situation resolves (spec §93).
+///
+/// Both checks reuse the existing direct-write pattern in
+/// check_assembly_floor_watchdog (read protocol.json, mutate, write, append
+/// board event). Lives in the same poll loop so cadence is identical.
+fn check_two_controls_dead_seats(
+    dir: &str,
+    active_section: &str,
+    proto_path: &std::path::Path,
+    app_handle: &tauri::AppHandle,
+) {
+    let proto: serde_json::Value = match std::fs::read_to_string(proto_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(p) => p,
+        None => return,
+    };
+    // Only run when assembly is active — in simultaneous mode there's no
+    // mic-passing state to police.
+    let assembly_active = proto
+        .get("floor")
+        .and_then(|f| f.get("assembly_active"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !assembly_active {
+        return;
+    }
+    let mode = proto
+        .get("floor")
+        .and_then(|f| f.get("mic_passing_mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("rotation")
+        .to_string();
+    if mode == "rotation" {
+        return; // current_speaker stall handler covers rotation.
+    }
+
+    // Two-source freshness threshold (matches check_assembly_floor_watchdog
+    // semantics): consider stale if no last_alive heartbeat in the last
+    // 120s. Reuses the same per-seat sessions/<role>-<inst>.json read path.
+    const DEAD_SEAT_THRESHOLD_MS: u64 = 120_000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let seat_alive_ms = |seat_label: &str| -> u64 {
+        let mut parts = seat_label.splitn(2, ':');
+        let role = parts.next().unwrap_or("");
+        let inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let seat_file = std::path::Path::new(dir)
+            .join(".vaak")
+            .join("sessions")
+            .join(format!("{}-{}.json", role, inst));
+        std::fs::read_to_string(&seat_file)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("last_alive_at_ms").and_then(|x| x.as_u64()))
+            .unwrap_or(0)
+    };
+
+    if mode == "hand_raise" {
+        let head = proto
+            .get("floor")
+            .and_then(|f| f.get("hand_queue"))
+            .and_then(|q| q.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let head = match head {
+            Some(s) => s,
+            None => return, // empty queue
+        };
+        let head_alive = seat_alive_ms(&head);
+        let head_stale = head_alive == 0
+            || now_ms.saturating_sub(head_alive) > DEAD_SEAT_THRESHOLD_MS;
+        if !head_stale {
+            return;
+        }
+        let mut current = proto.clone();
+        if let Some(floor_obj) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            if let Some(queue) = floor_obj
+                .get_mut("hand_queue")
+                .and_then(|q| q.as_array_mut())
+            {
+                queue.retain(|v| v.as_str() != Some(&head));
+            }
+        }
+        write_protocol_emit_two_controls_event(
+            dir,
+            proto_path,
+            active_section,
+            &mut current,
+            "hand_dequeued",
+            serde_json::json!({
+                "seat": head.clone(),
+                "reason": "stale_heartbeat",
+            }),
+            app_handle,
+        );
+        return;
+    }
+
+    if mode == "moderator" {
+        let moderator = proto
+            .get("floor")
+            .and_then(|f| f.get("moderator"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let mod_label = match moderator {
+            Some(s) => s,
+            None => {
+                // No moderator designated → auto-promote to rotation now.
+                let mut current = proto.clone();
+                if let Some(floor_obj) =
+                    current.get_mut("floor").and_then(|f| f.as_object_mut())
+                {
+                    floor_obj.insert(
+                        "mic_passing_mode".to_string(),
+                        serde_json::json!("rotation"),
+                    );
+                }
+                write_protocol_emit_two_controls_event(
+                    dir,
+                    proto_path,
+                    active_section,
+                    &mut current,
+                    "mic_mechanism_promoted",
+                    serde_json::json!({
+                        "from": "moderator",
+                        "to": "rotation",
+                        "reason": "moderator_vacant",
+                    }),
+                    app_handle,
+                );
+                return;
+            }
+        };
+        let mod_alive = seat_alive_ms(&mod_label);
+        let mod_stale = mod_alive == 0
+            || now_ms.saturating_sub(mod_alive) > DEAD_SEAT_THRESHOLD_MS;
+        if !mod_stale {
+            return;
+        }
+        let mut current = proto.clone();
+        if let Some(floor_obj) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            floor_obj.insert(
+                "mic_passing_mode".to_string(),
+                serde_json::json!("rotation"),
+            );
+        }
+        write_protocol_emit_two_controls_event(
+            dir,
+            proto_path,
+            active_section,
+            &mut current,
+            "mic_mechanism_promoted",
+            serde_json::json!({
+                "from": "moderator",
+                "to": "rotation",
+                "reason": "moderator_stale",
+            }),
+            app_handle,
+        );
+    }
+}
+
+/// Shared write+emit helper for the two-controls dead-seat watchdog. Mirrors
+/// the inline pattern in check_assembly_floor_watchdog: bump rev, stamp audit,
+/// write protocol.json, append board event, push protocol_changed for UI.
+fn write_protocol_emit_two_controls_event(
+    dir: &str,
+    proto_path: &std::path::Path,
+    active_section: &str,
+    current: &mut serde_json::Value,
+    event_type: &str,
+    extra_metadata: serde_json::Value,
+    app_handle: &tauri::AppHandle,
+) {
+    let cur_rev = current.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Some(rev_field) = current.get_mut("rev") {
+        *rev_field = serde_json::json!(cur_rev + 1);
+    }
+    let now_iso = iso_now();
+    if let Some(obj) = current.as_object_mut() {
+        obj.insert("last_writer_seat".to_string(), serde_json::json!("watchdog"));
+        obj.insert(
+            "last_writer_action".to_string(),
+            serde_json::json!(event_type),
+        );
+        obj.insert("rev_at".to_string(), serde_json::json!(now_iso.clone()));
+    }
+    if let Err(e) = std::fs::write(
+        proto_path,
+        serde_json::to_string_pretty(&current).unwrap_or_default(),
+    ) {
+        log_error(&format!(
+            "[two-controls-watchdog] protocol.json write failed: {}",
+            e
+        ));
+        return;
+    }
+
+    let board_path = collab::active_board_path(dir);
+    let count = std::fs::read_to_string(&board_path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    let mut metadata = serde_json::Map::new();
+    if let Some(obj) = extra_metadata.as_object() {
+        for (k, v) in obj {
+            metadata.insert(k.clone(), v.clone());
+        }
+    }
+    metadata.insert("section".into(), serde_json::json!(active_section));
+    metadata.insert("ts".into(), serde_json::json!(now_iso.clone()));
+    let event = serde_json::json!({
+        "id": (count + 1) as u64,
+        "from": "system",
+        "to": "all",
+        "type": event_type,
+        "timestamp": now_iso,
+        "subject": format!("[{}] system", event_type),
+        "body": format!("two-controls watchdog emitted {}", event_type),
+        "metadata": serde_json::Value::Object(metadata),
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", serde_json::to_string(&event).unwrap_or_default());
+    }
+
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.emit(
+            "protocol_changed",
+            serde_json::json!({"section": active_section, "source": "two-controls-watchdog"}),
         );
     }
 }
