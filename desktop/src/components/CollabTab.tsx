@@ -3450,7 +3450,10 @@ When multiple instances of this role are active:
                           try {
                             const { invoke } = await import("@tauri-apps/api/core");
                             await invoke("open_terminal_in_dir", { dir: projectDir || "" });
-                          } catch { /* ignore */ }
+                          } catch (e) {
+                            const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                            showToast(`Couldn't open terminal — ${msg}. Try manually: open a terminal and run \`claude\``, "error");
+                          }
                         }}
                       >{claudeInstalled === false ? "Install CLI First" : "Open Terminal to Log In"}</button>
                       <button
@@ -3463,7 +3466,10 @@ When multiple instances of this role are active:
                             if (!status.has_key) {
                               showToast("API key not detected in environment variables. If you logged in via OAuth, you may still be able to launch agents — try launching one to test.", "info");
                             }
-                          } catch { /* ignore */ }
+                          } catch (e) {
+                            const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                            showToast(`Couldn't re-check API key — ${msg}`, "error");
+                          }
                         }}
                       >Re-check</button>
                     </div>
