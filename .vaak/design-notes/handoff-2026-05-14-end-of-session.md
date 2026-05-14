@@ -33,10 +33,12 @@ AI agents from pre-2ec2303 sessions don't have the Item 3 project_send bypass co
 - Backend: stamp `vaak_sidecar_version: <git-sha>` in `sessions/<role>-<inst>.json` on every MCP RPC dispatch (build-time constant via env!("VERGEN_GIT_SHA") or similar). ~10 LOC.
 - Frontend: compare each seat's `vaak_sidecar_version` to current Vaak release; render "⚠ stale sidecar" badge on stale entries; tooltip explaining "ask agent to restart their Claude Code session to gain moderator powers." ~10 LOC.
 
-### Bug 2 — Watchdog auto-promote on AI-moderator (NOT FIXED, ~5 LOC)
-`check_two_controls_dead_seats` fires `mic_mechanism_promoted: moderator_stale` on AI moderators because the heartbeat-stale check fires even when the AI is actively moderating but not currently broadcasting. 57251b1 fixed this for human:0 only.
+### Bug 2 — Watchdog auto-promote on AI-moderator (FIXED at 9a672d4 — landed pre-session-end)
+`check_two_controls_dead_seats` was firing `mic_mechanism_promoted: moderator_stale` on AI moderators because the heartbeat-stale check ran even during legitimate silent moderation. 57251b1 had fixed this only for human:0.
 
-**Fix path:** widen 57251b1's skip to ALL moderators (architect msg 1745's preferred), OR add `floor.moderator_set_at_ms` baseline as freshness anchor. ~5 LOC. NEXT SESSION PRIORITY 1.
+**Fix shipped (developer:0 msg 1770 at 9a672d4):** unconditional early-return from the moderator branch AFTER the moderator-vacant check. moderator-vacant auto-promote STAYS (legit recovery for "no moderator set"); moderator-stale auto-promote REMOVED. Trade-off accepted: truly-dead AI moderator no longer auto-recovers via mode-promotion — recovery path becomes human re-sets moderator OR Layer 2 supervisor restarts dead session OR human flips mode manually.
+
+**REMAINING WORK FOR NEXT SESSION:** tauri build to bake 9a672d4 into the release exe + run the P1 verification gates with fresh AI sidecars (per Bug 1 mitigation).
 
 ### Bug 3 — UI rotation-strip filter (FIXED at 202119e)
 ProtocolPanel.tsx had a sibling rotation-strip render path that d74b021 missed. UI-arch shipped fix at 202119e. Tauri build at mtime ~22:13 incorporates it.
@@ -53,9 +55,9 @@ Re-run moderator-test with ALL AI sessions freshly launched. **Specific verifica
 **If anything still breaks with fresh sessions, fix it before moving on.** Don't proceed to P2 with known mod-feature gaps.
 
 **Sequencing for next session:**
-1. Ship Bug 2 fix (~5 LOC widen 57251b1's staleness-skip to all moderators)
-2. `npm run tauri build` to bake into release exe
-3. Human restarts Vaak; each AI agent restarts their Claude Code session
+1. ~~Ship Bug 2 fix~~ ✓ DONE at 9a672d4 (developer:0 msg 1770, pre-session-end)
+2. `npm run tauri build` to bake 9a672d4 into release exe (FIRST action next session)
+3. Human restarts Vaak; each AI agent restarts their Claude Code session (Bug 1 mitigation)
 4. Re-run the three verification scenarios above
 5. Only when all pass → proceed to P2
 
