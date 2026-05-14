@@ -5351,44 +5351,30 @@ fn check_two_controls_dead_seats(
                 return;
             }
         };
-        // Per human msg 1699: when moderator is "human:0", skip the
-        // staleness check entirely. The human is the desktop UI user,
-        // not an MCP-bound agent — they have no sessions/<role>-<inst>.json
-        // heartbeat file. seat_alive_ms returns 0, watchdog interpreted as
-        // stale, fired mic_mechanism_promoted=moderator_stale immediately
-        // after the human set themselves as moderator (system msg 1696
-        // verified this firing in production at 21:23:59Z right after the
-        // human's set_moderator at 21:23:xxZ). The human is structurally
-        // always alive from Vaak's perspective; no auto-recovery needed.
-        if mod_label == "human:0" {
-            return;
-        }
-        let mod_alive = seat_alive_ms(&mod_label);
-        let mod_stale = mod_alive == 0
-            || now_ms.saturating_sub(mod_alive) > DEAD_SEAT_THRESHOLD_MS;
-        if !mod_stale {
-            return;
-        }
-        let mut current = proto.clone();
-        if let Some(floor_obj) = current.get_mut("floor").and_then(|f| f.as_object_mut()) {
-            floor_obj.insert(
-                "mic_passing_mode".to_string(),
-                serde_json::json!("rotation"),
-            );
-        }
-        write_protocol_emit_two_controls_event(
-            dir,
-            proto_path,
-            active_section,
-            &mut current,
-            "mic_mechanism_promoted",
-            serde_json::json!({
-                "from": "moderator",
-                "to": "rotation",
-                "reason": "moderator_stale",
-            }),
-            app_handle,
-        );
+        // Bug 2 fix (per tester msg 1742 + architect msg 1745, supersedes
+        // 57251b1's human:0-only skip): widen the staleness-skip to ALL
+        // moderators, not just the human. Original logic auto-promoted
+        // mic_passing_mode away from "moderator" whenever the moderator
+        // seat's last_alive_at_ms went stale (>120s) — but moderators are
+        // EXPECTED to go silent during the work they're moderating
+        // (managing the pipeline, not participating in it). AI moderators
+        // were hitting the same auto-promote class as the human (which
+        // 57251b1 skipped via mod_label == "human:0"). evil-arch as
+        // moderator at human msg 1713 hit this exactly: system msg 1720
+        // mic_mechanism_promoted=moderator_stale fired right after they
+        // were set, locking them out of moderation.
+        //
+        // Trade-off: a truly-dead AI moderator no longer auto-recovers via
+        // mode-promotion. Recovery path is: (a) human re-sets moderator,
+        // OR (b) Layer 2 supervisor process-kill auto-restarts the dead
+        // session, OR (c) the human flips mic_passing_mode back to rotation
+        // manually. Per architect msg 1745 trade analysis, this is the
+        // right call — the auto-promote was breaking legitimate moderation
+        // more often than it was rescuing dead moderators.
+        // Suppress unused-variable warning for mod_label since it's now only
+        // used by the moderator-vacant branch above.
+        let _ = mod_label;
+        return;
     }
 }
 
