@@ -1,0 +1,514 @@
+/* AssemblyControls — two-controls UI styles. Pure CSS, no Tailwind.
+ * Visual conventions mirror collab.css patterns (.discussion-event-card,
+ * .message-card) so the new surface feels native alongside ProtocolPanel
+ * and the existing CollabTab message list.
+ *
+ * Color tokens (kept inline rather than introducing a new CSS-vars file):
+ * - Slate-blue planning #5b6cb8 / green executing #2e8b57 per UX-eng
+ *   phase-pill-spec-2026-05-13.md.
+ * - Mic-icon orange-amber #f59e0b (matches existing protocol-mic-yield-btn).
+ * - Combo-map active accent #4f46e5 (matches existing .role-active idiom).
+ */
+
+.assembly-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  position: relative;
+}
+
+.assembly-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Row 1: assembly mic-icon-button (left) + phase mode-pill (right).
+ * Different widget shapes per UI-arch msg 986 catch 1 — the assembly
+ * control is a square icon-button, the phase control is a rounded pill.
+ * They CANNOT be visually misread as one composite toggle. */
+
+.assembly-mic-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 2px solid #f59e0b;
+  background: transparent;
+  color: #f59e0b;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+
+.assembly-mic-btn.is-on {
+  background: #f59e0b;
+  color: #0f1115;
+}
+
+.assembly-mic-btn.is-off {
+  border-color: rgba(245, 158, 11, 0.4);
+  color: rgba(245, 158, 11, 0.7);
+}
+
+.assembly-mic-btn:hover {
+  filter: brightness(1.1);
+}
+
+.assembly-mic-icon {
+  font-size: 14px;
+}
+
+.assembly-mic-label {
+  letter-spacing: 0.04em;
+}
+
+/* Phase pill — slate-blue when planning, green when executing.
+ * Distinct rounded-pill shape from the mic-button above. */
+
+.assembly-phase-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: none;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  color: #ffffff;
+  transition: filter 120ms;
+}
+
+.assembly-phase-pill.is-planning {
+  background: #5b6cb8;
+}
+
+.assembly-phase-pill.is-execution {
+  background: #2e8b57;
+}
+
+.assembly-phase-pill.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.assembly-phase-pill:not(.is-disabled):hover {
+  filter: brightness(1.1);
+}
+
+.assembly-phase-marker {
+  font-size: 14px;
+}
+
+.assembly-phase-label {
+  letter-spacing: 0.04em;
+}
+
+/* Row 2: mic-passing dropdown + plan link */
+
+.assembly-mic-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #a0aec0;
+  font-size: 13px;
+}
+
+.assembly-mic-mode.is-disabled {
+  opacity: 0.4;
+}
+
+.assembly-mic-mode select {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.assembly-mic-mode select:disabled {
+  cursor: not-allowed;
+}
+
+.assembly-mic-mode-label {
+  color: #a0aec0;
+}
+
+.assembly-plan-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 13px;
+  color: #cbd5e0;
+}
+
+.assembly-plan-label {
+  color: #a0aec0;
+}
+
+.assembly-plan-path {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 3px;
+}
+
+.assembly-plan-menu-wrap {
+  position: relative;
+}
+
+.assembly-plan-menu-btn {
+  background: transparent;
+  border: none;
+  color: #a0aec0;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.assembly-plan-menu-btn:hover {
+  color: #e2e8f0;
+}
+
+.assembly-plan-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: #1a1f2e;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  padding: 4px 0;
+}
+
+.assembly-plan-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.assembly-plan-menu-item:not(.is-disabled):not(:disabled):hover {
+  background: rgba(79, 70, 229, 0.15);
+}
+
+.assembly-plan-menu-item:disabled,
+.assembly-plan-menu-item.is-disabled {
+  color: #5b6478;
+  cursor: not-allowed;
+}
+
+/* Row 3: per-mechanism status strip (UI-arch msg 969 fold) */
+
+.assembly-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  font-size: 13px;
+  color: #cbd5e0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.assembly-status-label {
+  color: #a0aec0;
+}
+
+.assembly-status-seat {
+  color: #e2e8f0;
+  font-weight: 500;
+}
+
+.assembly-status-empty {
+  color: #5b6478;
+  font-style: italic;
+}
+
+.assembly-status-arrow {
+  color: #5b6478;
+}
+
+.assembly-status-sep {
+  color: #5b6478;
+}
+
+.assembly-status-separator {
+  color: #5b6478;
+  margin: 0 4px;
+}
+
+.assembly-status-hint {
+  color: #5b6478;
+  font-style: italic;
+  font-size: 12px;
+}
+
+.assembly-status-action {
+  margin-left: 8px;
+  padding: 3px 10px;
+  background: rgba(79, 70, 229, 0.2);
+  color: #c7d2fe;
+  border: 1px solid rgba(79, 70, 229, 0.4);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.assembly-status-action:hover:not(:disabled) {
+  background: rgba(79, 70, 229, 0.3);
+}
+
+.assembly-status-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Row 4: 2x2 combination map. Active cell gets filled-accent bg + bold
+ * label per UI-arch msg 986 minor 3 fold (matches existing .role-active
+ * accent style). */
+
+.assembly-combo-map {
+  display: grid;
+  grid-template-rows: auto auto auto;
+  gap: 2px;
+  margin-top: 4px;
+  font-size: 12px;
+  max-width: 360px;
+}
+
+.assembly-combo-header,
+.assembly-combo-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr;
+  gap: 2px;
+}
+
+.assembly-combo-cell {
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  text-align: center;
+  border-radius: 3px;
+  color: #cbd5e0;
+}
+
+.assembly-combo-cell.is-header {
+  color: #a0aec0;
+  font-weight: 600;
+  background: transparent;
+}
+
+.assembly-combo-cell.is-rowheader {
+  color: #a0aec0;
+  font-weight: 600;
+  text-align: left;
+}
+
+.assembly-combo-cell.is-active {
+  background: rgba(79, 70, 229, 0.25);
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.5);
+}
+
+/* Modal — destructive-confirm pattern for open_planning + plan-path entry.
+ * Mirrors the existing .confirm-dialog idiom in collab.css. */
+
+.assembly-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.assembly-modal {
+  background: #1a1f2e;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 380px;
+  max-width: 560px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+}
+
+.assembly-modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #ffffff;
+  margin-bottom: 12px;
+}
+
+.assembly-modal-body {
+  color: #cbd5e0;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.assembly-modal-body code {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+}
+
+.assembly-modal-field {
+  display: block;
+  margin: 10px 0;
+}
+
+.assembly-modal-field > span {
+  display: block;
+  color: #a0aec0;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.assembly-modal-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'Consolas', 'Monaco', monospace;
+  box-sizing: border-box;
+}
+
+.assembly-modal-input:focus {
+  outline: none;
+  border-color: rgba(79, 70, 229, 0.6);
+}
+
+.assembly-modal-hint {
+  color: #5b6478;
+  font-size: 11px;
+  font-style: italic;
+  margin-top: 8px;
+}
+
+.assembly-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.assembly-modal-cancel,
+.assembly-modal-confirm {
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.assembly-modal-cancel {
+  background: transparent;
+  color: #cbd5e0;
+}
+
+.assembly-modal-cancel:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.assembly-modal-confirm {
+  background: #b91c1c;
+  color: #ffffff;
+  border-color: #b91c1c;
+}
+
+.assembly-modal-confirm:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.assembly-modal-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Phase-toggled separator card in CollabTab message stream.
+ * Mirrors the .discussion-event-card layout — full-width with a
+ * distinctive left border. Spec §72 emits this card for the
+ * school-of-fish visual transition. Honors prefers-reduced-motion. */
+
+.phase-toggled-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin: 12px 0;
+  background: linear-gradient(90deg, rgba(91, 108, 184, 0.08), rgba(46, 139, 87, 0.08));
+  border-left: 4px solid #2e8b57;
+  border-radius: 4px;
+  animation: phase-toggle-pulse 200ms ease-out;
+}
+
+.phase-toggled-separator.is-to-planning {
+  border-left-color: #5b6cb8;
+  background: linear-gradient(90deg, rgba(46, 139, 87, 0.08), rgba(91, 108, 184, 0.08));
+}
+
+.phase-toggled-icon {
+  font-size: 18px;
+}
+
+.phase-toggled-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.phase-toggled-plan {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 12px;
+  color: #a0aec0;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.phase-toggled-time {
+  color: #5b6478;
+  font-size: 11px;
+  margin-left: auto;
+}
+
+@keyframes phase-toggle-pulse {
+  0% { transform: scaleY(0.7); opacity: 0; }
+  100% { transform: scaleY(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phase-toggled-separator {
+    animation: none;
+  }
+}

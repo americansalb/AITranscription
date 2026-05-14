@@ -25,6 +25,13 @@ export type Protocol = {
     rotation_order: string[];
     threshold_ms: number;
     started_at: string | null;
+    assembly_active?: boolean;
+    phase?: 'planning' | 'execution';
+    mic_passing_mode?: 'rotation' | 'hand_raise' | 'moderator';
+    moderator?: string | null;
+    hand_queue?: string[];
+    plan_path?: string | null;
+    plan_hash?: string | null;
   };
   consensus: {
     mode: string;
@@ -100,6 +107,24 @@ function friendlyError(raw: string): string {
   }
   if (raw.includes('[InternalError]')) {
     return 'Something failed inside the system. Check the console.';
+  }
+  if (raw.includes('[RevisePlanForbidden]')) {
+    return 'Only architect, manager, or human can revise an accepted plan.';
+  }
+  if (raw.includes('[PlanPathOutsideDesignNotes]')) {
+    return 'Plan files must live under .vaak/design-notes/.';
+  }
+  if (raw.includes('[PlanPathNotMarkdown]')) {
+    return 'Plan files must be .md (markdown).';
+  }
+  if (raw.includes('[PlanPathMissing]')) {
+    return 'That plan file doesn\'t exist or isn\'t readable.';
+  }
+  if (raw.includes('[PlanScopeBlockMissing]')) {
+    return 'Plan file needs a `<!-- scope: path1 path2 -->` block (use `<!-- scope: * -->` for unrestricted).';
+  }
+  if (raw.includes('[UnknownMicMechanism]')) {
+    return 'That mic-passing mode isn\'t recognized.';
   }
   return raw;
 }

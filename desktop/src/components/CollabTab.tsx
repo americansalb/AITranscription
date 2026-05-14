@@ -9,6 +9,8 @@ import { useToast } from "./Toast";
 // section-pinned widget. Legacy `assembly_line` MCP tool still alive
 // (Slice 6 owns that decom) but the UI surface is unified.
 import { ProtocolPanel } from "./ProtocolPanel";
+import { AssemblyControls } from "./AssemblyControls";
+import { useProtocolState } from "../hooks/useProtocolState";
 import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
@@ -672,6 +674,15 @@ export function CollabTab() {
   const [companionLaunch, setCompanionLaunch] = useState<{ role: string; instance: number; companions: { role: string; enabled: boolean; optional: boolean }[] } | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
   const [activeSection, setActiveSection] = useState<string | null>(null);
+  // Two-controls protocol subscription (commit B). Reads commit A's new
+  // floor fields (assembly_active, phase, mic_passing_mode, etc.) for
+  // AssemblyControls. Listener doubles up with ProtocolPanel's internal
+  // useProtocolState — both re-render on protocol_changed pushes; cost is
+  // one extra get_protocol_cmd per push, accepted for commit B simplicity.
+  const { state: twoControlsProtocol, mutate: twoControlsMutate } = useProtocolState(
+    projectDir,
+    activeSection || "default",
+  );
   const [newSectionName, setNewSectionName] = useState("");
   const [creatingSectionMode, setCreatingSectionMode] = useState(false);
   const [sectionLoading, setSectionLoading] = useState(false);
@@ -2736,6 +2747,18 @@ When multiple instances of this role are active:
           </button>
         </div>
 
+        {/* Two-controls UI surface — commit B per .vaak/design-notes/
+            two-controls-spec-2026-05-14.md. Renders only when commit-A
+            protocol fields are present; v1.5.1 sections see nothing here
+            and continue with ProtocolPanel alone below. */}
+        {twoControlsProtocol && (
+          <AssemblyControls
+            protocol={twoControlsProtocol}
+            mutate={twoControlsMutate}
+            selfRole={null /* human view in CollabTab */}
+          />
+        )}
+
         {/* Protocol panel — unified floor + consensus state (Slice 3+4).
             Replaces AssemblyBanner per spec §11 step 3 — banner deletion
             cleared #954 vote-3 gate (R1 6/6 + R2 9/9 + R5 18/18 tests pass). */}
@@ -3910,6 +3933,42 @@ When multiple instances of this role are active:
 
               // Vote responses are hidden (tallied in VoteCard)
               if (voteResponseIds.has(msg.id)) return null;
+
+              // Two-controls phase_toggled separator card — spec §72 (school-of-
+              // fish visual transition). Full-width card marking the moment phase
+              // flips between planning and execution. prefers-reduced-motion is
+              // honored via @media query on the .phase-toggled-separator animation.
+              if (msg.type === "phase_toggled") {
+                const newPhase = (msg.metadata?.new as string) ?? "execution";
+                const oldPhase = (msg.metadata?.old as string) ?? "planning";
+                const planPath = (msg.metadata?.plan_path as string | null) ?? null;
+                const toPlanning = newPhase === "planning";
+                return (
+                  <div
+                    key={msg.id}
+                    className={`phase-toggled-separator${toPlanning ? " is-to-planning" : ""}`}
+                    role="separator"
+                    aria-label={`Phase changed from ${oldPhase} to ${newPhase}`}
+                  >
+                    <span className="phase-toggled-icon" aria-hidden="true">
+                      {toPlanning ? "✎" : "▷"}
+                    </span>
+                    <span className="phase-toggled-text">
+                      {toPlanning ? "PLANNING MODE" : "EXECUTION MODE"}
+                      {planPath && !toPlanning && " — plan accepted:"}
+                      {toPlanning && " — plan cleared"}
+                    </span>
+                    {planPath && !toPlanning && (
+                      <span className="phase-toggled-plan" title={planPath}>
+                        {planPath.replace(/^.*\//, "")}
+                      </span>
+                    )}
+                    <span className="phase-toggled-time" title={msg.timestamp}>
+                      {formatRelativeTime(msg.timestamp)}
+                    </span>
+                  </div>
+                );
+              }
 
               // Discussion events render as distinct inline cards
               if (msg.type === "moderation" && msg.metadata?.discussion_action) {
