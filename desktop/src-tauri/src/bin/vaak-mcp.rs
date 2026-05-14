@@ -3611,6 +3611,32 @@ fn apply_set_preset(
             name
         ));
     }
+
+    // V1.0.7 (Instance 4 interim gate, dev-challenger msg 619, architect msg 622):
+    // multi-writer audit's preset+floor.mode coordination class has no typed
+    // enforcement yet (pattern-(c) Preset enum is the v1.5.0 work in flight).
+    // Until that lands, reject ALL non-Default-chat cross-transitions: a
+    // preset change is allowed only if it goes THROUGH Default chat in
+    // either direction. Closes the live risk that an active assembly or
+    // discussion gets silently overwritten by another non-Default mode while
+    // floor.mode + rotation_order + discussion state drift independently.
+    //
+    // Coarse — superset of the existing Assembly Line ↔ discussion mutex
+    // above (which catches the most dangerous pairs explicitly). When
+    // v1.5.0 typed enforcement ships, this gate becomes redundant and can
+    // be removed.
+    if prev_preset != PRESET_DEFAULT_CHAT
+        && name != PRESET_DEFAULT_CHAT
+        && prev_preset != name
+    {
+        return Err(format!(
+            "[ConflictWithActivePreset] cannot transition preset directly from '{}' to '{}' — \
+             route through '{}' first to avoid floor.mode + rotation_order drift while the prior \
+             mode's state is still live. v1.0.7 interim gate per multi-writer audit Instance 4.",
+            prev_preset, name, PRESET_DEFAULT_CHAT
+        ));
+    }
+
     // Spec §6 matrix: preset → (floor.mode, consensus.mode).
     let (floor_mode, consensus_mode) = match name {
         PRESET_DEFAULT_CHAT => ("none", "none"),
