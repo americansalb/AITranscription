@@ -4944,12 +4944,16 @@ fn check_assembly_floor_watchdog(
     // declared `expected_duration_secs` via mic_claim, the watchdog respects
     // that declaration up to the 600s hard cap (evil-architect msg 875). If
     // unset (back-compat for unclaimed mics during rollout), falls back to
-    // the legacy `threshold_ms * 2` formula (default 120s).
+    // a default that matches Layer 1's freshness window — 180s (was 120s).
+    // feature/watchdog-rpc-liveness Finding 3 (dev:1 msg 1286 / dev-challenger
+    // msg 1199): the prior 120s default created a 60s band where Layer 1 said
+    // "alive" but the assembly watchdog said "stalled" — false floor_stall
+    // releases on actively-working agents. Now both agree.
     let stall_threshold_secs = floor
         .get("expected_duration_secs")
         .and_then(|v| v.as_u64())
         .filter(|secs| (30..=600).contains(secs))
-        .unwrap_or((threshold_ms / 1000) * 2);
+        .unwrap_or((threshold_ms / 1000) * 3);
 
     // Compare against sessions.json:last_working_at for the speaker.
     let sessions_path = std::path::Path::new(dir).join(".vaak").join("sessions.json");
@@ -5048,12 +5052,19 @@ fn check_assembly_floor_watchdog(
                 rev_age_secs, ASSEMBLY_MAX_FLOOR_SECS, heartbeat_age_ms
             ),
         )
-    } else if idle_secs > stall_threshold_secs {
+    } else if idle_secs > stall_threshold_secs && !heartbeat_fresh {
+        // feature/watchdog-rpc-liveness (developer:1 msg 1286 Finding 2 +
+        // dev:0 msg 1211 symmetry): apply the same heartbeat_fresh gate that
+        // max_floor_exceeded uses. Closes the dual-tracker false-positive
+        // class — agents doing silent tool-call work (Read/Edit/Bash via
+        // PreToolUse/PostToolUse hooks + Signal A RPC heartbeat in vaak-mcp.rs)
+        // bump last_alive_at_ms; floor_stall only fires when BOTH the
+        // working-activity track AND the heartbeat track are stale.
         (
             "floor_stall",
             format!(
-                "no working activity in {}s (stall threshold: {}s)",
-                idle_secs, stall_threshold_secs
+                "no working activity in {}s (stall threshold: {}s) AND heartbeat stale {}ms",
+                idle_secs, stall_threshold_secs, heartbeat_age_ms
             ),
         )
     } else {

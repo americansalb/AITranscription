@@ -11960,6 +11960,22 @@ fn main() {
             }
         };
 
+        // feature/watchdog-rpc-liveness Signal A (developer:1 msg 1286
+        // Finding 1 + evil-arch msg 1201): refresh per-seat last_alive_at_ms
+        // on every inbound MCP RPC. The keep-alive PreToolUse/PostToolUse
+        // hooks already cover Claude Code tool calls, but pure project_wait
+        // standby windows don't fire those hooks — the seat goes silent from
+        // the watchdog's perspective even while the harness is actively
+        // dispatching RPCs through this loop. Bumping last_alive_at_ms here
+        // closes that gap so check_assembly_floor_watchdog's heartbeat_fresh
+        // gate (main.rs:5034) correctly suppresses false floor_stall releases.
+        // Fail-open per update_seat_alive_at_ms's own discipline.
+        if let Ok(guard) = ACTIVE_PROJECT.lock() {
+            if let Some(state) = guard.as_ref() {
+                update_seat_alive_at_ms(&state.project_dir, &state.role, state.instance);
+            }
+        }
+
         if let Some(response) = handle_request(&request, &session_id) {
             let _ = writeln!(stdout, "{}", response);
             let _ = stdout.flush();
