@@ -71,6 +71,69 @@ pub struct Floor {
 
 fn default_threshold_ms() -> u64 { MIC_GRAB_THRESHOLD_MS }
 
+/// Preset name typed enum. v1.5.0 pattern-(c) inaugural — replaces the 25+
+/// raw string-literal sites where preset names appeared across vaak-mcp.rs,
+/// main.rs, and protocol.rs with a single source of truth.
+///
+/// Wire format preserved exactly via `#[serde(rename = ...)]` so existing
+/// on-disk `protocol.json` files continue to deserialize without migration.
+/// Test fixtures in `tests` below verify that the EXISTING wire strings
+/// the codebase wrote pre-v1.5.0 still parse correctly — dev-challenger
+/// msg 635 Finding 8 (read EXISTING wire strings, not just enum roundtrip).
+///
+/// Unknown variants serialize-deserialize as `Err` from serde by default
+/// — that's the "strict" behavior the spec selected (Finding 2). Corrupt or
+/// future-version `protocol.json` fails loud rather than silently mapping
+/// to a default; callers that want resilience-on-unknown can match the
+/// returned error explicitly.
+///
+/// `Copy` is intentionally NOT derived (evil-architect Finding 5) — leaves
+/// room for future variants to carry associated data without forcing every
+/// move-vs-copy call site to be rewritten.
+///
+/// This commit is Step 1 of the 6-commit migration sequence (evil-architect
+/// Finding 6). It defines the enum + tests with ZERO behavior change to
+/// the rest of the codebase. Subsequent commits migrate read/write sites
+/// to use this enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Preset {
+    #[serde(rename = "Default chat")]
+    DefaultChat,
+    #[serde(rename = "Debate")]
+    Debate,
+    #[serde(rename = "Assembly Line")]
+    AssemblyLine,
+    #[serde(rename = "Town hall")]
+    TownHall,
+    #[serde(rename = "Brainstorm")]
+    Brainstorm,
+    #[serde(rename = "Continuous Review")]
+    ContinuousReview,
+    #[serde(rename = "Delphi")]
+    Delphi,
+    #[serde(rename = "Oxford")]
+    Oxford,
+}
+
+impl Preset {
+    /// Returns the wire-format string for this variant. Useful when
+    /// constructing JSON values directly via `serde_json::json!` macros
+    /// or when comparing against legacy string sites that haven't been
+    /// migrated yet. Always matches the `#[serde(rename = ...)]` above.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Preset::DefaultChat => "Default chat",
+            Preset::Debate => "Debate",
+            Preset::AssemblyLine => "Assembly Line",
+            Preset::TownHall => "Town hall",
+            Preset::Brainstorm => "Brainstorm",
+            Preset::ContinuousReview => "Continuous Review",
+            Preset::Delphi => "Delphi",
+            Preset::Oxford => "Oxford",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusRound {
     #[serde(default)]
@@ -713,5 +776,127 @@ mod tests {
         assert_eq!(first.preset, second.preset);
         assert_eq!(first.last_writer_action, second.last_writer_action);
         assert_eq!(first.floor.current_speaker, second.floor.current_speaker);
+    }
+
+    // ============================================================
+    // Preset enum (v1.5.0 pattern-(c) inaugural, commit 1 of 6)
+    // ============================================================
+    //
+    // Tests verify that the EXISTING wire strings the codebase wrote
+    // pre-v1.5.0 still parse correctly — dev-challenger msg 635 Finding 8.
+    // Fixture-based: each test deserializes a string the codebase actually
+    // produced and verifies it maps to the expected Preset variant. Pure
+    // enum roundtrip tests would have missed the Continuous Review rename
+    // bug (Finding 1) because both writes and reads would have agreed on
+    // the broken wire.
+
+    #[test]
+    fn preset_deserializes_existing_default_chat_wire() {
+        let v: Preset = serde_json::from_str(r#""Default chat""#).unwrap();
+        assert_eq!(v, Preset::DefaultChat);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_debate_wire() {
+        let v: Preset = serde_json::from_str(r#""Debate""#).unwrap();
+        assert_eq!(v, Preset::Debate);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_assembly_line_wire() {
+        let v: Preset = serde_json::from_str(r#""Assembly Line""#).unwrap();
+        assert_eq!(v, Preset::AssemblyLine);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_town_hall_wire() {
+        let v: Preset = serde_json::from_str(r#""Town hall""#).unwrap();
+        assert_eq!(v, Preset::TownHall);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_brainstorm_wire() {
+        let v: Preset = serde_json::from_str(r#""Brainstorm""#).unwrap();
+        assert_eq!(v, Preset::Brainstorm);
+    }
+
+    /// Critical regression guard against dev-challenger Finding 1: the
+    /// existing wire is "Continuous Review" (two words). Without the
+    /// `#[serde(rename = ...)]` attribute, `Preset::ContinuousReview`
+    /// would deserialize-fail on "Continuous Review" (default looks for
+    /// "ContinuousReview") and the v1.0 → v1.5 migration breaks for every
+    /// installation that has discussed under the Continuous Review preset.
+    #[test]
+    fn preset_deserializes_existing_continuous_review_wire() {
+        let v: Preset = serde_json::from_str(r#""Continuous Review""#).unwrap();
+        assert_eq!(v, Preset::ContinuousReview);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_delphi_wire() {
+        let v: Preset = serde_json::from_str(r#""Delphi""#).unwrap();
+        assert_eq!(v, Preset::Delphi);
+    }
+
+    #[test]
+    fn preset_deserializes_existing_oxford_wire() {
+        let v: Preset = serde_json::from_str(r#""Oxford""#).unwrap();
+        assert_eq!(v, Preset::Oxford);
+    }
+
+    /// Every variant must serialize back to a string that itself
+    /// deserializes to the same variant — roundtrip via the wire format.
+    #[test]
+    fn preset_roundtrip_via_wire() {
+        let all = [
+            Preset::DefaultChat,
+            Preset::Debate,
+            Preset::AssemblyLine,
+            Preset::TownHall,
+            Preset::Brainstorm,
+            Preset::ContinuousReview,
+            Preset::Delphi,
+            Preset::Oxford,
+        ];
+        for variant in all.iter() {
+            let serialized = serde_json::to_string(variant).unwrap();
+            let parsed: Preset = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(&parsed, variant, "roundtrip failed for {:?}", variant);
+        }
+    }
+
+    /// `as_wire_str` must match what serde produces — both surfaces share
+    /// the same single source of truth.
+    #[test]
+    fn preset_as_wire_str_matches_serde() {
+        let all = [
+            Preset::DefaultChat,
+            Preset::Debate,
+            Preset::AssemblyLine,
+            Preset::TownHall,
+            Preset::Brainstorm,
+            Preset::ContinuousReview,
+            Preset::Delphi,
+            Preset::Oxford,
+        ];
+        for variant in all.iter() {
+            let serde_form = serde_json::to_string(variant).unwrap();
+            let serde_str = serde_form.trim_matches('"');
+            assert_eq!(
+                serde_str,
+                variant.as_wire_str(),
+                "as_wire_str / serde mismatch for {:?}",
+                variant
+            );
+        }
+    }
+
+    /// Unknown preset strings fail loud (strict deserialization, Finding 2
+    /// resolution). Callers that want resilience-on-unknown handle the
+    /// Err explicitly.
+    #[test]
+    fn preset_unknown_wire_string_fails() {
+        let res: Result<Preset, _> = serde_json::from_str(r#""Nonexistent""#);
+        assert!(res.is_err(), "expected unknown variant to fail loud");
     }
 }
