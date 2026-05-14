@@ -7,6 +7,9 @@ import { QueueApp } from "./QueueApp";
 import { CollaborateV2App } from "./components/CollaborateV2/CollaborateV2App";
 import { ToastProvider } from "./components/Toast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+// tokens.css must load BEFORE styles.css so design tokens cascade properly
+// into the rest of the stylesheet (Wave 1 of typed-css-spec 584568b).
+import "./styles/tokens.css";
 import "./styles.css";
 
 // Block browser-style shortcuts that conflict with app functionality.

@@ -1,0 +1,68 @@
+/* Vaak design tokens — single source of truth for spacing, type, z-index,
+ * and radius scales. Populated per design-tokens-spec (dbc51f8) Phase 1
+ * minimum scope and typed-css-spec (a2c1315 + 584568b corrigendum) Wave 1
+ * bootstrap requirement. Read by the stylelint vaak-tokens plugin at lint
+ * time to derive the allow-set; bypass produces a CI warning (warn-only
+ * during Wave 0 transition; error post-Wave-4).
+ *
+ * Color tokens stay in styles.css for V1; design-tokens-spec open
+ * questions on dark/light split + token-sheet-location are unresolved
+ * for color and out-of-scope for this Wave 1 bootstrap.
+ *
+ * Adding a new value to a scale: edit this file. The stylelint plugin
+ * will automatically include the addition in its allow-set on next run.
+ * Token additions don't require plugin changes.
+ */
+
+:root {
+  /* --- Spacing scale (9 steps, geometric) ---
+   * Picked to cover the 20 most-used px values in existing CSS per
+   * design-tokens-spec audit. Roughly halving/doubling steps. Any value
+   * outside the scale needs a justification comment.
+   */
+  --space-0: 0;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  /* --- Type scale (7 steps) ---
+   * Existing 21 distinct font-sizes in V1/V2 CSS collapsed to 7 steps
+   * covering >=95% of current usage. Sizes above the scale (24px+ hero)
+   * stay literal.
+   */
+  --text-xs: 10px;    /* metadata, timestamps */
+  --text-sm: 11px;    /* secondary labels */
+  --text-base: 13px;  /* body */
+  --text-md: 14px;    /* default UI text */
+  --text-lg: 15px;    /* card titles */
+  --text-xl: 18px;    /* page headings */
+  --text-2xl: 22px;   /* hero */
+
+  /* --- Z-index scale (6 layers) ---
+   * Existing 15 z-index values in V1 CSS are unscaled. Conflicts likely.
+   * This scale forces explicit layering decisions; toast > modal > popover
+   * > overlay > base; cursor stays at the top of the stack for drag
+   * handles.
+   */
+  --z-base: 0;
+  --z-overlay: 100;   /* sticky headers, dropdowns */
+  --z-popover: 200;   /* tooltips, mention popovers */
+  --z-modal: 300;     /* dialogs, confirm-actions */
+  --z-toast: 400;     /* notifications (above modals) */
+  --z-cursor: 999;    /* drag handles, sortable previews */
+
+  /* --- Radius scale additions ---
+   * Existing tokens --radius-sm: 6px, --radius-md: 10px, --radius-lg: 16px
+   * stay in styles.css (V1 already uses them). This file adds two new
+   * tokens that the design-tokens-spec proposes:
+   *   --radius-xs:   3px   (inline badges, chips)
+   *   --radius-pill: 999px (fully rounded pills, e.g., cv2-phase-pill)
+   */
+  --radius-xs: 3px;
+  --radius-pill: 999px;
+}
