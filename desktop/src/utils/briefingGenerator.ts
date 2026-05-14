@@ -78,6 +78,7 @@ function generateAntiPatterns(tags: string[], permissions: string[]): string {
 
   // Universal anti-patterns
   patterns.push("- NEVER send acknowledgment-only messages (\"Got it\", \"Will do\")");
+  patterns.push("- NEVER fill your turn with performance content when you have nothing substantive — pass instead (see Turn Discipline)");
   patterns.push("- NEVER relay the human's words back to them");
 
   if (tags.includes("moderation")) {
@@ -107,6 +108,76 @@ function generateAntiPatterns(tags: string[], permissions: string[]): string {
   }
 
   return patterns.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Turn discipline generator (Assembly Line: passing-as-default culture)
+// ---------------------------------------------------------------------------
+
+function generateTurnDiscipline(tags: string[]): string {
+  const isAdversarial = tags.some((t) => t === "red-team" || t === "security");
+
+  const actBullets: string[] = [];
+  const passBullets: string[] = [
+    "- Nothing has changed direction or advanced the work since the previous speaker",
+    "- The previous speaker covered your lens completely",
+    "- You would otherwise send \"agree\" / \"endorsing in full\" / acknowledgment-only content",
+  ];
+
+  if (tags.includes("implementation") || tags.includes("debugging")) {
+    actBullets.push("- A code assignment, bug report, or implementation question lands");
+    actBullets.push("- You have a status update from work in progress");
+  }
+  if (tags.includes("code-review")) {
+    actBullets.push("- New code commits land that haven't been reviewed");
+    actBullets.push("- A peer requests review of a specific artifact");
+  }
+  if (tags.includes("testing")) {
+    actBullets.push("- A testable artifact (commit, build, spec) lands");
+    actBullets.push("- A test failure or regression needs to be reported");
+  }
+  if (tags.includes("architecture")) {
+    actBullets.push("- A design decision needs arbitration or a spec needs drafting");
+    actBullets.push("- A pattern violation requires correction");
+  }
+  if (tags.includes("red-team") || tags.includes("security")) {
+    actBullets.push("- A new contract, spec, or commit needs adversarial review");
+    actBullets.push("- A finding has been missed, downgraded, or theatrically fixed");
+  }
+  if (tags.includes("moderation")) {
+    actBullets.push("- A structured discussion (Delphi, Oxford, Red Team) needs to be run");
+    actBullets.push("- A debate rule has been violated");
+  }
+  if (tags.includes("coordination")) {
+    actBullets.push("- An assignment needs to be routed or priorities arbitrated");
+  }
+  if (tags.includes("analysis")) {
+    actBullets.push("- A research or investigation question is open");
+  }
+  if (tags.includes("documentation")) {
+    actBullets.push("- A doc gap, spec request, or update lands");
+  }
+  if (tags.includes("compliance")) {
+    actBullets.push("- A regulatory checkpoint is reached or a compliance risk is identified");
+  }
+  if (actBullets.length === 0) {
+    actBullets.push("- A directive in your scope lands");
+  }
+  actBullets.push("- You have substantive content that changes direction or advances the work");
+
+  const adversarialNote = isAdversarial
+    ? "\n\n**Adversarial-lens note:** Your pass threshold is LOWER than non-adversarial roles. When a new spec, contract, or commit lands, you should act unless you have verified nothing was missed. Silence from your lens after a contract change is itself a finding."
+    : "";
+
+  return `When the mic lands on you, you have one decision: act or pass. Passing is the default. A round where most agents pass and a couple do real work is a SUCCESSFUL round, not a failed one.
+
+**Act when:**
+${actBullets.join("\n")}
+
+**Pass when:**
+${passBullets.join("\n")}
+
+**How to pass:** send one short message stating what the previous speaker did and that you have nothing to add. Example: \`project_send(to="all", type="status", subject="passing", body="Read msg N from <speaker>. No add from <my lens>.")\`. Then the mic rotates. Do NOT fill your turn with performance content; "endorsing in full" without substantive add is a pass — say so directly.${adversarialNote}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -184,12 +255,15 @@ export function generateBriefing(input: BriefingInput): string {
   // Section 3: Anti-patterns
   const antiPatterns = generateAntiPatterns(tags, permissions);
 
-  // Section 4: Peer relationships
+  // Section 4: Turn discipline (Assembly Line: passing-as-default)
+  const turnDiscipline = generateTurnDiscipline(tags);
+
+  // Section 5: Peer relationships
   const peerRelationships = generatePeerRelationships(tags, peers);
 
-  // Section 5: Multi-instance coordination (only for roles with max_instances > 1)
+  // Section 6: Multi-instance coordination (only for roles with max_instances > 1)
   const multiInstanceSection = (maxInstances ?? 1) > 1
-    ? `\n## 5. Multi-Instance Coordination
+    ? `\n## 6. Multi-Instance Coordination
 
 When multiple instances of this role are active:
 1. ALWAYS check \`project_claims\` before starting ANY file work
@@ -200,7 +274,7 @@ When multiple instances of this role are active:
 `
     : "";
 
-  // Section 6 (or 5 if no multi-instance): Action boundary (from permissions)
+  // Action boundary (from permissions)
   const actionLines = permissions
     .map((p) => PERMISSION_DESCRIPTIONS[p])
     .filter(Boolean)
@@ -218,7 +292,7 @@ When multiple instances of this role are active:
     "4. Report completion via `project_send` when done",
   ].join("\n");
 
-  const sectionNum = (maxInstances ?? 1) > 1 ? 6 : 5;
+  const sectionNum = (maxInstances ?? 1) > 1 ? 7 : 6;
 
   return `# ${title}
 
@@ -231,7 +305,10 @@ ${primaryFunction}
 ## 3. Anti-patterns
 ${antiPatterns}
 
-## 4. Peer Relationships
+## 4. Turn Discipline (Assembly Line)
+${turnDiscipline}
+
+## 5. Peer Relationships
 ${peerRelationships}
 ${multiInstanceSection}
 ## ${sectionNum}. Action Boundary
