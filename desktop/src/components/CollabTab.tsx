@@ -1792,8 +1792,13 @@ When multiple instances of this role are active:
         try {
           await invoke("buzz_agent_terminal", { role: slug, instance });
           setBuzzedKey(key);
+          showToast(`Buzzed ${key} via terminal`, "success");
         } catch {
-          // Terminal buzz failed (PID not found, window gone, etc.) — fall back to board message
+          // Terminal buzz failed (PID not found, window gone, etc.) — fall
+          // back to board message. Distinct toast so the user knows which
+          // path succeeded — they expect different reliability from each:
+          // terminal buzz works even when MCP is dead; board message
+          // requires the agent to poll the board.
           await invoke("send_team_message", {
             dir: projectDir,
             to: key,
@@ -1802,11 +1807,14 @@ When multiple instances of this role are active:
             msgType: "buzz",
           });
           setBuzzedKey(key);
+          showToast(`Buzzed ${key} via board message (terminal not reachable)`, "info");
         }
         setTimeout(() => setBuzzedKey(prev => prev === key ? null : prev), 1500);
       }
     } catch (e) {
+      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
       console.error("[CollabTab] Failed to buzz agent:", e);
+      showToast(`Couldn't buzz ${key} — both terminal and board paths failed: ${msg}`, "error");
     }
   };
 
