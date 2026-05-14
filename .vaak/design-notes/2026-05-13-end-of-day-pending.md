@@ -42,7 +42,7 @@ Branch: `feature/al-vision-slice-1`. Push: complete per developer msg 695 + UX m
 - `0d26052` buzz feedback distinguishes terminal vs board-message vs failure
 - `8faf5b5` StatsPanel WPM-update silent failure toast
 
-### UI-architect (15 commits, mix of code + specs)
+### UI-architect (18 commits, mix of code + specs)
 - `bf0e1ae` ToastProvider lift (counted above)
 - `1785bd7` CollabTab.tsx 12-module extraction outline (parked, multi-week)
 - `5c222d5` phase-pill UI-craft pre-review
@@ -51,6 +51,8 @@ Branch: `feature/al-vision-slice-1`. Push: complete per developer msg 695 + UX m
 - `584568b` typed-CSS spec corrigendum (dev-challenger findings 1-4 addressed)
 - `c53dca0` Wave 1 tokens.css populated baseline
 - `dbc51f8` design-tokens spec
+- `ae4a13f` Wave 0 stylelint vaak-tokens plugin + config (warn-only)
+- `3654b07` Wave 0 corrigendum (proper severity + tighter scope; baseline 3102 warnings, 0 errors)
 
 ### Architect-lane spec/audit (d325c2f)
 - `.vaak/design-notes/assembly-mode-v1.0-corrected-spec-2026-05-13.md` — rule 2/3/3a/4 with v1.0.2-v1.0.5 corrigenda
@@ -62,7 +64,13 @@ Branch: `feature/al-vision-slice-1`. Push: complete per developer msg 695 + UX m
 ## In-flight at the moment work stopped
 
 - **v1.5.0 Preset enum:** commits 1-2 shipped + adversarial-passed + tech-leader-runtime-trace-passed. Commits 3-6 not started. Spec is the binding contract.
-- **Typed-CSS:** Wave 1 tokens.css baseline shipped (c53dca0). Plugin + `no-disable-without-justification` rule (Wave 2+) not started. Spec corrigendum 584568b is dev-challenger-passed and implementation-ready.
+- **Typed-CSS:** Wave 1 tokens.css baseline (`c53dca0`) + Wave 0 stylelint plugin (`ae4a13f`/`3654b07`) shipped warn-only with 3102-warning baseline. Wave 2 (no-disable-without-justification rule) and Wave 3-4 (drift reduction + ERROR-mode adoption) not started. Awaits pre-merge review of c53dca0+ae4a13f+3654b07 chain under tech-leader's runtime-trace gate.
+
+## Review protocols added today (per tech-leader msg 701, durable)
+
+- **Runtime-trace gate** (msg 424): contract review must verify writer-side populates the field reader-side consults, not diff-only check. First PRE-merge application was tech-leader's pass on 1cd488d.
+- **Cross-file provider check on hook introduction** (memory `feedback_check_provider_wrap_on_hook_intro`): when a new React hook is introduced to a component, verify the matching context provider wraps every route the component appears under.
+- **Frontend deployment verification** (memory `feedback_frontend_needs_npm_build`): `npm run build` (not just `npm run build-sidecar`) must be named in ship messages for `desktop/src/**` changes; rebuilds-on-disk don't reach production until dist is regenerated.
 
 ## Spec'd but parked behind observation
 
