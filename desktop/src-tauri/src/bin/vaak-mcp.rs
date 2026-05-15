@@ -8735,7 +8735,34 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             } else {
                 false
             };
-            let next_speaker = if yield_to_human || yield_is_self {
+            // Strict-turn-discipline al_auto_advance gate (evil-arch msg 2421
+            // + human msg 2441): suppress al_auto_advance when
+            //   (a) review_intensity >= 7 (yield-only mic-pass per spec line 77), OR
+            //   (b) sender's floor.turn_type == "working" AND no explicit
+            //       yield_to.target in this send's metadata (working agents
+            //       hold mic through periodic sends; only explicit yield releases)
+            // Per spec §Working-turn unbounded mic-hold (lines 56-62) +
+            // §Yield-only mic-pass (lines 75-79). Composes with Commit T's
+            // watchdog floor_stall suppression — closes both release paths.
+            let proto_for_advance =
+                read_protocol_for_section_value(&state.project_dir, &section_for_gate);
+            let review_intensity = proto_for_advance
+                .get("floor")
+                .and_then(|f| f.get("review_intensity"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5) as u8;
+            let sender_turn_type = proto_for_advance
+                .get("floor")
+                .and_then(|f| f.get("turn_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let has_explicit_yield = !yield_target.is_empty() && !yield_is_legacy_compat;
+            let suppress_auto_advance =
+                review_intensity >= 7
+                || (sender_turn_type == "working" && !has_explicit_yield);
+
+            let next_speaker = if yield_to_human || yield_is_self || suppress_auto_advance {
                 None
             } else {
                 next_assembly_speaker(&asm, &state.project_dir, &from_label)
