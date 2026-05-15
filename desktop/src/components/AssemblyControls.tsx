@@ -90,6 +90,9 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   const [replanningReason, setReplanningReason] = useState('');
   const replanningReasonRef = useRef<HTMLTextAreaElement | null>(null);
   const REPLANNING_REASON_MAX = 200;
+
+  // Q.A state block moves after selfSeatLabel is defined — see below the
+  // moderator-fast-flip block.
   // ••• menu dropdown open state.
   const [planMenuOpen, setPlanMenuOpen] = useState(false);
   // Baseline-snapshot pattern for surfacing modal errors (B.1 fold per UX-eng
@@ -118,6 +121,40 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // view (selfRole === null) maps to "human:0" canonical seat.
   const selfSeatLabel = selfRole === null ? 'human:0' : `${selfRole}:0`;
   const isSelfModerator = micMode === 'moderator' && moderator !== null && moderator === selfSeatLabel;
+
+  // Commit Q.A — Affordance C moderator queue (accept/dismiss).
+  // Replanning requests come from server state; expansion + dismissed
+  // tracking are moderator-private UI state.
+  const replanningRequests = protocol.floor.replanning_requests ?? [];
+  const [replanningQueueExpanded, setReplanningQueueExpanded] = useState(false);
+  // Dismissed-set keyed by moderator-seat + content-hash per UI-arch msg
+  // 1925 craft note 3. Survives remount via localStorage so moderator
+  // doesn't keep re-seeing requests they've already chosen not to act on.
+  const dismissedStorageKey = `vaak-replanning-dismissed:${selfSeatLabel}`;
+  const [dismissedHashes, setDismissedHashes] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(dismissedStorageKey);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      return new Set(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      return new Set();
+    }
+  });
+  // Per-request stable hash so the moderator's dismiss survives queue
+  // mutations (request_index changes when an earlier request is
+  // accepted; content-hash is the durable identity).
+  const requestContentHash = (req: { seat: string; reason: string; ts: number }) =>
+    `${req.seat}:${req.reason}:${req.ts}`;
+  const persistDismissed = (next: Set<string>) => {
+    setDismissedHashes(next);
+    try {
+      localStorage.setItem(dismissedStorageKey, JSON.stringify(Array.from(next)));
+    } catch {
+      // localStorage can throw on quota/privacy; silently degrade — board
+      // event is still the source-of-truth audit record (deferred to Q.B).
+    }
+  };
 
   // Per the spec line 70-103, moderator-driven phase flips skip the modal
   // — the explicit moderator-only surface IS the intent declaration.
@@ -247,6 +284,34 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       setProposeReplanningOpen(false);
       setReplanningReason('');
     }
+  };
+
+  // Commit Q.A (Affordance C) — Moderator accept-or-dismiss handlers.
+  // Accept fires accept_replanning(request_index) → server atomic side
+  // effects per spec §accept_replanning step 1-4 (school-of-fish flip).
+  const acceptReplanningAtIndex = async (index: number) => {
+    setErrorBaseline(lastError);
+    const result = await mutate('accept_replanning', { request_index: index });
+    if (result !== null) {
+      // Server cleared the queue + flipped phase; collapse the moderator
+      // queue panel since there's nothing left to act on. The
+      // protocol_changed event will refresh the rest of the UI.
+      setReplanningQueueExpanded(false);
+    }
+  };
+
+  // Dismiss is moderator-private at v1: persists to localStorage so the
+  // moderator doesn't re-see requests they chose not to act on. Board
+  // emit (replanning_dismissed informational event for team audit trail
+  // per spec §Affordance C) is deferred to follow-up Commit Q.B — focus
+  // here is the moderator-private UI continuity, not the audit ledger.
+  const dismissReplanningAtIndex = (index: number) => {
+    const req = replanningRequests[index];
+    if (!req) return;
+    const hash = requestContentHash(req);
+    const next = new Set(dismissedHashes);
+    next.add(hash);
+    persistDismissed(next);
   };
 
   // Item 6 (UX-eng msg 1449 per human msg 1447 + architect msg 1464): when
@@ -522,6 +587,82 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           </div>
         )}
       </div>
+
+      {/* Affordance C — Moderator replanning queue (Commit Q.A per
+          collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C).
+          Visible only to the moderator seat AND only when there is at least
+          one replanning request in the queue. Clicking the header expands
+          the per-request list with Accept/Dismiss buttons. Dismissed
+          requests render as faded "dismissed by you" rows — they remain in
+          the server-side queue for audit / future-moderator visibility.
+          localStorage-private continuity per UI-arch msg 1925 craft note 3. */}
+      {assemblyActive && isSelfModerator && replanningRequests.length > 0 && (
+        <div className="assembly-replanning-queue">
+          <button
+            type="button"
+            className="assembly-replanning-header"
+            onClick={() => setReplanningQueueExpanded((v) => !v)}
+            aria-expanded={replanningQueueExpanded}
+            title="Click to expand / collapse the replanning request queue."
+          >
+            <span className="assembly-replanning-icon">⚠</span>
+            <span>
+              {replanningRequests.length}
+              {replanningRequests.length === 1 ? ' replanning request' : ' replanning requests'}
+            </span>
+            <span className="assembly-replanning-caret">
+              {replanningQueueExpanded ? '▾' : '▸'}
+            </span>
+          </button>
+          {replanningQueueExpanded && (
+            <ol className="assembly-replanning-list">
+              {replanningRequests.map((req, idx) => {
+                const hash = requestContentHash(req);
+                const isDismissed = dismissedHashes.has(hash);
+                return (
+                  <li
+                    key={hash}
+                    className={
+                      'assembly-replanning-item' +
+                      (isDismissed ? ' assembly-replanning-item-dismissed' : '')
+                    }
+                  >
+                    <div className="assembly-replanning-meta">
+                      <span className="assembly-replanning-seat">{req.seat}</span>
+                      {isDismissed && (
+                        <span className="assembly-replanning-dismissed-tag">
+                          dismissed by you
+                        </span>
+                      )}
+                    </div>
+                    <div className="assembly-replanning-reason">{req.reason}</div>
+                    {!isDismissed && (
+                      <div className="assembly-replanning-actions">
+                        <button
+                          type="button"
+                          className="assembly-replanning-accept"
+                          onClick={() => acceptReplanningAtIndex(idx)}
+                          title="Accept this request — flip the team back to planning."
+                        >
+                          Accept (pivot to planning)
+                        </button>
+                        <button
+                          type="button"
+                          className="assembly-replanning-dismiss"
+                          onClick={() => dismissReplanningAtIndex(idx)}
+                          title="Dismiss from your view only — the request stays in the queue for the audit trail and for future moderators."
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
+      )}
 
       {/* Moderator fast-flip row — moderator-authority Item 5 per UX-eng
           msg 1587 split-by-surface + UI-arch msg 1589 per-actor render. Only

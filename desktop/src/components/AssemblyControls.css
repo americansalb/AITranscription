@@ -265,6 +265,130 @@
   float: right;
 }
 
+/* Affordance C — Moderator replanning queue (Commit Q.A,
+ * collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C).
+ * Renders above the moderator fast-flip row. Amber palette echoes the
+ * propose-replanning button so the moderator visually associates this
+ * surface with the school-of-fish raise-hand chain. */
+.assembly-replanning-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.assembly-replanning-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.assembly-replanning-header:hover {
+  background: rgba(251, 191, 36, 0.20);
+}
+
+.assembly-replanning-icon {
+  font-size: 13px;
+}
+
+.assembly-replanning-caret {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+.assembly-replanning-list {
+  list-style: decimal;
+  margin: 4px 0 0 0;
+  padding: 6px 8px 6px 24px;
+  background: rgba(251, 191, 36, 0.04);
+  border: 1px solid rgba(251, 191, 36, 0.15);
+  border-radius: 4px;
+}
+
+.assembly-replanning-item {
+  padding: 4px 0;
+  font-size: 12px;
+  color: #e2e8f0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.assembly-replanning-item:last-child {
+  border-bottom: none;
+}
+
+.assembly-replanning-item-dismissed {
+  opacity: 0.5;
+}
+
+.assembly-replanning-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.assembly-replanning-seat {
+  font-weight: 600;
+  color: #fbbf24;
+}
+
+.assembly-replanning-dismissed-tag {
+  font-style: italic;
+  color: #a0aec0;
+  font-size: 10px;
+}
+
+.assembly-replanning-reason {
+  margin: 2px 0 4px 0;
+  color: #cbd5e0;
+  word-break: break-word;
+}
+
+.assembly-replanning-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.assembly-replanning-accept,
+.assembly-replanning-dismiss {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.assembly-replanning-accept {
+  background: rgba(91, 108, 184, 0.20);
+  color: #c7d2fe;
+  border: 1px solid rgba(91, 108, 184, 0.45);
+}
+
+.assembly-replanning-accept:hover {
+  background: rgba(91, 108, 184, 0.30);
+}
+
+.assembly-replanning-dismiss {
+  background: transparent;
+  color: #a0aec0;
+  border: 1px solid rgba(160, 174, 192, 0.30);
+}
+
+.assembly-replanning-dismiss:hover {
+  background: rgba(160, 174, 192, 0.08);
+  color: #cbd5e0;
+}
+
 /* Item 6 (per UX-eng msg 1449 + architect msg 1464): inline notice when
  * "Moderator" mode is picked without a moderator assigned. Amber-style hint
  * distinct from the red-amber .assembly-modal-error (which is destructive

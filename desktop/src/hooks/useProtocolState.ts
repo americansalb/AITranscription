@@ -14,6 +14,12 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
+export type ReplanningRequest = {
+  seat: string;
+  reason: string;
+  ts: number;
+};
+
 export type Protocol = {
   schema_version: number;
   rev: number;
@@ -32,6 +38,9 @@ export type Protocol = {
     hand_queue?: string[];
     plan_path?: string | null;
     plan_hash?: string | null;
+    // Collaborative-proposal-workflow v1 — Commit P backend field.
+    // Frontend consumer uses `?? []` defaults per back-compat pattern.
+    replanning_requests?: ReplanningRequest[];
   };
   consensus: {
     mode: string;
@@ -125,6 +134,14 @@ function friendlyError(raw: string): string {
   }
   if (raw.includes('[UnknownMicMechanism]')) {
     return 'That mic-passing mode isn\'t recognized.';
+  }
+  // Collaborative-proposal-workflow v1 (Commit Q.A per UI-arch msg 1964
+  // follow-on 1). Friendly translations for the new error envelopes.
+  if (raw.includes('[ProposeReplanningPhaseInvalid]')) {
+    return 'You can only propose replanning during execution — the team is already in planning.';
+  }
+  if (raw.includes('[AcceptReplanningForbidden]')) {
+    return 'Only the moderator (or architect/manager/human) can accept replanning.';
   }
   return raw;
 }
