@@ -300,18 +300,39 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     }
   };
 
-  // Dismiss is moderator-private at v1: persists to localStorage so the
-  // moderator doesn't re-see requests they chose not to act on. Board
-  // emit (replanning_dismissed informational event for team audit trail
-  // per spec §Affordance C) is deferred to follow-up Commit Q.B — focus
-  // here is the moderator-private UI continuity, not the audit ledger.
-  const dismissReplanningAtIndex = (index: number) => {
+  // Dismiss writes a localStorage-private marker (moderator continuity) AND
+  // fires the emit_replanning_dismissed_cmd Tauri command (Commit Q.B —
+  // appends an informational board event for team audit per spec §Affordance
+  // C line 187). The request STAYS in floor.replanning_requests — only this
+  // moderator's UI surfaces it as dismissed. Future moderators see the full
+  // queue and can re-act. localStorage + board event are decoupled and both
+  // useful: localStorage answers "should I show this to THIS moderator
+  // again?" and the board event answers "why didn't the team replan when
+  // X was raised?"
+  const dismissReplanningAtIndex = async (index: number) => {
     const req = replanningRequests[index];
     if (!req) return;
     const hash = requestContentHash(req);
     const next = new Set(dismissedHashes);
     next.add(hash);
     persistDismissed(next);
+    if (!projectDir) return;
+    try {
+      await invoke('emit_replanning_dismissed_cmd', {
+        dir: projectDir,
+        requestSeat: req.seat,
+        requestReason: req.reason,
+        requestTs: req.ts,
+        requestIndex: index,
+        moderator: selfSeatLabel,
+      });
+    } catch (e) {
+      // Audit-trail emit failed; localStorage marker already landed so
+      // moderator-private continuity is intact. Log to console for
+      // debugging — same pattern as the existing fire-and-forget invoke
+      // sites in this file.
+      console.warn('[AssemblyControls] emit_replanning_dismissed_cmd failed:', e);
+    }
   };
 
   // Item 6 (UX-eng msg 1449 per human msg 1447 + architect msg 1464): when

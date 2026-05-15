@@ -4325,6 +4325,77 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
     Ok(msg_id)
 }
 
+/// Commit Q.B — replanning_dismissed informational event emit per
+/// collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C line
+/// 187. Non-state-mutating board record so the team's audit trail captures
+/// the moderator's "I saw this and chose not to pivot" decisions. The
+/// associated request STAYS in floor.replanning_requests — only the
+/// moderator's private UI surfaces it as dismissed (localStorage continuity
+/// in AssemblyControls.tsx). Distinct from accept_replanning which DOES
+/// mutate state through protocol_mutate; dismiss is moderator UX, not a
+/// state transition.
+///
+/// No mirror in vaak-mcp.rs: dismiss originates only in the Tauri UI
+/// (moderator-side). AI agents have no dismiss path — they propose, the
+/// moderator decides.
+#[tauri::command]
+fn emit_replanning_dismissed_cmd(
+    dir: String,
+    request_seat: String,
+    request_reason: String,
+    request_ts: i64,
+    request_index: u64,
+    moderator: String,
+) -> Result<u64, String> {
+    let dir = validate_project_dir(&dir)?;
+    let board_path = collab::active_board_path(&dir);
+
+    let existing = std::fs::read_to_string(&board_path).unwrap_or_default();
+    let max_id: u64 = existing
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+        .max()
+        .unwrap_or(0);
+    let msg_id = max_id + 1;
+
+    let now = collab::iso_now();
+
+    let message = serde_json::json!({
+        "id": msg_id,
+        "from": "system",
+        "to": "all",
+        "type": "replanning_dismissed",
+        "timestamp": now,
+        "subject": format!("[replanning_dismissed] {} dismissed {}'s request", moderator, request_seat),
+        "body": format!(
+            "Moderator {} dismissed replanning request from {}: {}",
+            moderator, request_seat, request_reason
+        ),
+        "metadata": {
+            "moderator": moderator,
+            "request_seat": request_seat,
+            "request_reason": request_reason,
+            "request_ts": request_ts,
+            "request_index": request_index,
+        }
+    });
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+        .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+
+    writeln!(file, "{}", message)
+        .map_err(|e| format!("Failed to write replanning_dismissed event: {}", e))?;
+
+    notify_collab_change();
+    Ok(msg_id)
+}
+
 // ==================== Section Commands ====================
 
 #[tauri::command]
@@ -6177,6 +6248,9 @@ fn main() {
             // Protocol v6 (Slice 3+4) — read + UI-side mutate
             get_protocol_cmd,
             protocol_mutate_cmd,
+            // Collaborative-proposal-workflow v1 (Commit Q.B) — moderator's
+            // informational dismiss event for board audit trail.
+            emit_replanning_dismissed_cmd,
             // Slice 9 — health pill (resilience-stack JOIN)
             get_resilience_status,
             // Two-controls B.4.1 — active seats for moderator picker

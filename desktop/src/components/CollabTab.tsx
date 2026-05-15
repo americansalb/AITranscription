@@ -3947,27 +3947,62 @@ When multiple instances of this role are active:
               // fish visual transition). Full-width card marking the moment phase
               // flips between planning and execution. prefers-reduced-motion is
               // honored via @media query on the .phase-toggled-separator animation.
+              //
+              // Commit Q.B extends this card with a school-of-fish replanning
+              // variant when reason starts with "replanning_accepted_by:" —
+              // the card surfaces the requester (triggered_by) + the moderator
+              // who accepted, per collaborative-proposal-workflow-spec-2026-
+              // 05-15.md §Affordance C line 189.
               if (msg.type === "phase_toggled") {
                 const newPhase = (msg.metadata?.new as string) ?? "execution";
                 const oldPhase = (msg.metadata?.old as string) ?? "planning";
                 const planPath = (msg.metadata?.plan_path as string | null) ?? null;
+                const reason = (msg.metadata?.reason as string | null) ?? null;
+                const triggeredBy = (msg.metadata?.triggered_by as string | null) ?? null;
                 const toPlanning = newPhase === "planning";
+                const isReplanningAccepted = reason?.startsWith("replanning_accepted_by:");
+                const moderator = isReplanningAccepted
+                  ? reason!.slice("replanning_accepted_by:".length)
+                  : null;
                 return (
                   <div
                     key={msg.id}
-                    className={`phase-toggled-separator${toPlanning ? " is-to-planning" : ""}`}
+                    className={
+                      `phase-toggled-separator${toPlanning ? " is-to-planning" : ""}` +
+                      (isReplanningAccepted ? " is-replanning-accepted" : "")
+                    }
                     role="separator"
-                    aria-label={`Phase changed from ${oldPhase} to ${newPhase}`}
+                    aria-label={
+                      isReplanningAccepted
+                        ? `Replanning accepted by ${moderator}: phase changed from ${oldPhase} to ${newPhase}`
+                        : `Phase changed from ${oldPhase} to ${newPhase}`
+                    }
                   >
                     <span className="phase-toggled-icon" aria-hidden="true">
                       {toPlanning ? "✎" : "▷"}
                     </span>
                     <span className="phase-toggled-text">
-                      {toPlanning ? "PLANNING MODE" : "EXECUTION MODE"}
-                      {planPath && !toPlanning && " — plan accepted:"}
-                      {toPlanning && " — plan cleared"}
+                      {isReplanningAccepted ? (
+                        <>
+                          EXECUTION → PLANNING
+                          {triggeredBy && (
+                            <>
+                              {" "}— replanning requested by{" "}
+                              <strong>{triggeredBy}</strong>;{" "}
+                            </>
+                          )}
+                          {!triggeredBy && " — "}
+                          <strong>{moderator}</strong> accepted
+                        </>
+                      ) : (
+                        <>
+                          {toPlanning ? "PLANNING MODE" : "EXECUTION MODE"}
+                          {planPath && !toPlanning && " — plan accepted:"}
+                          {toPlanning && " — plan cleared"}
+                        </>
+                      )}
                     </span>
-                    {planPath && !toPlanning && (
+                    {planPath && !toPlanning && !isReplanningAccepted && (
                       <span className="phase-toggled-plan" title={planPath}>
                         {planPath.replace(/^.*\//, "")}
                       </span>

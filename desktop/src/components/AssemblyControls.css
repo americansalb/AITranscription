@@ -722,6 +722,28 @@
   background: linear-gradient(90deg, rgba(46, 139, 87, 0.08), rgba(91, 108, 184, 0.08));
 }
 
+/* Commit Q.B — school-of-fish replanning-accepted variant. Per
+ * collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C line
+ * 189 + UI-arch msg 1925 craft note 5: horizontal-rule + colored badge
+ * using v1.1 phase colors (planning slate-blue on the new-mode side,
+ * execution green on the old-mode side). Distinguished from the regular
+ * is-to-planning by an amber accent stripe — replanning is a school-of-
+ * fish-triggered pivot, not a routine moderator open_planning. */
+.phase-toggled-separator.is-replanning-accepted {
+  border-left-color: #fbbf24;
+  border-left-width: 5px;
+  background: linear-gradient(
+    90deg,
+    rgba(46, 139, 87, 0.10) 0%,
+    rgba(251, 191, 36, 0.12) 50%,
+    rgba(91, 108, 184, 0.10) 100%
+  );
+}
+
+.phase-toggled-separator.is-replanning-accepted .phase-toggled-text strong {
+  color: #fbbf24;
+}
+
 .phase-toggled-icon {
   font-size: 18px;
 }
