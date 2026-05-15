@@ -8249,6 +8249,27 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             ))
             .unwrap_or_default();
 
+        // Commit A — extended_thinking attestation check per
+        // collaborative-proposal-workflow-spec-2026-05-15.md §Extended-thinking
+        // attestation (lines 125-133). Planning-phase sends MUST include
+        // metadata.extended_thinking: true; missing/false emits a
+        // planning_unattested informational board event (non-blocking).
+        // Honor-system at v1 per spec line 129 — no model-API verification.
+        // Round-trip enforcement is v1.6 hardening path.
+        let unattested = {
+            let phase_now = proto_for_gate
+                .get("floor")
+                .and_then(|f| f.get("phase"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("execution");
+            let attested = metadata
+                .as_ref()
+                .and_then(|m| m.get("extended_thinking"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            phase_now == "planning" && !attested
+        };
+
         let msg_id = next_message_id(&state.project_dir);
         let message = serde_json::json!({
             "id": msg_id,
@@ -8261,6 +8282,37 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "metadata": metadata.unwrap_or(serde_json::json!({}))
         });
         append_to_board(&state.project_dir, &message)?;
+
+        // Commit A — planning_unattested informational event emit. Lands
+        // AFTER the main message so subscribers see them in order and the
+        // CollabTab badge renderer can correlate the warning with the
+        // originating message id. Non-blocking; the main message has
+        // already been accepted.
+        if unattested {
+            let warning_id = next_message_id(&state.project_dir);
+            let warning = serde_json::json!({
+                "id": warning_id,
+                "from": "system",
+                "to": "all",
+                "type": "planning_unattested",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[planning_unattested] {} sent without extended_thinking", from_label),
+                "body": format!(
+                    "Message #{} from {} during planning phase was sent without metadata.extended_thinking: true. \
+                     Planning-phase contributions are expected to attest the agent's deep-think round per \
+                     collaborative-proposal-workflow-spec-2026-05-15.md §Extended-thinking attestation. \
+                     Honor-system at v1; warning only, message still lands.",
+                    msg_id, from_label
+                ),
+                "metadata": {
+                    "originating_message_id": msg_id,
+                    "originating_seat": from_label,
+                }
+            });
+            // Audit-trail emit is best-effort — failure here does not roll
+            // back the main message (which has already landed).
+            let _ = append_to_board(&state.project_dir, &warning);
+        }
 
         // V1.0.4 — clear `halted_for_human` after a human:0 send. Rule 4
         // halts the floor by setting halted_for_human=true; this is the

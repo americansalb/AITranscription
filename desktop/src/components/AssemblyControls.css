@@ -879,6 +879,43 @@
   }
 }
 
+/* Commit A — planning_unattested warning badge per
+ * collaborative-proposal-workflow-spec-2026-05-15.md §Extended-thinking
+ * attestation. Compact in-line badge. Non-blocking; informational only.
+ * Amber palette like the mic-mechanism-promoted card since both are
+ * "informational, not error" recovery/awareness signals. */
+.planning-unattested-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  margin: 4px 0;
+  background: rgba(251, 191, 36, 0.05);
+  border-left: 3px solid #fbbf24;
+  border-radius: 3px;
+  font-size: 12px;
+  color: #cbd5e0;
+}
+
+.planning-unattested-icon {
+  font-size: 13px;
+  color: #fbbf24;
+}
+
+.planning-unattested-text strong {
+  color: #fbbf24;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.planning-unattested-text code {
+  background: rgba(255, 255, 255, 0.05);
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+  color: #c7d2fe;
+}
+
 /* Mic-mechanism-promoted recovery card (moderator-authority Item 5 follow-up).
  * Compact one-line notice rendered in the message stream when the watchdog
  * auto-promotes mic-passing mode (e.g., moderator_stale → rotation). Distinct

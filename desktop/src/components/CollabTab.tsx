@@ -4014,6 +4014,32 @@ When multiple instances of this role are active:
                 );
               }
 
+              // Commit A — planning_unattested warning badge (collab-proposal-
+              // workflow-spec-2026-05-15.md §Extended-thinking attestation
+              // lines 125-133). Compact one-line warning rendered in the
+              // message stream below the originating message it correlates
+              // to. Non-blocking surface — the originating message has
+              // already landed; this is the team-visible "agent forgot
+              // attestation" signal.
+              if (msg.type === "planning_unattested") {
+                const originatingId = (msg.metadata?.originating_message_id as number | null) ?? null;
+                const originatingSeat = (msg.metadata?.originating_seat as string | null) ?? "unknown";
+                return (
+                  <div
+                    key={msg.id}
+                    className="planning-unattested-badge"
+                    role="status"
+                    aria-label={`Planning-phase message ${originatingId ?? ""} from ${originatingSeat} was sent without extended_thinking attestation`}
+                  >
+                    <span className="planning-unattested-icon" aria-hidden="true">⚠</span>
+                    <span className="planning-unattested-text">
+                      <strong>{originatingSeat}</strong> sent msg #{originatingId} without{" "}
+                      <code>extended_thinking</code> attestation
+                    </span>
+                  </div>
+                );
+              }
+
               // Moderator-authority Item 5 follow-up — stale-moderator
               // recovery card. When the watchdog auto-promotes mic-passing
               // mode from moderator → rotation (reason: moderator_stale or
