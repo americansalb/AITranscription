@@ -83,9 +83,26 @@ Co-owned developer:1 + platform-engineer:0 per platform-engineer msg 2115. III.B
 
 **III.A — Recording & capture pipeline.** Per-modality capture (audio for speaking, video for proctoring + identity, text for writing). MediaRecorder API or Tauri-native equivalent. Codec: Opus 48kHz fullband for speaking (paralinguistics preserved per dev-challenger msg 2110 #5 + platform-engineer msg 2115); H.264 baseline for video. Chunked streaming + local IndexedDB fallback for network-blip resilience. S3-compatible signed-URL writes. 7-year retention pending VII Compliance.
 
+**III.A execution-phase content (developer:1):**
+
+- **Audio capture parameters (speaking modality):** Opus codec @ 48 kHz / 16-bit mono / VBR ~24 kbps target + 32 kbps cap; `MediaRecorder` `audioBitsPerSecond: 24000` with `mimeType: "audio/webm;codecs=opus"`; Tauri-native fallback uses `cpal` library with same params. Chunk duration: 5 s slices via `MediaRecorder.start(5000)` so a 30-min speaking task = ~360 chunks; each chunk ~15 KB. Total payload ~5.5 MB per 30-min speaking task — well within IndexedDB headroom even on Safari's 500 MB floor.
+- **Video capture parameters (proctoring + identity):** H.264 baseline profile @ 640×480 / 15 fps / VBR ~200 kbps; `MediaRecorder` `videoBitsPerSecond: 200000` with `mimeType: "video/mp4;codecs=avc1.42E01E"`. Chunk duration 30 s (proctoring tolerates coarser granularity than speaking). At 200 kbps × 30 min = ~45 MB total — still IndexedDB-feasible; degrades to 320×240 / 10 fps at <500 kbps available bandwidth.
+- **Text capture (writing modality):** plain UTF-8 text; debounced state-snapshot every 10 s; `crypto.randomUUID()` per chunk for de-duplication. Local-storage footprint negligible (~20 KB per 1000-word essay).
+- **Chunked-upload protocol:** `PUT` to S3-signed URL per chunk; server confirms via 200 response → client deletes IndexedDB entry. On 5xx/timeout: exponential backoff 2^n s capped at 60 s; persist locally. Service Worker handles retry in background tab.
+- **Resumption tokens:** each chunk carries `{session_id, modality, chunk_seq, sha256}`. Server-side dedup by `(session_id, modality, chunk_seq)`; sha256 catches corruption. Recovery from browser crash: rehydrate `session_id` from JWT in localStorage; re-list IndexedDB chunks; resume PUT loop from `max(chunk_seq) + 1`.
+- **Retention + deletion:** S3 lifecycle policy moves chunks to Glacier after 90 d; deletes after 7 years per language-testing-industry norms (pending VII final). Per-candidate "right to deletion" (GDPR/CCPA) cross-cut to VII.A handled by tagged S3 object → batch-delete Lambda.
+
 <!-- delegation: owner=developer:1 section=III.B deadline=execution-phase deps=III.A -->
 
 **III.B — Secure browser / lockdown environment (PHASED).** Phase 1: Tauri-native (kiosk-mode, no copy/paste, no other windows, no screen recording) for sponsored AALB admin. Phase 2: lockdown-browser (Chrome enterprise policies + tab-isolation) for self-assessment. Phase 3: hybrid (native shell loading sandboxed web content) when mobile in-scope. Honest threat-model acknowledgments per dev-challenger msg 2110 #4: gaze tracking and keyboard cadence have high FP rates; live human proctor is the primary control for accreditation-grade testing; VM-detection (CPUID hypervisor bit, IOMMU signatures, clock-jitter) is Phase 1 limitation explicitly documented; off-screen-accomplice via secondary device is uncatchable without live proctor.
+
+**III.B execution-phase content (developer:1):**
+
+- **Phase 1 — Tauri-native AALB Test Client:** new Tauri 2.0 app, separate from Vaak's existing Tauri app. Single-window full-screen kiosk via `tauri::WindowBuilder::new(...).fullscreen(true).resizable(false).decorations(false)`. Block clipboard via `tauri::Manager::set_clipboard_text` disabled. Block dev-tools via `--release` flag + `tauri.conf.json` `"devPath": null` + `"build": { "devUrl": null }`. Block second-window-open via `tauri::Manager::create_window` guard. macOS: NSApplication.shared.presentationOptions = .disableAppleMenu | .disableProcessSwitching. Windows: `SetThreadDesktop` to isolated desktop (admin-only — defer to v1.1). Linux: X11 grab via `XGrabKeyboard` (Wayland equivalent TBD per platform-engineer:0 cross-platform audit).
+- **Phase 1 — VM/Hypervisor detection** (best-effort, documented limitation): Windows `IsProcessorFeaturePresent(PF_HYPERVISOR_PRESENT)` + CPUID leaf 0x40000000 (hypervisor vendor signature); macOS `sysctl hw.vmwaretools` / `system_profiler SPHardwareDataType` for VMware/VBox tells; Linux `/sys/class/dmi/id/sys_vendor` for QEMU/KVM/VirtualBox; cross-OS clock-jitter test (consumer-grade hypervisors leak ~10-50µs timing irregularities). At-launch detection only — if detected, candidate sees "VM detected — testing on a VM is not permitted for accredited admin. Switch to a physical machine or contact your proctor." Bypassable but raises the bar from zero-effort.
+- **Phase 1 anti-cheat enumeration:** clipboard disable, copy/paste/cut intercept, right-click-menu disable, F12/Ctrl+Shift+I disable, print-screen intercept (Windows `RegisterHotKey VK_SNAPSHOT` no-op handler; macOS not interceptable per API constraints — known limitation), audio-out monitoring (detect if speakers/headphones change mid-test). Each enumerated under `tauri::AppHandle` lifecycle.
+- **Phase 2 — Lockdown-browser fallback:** Respondus LockDown Browser (commercial, ~$5K/yr institutional license) OR open-source Safe Exam Browser (SEB, freemium, manifest-based config). Recommend SEB for self-assessment use case — institutional Respondus license cost is unjustified at self-assessment scale.
+- **Phase 3 — Hybrid + mobile:** placeholder; full design deferred. Constraint: iOS/Android in-app webview lacks Chrome-equivalent enterprise policies. Workaround paths under investigation include Apple's `WKWebView` config + Android's `WebViewClient` config + native shell that wraps test surface.
 
 <!-- delegation: owner=platform-engineer:0 section=III.C deadline=execution-phase deps=III.A,VII.A -->
 
@@ -98,6 +115,20 @@ Co-owned developer:1 + platform-engineer:0 per platform-engineer msg 2115. III.B
 <!-- delegation: owner=developer:1 section=III.D deadline=execution-phase deps=III.A,III.C,IV.C -->
 
 **III.D — Real-time proctoring pipeline.** WebRTC peer connection to proctor monitor (or SFU like mediasoup for multi-candidate batching). Behavioral signals: gaze tracking (face landmarks), audio voice continuity, keyboard cadence, screen-region focus. Honest threat-model labeling per dev-challenger msg 2110 #4: what's caught vs not. Post-hoc review compiles candidate session to mp4 + event timeline; proctor scrubs for anomalies. Critical cross-cut to IV.C: anti-cheat engine reads applied-accommodation profile and suppresses corresponding signals (screen-reader use ≠ off-screen-look; extended-time ≠ extended-idle = cheat).
+
+**III.D execution-phase content (developer:1):**
+
+- **Behavioral signal threshold table (auto-flag-for-review, NOT auto-flunk):**
+  - *Face absence:* threshold 5 s continuous → flag-for-review. Accommodation suppression: candidate w/ "extended-bathroom-break" accommodation gets 120 s pre-flag grace.
+  - *Multiple faces:* any detection → immediate flag-for-review (no false-positive grace; legitimate single-occupant testing always has one face).
+  - *Off-screen gaze:* >30 % of 60 s window looking away from screen → flag-for-review. Accommodation suppression: candidate w/ "scratch paper" accommodation gets gaze-FP-rate raised to >60 %.
+  - *Audio voice continuity (speaking modality only):* secondary voice detected → flag-for-review. Threshold: secondary-voice energy >-30 dB relative to primary candidate voice for >2 s.
+  - *Keyboard cadence (writing modality only):* dwell-time variance < 10 ms (suggesting auto-paste/macro) → flag-for-review. Accommodation suppression: "alternative input device" accommodation disables cadence checking entirely.
+  - *Window/tab focus loss:* any focus-loss event in Tauri-kiosk mode → flag-for-review (kiosk mode shouldn't permit it; if observed, likely OS-level bypass attempt).
+- **WebRTC topology:** mediasoup SFU @ ~10 candidates per proctor max. Per-candidate video: 320×240 @ 5 fps (proctor view) — distinct from candidate-side capture at 640×480 @ 15 fps. Bandwidth budget: proctor monitor ~250 kbps per candidate × 10 = ~2.5 Mbps total.
+- **Auto-flag UI contract (cross-cut to IV.A):** every flag emits a board-like event `{candidate_id, signal_type, timestamp, confidence, suppression_applied: bool}` consumed by proctor UI. Proctor UI shows flag with confidence input slider (0-100) before escalation per UI-architect msg 2113 #4 craft note — prevents over-flagging legitimate accommodation behaviors.
+- **Post-hoc review artifact:** WebM screen-capture + chunked audio (from III.A) + chunked video (from III.A) + JSON event timeline merged server-side into single MP4 + sidecar JSON via FFmpeg `concat` + `subtitles` filter. Retention per III.A: 7 years; deletable per VII.A.
+- **Accommodation × proctoring conflict resolution (cross-cut to IV.C):** at session start, anti-cheat engine reads `candidate.accommodations` → per-signal suppression map → applied to all real-time + post-hoc analysis. Suppression decisions audit-logged so accreditation review can verify no candidate was unjustly flagged.
 
 <!-- delegation: owner=platform-engineer:0 section=III.E deadline=execution-phase deps=III.A,III.D -->
 
@@ -162,6 +193,19 @@ Co-owned architect:0 + tester:0 (adversarial) + platform-engineer:0 (infrastruct
 <!-- delegation: owner=developer:1 section=V.Y deadline=execution-phase deps=V.C -->
 
 **V.Y — Statistical pipeline (IRT/Rasch).** Python (pyirt, psychopy) server-side. Tighter FastAPI backend integration vs R alternative. Spec: API contract, batch-vs-realtime calibration, item-bank update workflow.
+
+**V.Y execution-phase content (developer:1):**
+
+- **Library shortlist:** primary `mirt`-equivalent in Python via `girth` (general item response theory; supports 1PL/2PL/3PL + GRM for polytomous items — needed for AALB's speaking/writing rubric scales). Fallback: `pyirt` (simpler API but only 2PL); explicit R bridge via `rpy2` only if `girth` proves insufficient for plus-level differentiation (target accuracy validated against ETS published IRT benchmarks during V.C concordance study).
+- **API contract (FastAPI `/api/v1/psychometrics/*`):**
+  - `POST /calibrate-batch`: input `{item_responses: [{candidate_id, item_id, score}]}`, output `{item_params: {item_id: {a, b, c}}, ability_estimates: {candidate_id: theta}, fit_stats: {...}}`. Batch operation; minutes-to-hours runtime for N≥500 calibration sample.
+  - `POST /score-realtime`: input `{candidate_id, item_responses: [...]}`, output `{theta, theta_se, ilr_anchor, aalb_band, recommendation: {action, confidence}}`. Sub-second for known item-bank (item params pre-calibrated).
+  - `GET /item-bank/:id`: returns item params + exposure stats + last-calibrated timestamp.
+  - `POST /item-bank/promote`: gated to architect/manager/human; promotes draft items to live calibrated set after batch calibration meets fit-stat thresholds (RMSEA<0.06, CFI>0.95, item-fit infit/outfit 0.7-1.3 per ITC standards).
+- **Batch-vs-realtime calibration policy:** item parameters live in two tiers — `calibrated` (locked, used for realtime scoring) and `draft` (collecting responses, awaiting promotion). Calibration runs quarterly OR per-1000-administrations per tester msg 2124 V.adv #5; promotion gated on fit stats above + architect/human sign-off. Realtime scoring only uses `calibrated` item params; draft items run in parallel for data collection but don't affect candidate scoring.
+- **Item-bank update workflow:** new items authored by content-author role (vacant; SME-deferred per §Purpose); enter as `draft`; collect ≥N=300 responses per item; batch calibration computes draft params; review for fit-stat thresholds + content-validity SME pass; promote to `calibrated` via `POST /item-bank/promote`. Items failing fit-stat thresholds get item-review workflow (revise / retire / re-draft).
+- **Discriminant-validity computation (cross-cut to V.A discriminant-validation sub-step per tester msg 2124 + dev-challenger msg 2126):** during concordance study, collect Raven's Progressive Matrices subset + test-taking-skill questionnaire + education-level demographic alongside Spanish-proficiency responses. Compute Pearson r between AALB theta and each non-target construct. Target r<0.30 with Raven's + r<0.30 with test-taking-skill + r<0.40 with education-level. Surface in `/api/v1/psychometrics/discriminant-report` endpoint for V.adversarial audit per tester msg 2124 V.adv #4.
+- **Storage:** PostgreSQL `psychometrics.item_params`, `psychometrics.ability_estimates`, `psychometrics.calibration_runs` tables. Indexed on `item_id` + `candidate_id` + `calibration_run_id`. Append-only — historical calibrations preserved for concordance audit + accreditation review.
 
 <!-- delegation: owner=platform-engineer:0 section=V.Z deadline=execution-phase deps=III.E,IV.E -->
 
