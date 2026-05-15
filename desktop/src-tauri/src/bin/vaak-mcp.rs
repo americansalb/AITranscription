@@ -6630,6 +6630,148 @@ mod protocol_slice2_tests {
     }
 
     // ============================================================
+    // R3 — replanning_requests multi-writer NO-ERASURE under contention
+    //
+    // Per tester msg 1913 + architect msg 1979 v7 correction +
+    // dev-challenger msg 1976 catch: the lock-via-collab.rs guarantee is
+    // no-erasure under contention, NOT strict-FIFO-by-ts. Earlier spec
+    // framing ("queue order matches seeded-timestamp order") was rhetorical
+    // inheritance from v1.0 routing fix; corrected in v7 §propose_replanning
+    // "Queue ordering semantics" — queue order is arrival order, lock-
+    // acquire is OS-scheduler-dependent and non-deterministic by design.
+    // Moderator's Affordance C selects by request_index, not by iteration.
+    //
+    // Two sibling tests:
+    //   r3_no_erasure_under_concurrent_contention — N=4 std::thread::spawn
+    //     racing for an Arc<Mutex<state>> (stands in for production's
+    //     with_file_lock). Asserts: all 4 entries land (no race-erasure);
+    //     each seeded ts appears exactly once (set equality of ts identities,
+    //     no duplicates, no missing). NO assertion on queue index order.
+    //
+    //   r3_serial_seeded_order_preserved_n4 — N=4 sequential calls;
+    //     extends r3_precondition_explicit_ts_is_honored from N=3 to N=4
+    //     per spec v7 framing. Discriminates "lock honors caller-provided
+    //     ts" from "lock overrides with now()". Serial path, no contention.
+    //
+    // Refs: project_multi_writer_audit_2026-05-13.md,
+    // feedback_audit_class_not_just_symbol.md.
+    // ============================================================
+
+    /// R3 — N=4 concurrent writers racing under Mutex<state> (stands in for
+    /// production's with_file_lock at the dispatcher). Verifies the multi-
+    /// writer audit invariant: every writer's entry lands, no ts duplicated,
+    /// no ts missing. Order within the queue is arrival order = lock-acquire
+    /// order = scheduler-dependent; per v7 spec correction we verify set
+    /// equality (no-erasure), not arrival ordering.
+    ///
+    /// SCOPE NOTE (per dev-challenger msg 1985): Arc<Mutex<state>> exercises
+    /// in-process THREAD contention. Production's with_file_lock at
+    /// vaak-mcp.rs:598 takes a project_dir and locks .vaak/board.lock —
+    /// it serializes across PROCESSES via OS file-locking. Different blast
+    /// radius: this fixture catches in-process race bugs in apply-layer
+    /// state mutation; a future tempdir-harnessed integration test would
+    /// catch file-lock-specific bugs (premature release, lock-file creation
+    /// race, OS-specific semantics). v1 R3 covers the apply-layer invariant
+    /// per spec v7; cross-process file-lock parity is a v1.6 follow-up.
+    #[test]
+    fn r3_no_erasure_under_concurrent_contention() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let state = Arc::new(Mutex::new(fresh_state()));
+        {
+            let mut s = state.lock().unwrap();
+            s["floor"]["phase"] = serde_json::json!("execution");
+        }
+
+        let seeds: Vec<(&'static str, &'static str, i64)> = vec![
+            ("developer:0", "thread-0 plan gap", 1_700_000_000_000),
+            ("developer:1", "thread-1 plan gap", 1_700_000_000_001),
+            ("tester:0", "thread-2 plan gap", 1_700_000_000_002),
+            ("ux-engineer:0", "thread-3 plan gap", 1_700_000_000_003),
+        ];
+        let n = seeds.len();
+
+        let handles: Vec<_> = seeds
+            .into_iter()
+            .enumerate()
+            .map(|(i, (actor, reason, ts))| {
+                let state = Arc::clone(&state);
+                thread::spawn(move || {
+                    let mut s = state.lock().unwrap();
+                    apply_propose_replanning(&mut s, actor, reason, Some(ts))
+                        .unwrap_or_else(|e| panic!("thread {} failed: {}", i, e));
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let s = state.lock().unwrap();
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert_eq!(
+            queue.len(),
+            n,
+            "all {} writers must land — multi-writer audit (no race-erasure)",
+            n
+        );
+
+        let mut ts_set: Vec<i64> = queue
+            .iter()
+            .map(|e| e["ts"].as_i64().expect("each entry must have an i64 ts"))
+            .collect();
+        ts_set.sort();
+        assert_eq!(
+            ts_set,
+            vec![
+                1_700_000_000_000,
+                1_700_000_000_001,
+                1_700_000_000_002,
+                1_700_000_000_003,
+            ],
+            "each seeded ts must appear exactly once — no entries dropped, no duplicates"
+        );
+    }
+
+    /// R3 — N=4 serial seeded calls; queue index order matches seeded ts
+    /// order under no-contention. Extends r3_precondition_explicit_ts_is_
+    /// honored (N=3) to N=4 per spec v7 line 289 framing. Discriminates
+    /// "lock honors caller-provided ts" from "lock overrides with now()".
+    #[test]
+    fn r3_serial_seeded_order_preserved_n4() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        let seeds = [
+            1_700_000_000_000_i64,
+            1_700_000_000_001,
+            1_700_000_000_002,
+            1_700_000_000_003,
+        ];
+        for (i, ts) in seeds.iter().enumerate() {
+            apply_propose_replanning(
+                &mut s,
+                "developer:1",
+                &format!("serial-call-{}", i),
+                Some(*ts),
+            )
+            .unwrap_or_else(|e| panic!("serial call {} failed: {}", i, e));
+        }
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert_eq!(queue.len(), 4);
+        for (i, ts) in seeds.iter().enumerate() {
+            assert_eq!(
+                queue[i]["ts"].as_i64().unwrap(),
+                *ts,
+                "queue[{}] must match seeded ts {} (serial path preserves order)",
+                i,
+                ts
+            );
+        }
+    }
+
+    // ============================================================
     // Collaborative-proposal-workflow v1 — Commit Q
     // R4 accept_replanning role gate (mirrors v1.X §Item 4 phase-flip)
     // R5 accept_replanning atomicity (single-write phase + plan + queue)
