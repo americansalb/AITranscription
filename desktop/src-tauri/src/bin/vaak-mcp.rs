@@ -6915,6 +6915,45 @@ mod protocol_slice2_tests {
         assert_eq!(s["floor"]["phase"], "planning");
     }
 
+    /// R5.A (apply-layer half per evil-arch msg 1906 #3 + spec v7 line 292) —
+    /// current_speaker is set with stale heartbeat at accept_replanning time;
+    /// phase still flips cleanly. The watchdog floor_stall cleanup of the
+    /// phantom current_speaker is the integration-level half (async, ~30s
+    /// post-tick) and lives in a future tempdir-harnessed integration test.
+    ///
+    /// Apply-layer claim verified here: accept_replanning does NOT check
+    /// current_speaker liveness — that's the watchdog's domain (separation of
+    /// concerns from v1.X Bug 2 fix at 9a672d4). A dead speaker on the floor
+    /// at pivot time does not block the moderator's accept; the four atomic
+    /// side effects (phase, plan_path, plan_hash, replanning_requests) land
+    /// per W1 atomicity regardless. current_speaker remains as a phantom
+    /// field until watchdog releases via floor_stall — UNTESTED here, lives
+    /// in integration.
+    #[test]
+    fn r5_a_dead_speaker_phantom_at_pivot_phase_flips_cleanly() {
+        let mut s = fresh_with_replanning_queue();
+        // Simulate a dead/AFK current_speaker mid-working-turn. Stale-heartbeat
+        // semantics live in sessions/<role>-<inst>.json:last_alive_at_ms not in
+        // protocol.json — the apply-layer can't see them. What we CAN verify
+        // is that current_speaker presence on the floor doesn't block the
+        // accept_replanning side effects.
+        s["floor"]["current_speaker"] = serde_json::json!("developer:1");
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "evil-architect:0")
+            .expect("accept_replanning must not be blocked by current_speaker liveness state");
+        // All four atomic side effects land:
+        assert_eq!(s["floor"]["phase"], "planning");
+        assert!(s["floor"]["plan_path"].is_null());
+        assert!(s["floor"]["plan_hash"].is_null());
+        assert!(s["floor"]["replanning_requests"].as_array().unwrap().is_empty());
+        // Phantom current_speaker remains — accept doesn't clear it; the
+        // watchdog floor_stall path does (integration-tested, not here).
+        assert_eq!(
+            s["floor"]["current_speaker"].as_str(),
+            Some("developer:1"),
+            "phantom current_speaker stays until watchdog releases (separation of concerns)"
+        );
+    }
+
     /// R6 — accept_replanning with empty queue still succeeds (the
     /// moderator can pre-empt without any open request). Spec doesn't
     /// require non-empty queue as a precondition — request_index
