@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|Grep|Glob|WebFetch|WebSearch|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/turn-gate.cmd"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Read|Edit|Write|NotebookEdit",
