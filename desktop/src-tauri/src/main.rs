@@ -4325,6 +4325,179 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
     Ok(msg_id)
 }
 
+/// Commit D — DelegationEntry + parse_delegation_blocks helpers per
+/// collaborative-proposal-workflow-spec-2026-05-15.md §Delegation-block
+/// markup + §parse_delegation_blocks (lines 89-106 + 166).
+///
+/// Two parser surfaces per architect msg 1944 (folding dev-challenger msg
+/// 1939 #2):
+///   - parse_delegation_blocks_lenient: drops malformed silently for the
+///     UI's Affordance B chart (forward-compat — partial plan-doc edits
+///     mid-write shouldn't break the chart render)
+///   - parse_delegation_blocks_strict: reports ParseError list for the
+///     pre-commit hook's well-formedness gate (Commit H Python side has
+///     its own parser; Rust strict variant exists for symmetric API +
+///     for future Tauri-side hook integration)
+///
+/// Hand-rolled (no regex crate dependency) matching the non-greedy
+/// `<!--\s*delegation:\s*(.+?)\s*-->` semantics per platform-eng msg 1916
+/// #2. Hyphenated values in field bodies (`section=V.A-1`, `deadline=
+/// after-pilot`, `owner=ui-architect:0`) are preserved because the close
+/// is determined by `-->` lookahead, not by stopping at `-`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct DelegationEntry {
+    owner: String,
+    section: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deadline: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+enum ParseError {
+    MissingOwner { raw_body: String },
+    MissingSection { raw_body: String },
+    DuplicateSection { section: String, owner: String },
+}
+
+/// Iterate `<!-- delegation: ... -->` blocks in `content`. Returns the
+/// inner-body string for each block (the part between `delegation:` and
+/// `-->`, trimmed). Closure-driven so both lenient + strict can reuse
+/// the same scanning logic.
+fn for_each_delegation_block<F: FnMut(&str)>(content: &str, mut f: F) {
+    let open = "<!--";
+    let needle = "delegation:";
+    let close = "-->";
+    let mut rest = content;
+    while let Some(open_pos) = rest.find(open) {
+        let after_open = &rest[open_pos + open.len()..];
+        // Optional whitespace then "delegation:" — skip otherwise.
+        let trimmed = after_open.trim_start();
+        if !trimmed.starts_with(needle) {
+            // Not a delegation block; advance past this `<!--` and keep
+            // scanning. (Could be a scope:, delegation-target:, or any
+            // unrelated HTML comment.)
+            rest = after_open;
+            continue;
+        }
+        let body_start_offset =
+            (after_open.len() - trimmed.len()) + needle.len();
+        let body_and_after = &after_open[body_start_offset..];
+        let Some(close_pos) = body_and_after.find(close) else {
+            // Unclosed comment — skip the rest of the buffer to avoid
+            // infinite loop. v1 chooses to silently bail (malformed
+            // plan doc; pre-commit hook will catch it via the v1.1
+            // scope-block parser separately).
+            break;
+        };
+        let body = body_and_after[..close_pos].trim();
+        f(body);
+        // Advance past the close marker.
+        rest = &body_and_after[close_pos + close.len()..];
+    }
+}
+
+/// Parse a single delegation-block body into a DelegationEntry. Returns
+/// None on missing required fields (owner, section). Used by both
+/// lenient and strict callers via different error paths.
+fn parse_delegation_body(body: &str) -> Result<DelegationEntry, ParseError> {
+    let mut owner: Option<String> = None;
+    let mut section: Option<String> = None;
+    let mut deadline: Option<String> = None;
+    let mut deps: Vec<String> = vec![];
+    for token in body.split_whitespace() {
+        let Some(eq) = token.find('=') else { continue };
+        let key = &token[..eq];
+        let value = &token[eq + 1..];
+        match key {
+            "owner" => owner = Some(value.to_string()),
+            "section" => section = Some(value.to_string()),
+            "deadline" => deadline = Some(value.to_string()),
+            "deps" => {
+                deps = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            _ => {} // forward-compat: unknown keys silently dropped
+        }
+    }
+    match (owner, section) {
+        (Some(o), Some(s)) => Ok(DelegationEntry {
+            owner: o,
+            section: s,
+            deadline,
+            deps,
+        }),
+        (None, _) => Err(ParseError::MissingOwner {
+            raw_body: body.to_string(),
+        }),
+        (Some(_), None) => Err(ParseError::MissingSection {
+            raw_body: body.to_string(),
+        }),
+    }
+}
+
+/// Lenient parser per spec §parse_delegation_blocks (Affordance B chart
+/// path). Drops malformed blocks silently — forward-compat for users
+/// editing plan docs mid-write.
+fn parse_delegation_blocks_lenient(content: &str) -> Vec<DelegationEntry> {
+    let mut out = Vec::new();
+    for_each_delegation_block(content, |body| {
+        if let Ok(entry) = parse_delegation_body(body) {
+            out.push(entry);
+        }
+    });
+    out
+}
+
+/// Strict parser per architect msg 1944 + spec §Pre-commit hook
+/// extension. Reports all errors (malformed blocks AND duplicate
+/// section names from spec line 115 `[delegation_drift]`). Hook
+/// callers branch on Err for non-zero exit.
+fn parse_delegation_blocks_strict(
+    content: &str,
+) -> Result<Vec<DelegationEntry>, Vec<ParseError>> {
+    let mut entries: Vec<DelegationEntry> = Vec::new();
+    let mut errors: Vec<ParseError> = Vec::new();
+    let mut seen_sections: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for_each_delegation_block(content, |body| {
+        match parse_delegation_body(body) {
+            Ok(entry) => {
+                if let Some(existing_owner) = seen_sections.get(&entry.section) {
+                    errors.push(ParseError::DuplicateSection {
+                        section: entry.section.clone(),
+                        owner: existing_owner.clone(),
+                    });
+                } else {
+                    seen_sections.insert(entry.section.clone(), entry.owner.clone());
+                    entries.push(entry);
+                }
+            }
+            Err(e) => errors.push(e),
+        }
+    });
+    if errors.is_empty() {
+        Ok(entries)
+    } else {
+        Err(errors)
+    }
+}
+
+/// Tauri command for the Affordance B chart UI — reads a plan file and
+/// returns the lenient-parsed delegation entries. Strict variant is
+/// reserved for hook integration (Python hook has its own parser at v1;
+/// Rust strict exists for symmetric API + future use).
+#[tauri::command]
+fn parse_delegation_blocks_cmd(plan_path: String) -> Result<Vec<DelegationEntry>, String> {
+    let content = std::fs::read_to_string(&plan_path)
+        .map_err(|e| format!("Failed to read plan file {}: {}", plan_path, e))?;
+    Ok(parse_delegation_blocks_lenient(&content))
+}
+
 /// Commit Q.B — replanning_dismissed informational event emit per
 /// collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C line
 /// 187. Non-state-mutating board record so the team's audit trail captures
@@ -6251,6 +6424,8 @@ fn main() {
             // Collaborative-proposal-workflow v1 (Commit Q.B) — moderator's
             // informational dismiss event for board audit trail.
             emit_replanning_dismissed_cmd,
+            // Commit D — delegation-block parser for Affordance B chart.
+            parse_delegation_blocks_cmd,
             // Slice 9 — health pill (resilience-stack JOIN)
             get_resilience_status,
             // Two-controls B.4.1 — active seats for moderator picker
@@ -6398,6 +6573,173 @@ fn show_error_dialog(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ============================================================
+    // Commit D — parse_delegation_blocks (R7 well-formedness + R8 vacant-
+    // owner detection precondition). Spec lines 286-291 + 102 (regex
+    // grammar). Hand-rolled parser matches non-greedy semantics for
+    // hyphenated values (ui-architect:0, after-pilot, V.A-1, etc.).
+    // ============================================================
+
+    /// R7 — well-formed single block parses owner + section + optional
+    /// fields.
+    #[test]
+    fn r7_lenient_parses_single_well_formed_block() {
+        let plan = r#"# Plan
+Some prose.
+<!-- delegation: owner=architect:0 section=I deadline=execution-phase deps=II,III -->
+More prose.
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].owner, "architect:0");
+        assert_eq!(entries[0].section, "I");
+        assert_eq!(entries[0].deadline.as_deref(), Some("execution-phase"));
+        assert_eq!(entries[0].deps, vec!["II", "III"]);
+    }
+
+    /// R7 — multiple blocks per file parse independently.
+    #[test]
+    fn r7_lenient_parses_multiple_blocks() {
+        let plan = r#"
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation: owner=ux-engineer:0 section=IV.A deps=II -->
+<!-- delegation: owner=ui-architect:0 section=IV.B -->
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].owner, "ux-engineer:0");
+        assert_eq!(entries[2].owner, "ui-architect:0");
+    }
+
+    /// R7 — platform-eng msg 1916 #2 hyphen-tolerance: section IDs and
+    /// deadline values containing `-` must NOT prematurely close the
+    /// match. Naive `[^-]+` pattern would break here.
+    #[test]
+    fn r7_lenient_handles_hyphenated_values() {
+        let plan = r#"
+<!-- delegation: owner=ui-architect:0 section=V.A-1 deadline=after-pilot deps=II-a,III-b -->
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].owner, "ui-architect:0");
+        assert_eq!(entries[0].section, "V.A-1");
+        assert_eq!(entries[0].deadline.as_deref(), Some("after-pilot"));
+        assert_eq!(entries[0].deps, vec!["II-a", "III-b"]);
+    }
+
+    /// R7 — lenient parser silently drops malformed blocks (missing
+    /// owner) per spec §parse_delegation_blocks line 166.
+    #[test]
+    fn r7_lenient_drops_block_missing_owner() {
+        let plan = r#"
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation: section=II deadline=after-pilot -->
+<!-- delegation: owner=tester:0 section=III -->
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        // Three blocks total; middle one drops silently.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].section, "I");
+        assert_eq!(entries[1].section, "III");
+    }
+
+    /// R7 — lenient parser handles missing close marker gracefully (no
+    /// infinite loop, no panic, just bails out at the malformed point).
+    #[test]
+    fn r7_lenient_bails_on_unclosed_comment() {
+        let plan = r#"
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation: owner=tester:0 section=II
+"#;
+        // Should parse the first block, then bail.
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].section, "I");
+    }
+
+    /// R7 — non-delegation comments (scope:, delegation-target:) are
+    /// skipped without confusing the scanner.
+    #[test]
+    fn r7_lenient_ignores_non_delegation_comments() {
+        let plan = r#"
+<!-- scope: src/foo.rs src/bar.rs -->
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation-target: section=I -->
+<!-- some other comment -->
+<!-- delegation: owner=ux-engineer:0 section=II -->
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].owner, "architect:0");
+        assert_eq!(entries[1].owner, "ux-engineer:0");
+    }
+
+    /// R7 — strict parser returns ParseError list on malformed input.
+    /// Distinct from lenient which drops silently.
+    #[test]
+    fn r7_strict_reports_missing_owner_error() {
+        let plan = r#"
+<!-- delegation: section=II deadline=after-pilot -->
+"#;
+        let result = parse_delegation_blocks_strict(plan);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], ParseError::MissingOwner { .. }));
+    }
+
+    /// R7 — strict parser detects duplicate-section drift per spec
+    /// line 115. Lenient parser does NOT (it just accepts both, last
+    /// occurrence wins via insertion order).
+    #[test]
+    fn r7_strict_detects_duplicate_section_drift() {
+        let plan = r#"
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation: owner=ux-engineer:0 section=I -->
+"#;
+        let result = parse_delegation_blocks_strict(plan);
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ParseError::DuplicateSection { section, .. } if section == "I"
+        )));
+    }
+
+    /// R7 — strict parser returns Ok with entries when all blocks
+    /// well-formed and sections unique.
+    #[test]
+    fn r7_strict_ok_on_well_formed_input() {
+        let plan = r#"
+<!-- delegation: owner=architect:0 section=I -->
+<!-- delegation: owner=ux-engineer:0 section=IV.A deps=II -->
+"#;
+        let result = parse_delegation_blocks_strict(plan);
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+        assert_eq!(entries.len(), 2);
+    }
+
+    /// R8 — vacant-owner detection: the parser itself doesn't know
+    /// which seats are active (that's the team_status integration at
+    /// the consumer layer). This test verifies the parsed `owner`
+    /// field is the raw seat slug that the Affordance B chart will
+    /// cross-check against active_seats in the UI.
+    #[test]
+    fn r8_owner_field_preserves_raw_seat_slug() {
+        let plan = r#"
+<!-- delegation: owner=ghost-role:0 section=I -->
+<!-- delegation: owner=architect:0 section=II -->
+"#;
+        let entries = parse_delegation_blocks_lenient(plan);
+        assert_eq!(entries.len(), 2);
+        // Affordance B chart layer will mark "ghost-role:0" as
+        // (vacant) when it doesn't appear in active_seats. Parser's
+        // job is to return the literal owner value.
+        assert_eq!(entries[0].owner, "ghost-role:0");
+        assert_eq!(entries[1].owner, "architect:0");
+    }
 
     // ── validate_project_dir ───────────────────────────────────────────
 
