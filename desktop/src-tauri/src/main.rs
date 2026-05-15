@@ -4121,6 +4121,36 @@ fn do_protocol_mutate_inner(
                         }
                     }
                 }
+                // Commit S — set_review_intensity (strict-turn-discipline +
+                // review-intensity-slider spec 2026-05-15). Mirror of
+                // vaak-mcp.rs apply_set_review_intensity. Role gate +
+                // range 1-10 validation; writes to floor.review_intensity.
+                "set_review_intensity" => {
+                    let role = caller_role_main(actor);
+                    let is_moderator =
+                        current.floor.moderator.as_deref() == Some(actor);
+                    let is_privileged =
+                        matches!(role, "architect" | "manager" | "human");
+                    if !is_moderator && !is_privileged {
+                        Err(format!(
+                            "[SetReviewIntensityForbidden] caller '{}' (role '{}') not moderator or privileged — gated to moderator OR architect/manager/human.",
+                            actor, role
+                        ))
+                    } else {
+                        let level = args.get("level").and_then(|v| v.as_u64());
+                        match level {
+                            Some(n) if (1..=10).contains(&n) => {
+                                current.floor.review_intensity = n as u8;
+                                Ok(())
+                            }
+                            Some(n) => Err(format!(
+                                "[InvalidArgs] set_review_intensity level must be 1-10 (got {})",
+                                n
+                            )),
+                            None => Err("[InvalidArgs] set_review_intensity requires args.level (integer 1-10)".to_string()),
+                        }
+                    }
+                }
                 // Commit Q — accept_replanning. Mirror of vaak-mcp.rs
                 // apply_accept_replanning. Role gate identical to v1.X
                 // open_planning / revise_plan: moderator OR

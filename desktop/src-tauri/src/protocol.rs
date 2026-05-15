@@ -94,7 +94,16 @@ pub struct Floor {
     // pre-Commit-P protocol.json files deserialize cleanly to empty Vec.
     #[serde(default)]
     pub replanning_requests: Vec<ReplanningRequest>,
+
+    // Strict-turn-discipline + review-intensity-slider (spec 2026-05-15,
+    // Commit S). Moderator-set per-task discipline level 1-10. Default 5
+    // preserves pre-spec behavior; #[serde(default = "default_review_intensity")]
+    // makes pre-Commit-S protocol.json files deserialize to level 5.
+    #[serde(default = "default_review_intensity")]
+    pub review_intensity: u8,
 }
+
+fn default_review_intensity() -> u8 { 5 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReplanningRequest {
@@ -289,6 +298,7 @@ impl Protocol {
                 plan_path: None,
                 plan_hash: None,
                 replanning_requests: vec![],
+                review_intensity: 5,
             },
             consensus: Consensus {
                 mode: "none".to_string(),

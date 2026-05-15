@@ -3110,7 +3110,8 @@ fn protocol_fresh_value() -> serde_json::Value {
             "hand_queue": [],                // seat slugs in raise-hand order
             "plan_path": null,               // accepted plan when phase == "execution"
             "plan_hash": null,               // SHA-256 of plan_path file at accept_plan time
-            "replanning_requests": []        // Collaborative-proposal-workflow v1 — multi-writer queue
+            "replanning_requests": [],       // Collaborative-proposal-workflow v1 — multi-writer queue
+            "review_intensity": 5            // Strict-turn-discipline slider 1-10; default 5 preserves pre-spec behavior
         },
         "consensus": {
             "mode": "none",
@@ -3618,6 +3619,9 @@ fn do_protocol_mutate(
                 // Commit Q — accept_replanning. Role gate per spec §accept_replanning.
                 // request_index is optional; out-of-bounds rejects inside apply.
                 "accept_replanning" => apply_accept_replanning(&mut current, &args, actor),
+                // Commit S — strict-turn-discipline review-intensity slider.
+                // Role gate (moderator/architect/manager/human) + range 1-10.
+                "set_review_intensity" => apply_set_review_intensity(&mut current, &args, actor),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -5043,6 +5047,48 @@ fn apply_propose_replanning(
     Ok(())
 }
 
+/// set_review_intensity — Strict-turn-discipline + review-intensity-slider
+/// spec Commit S. Moderator-set per-task discipline level 1-10. Higher
+/// levels activate stricter rules (auto-claim, read-embargo, yield-only).
+/// Default 5 preserves current behavior.
+///
+/// Gate: moderator OR architect/manager/human per v1.X §Item 4 phase-flip
+/// predicate. Other callers reject with [SetReviewIntensityForbidden].
+/// Validates 1 <= level <= 10 else [InvalidArgs].
+fn apply_set_review_intensity(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let role = caller_role(actor);
+    let is_moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        == Some(actor);
+    let is_privileged = matches!(role, "architect" | "manager" | "human");
+    if !is_moderator && !is_privileged {
+        return Err(format!(
+            "[SetReviewIntensityForbidden] caller '{}' (role '{}') not moderator or privileged — gated to moderator OR architect/manager/human (spec §set_review_intensity role gate).",
+            actor, role
+        ));
+    }
+    let level = args
+        .get("level")
+        .and_then(|v| v.as_u64())
+        .ok_or("[InvalidArgs] set_review_intensity requires args.level (integer 1-10)")?;
+    if !(1..=10).contains(&level) {
+        return Err(format!(
+            "[InvalidArgs] set_review_intensity level must be 1-10 (got {})",
+            level
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("review_intensity".to_string(), serde_json::json!(level));
+    }
+    Ok(())
+}
+
 /// accept_replanning — Collaborative-proposal-workflow v1 spec Commit Q.
 /// School-of-fish pivot: moderator (or architect/manager/human) drains the
 /// replanning_requests queue and flips phase back to planning atomically.
@@ -5132,6 +5178,7 @@ fn emit_two_controls_event(
         "grant_mic" => "mic_granted",
         "set_moderator" => "moderator_set",
         "propose_replanning" => "replanning_proposed",
+        "set_review_intensity" => "review_intensity_changed",
         _ => return,
     };
     let pre_floor = pre.get("floor").cloned().unwrap_or(serde_json::Value::Null);
@@ -5191,6 +5238,10 @@ fn emit_two_controls_event(
                         .unwrap_or(0)
                 ),
             );
+        }
+        "set_review_intensity" => {
+            payload.insert("old".into(), pre_get("review_intensity"));
+            payload.insert("new".into(), post_get("review_intensity"));
         }
         "accept_replanning" => {
             // Extends v1.1 phase_toggled payload with reason + triggered_by
@@ -7025,6 +7076,87 @@ mod protocol_slice2_tests {
                 panic!("planning phase must allow turn_type={}: {}", turn_type, e)
             });
         }
+    }
+
+    // ============================================================
+    // Strict-turn-discipline + review-intensity-slider (Commit S)
+    // S1 set_review_intensity role gate
+    // S2 set_review_intensity range 1-10
+    // S3 set_review_intensity back-compat (fresh state default = 5)
+    // ============================================================
+
+    #[test]
+    fn s1_set_review_intensity_moderator_succeeds() {
+        let mut s = fresh_state();
+        s["floor"]["moderator"] = serde_json::json!("evil-architect:0");
+        apply_set_review_intensity(
+            &mut s,
+            &serde_json::json!({"level": 7}),
+            "evil-architect:0",
+        )
+        .expect("moderator must succeed");
+        assert_eq!(s["floor"]["review_intensity"], 7);
+    }
+
+    #[test]
+    fn s1_set_review_intensity_architect_succeeds() {
+        let mut s = fresh_state();
+        apply_set_review_intensity(&mut s, &serde_json::json!({"level": 8}), "architect:0")
+            .expect("architect must succeed");
+        assert_eq!(s["floor"]["review_intensity"], 8);
+    }
+
+    #[test]
+    fn s1_set_review_intensity_human_succeeds() {
+        let mut s = fresh_state();
+        apply_set_review_intensity(&mut s, &serde_json::json!({"level": 10}), "human:0")
+            .expect("human must succeed");
+        assert_eq!(s["floor"]["review_intensity"], 10);
+    }
+
+    #[test]
+    fn s1_set_review_intensity_developer_rejects() {
+        let mut s = fresh_state();
+        let err =
+            apply_set_review_intensity(&mut s, &serde_json::json!({"level": 5}), "developer:0")
+                .unwrap_err();
+        assert!(
+            err.starts_with("[SetReviewIntensityForbidden]"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn s2_set_review_intensity_range_below_rejects() {
+        let mut s = fresh_state();
+        let err =
+            apply_set_review_intensity(&mut s, &serde_json::json!({"level": 0}), "architect:0")
+                .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    #[test]
+    fn s2_set_review_intensity_range_above_rejects() {
+        let mut s = fresh_state();
+        let err =
+            apply_set_review_intensity(&mut s, &serde_json::json!({"level": 11}), "architect:0")
+                .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    #[test]
+    fn s2_set_review_intensity_missing_level_rejects() {
+        let mut s = fresh_state();
+        let err = apply_set_review_intensity(&mut s, &serde_json::json!({}), "architect:0")
+            .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    #[test]
+    fn s3_set_review_intensity_default_is_5() {
+        let s = fresh_state();
+        assert_eq!(s["floor"]["review_intensity"], 5);
     }
 
     /// R6 — accept_replanning with empty queue still succeeds (the
