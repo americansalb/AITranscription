@@ -9480,6 +9480,7 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
         }
     }
 
+    let leaver_label = format!("{}:{}", state.role, state.instance);
     with_file_lock(&state.project_dir, || {
         let mut sessions = read_sessions(&state.project_dir);
         if let Some(bindings) = sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
@@ -9488,6 +9489,53 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
             });
         }
         write_sessions(&state.project_dir, &sessions)?;
+
+        // Fix for human msg 2299 "leaving glitch" + v1.X queue item
+        // rotation_order_prune_on_kick_leave (evil-arch msg 2136/2139/2153):
+        // sessions.json cleanup ALONE leaves the seat in floor.rotation_order
+        // and possibly as floor.current_speaker — the mic keeps trying to
+        // advance to a non-existent session, requiring the human to manually
+        // buzz another seat in. Prune both fields here as part of the same
+        // CAS write so observers see consistent state.
+        let section = get_active_section(&state.project_dir);
+        let mut proto = read_protocol_for_section_value(&state.project_dir, &section);
+        let mut proto_changed = false;
+        if let Some(floor) = proto.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            if let Some(arr) = floor.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|v| v.as_str() != Some(&leaver_label));
+                if arr.len() != before {
+                    proto_changed = true;
+                }
+            }
+            if floor.get("current_speaker").and_then(|v| v.as_str()) == Some(&leaver_label) {
+                floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+                proto_changed = true;
+            }
+            if floor.get("moderator").and_then(|v| v.as_str()) == Some(&leaver_label) {
+                floor.insert("moderator".to_string(), serde_json::Value::Null);
+                proto_changed = true;
+            }
+            if let Some(hq) = floor.get_mut("hand_queue").and_then(|v| v.as_array_mut()) {
+                let before = hq.len();
+                hq.retain(|v| v.as_str() != Some(&leaver_label));
+                if hq.len() != before {
+                    proto_changed = true;
+                }
+            }
+        }
+        if proto_changed {
+            let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(rev_field) = proto.get_mut("rev") {
+                *rev_field = serde_json::json!(cur_rev + 1);
+            }
+            if let Some(obj) = proto.as_object_mut() {
+                obj.insert("last_writer_seat".to_string(), serde_json::json!(leaver_label.clone()));
+                obj.insert("last_writer_action".to_string(), serde_json::json!("project_leave_prune"));
+                obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+            let _ = write_protocol_for_section_value(&state.project_dir, &section, &proto);
+        }
         Ok(())
     })?;
 
@@ -9547,6 +9595,47 @@ fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, S
             return Err(format!("No active session found for {}", target_label));
         }
         write_sessions(&state.project_dir, &sessions)?;
+
+        // Fix for human msg 2299 "leaving glitch" + v1.X queue item
+        // rotation_order_prune_on_kick_leave: same prune as handle_project_leave
+        // applied to a kicked target. Without this, kicked seats persist in
+        // rotation_order + may still be current_speaker, requiring manual buzz
+        // to bring a live seat into rotation.
+        let section = get_active_section(&state.project_dir);
+        let mut proto = read_protocol_for_section_value(&state.project_dir, &section);
+        let mut proto_changed = false;
+        if let Some(floor) = proto.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            if let Some(arr) = floor.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|v| v.as_str() != Some(&target_label));
+                if arr.len() != before { proto_changed = true; }
+            }
+            if floor.get("current_speaker").and_then(|v| v.as_str()) == Some(&target_label) {
+                floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+                proto_changed = true;
+            }
+            if floor.get("moderator").and_then(|v| v.as_str()) == Some(&target_label) {
+                floor.insert("moderator".to_string(), serde_json::Value::Null);
+                proto_changed = true;
+            }
+            if let Some(hq) = floor.get_mut("hand_queue").and_then(|v| v.as_array_mut()) {
+                let before = hq.len();
+                hq.retain(|v| v.as_str() != Some(&target_label));
+                if hq.len() != before { proto_changed = true; }
+            }
+        }
+        if proto_changed {
+            let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(rev_field) = proto.get_mut("rev") {
+                *rev_field = serde_json::json!(cur_rev + 1);
+            }
+            if let Some(obj) = proto.as_object_mut() {
+                obj.insert("last_writer_seat".to_string(), serde_json::json!(format!("{}:{}", state.role, state.instance)));
+                obj.insert("last_writer_action".to_string(), serde_json::json!("project_kick_prune"));
+                obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+            let _ = write_protocol_for_section_value(&state.project_dir, &section, &proto);
+        }
         Ok(())
     })?;
 
