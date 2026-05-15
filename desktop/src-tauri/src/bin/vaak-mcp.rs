@@ -3985,6 +3985,23 @@ fn apply_mic_claim(
             turn_type
         ));
     }
+    // Commit M — v1.1 §A2 planning_blocks_working gate per architect msg 2020
+    // + tester msg 2011 R5.B investigation. v1.1 spec promised this but
+    // implementation never delivered; collab-proposal-workflow-spec-2026-
+    // 05-15.md §W2 (line 196) restates the rule. Discussion turn-types
+    // (reviewing/passing/thinking) stay allowed in planning — planning IS
+    // the discussion phase. Only `working` (code-writing posture) is gated.
+    let phase = state
+        .get("floor")
+        .and_then(|f| f.get("phase"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("execution");
+    if turn_type == "working" && phase == "planning" {
+        return Err(format!(
+            "[planning_blocks_working] cannot claim turn_type='working' during planning phase (current phase: '{}'). Planning-phase contributions should claim reviewing/thinking/passing instead.",
+            phase
+        ));
+    }
     let expected_duration_secs = args
         .get("expected_duration_secs")
         .and_then(|v| v.as_u64())
@@ -6952,6 +6969,62 @@ mod protocol_slice2_tests {
             Some("developer:1"),
             "phantom current_speaker stays until watchdog releases (separation of concerns)"
         );
+    }
+
+    /// R5.B (Commit M) — planning_blocks_working gate per v1.1 §A2 +
+    /// collab-proposal-workflow-spec-2026-05-15.md §W2. apply_mic_claim
+    /// with turn_type="working" during planning phase rejects with
+    /// [planning_blocks_working]. Other turn_types stay allowed (planning
+    /// IS the discussion phase).
+    #[test]
+    fn r5b_planning_blocks_working_turn_type() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("planning");
+        s["floor"]["current_speaker"] = serde_json::json!("developer:1");
+        let err = apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "working"}),
+            "developer:1",
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[planning_blocks_working]"),
+            "got: {}",
+            err
+        );
+    }
+
+    /// R5.B — execution phase allows working turn_type (regression guard).
+    #[test]
+    fn r5b_execution_allows_working_turn_type() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        s["floor"]["current_speaker"] = serde_json::json!("developer:1");
+        apply_mic_claim(
+            &mut s,
+            &serde_json::json!({"turn_type": "working"}),
+            "developer:1",
+        )
+        .expect("execution phase must allow working turn_type");
+    }
+
+    /// R5.B — planning phase allows non-working turn_types (reviewing,
+    /// thinking, passing). Planning IS the discussion phase.
+    #[test]
+    fn r5b_planning_allows_reviewing_thinking_passing() {
+        for turn_type in ["reviewing", "thinking", "passing"] {
+            let mut s = fresh_state();
+            s["floor"]["phase"] = serde_json::json!("planning");
+            s["floor"]["current_speaker"] = serde_json::json!("developer:1");
+            apply_mic_claim(
+                &mut s,
+                &serde_json::json!({"turn_type": turn_type}),
+                "developer:1",
+            )
+            .unwrap_or_else(|e| {
+                panic!("planning phase must allow turn_type={}: {}", turn_type, e)
+            });
+        }
     }
 
     /// R6 — accept_replanning with empty queue still succeeds (the
