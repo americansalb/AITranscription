@@ -8361,12 +8361,19 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // CollabTab badge renderer can correlate the warning with the
         // originating message id. Non-blocking; the main message has
         // already been accepted.
+        //
+        // Commit 14 (evil-arch msg 2045 CRITICAL #2, human msg 2055 patch):
+        // mirror the original `to` field on the warning event. Prior
+        // behavior unconditionally set `to: "all"` even when the original
+        // was a DM, leaking the existence of the DM (plus originating_seat
+        // and msg_id) to the entire team. The warning's audience MUST
+        // match the original's audience.
         if unattested {
             let warning_id = next_message_id(&state.project_dir);
             let warning = serde_json::json!({
                 "id": warning_id,
                 "from": "system",
-                "to": "all",
+                "to": to,  // CRITICAL #2 fix: mirror original audience, not broadcast.
                 "type": "planning_unattested",
                 "timestamp": utc_now_iso(),
                 "subject": format!("[planning_unattested] {} sent without extended_thinking", from_label),
@@ -8380,6 +8387,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 "metadata": {
                     "originating_message_id": msg_id,
                     "originating_seat": from_label,
+                    "originating_to": to,
                 }
             });
             // Audit-trail emit is best-effort — failure here does not roll

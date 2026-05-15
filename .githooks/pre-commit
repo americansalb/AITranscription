@@ -120,20 +120,45 @@ def parse_delegation_blocks(plan_text: str):
 def read_team_status_seats(root: Path) -> set:
     """Read .vaak/project.json + .vaak/sessions.json to build the set of
     known team seat slugs (role:instance form) for delegation-owner
-    validation per spec line 116. Returns empty set if either file is
-    missing or unparseable — hook defensively allows commits when team
-    state is unreadable (vs blocking on a transient I/O issue).
+    validation per spec line 116.
+
+    Commit 14 (evil-arch msg 2045 CRITICAL #1, human msg 2055 patch
+    authorization): fail-CLOSED on JSON corruption. Previous behavior
+    returned an empty set on json.JSONDecodeError, which caused the
+    delegation_owner_unknown gate to be silently SKIPPED. The two-
+    controls integrity contract depends on team_status being
+    authoritative — a corrupt project.json should block commits with
+    a clear error, not bypass gates.
+
+    Missing file → return empty set (back-compat for fresh checkouts
+    that haven't run any Vaak roles yet; downstream validator skips
+    the gate when known_seats is empty AND the project.json file
+    doesn't exist — distinguished from corrupt-JSON).
+
+    Corrupt file → raise via reject(); caller-side handling not needed.
 
     A seat is 'known' if it appears in project.json:roles[*] regardless of
-    active status. Hook well-formedness is about plan-doc correctness
-    (typo guard), not session liveness — the latter belongs to a v1.6
-    upgrade per spec line 121."""
+    active status."""
     seats = set()
     project_path = root / ".vaak" / "project.json"
+    if not project_path.exists():
+        # Fresh checkout or pre-Vaak repo; back-compat empty set.
+        return seats
     try:
         proj = json.loads(project_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError:
+        # Transient I/O (file locked, permission, etc.) — fall back to
+        # empty rather than blocking on infrastructure trouble. Same
+        # defensive read as before; only JSON corruption is the new
+        # fail-closed case.
         return seats
+    except json.JSONDecodeError as e:
+        reject(
+            "project_state_unreadable",
+            f".vaak/project.json is corrupt JSON: {e}. "
+            "Integrity gates require parseable team state; fix the file before committing. "
+            "(evil-arch msg 2045 CRITICAL #1 fail-closed gate)",
+        )
     for role_entry in proj.get("roles", []) or []:
         role_slug = role_entry.get("slug")
         if not role_slug:
@@ -199,14 +224,28 @@ def main() -> None:
 
     try:
         proto = json.loads(proto_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # Malformed protocol → don't block, but warn so the user knows the
-        # gate isn't active.
+    except OSError as e:
+        # Transient I/O (file locked, permission, vanished mid-read) —
+        # warn + allow rather than blocking on infrastructure trouble.
+        # Same defensive read as before for the I/O path.
         sys.stderr.write(
-            f"[two-controls-hook] warning: could not parse {proto_path} — "
+            f"[two-controls-hook] warning: could not read {proto_path} ({e}) — "
             "two-controls gate is OFF for this commit.\n"
         )
         sys.exit(0)
+    except json.JSONDecodeError as e:
+        # Commit 14 (evil-arch msg 2045 CRITICAL #1, human msg 2055 patch):
+        # JSON corruption fails CLOSED. The two-controls integrity contract
+        # depends on protocol.json being authoritative; a corrupt file
+        # could mask phase=planning or plan_hash drift, letting commits
+        # bypass gates silently. Prior behavior of "warn + exit 0" was a
+        # silent integrity hole.
+        reject(
+            "protocol_state_unreadable",
+            f"{proto_path} is corrupt JSON: {e}. "
+            "Integrity gates require parseable protocol state; fix the file before "
+            "committing (evil-arch msg 2045 CRITICAL #1 fail-closed gate).",
+        )
 
     floor = proto.get("floor") or {}
     phase = floor.get("phase", "execution")
