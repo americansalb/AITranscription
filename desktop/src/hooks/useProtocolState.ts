@@ -41,6 +41,9 @@ export type Protocol = {
     // Collaborative-proposal-workflow v1 — Commit P backend field.
     // Frontend consumer uses `?? []` defaults per back-compat pattern.
     replanning_requests?: ReplanningRequest[];
+    // Strict-turn-discipline review-intensity slider (Commit S).
+    // Default 5; back-compat consumer uses `?? 5`.
+    review_intensity?: number;
   };
   consensus: {
     mode: string;
@@ -142,6 +145,9 @@ function friendlyError(raw: string): string {
   }
   if (raw.includes('[AcceptReplanningForbidden]')) {
     return 'Only the moderator (or architect/manager/human) can accept replanning.';
+  }
+  if (raw.includes('[SetReviewIntensityForbidden]')) {
+    return 'Only the moderator (or architect/manager/human) can change review intensity.';
   }
   return raw;
 }

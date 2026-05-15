@@ -125,6 +125,11 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // might be rendered.
   const canRevise = selfRole !== null && REVISE_ALLOWED_ROLES.has(selfRole);
   const canTogglePhase = selfRole === null || selfRole === 'human';
+  // Commit S.A — review intensity slider gated to moderator + privileged.
+  const canSetReviewIntensity =
+    selfRole === null
+    || selfRole === 'human'
+    || REVISE_ALLOWED_ROLES.has(selfRole ?? '');
 
   // Item 5 — moderator fast-flip row. Renders when the current viewer IS the
   // moderator (per UX-eng msg 1587 split-by-surface design + UI-arch msg 1589
@@ -137,6 +142,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // Replanning requests come from server state; expansion + dismissed
   // tracking are moderator-private UI state.
   const replanningRequests = protocol.floor.replanning_requests ?? [];
+  const reviewIntensity = protocol.floor.review_intensity ?? 5;
   const [replanningQueueExpanded, setReplanningQueueExpanded] = useState(false);
   // Dismissed-set keyed by moderator-seat + content-hash per UI-arch msg
   // 1925 craft note 3. Survives remount via localStorage so moderator
@@ -295,6 +301,14 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       setProposeReplanningOpen(false);
       setReplanningReason('');
     }
+  };
+
+  // Commit S.A — review intensity slider handler. Fires set_review_intensity
+  // on slider release; gated by canSetReviewIntensity render check above.
+  const handleReviewIntensityChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const level = parseInt(e.target.value, 10);
+    if (Number.isNaN(level) || level === reviewIntensity) return;
+    void mutate('set_review_intensity', { level });
   };
 
   // Commit Q.A (Affordance C) — Moderator accept-or-dismiss handlers.
@@ -828,6 +842,28 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           >
             → Executing
           </button>
+        </div>
+      )}
+
+      {/* Commit S.A — review-intensity slider. Gated to moderator/privileged.
+          1=ship-direct ... 5=default ... 10=strict turn discipline per
+          spec §The Slider — 10 Discipline Levels. */}
+      {assemblyActive && canSetReviewIntensity && (
+        <div className="assembly-review-intensity-row">
+          <span className="assembly-review-intensity-label" title="Review intensity 1-10: higher = stricter discipline">
+            Review intensity:
+          </span>
+          <input
+            type="range"
+            min={1}
+            max={10}
+            step={1}
+            value={reviewIntensity}
+            onChange={handleReviewIntensityChange}
+            className="assembly-review-intensity-slider"
+            aria-label="Review intensity slider 1 to 10"
+          />
+          <span className="assembly-review-intensity-value">{reviewIntensity}</span>
         </div>
       )}
 

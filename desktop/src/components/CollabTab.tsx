@@ -4014,6 +4014,29 @@ When multiple instances of this role are active:
                 );
               }
 
+              // Commit S.A — review_intensity_changed separator card.
+              // Renders when moderator/privileged adjusts the discipline level.
+              if (msg.type === "review_intensity_changed") {
+                const oldLevel = (msg.metadata?.old as number | null) ?? null;
+                const newLevel = (msg.metadata?.new as number | null) ?? null;
+                return (
+                  <div
+                    key={msg.id}
+                    className="review-intensity-changed-card"
+                    role="status"
+                    aria-label={`Review intensity changed from ${oldLevel ?? '?'} to ${newLevel ?? '?'}`}
+                  >
+                    <span className="review-intensity-changed-icon" aria-hidden="true">🎚</span>
+                    <span className="review-intensity-changed-text">
+                      Review intensity: <strong>{oldLevel ?? '?'}</strong> → <strong>{newLevel ?? '?'}</strong>
+                    </span>
+                    <span className="review-intensity-changed-time" title={msg.timestamp}>
+                      {formatRelativeTime(msg.timestamp)}
+                    </span>
+                  </div>
+                );
+              }
+
               // Commit A — planning_unattested warning badge (collab-proposal-
               // workflow-spec-2026-05-15.md §Extended-thinking attestation
               // lines 125-133). Compact one-line warning rendered in the
