@@ -4121,8 +4121,54 @@ fn do_protocol_mutate_inner(
                         }
                     }
                 }
+                // Commit Q — accept_replanning. Mirror of vaak-mcp.rs
+                // apply_accept_replanning. Role gate identical to v1.X
+                // open_planning / revise_plan: moderator OR
+                // architect/manager/human. Atomic side effects per spec
+                // line 51-53.
+                "accept_replanning" => {
+                    let role = caller_role_main(actor);
+                    let is_moderator =
+                        current.floor.moderator.as_deref() == Some(actor);
+                    let is_privileged =
+                        matches!(role, "architect" | "manager" | "human");
+                    if !is_moderator && !is_privileged {
+                        Err(format!(
+                            "[AcceptReplanningForbidden] caller '{}' (role '{}') not moderator or privileged — gated to moderator OR architect/manager/human (spec §accept_replanning role gate).",
+                            actor, role
+                        ))
+                    } else {
+                        // Validate request_index if provided. Out-of-bounds
+                        // rejects so the event payload's triggered_by lookup
+                        // is consistent with the accept.
+                        let idx_validation = args
+                            .get("request_index")
+                            .and_then(|v| v.as_u64())
+                            .map(|idx| {
+                                let queue_len = current.floor.replanning_requests.len();
+                                if (idx as usize) >= queue_len {
+                                    Err(format!(
+                                        "[InvalidArgs] accept_replanning request_index {} out of bounds for queue of length {}",
+                                        idx, queue_len
+                                    ))
+                                } else {
+                                    Ok(())
+                                }
+                            });
+                        if let Some(Err(e)) = idx_validation {
+                            Err(e)
+                        } else {
+                            // Atomic side effects per spec line 51-53.
+                            current.floor.phase = Some("planning".to_string());
+                            current.floor.plan_path = None;
+                            current.floor.plan_hash = None;
+                            current.floor.replanning_requests = vec![];
+                            Ok(())
+                        }
+                    }
+                }
                 other => Err(format!(
-                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning); '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning/accept_replanning); '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };

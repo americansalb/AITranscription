@@ -3615,6 +3615,9 @@ fn do_protocol_mutate(
                         None => Err("[InvalidArgs] propose_replanning requires args.reason (string)".to_string()),
                     }
                 }
+                // Commit Q — accept_replanning. Role gate per spec §accept_replanning.
+                // request_index is optional; out-of-bounds rejects inside apply.
+                "accept_replanning" => apply_accept_replanning(&mut current, &args, actor),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -3650,7 +3653,7 @@ fn do_protocol_mutate(
 
             // Two-controls observability events (finding #3, A12). Inside the
             // lock so observers see protocol.json + board event consistently.
-            emit_two_controls_event(pd, actor, action, &pre_state, &current);
+            emit_two_controls_event(pd, actor, action, &args, &pre_state, &current);
 
             Ok(Ok(current))
         });
@@ -5023,18 +5026,89 @@ fn apply_propose_replanning(
     Ok(())
 }
 
+/// accept_replanning — Collaborative-proposal-workflow v1 spec Commit Q.
+/// School-of-fish pivot: moderator (or architect/manager/human) drains the
+/// replanning_requests queue and flips phase back to planning atomically.
+/// Mirrors v1.X moderator-authority §Item 4 phase-flip predicate. Side
+/// effects within the single CAS write:
+///   1. phase → "planning"
+///   2. plan_path/plan_hash → null (replanning means prior plan insufficient)
+///   3. replanning_requests → [] (queue drained)
+/// triggered_by (event payload) derives from args.request_index against the
+/// pre-state queue and is computed in emit_two_controls_event after this
+/// apply runs — the function itself returns Result<(), String> with no
+/// extra return channel needed.
+fn apply_accept_replanning(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let role = caller_role(actor);
+    let is_moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        == Some(actor);
+    let is_privileged = matches!(role, "architect" | "manager" | "human");
+    if !is_moderator && !is_privileged {
+        return Err(format!(
+            "[AcceptReplanningForbidden] caller '{}' (role '{}') not moderator or privileged — gated to moderator OR architect/manager/human (spec §accept_replanning role gate).",
+            actor, role
+        ));
+    }
+    // Validate request_index if provided — out-of-bounds rejects so the
+    // event payload's triggered_by lookup is consistent with the accept.
+    if let Some(idx) = args.get("request_index").and_then(|v| v.as_u64()) {
+        let queue_len = state
+            .get("floor")
+            .and_then(|f| f.get("replanning_requests"))
+            .and_then(|q| q.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if (idx as usize) >= queue_len {
+            return Err(format!(
+                "[InvalidArgs] accept_replanning request_index {} out of bounds for queue of length {}",
+                idx, queue_len
+            ));
+        }
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        // Atomic side effects per spec line 51-53 — all four state writes
+        // land in the SAME CAS-gated protocol.json write (outer
+        // with_file_lock in do_protocol_mutate). Observers at T+ε see all
+        // four together or none of them (school-of-fish W1).
+        floor.insert("phase".to_string(), serde_json::json!("planning"));
+        floor.insert("plan_path".to_string(), serde_json::Value::Null);
+        floor.insert("plan_hash".to_string(), serde_json::Value::Null);
+        floor.insert(
+            "replanning_requests".to_string(),
+            serde_json::Value::Array(vec![]),
+        );
+    }
+    Ok(())
+}
+
 /// Emit a board event after a successful protocol_mutate. Captures pre/post
 /// state diff for the spec's 9-event observability invariant (finding #3).
+///
+/// args is included (Commit Q per collaborative-proposal-workflow-spec-2026-
+/// 05-15.md §accept_replanning step 4) so accept_replanning can derive its
+/// `triggered_by` payload field from `args.request_index` against the
+/// pre-state queue. Existing actions ignore args; only the new ones read it.
 fn emit_two_controls_event(
     project_dir: &str,
     actor: &str,
     action: &str,
+    args: &serde_json::Value,
     pre: &serde_json::Value,
     post: &serde_json::Value,
 ) {
     let event_type = match action {
         "set_assembly" => "assembly_toggled",
-        "accept_plan" | "open_planning" => "phase_toggled",
+        // accept_replanning emits phase_toggled (extended payload — see match
+        // arm below for the reason+triggered_by fields). Existing v1.1
+        // consumers parse phase_toggled and ignore unknown fields.
+        "accept_plan" | "open_planning" | "accept_replanning" => "phase_toggled",
         "revise_plan" => "plan_revised",
         "set_mic_passing" => "mic_passing_mode_changed",
         "raise_hand" => "hand_raised",
@@ -5100,6 +5174,33 @@ fn emit_two_controls_event(
                         .unwrap_or(0)
                 ),
             );
+        }
+        "accept_replanning" => {
+            // Extends v1.1 phase_toggled payload with reason + triggered_by
+            // per spec §accept_replanning step 4. Existing v1.1 consumers
+            // parsing the 4 base fields (old/new/plan_path/plan_hash) keep
+            // working — the additions are post-pop optional fields.
+            payload.insert("old".into(), pre_get("phase"));
+            payload.insert("new".into(), post_get("phase"));
+            payload.insert("plan_path".into(), post_get("plan_path"));
+            payload.insert("plan_hash".into(), post_get("plan_hash"));
+            payload.insert(
+                "reason".into(),
+                serde_json::json!(format!("replanning_accepted_by:{}", actor)),
+            );
+            // triggered_by — only present when args.request_index pins a
+            // specific request in the pre-state queue. Absent (no insert)
+            // when the moderator accepts the queue as a whole.
+            if let Some(idx) = args.get("request_index").and_then(|v| v.as_u64()) {
+                if let Some(req) = pre_get("replanning_requests")
+                    .as_array()
+                    .and_then(|a| a.get(idx as usize))
+                {
+                    if let Some(seat) = req.get("seat").and_then(|s| s.as_str()) {
+                        payload.insert("triggered_by".into(), serde_json::json!(seat));
+                    }
+                }
+            }
         }
         _ => return,
     }
@@ -6526,6 +6627,165 @@ mod protocol_slice2_tests {
         assert_eq!(queue[0]["ts"].as_i64().unwrap(), 1_700_000_000_000);
         assert_eq!(queue[1]["ts"].as_i64().unwrap(), 1_700_000_000_001);
         assert_eq!(queue[2]["ts"].as_i64().unwrap(), 1_700_000_000_002);
+    }
+
+    // ============================================================
+    // Collaborative-proposal-workflow v1 — Commit Q
+    // R4 accept_replanning role gate (mirrors v1.X §Item 4 phase-flip)
+    // R5 accept_replanning atomicity (single-write phase + plan + queue)
+    // R6 phase_toggled extended payload — at apply layer this just
+    //    verifies the state shape; full event-emission test happens
+    //    via integration through do_protocol_mutate → emit
+    // ============================================================
+
+    fn fresh_with_replanning_queue() -> serde_json::Value {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        s["floor"]["plan_path"] = serde_json::json!(".vaak/design-notes/test-plan.md");
+        s["floor"]["plan_hash"] = serde_json::json!("sha256:dead");
+        s["floor"]["moderator"] = serde_json::json!("evil-architect:0");
+        apply_propose_replanning(&mut s, "developer:1", "gap A", Some(1_700_000_000_000))
+            .unwrap();
+        apply_propose_replanning(&mut s, "ux-engineer:0", "gap B", Some(1_700_000_000_001))
+            .unwrap();
+        s
+    }
+
+    /// R4 — moderator caller succeeds. Mirrors v1.X §Item 4 phase-flip
+    /// predicate.
+    #[test]
+    fn r4_accept_replanning_moderator_succeeds() {
+        let mut s = fresh_with_replanning_queue();
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "evil-architect:0")
+            .expect("moderator must be accepted");
+        assert_eq!(s["floor"]["phase"], "planning");
+        assert!(s["floor"]["plan_path"].is_null());
+        assert!(s["floor"]["plan_hash"].is_null());
+        assert!(s["floor"]["replanning_requests"].as_array().unwrap().is_empty());
+    }
+
+    /// R4 — architect privileged role succeeds (even when NOT the seat in
+    /// floor.moderator). Mirrors v1.X open_planning + revise_plan gate.
+    #[test]
+    fn r4_accept_replanning_architect_succeeds() {
+        let mut s = fresh_with_replanning_queue();
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "architect:0")
+            .expect("architect must be accepted");
+        assert_eq!(s["floor"]["phase"], "planning");
+    }
+
+    /// R4 — human privileged role succeeds.
+    #[test]
+    fn r4_accept_replanning_human_succeeds() {
+        let mut s = fresh_with_replanning_queue();
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "human:0")
+            .expect("human must be accepted");
+        assert_eq!(s["floor"]["phase"], "planning");
+    }
+
+    /// R4 — developer (non-moderator, non-privileged) rejects with
+    /// [AcceptReplanningForbidden].
+    #[test]
+    fn r4_accept_replanning_developer_rejects() {
+        let mut s = fresh_with_replanning_queue();
+        let err = apply_accept_replanning(&mut s, &serde_json::json!({}), "developer:0")
+            .unwrap_err();
+        assert!(
+            err.starts_with("[AcceptReplanningForbidden]"),
+            "got: {}",
+            err
+        );
+        // State should be untouched — gate rejects before side effects.
+        assert_eq!(s["floor"]["phase"], "execution");
+        assert_eq!(
+            s["floor"]["replanning_requests"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    /// R4 — dev-challenger (non-moderator, non-privileged) rejects.
+    #[test]
+    fn r4_accept_replanning_dev_challenger_rejects() {
+        let mut s = fresh_with_replanning_queue();
+        let err = apply_accept_replanning(&mut s, &serde_json::json!({}), "dev-challenger:0")
+            .unwrap_err();
+        assert!(err.starts_with("[AcceptReplanningForbidden]"), "got: {}", err);
+    }
+
+    /// R5 — atomicity at the apply layer: all four side effects land
+    /// together when accept_replanning succeeds. (The full lock-mediated
+    /// observer-thread test rides on the outer with_file_lock — that's
+    /// integration-level; this apply-layer test pins the in-state shape.)
+    #[test]
+    fn r5_accept_replanning_atomic_side_effects() {
+        let mut s = fresh_with_replanning_queue();
+        // Pre-state: execution + plan + 2 requests.
+        assert_eq!(s["floor"]["phase"], "execution");
+        assert_eq!(
+            s["floor"]["plan_path"].as_str(),
+            Some(".vaak/design-notes/test-plan.md")
+        );
+        assert_eq!(
+            s["floor"]["replanning_requests"].as_array().unwrap().len(),
+            2
+        );
+
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "evil-architect:0").unwrap();
+
+        // Post-state: planning + cleared plan + drained queue. All four.
+        assert_eq!(s["floor"]["phase"], "planning");
+        assert!(s["floor"]["plan_path"].is_null());
+        assert!(s["floor"]["plan_hash"].is_null());
+        assert!(s["floor"]["replanning_requests"].as_array().unwrap().is_empty());
+    }
+
+    /// R5 — out-of-bounds request_index rejects with [InvalidArgs] and
+    /// leaves state untouched. Same pattern as set_moderator/InvalidArgs.
+    #[test]
+    fn r5_accept_replanning_out_of_bounds_index_rejects() {
+        let mut s = fresh_with_replanning_queue();
+        let err = apply_accept_replanning(
+            &mut s,
+            &serde_json::json!({"request_index": 99}),
+            "evil-architect:0",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert_eq!(s["floor"]["phase"], "execution");
+        assert_eq!(
+            s["floor"]["replanning_requests"].as_array().unwrap().len(),
+            2
+        );
+    }
+
+    /// R5 — request_index in bounds is accepted; same atomic side effects.
+    /// (Event payload's triggered_by is derived later in
+    /// emit_two_controls_event from pre-state queue at this index.)
+    #[test]
+    fn r5_accept_replanning_with_request_index_succeeds() {
+        let mut s = fresh_with_replanning_queue();
+        apply_accept_replanning(
+            &mut s,
+            &serde_json::json!({"request_index": 0}),
+            "evil-architect:0",
+        )
+        .expect("in-bounds request_index must succeed");
+        assert_eq!(s["floor"]["phase"], "planning");
+    }
+
+    /// R6 — accept_replanning with empty queue still succeeds (the
+    /// moderator can pre-empt without any open request). Spec doesn't
+    /// require non-empty queue as a precondition — request_index
+    /// out-of-bounds is the boundary check, not queue-non-empty.
+    #[test]
+    fn r6_accept_replanning_empty_queue_succeeds() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        s["floor"]["moderator"] = serde_json::json!("evil-architect:0");
+        // No requests in queue.
+        apply_accept_replanning(&mut s, &serde_json::json!({}), "evil-architect:0")
+            .expect("empty queue does not block accept");
+        assert_eq!(s["floor"]["phase"], "planning");
     }
 
     /// F5 (dev-challenger msg 1115): A9 PlanPathOutsideDesignNotes must fire
