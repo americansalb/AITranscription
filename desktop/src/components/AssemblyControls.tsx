@@ -41,6 +41,17 @@ type ActiveSeat = {
 };
 type ActiveSeatsResponse = { seats: ActiveSeat[] };
 
+// Commit D.A — DelegationEntry mirror of the Rust struct returned by
+// parse_delegation_blocks_cmd (main.rs Commit D). The wire shape uses
+// serde's skip_serializing_if for optional/empty fields, so `deadline`
+// can be undefined and `deps` can be undefined (treat as []).
+export type DelegationEntry = {
+  owner: string;
+  section: string;
+  deadline?: string;
+  deps?: string[];
+};
+
 export type AssemblyControlsProps = {
   protocol: Protocol;
   mutate: Mutate;
@@ -362,6 +373,53 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     return () => { cancelled = true; };
   }, [projectDir, assemblyActive, currentSpeaker]);
 
+  // Commit D.A — Affordance B delegation chart state + load effect.
+  // When the active plan_path changes, fetch the delegation entries via
+  // the Commit D Tauri command. Renders nothing when no plan_path or
+  // no <!-- delegation: --> blocks found. Activeseats from the existing
+  // moderator-picker fetch is reused for vacant-owner detection per
+  // UI-arch msg 1925 craft note 2 (two-level treatment).
+  const [delegationEntries, setDelegationEntries] = useState<DelegationEntry[]>([]);
+  const [delegationLoadError, setDelegationLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!planPath) {
+      setDelegationEntries([]);
+      setDelegationLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const entries = await invoke<DelegationEntry[]>(
+          'parse_delegation_blocks_cmd',
+          { planPath },
+        );
+        if (!cancelled) {
+          setDelegationEntries(entries);
+          setDelegationLoadError(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setDelegationEntries([]);
+          setDelegationLoadError(String(e));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [planPath]);
+
+  // Vacant-owner detection — owner seat slug not present in active_seats.
+  // activeSeats is fetched separately for the moderator picker; reused here
+  // (DRY + same freshness window). When activeSeats is empty (e.g.
+  // assemblyActive false), the vacant-check would falsely mark all
+  // delegations as vacant, so suppress the warning in that case.
+  const activeSeatSet = new Set(activeSeats.map((s) => s.label));
+  const isOwnerVacant = (owner: string) =>
+    activeSeats.length > 0 && !activeSeatSet.has(owner);
+  const vacantDelegationCount = delegationEntries.filter((e) =>
+    isOwnerVacant(e.owner),
+  ).length;
+
   const handleModeratorChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const seat = e.target.value;
     if (!seat || seat === moderator) return;
@@ -605,6 +663,65 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Affordance B — Delegation chart (Commit D.A per spec §Affordance
+            B lines 149-166). Renders only when the active plan file
+            contains <!-- delegation: --> blocks. Two-level vacancy treatment
+            per UI-arch msg 1925 craft note 2: aggregate banner at top when
+            any owner is vacant + inline (vacant) tags on the affected
+            rows. The proposal document IS the source of truth; this UI
+            mirrors the chart from the plan file at render time. */}
+        {phase === 'execution' && planPath && delegationEntries.length > 0 && (
+          <div className="assembly-delegation-chart">
+            {vacantDelegationCount > 0 && (
+              <div className="assembly-delegation-banner" role="alert">
+                <span className="assembly-delegation-banner-icon" aria-hidden="true">⚠</span>
+                <span>
+                  {vacantDelegationCount} of {delegationEntries.length}{' '}
+                  {delegationEntries.length === 1 ? 'section' : 'sections'}{' '}
+                  delegated to vacant {vacantDelegationCount === 1 ? 'role' : 'roles'} —
+                  launch agents or reassign before execution.
+                </span>
+              </div>
+            )}
+            <div className="assembly-delegation-label">Sections:</div>
+            <ul className="assembly-delegation-list">
+              {delegationEntries.map((entry) => {
+                const vacant = isOwnerVacant(entry.owner);
+                return (
+                  <li
+                    key={`${entry.section}:${entry.owner}`}
+                    className={
+                      'assembly-delegation-row' +
+                      (vacant ? ' assembly-delegation-row-vacant' : '')
+                    }
+                  >
+                    <span className="assembly-delegation-section">{entry.section}.</span>{' '}
+                    <span className="assembly-delegation-owner">{entry.owner}</span>
+                    {vacant && (
+                      <span className="assembly-delegation-vacant-tag">(vacant)</span>
+                    )}
+                    {entry.deadline && (
+                      <span className="assembly-delegation-deadline">
+                        — {entry.deadline}
+                      </span>
+                    )}
+                    {entry.deps && entry.deps.length > 0 && (
+                      <span className="assembly-delegation-deps">
+                        deps: {entry.deps.join(', ')}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            {delegationLoadError && (
+              <div className="assembly-delegation-error" role="alert">
+                Could not parse delegation blocks: {delegationLoadError}
+              </div>
+            )}
           </div>
         )}
       </div>

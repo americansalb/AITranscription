@@ -722,6 +722,105 @@
   background: linear-gradient(90deg, rgba(46, 139, 87, 0.08), rgba(91, 108, 184, 0.08));
 }
 
+/* Affordance B — Delegation chart in plan link area (Commit D.A per
+ * collaborative-proposal-workflow-spec-2026-05-15.md §Affordance B).
+ * Two-level vacancy treatment per UI-arch msg 1925 craft note 2:
+ * aggregate banner + inline (vacant) tags. */
+.assembly-delegation-chart {
+  margin: 6px 0 0 0;
+  padding: 8px 12px;
+  background: rgba(91, 108, 184, 0.04);
+  border: 1px solid rgba(91, 108, 184, 0.15);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.assembly-delegation-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  background: rgba(251, 191, 36, 0.10);
+  border-left: 3px solid #fbbf24;
+  border-radius: 3px;
+  color: #fbbf24;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.assembly-delegation-banner-icon {
+  font-size: 13px;
+}
+
+.assembly-delegation-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #a0aec0;
+  letter-spacing: 0.03em;
+  margin-bottom: 2px;
+}
+
+.assembly-delegation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.assembly-delegation-row {
+  padding: 2px 0;
+  color: #cbd5e0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.assembly-delegation-row-vacant {
+  color: #a0aec0;
+}
+
+.assembly-delegation-section {
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.assembly-delegation-owner {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: #c7d2fe;
+}
+
+.assembly-delegation-row-vacant .assembly-delegation-owner {
+  color: #a0aec0;
+}
+
+.assembly-delegation-vacant-tag {
+  font-style: italic;
+  color: #fbbf24;
+  font-size: 11px;
+}
+
+.assembly-delegation-deadline {
+  font-size: 11px;
+  color: #5b6478;
+}
+
+.assembly-delegation-deps {
+  font-size: 11px;
+  color: #5b6478;
+  margin-left: auto;
+}
+
+.assembly-delegation-error {
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: rgba(232, 76, 76, 0.06);
+  border-left: 3px solid #e84c4c;
+  color: #f87171;
+  font-size: 11px;
+}
+
 /* Commit Q.B — school-of-fish replanning-accepted variant. Per
  * collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C line
  * 189 + UI-arch msg 1925 craft note 5: horizontal-rule + colored badge
