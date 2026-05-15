@@ -1524,6 +1524,62 @@ pub fn roster_remove_slot(dir: &str, role: &str, instance: i32) -> Result<(), St
         }
     }
 
+    // 3. Prune protocol.json (per human msg 2299 + a091870 fix extended to
+    // roster_remove_slot): rotation_order / current_speaker / moderator /
+    // hand_queue references to the removed seat get cleared so the mic
+    // doesn't stall on a zombie. Same shape as handle_project_leave's
+    // protocol prune. Applied to ALL section protocol.json files since
+    // the seat may appear in multiple sections.
+    let target_label = format!("{}:{}", role, instance);
+    let sections_dir = vaak_dir.join("sections");
+    let mut proto_paths: Vec<std::path::PathBuf> = vec![vaak_dir.join("protocol.json")];
+    if let Ok(entries) = std::fs::read_dir(&sections_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path().join("protocol.json");
+            if p.exists() {
+                proto_paths.push(p);
+            }
+        }
+    }
+    for proto_path in proto_paths {
+        let Ok(content) = std::fs::read_to_string(&proto_path) else { continue };
+        let Ok(mut proto) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+        let mut changed = false;
+        if let Some(floor) = proto.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            if let Some(arr) = floor.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|v| v.as_str() != Some(&target_label));
+                if arr.len() != before { changed = true; }
+            }
+            if floor.get("current_speaker").and_then(|v| v.as_str()) == Some(&target_label) {
+                floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+                changed = true;
+            }
+            if floor.get("moderator").and_then(|v| v.as_str()) == Some(&target_label) {
+                floor.insert("moderator".to_string(), serde_json::Value::Null);
+                changed = true;
+            }
+            if let Some(hq) = floor.get_mut("hand_queue").and_then(|v| v.as_array_mut()) {
+                let before = hq.len();
+                hq.retain(|v| v.as_str() != Some(&target_label));
+                if hq.len() != before { changed = true; }
+            }
+        }
+        if changed {
+            let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(rev_field) = proto.get_mut("rev") {
+                *rev_field = serde_json::json!(cur_rev + 1);
+            }
+            if let Some(obj) = proto.as_object_mut() {
+                obj.insert("last_writer_action".to_string(), serde_json::json!("roster_remove_slot_prune"));
+                obj.insert("rev_at".to_string(), serde_json::json!(iso_now()));
+            }
+            if let Ok(updated) = serde_json::to_string_pretty(&proto) {
+                let _ = atomic_write(&proto_path, updated.as_bytes());
+            }
+        }
+    }
+
     Ok(())
 }
 
