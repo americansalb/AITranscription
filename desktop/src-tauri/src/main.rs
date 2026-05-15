@@ -5475,6 +5475,27 @@ fn check_assembly_floor_watchdog(
         // PreToolUse/PostToolUse hooks + Signal A RPC heartbeat in vaak-mcp.rs)
         // bump last_alive_at_ms; floor_stall only fires when BOTH the
         // working-activity track AND the heartbeat track are stale.
+        //
+        // Commit T (strict-turn-discipline spec §Working-turn unbounded
+        // mic-hold): suppress floor_stall when current_speaker holds a
+        // working-turn AND review_intensity >= 5. Working agents on the
+        // mic for long stretches (writing code, drafting prose) shouldn't
+        // be auto-rotated; the unbounded hold expires only on explicit
+        // yield_to or heartbeat-truly-stale (max_floor_exceeded branch
+        // above still fires when heartbeat is also stale).
+        let turn_type = proto
+            .get("floor")
+            .and_then(|f| f.get("turn_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let review_intensity = proto
+            .get("floor")
+            .and_then(|f| f.get("review_intensity"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as u8;
+        if should_suppress_floor_stall(turn_type, review_intensity) {
+            return;
+        }
         (
             "floor_stall",
             format!(
@@ -5579,6 +5600,14 @@ fn check_assembly_floor_watchdog(
 /// Both checks reuse the existing direct-write pattern in
 /// check_assembly_floor_watchdog (read protocol.json, mutate, write, append
 /// board event). Lives in the same poll loop so cadence is identical.
+/// Commit T (strict-turn-discipline spec §Working-turn unbounded mic-hold).
+/// Returns true when a current working-turn at review_intensity >= 5
+/// should NOT have floor_stall fire against it. Pure helper for unit
+/// test surface (T1/T2 fixtures).
+fn should_suppress_floor_stall(turn_type: &str, review_intensity: u8) -> bool {
+    turn_type == "working" && review_intensity >= 5
+}
+
 fn check_two_controls_dead_seats(
     dir: &str,
     active_section: &str,
@@ -6772,6 +6801,36 @@ More prose.
     }
 
     // ── validate_project_dir ───────────────────────────────────────────
+
+    // ============================================================
+    // Strict-turn-discipline (Commit T): working-turn unbounded mic-hold
+    // T1 working-turn at intensity >= 5 → suppress floor_stall
+    // T2 communication-turn (reviewing/passing/thinking) → still releases
+    // ============================================================
+
+    #[test]
+    fn t1_working_turn_at_level_5_suppresses_floor_stall() {
+        assert!(should_suppress_floor_stall("working", 5));
+        assert!(should_suppress_floor_stall("working", 6));
+        assert!(should_suppress_floor_stall("working", 10));
+    }
+
+    #[test]
+    fn t1_working_turn_below_level_5_does_not_suppress() {
+        assert!(!should_suppress_floor_stall("working", 4));
+        assert!(!should_suppress_floor_stall("working", 1));
+    }
+
+    #[test]
+    fn t2_communication_turns_never_suppress() {
+        for turn_type in ["reviewing", "passing", "thinking", ""] {
+            assert!(
+                !should_suppress_floor_stall(turn_type, 10),
+                "turn_type={} at level 10 should NOT suppress",
+                turn_type
+            );
+        }
+    }
 
     #[test]
     fn test_validate_project_dir_path_traversal_rejected() {
