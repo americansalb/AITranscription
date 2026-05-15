@@ -4080,8 +4080,40 @@ fn do_protocol_mutate_inner(
                         }
                     }
                 }
+                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P).
+                // Mirror of vaak-mcp.rs apply_propose_replanning per
+                // feedback_mirror_binary_parity_audit. Same gate, same queue
+                // append. No role gate — any active seat can propose.
+                "propose_replanning" => {
+                    let phase = current.floor.phase.as_deref().unwrap_or("execution");
+                    if phase != "execution" {
+                        Err(format!(
+                            "[ProposeReplanningPhaseInvalid] propose_replanning requires phase == 'execution' (current: {})",
+                            phase
+                        ))
+                    } else {
+                        let reason = args.get("reason").and_then(|v| v.as_str());
+                        match reason {
+                            Some(r) => {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0);
+                                current.floor.replanning_requests.push(
+                                    protocol::ReplanningRequest {
+                                        seat: actor.to_string(),
+                                        reason: r.to_string(),
+                                        ts,
+                                    },
+                                );
+                                Ok(())
+                            }
+                            None => Err("[InvalidArgs] propose_replanning requires args.reason (string)".to_string()),
+                        }
+                    }
+                }
                 other => Err(format!(
-                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator); '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning); '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };

@@ -3109,7 +3109,8 @@ fn protocol_fresh_value() -> serde_json::Value {
             "moderator": null,               // seat slug if mic_passing_mode == "moderator"
             "hand_queue": [],                // seat slugs in raise-hand order
             "plan_path": null,               // accepted plan when phase == "execution"
-            "plan_hash": null                // SHA-256 of plan_path file at accept_plan time
+            "plan_hash": null,               // SHA-256 of plan_path file at accept_plan time
+            "replanning_requests": []        // Collaborative-proposal-workflow v1 — multi-writer queue
         },
         "consensus": {
             "mode": "none",
@@ -3604,6 +3605,8 @@ fn do_protocol_mutate(
                 "raise_hand" => apply_raise_hand(&mut current, actor),
                 "grant_mic" => apply_grant_mic(&mut current, &args, actor),
                 "set_moderator" => apply_set_moderator(&mut current, &args, actor),
+                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P).
+                "propose_replanning" => apply_propose_replanning(&mut current, &args, actor),
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -4957,6 +4960,54 @@ fn apply_set_moderator(
     Ok(())
 }
 
+/// propose_replanning — Collaborative-proposal-workflow v1 spec Commit P.
+/// Any active seat in the rotation can propose a replanning flip while phase
+/// is "execution". Server-side gate: phase must be "execution"; otherwise
+/// reject with [ProposeReplanningPhaseInvalid]. No role gate (per spec — any
+/// seat that hits a plan gap can surface it; the moderator decides whether
+/// to pivot via accept_replanning). Appends {seat, reason, ts} to the
+/// floor.replanning_requests multi-writer queue. The outer `with_file_lock`
+/// in `do_protocol_mutate` serializes appends so N simultaneous proposals
+/// land FIFO without erasing each other (R3 invariant).
+fn apply_propose_replanning(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+) -> Result<(), String> {
+    let phase = state
+        .get("floor")
+        .and_then(|f| f.get("phase"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("execution");
+    if phase != "execution" {
+        return Err(format!(
+            "[ProposeReplanningPhaseInvalid] propose_replanning requires phase == 'execution' (current: {})",
+            phase
+        ));
+    }
+    let reason = args
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] propose_replanning requires args.reason (string)")?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        let queue = floor
+            .entry("replanning_requests".to_string())
+            .or_insert_with(|| serde_json::Value::Array(vec![]));
+        if let Some(arr) = queue.as_array_mut() {
+            arr.push(serde_json::json!({
+                "seat": actor,
+                "reason": reason,
+                "ts": ts,
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// Emit a board event after a successful protocol_mutate. Captures pre/post
 /// state diff for the spec's 9-event observability invariant (finding #3).
 fn emit_two_controls_event(
@@ -4974,6 +5025,7 @@ fn emit_two_controls_event(
         "raise_hand" => "hand_raised",
         "grant_mic" => "mic_granted",
         "set_moderator" => "moderator_set",
+        "propose_replanning" => "replanning_proposed",
         _ => return,
     };
     let pre_floor = pre.get("floor").cloned().unwrap_or(serde_json::Value::Null);
@@ -5012,6 +5064,27 @@ fn emit_two_controls_event(
         "set_moderator" => {
             payload.insert("old".into(), pre_get("moderator"));
             payload.insert("new".into(), post_get("moderator"));
+        }
+        "propose_replanning" => {
+            // Emit the just-appended request as the event payload (the LAST
+            // entry of the post-state queue is what this caller pushed). The
+            // outer with_file_lock guarantees no concurrent push lands
+            // between apply_propose_replanning and this read.
+            let last_request = post_get("replanning_requests")
+                .as_array()
+                .and_then(|a| a.last().cloned())
+                .unwrap_or(serde_json::Value::Null);
+            payload.insert("seat".into(), serde_json::json!(actor));
+            payload.insert("request".into(), last_request);
+            payload.insert(
+                "queue_depth".into(),
+                serde_json::json!(
+                    post_get("replanning_requests")
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0)
+                ),
+            );
         }
         _ => return,
     }
@@ -6318,6 +6391,119 @@ mod protocol_slice2_tests {
         )
         .expect("human must be accepted");
         assert_eq!(s["floor"]["moderator"], "tester:0");
+    }
+
+    // ============================================================
+    // Collaborative-proposal-workflow v1 (spec 2026-05-15) — Commit P
+    // R1 propose_replanning execution-only gate
+    // R2 propose_replanning open to any seat (no role gate)
+    // ============================================================
+
+    /// R1 — propose_replanning from execution phase pushes onto queue.
+    #[test]
+    fn r1_propose_replanning_from_execution_pushes_to_queue() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "plan gap on test rubric"}),
+            "developer:1",
+        )
+        .expect("execution-phase propose must succeed");
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["seat"], "developer:1");
+        assert_eq!(queue[0]["reason"], "plan gap on test rubric");
+        assert!(queue[0]["ts"].is_i64() || queue[0]["ts"].is_u64());
+    }
+
+    /// R1 — propose_replanning from planning phase rejects with the
+    /// [ProposeReplanningPhaseInvalid] envelope per spec.
+    #[test]
+    fn r1_propose_replanning_from_planning_rejects() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("planning");
+        let err = apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "should not land"}),
+            "developer:1",
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[ProposeReplanningPhaseInvalid]"),
+            "got: {}",
+            err
+        );
+        // Queue remains empty after rejection.
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert!(queue.is_empty());
+    }
+
+    /// R1 — missing args.reason rejects with [InvalidArgs].
+    #[test]
+    fn r1_propose_replanning_missing_reason_invalid_args() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        let err = apply_propose_replanning(&mut s, &serde_json::json!({}), "developer:1")
+            .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// R2 — propose_replanning has NO role gate. A non-moderator,
+    /// non-architect, non-human caller succeeds. Per spec: any active seat
+    /// in the rotation can propose; the moderator decides whether to pivot.
+    #[test]
+    fn r2_propose_replanning_no_role_gate_developer_succeeds() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "developer-lens plan gap"}),
+            "developer:1",
+        )
+        .expect("developer must be accepted — no role gate on propose_replanning");
+    }
+
+    #[test]
+    fn r2_propose_replanning_no_role_gate_dev_challenger_succeeds() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "adversarial concern"}),
+            "dev-challenger:0",
+        )
+        .expect("dev-challenger must be accepted — no role gate on propose_replanning");
+    }
+
+    #[test]
+    fn r2_propose_replanning_no_role_gate_audience_succeeds() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "learner-persona gap"}),
+            "audience:0",
+        )
+        .expect("audience must be accepted — no role gate on propose_replanning");
+    }
+
+    /// R1 — phase field missing in floor (legacy/pre-Commit-P state) defaults
+    /// to "execution" per fresh_state shape. Confirms back-compat: pre-v1.1
+    /// protocol.json files don't get rejected for missing phase.
+    #[test]
+    fn r1_propose_replanning_missing_phase_defaults_to_execution() {
+        let mut s = fresh_state();
+        // Strip phase to simulate a pre-v1.1 protocol.json.
+        if let Some(floor) = s["floor"].as_object_mut() {
+            floor.remove("phase");
+        }
+        apply_propose_replanning(
+            &mut s,
+            &serde_json::json!({"reason": "back-compat path"}),
+            "developer:1",
+        )
+        .expect("missing phase must default to execution and accept");
     }
 
     /// F5 (dev-challenger msg 1115): A9 PlanPathOutsideDesignNotes must fire

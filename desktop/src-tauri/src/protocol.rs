@@ -87,6 +87,20 @@ pub struct Floor {
     pub plan_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
+
+    // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P).
+    // Multi-writer queue: any active seat appends via propose_replanning;
+    // moderator drains via accept_replanning. #[serde(default)] makes
+    // pre-Commit-P protocol.json files deserialize cleanly to empty Vec.
+    #[serde(default)]
+    pub replanning_requests: Vec<ReplanningRequest>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReplanningRequest {
+    pub seat: String,
+    pub reason: String,
+    pub ts: i64,
 }
 
 fn default_threshold_ms() -> u64 { MIC_GRAB_THRESHOLD_MS }
@@ -274,6 +288,7 @@ impl Protocol {
                 hand_queue: None,
                 plan_path: None,
                 plan_hash: None,
+                replanning_requests: vec![],
             },
             consensus: Consensus {
                 mode: "none".to_string(),
