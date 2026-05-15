@@ -217,6 +217,54 @@
   cursor: not-allowed;
 }
 
+/* Affordance A — propose-replanning button (Commit P.A,
+ * collaborative-proposal-workflow-spec-2026-05-15.md). Per-seat surface
+ * rendered below the moderator fast-flip row. Amber/warning palette to
+ * distinguish from the indigo fast-flip row — propose_replanning is a
+ * raise-hand signal, not an authority move. */
+.assembly-propose-replanning-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.assembly-propose-replanning-btn {
+  padding: 4px 12px;
+  background: rgba(251, 191, 36, 0.10);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.assembly-propose-replanning-btn:hover {
+  background: rgba(251, 191, 36, 0.18);
+  border-color: rgba(251, 191, 36, 0.55);
+}
+
+/* Reason textarea inside the propose-replanning modal — overrides the
+ * default text-input height for multi-line input per spec §Affordance A
+ * (~3 lines, ~200 char limit). */
+.assembly-modal-textarea {
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 60px;
+}
+
+/* Live character count next to the hint, monospace for stable width as
+ * digits change. */
+.assembly-modal-char-count {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #a0aec0;
+  font-size: 11px;
+  float: right;
+}
+
 /* Item 6 (per UX-eng msg 1449 + architect msg 1464): inline notice when
  * "Moderator" mode is picked without a moderator assigned. Amber-style hint
  * distinct from the red-amber .assembly-modal-error (which is destructive

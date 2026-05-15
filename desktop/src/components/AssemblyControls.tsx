@@ -84,6 +84,12 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   const [planEntryMode, setPlanEntryMode] = useState<'accept' | 'revise' | null>(null);
   const [planPathInput, setPlanPathInput] = useState('');
   const [revisionNote, setRevisionNote] = useState('');
+  // Collaborative-proposal-workflow v1 (Commit P.A) — Affordance A.
+  // Per-seat propose-replanning modal state.
+  const [proposeReplanningOpen, setProposeReplanningOpen] = useState(false);
+  const [replanningReason, setReplanningReason] = useState('');
+  const replanningReasonRef = useRef<HTMLTextAreaElement | null>(null);
+  const REPLANNING_REASON_MAX = 200;
   // ••• menu dropdown open state.
   const [planMenuOpen, setPlanMenuOpen] = useState(false);
   // Baseline-snapshot pattern for surfacing modal errors (B.1 fold per UX-eng
@@ -131,31 +137,37 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     void mutate('accept_plan', { plan_path: planPath });
   };
 
-  // ESC-to-close for both modals (Nit 1 per UX-eng msg 1155). One global
-  // keydown handler dispatches to whichever modal is currently open.
+  // ESC-to-close for modals (Nit 1 per UX-eng msg 1155). One global keydown
+  // handler dispatches to whichever modal is currently open. Commit P.A
+  // adds proposeReplanningOpen to the rotation.
   useEffect(() => {
-    if (!confirmOpenPlanning && !planEntryMode) return;
+    if (!confirmOpenPlanning && !planEntryMode && !proposeReplanningOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (confirmOpenPlanning) {
         setConfirmOpenPlanning(false);
       } else if (planEntryMode) {
         setPlanEntryMode(null);
+      } else if (proposeReplanningOpen) {
+        setProposeReplanningOpen(false);
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [confirmOpenPlanning, planEntryMode]);
+  }, [confirmOpenPlanning, planEntryMode, proposeReplanningOpen]);
 
   // Default-focus on open: Cancel for destructive-confirm (safer default per
-  // destructive-action UX convention), input field for plan-entry.
+  // destructive-action UX convention), input field for plan-entry, textarea
+  // for propose-replanning (typing IS the goal of opening this modal).
   useEffect(() => {
     if (confirmOpenPlanning) {
       confirmCancelRef.current?.focus();
     } else if (planEntryMode) {
       planInputRef.current?.focus();
+    } else if (proposeReplanningOpen) {
+      replanningReasonRef.current?.focus();
     }
-  }, [confirmOpenPlanning, planEntryMode]);
+  }, [confirmOpenPlanning, planEntryMode, proposeReplanningOpen]);
 
   // FINDING (UX-eng msg 1155): server-side rejections (PlanPathMissing,
   // RevisePlanForbidden, SetModeratorForbidden, etc.) used to fire-and-forget
@@ -214,6 +226,26 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       setPlanEntryMode(null);
       setPlanPathInput('');
       setRevisionNote('');
+    }
+  };
+
+  // Commit P.A (Affordance A) — Open the propose-replanning modal. Snapshot
+  // lastError baseline so only post-open errors surface inline (B.1 pattern).
+  const openProposeReplanning = () => {
+    setErrorBaseline(lastError);
+    setReplanningReason('');
+    setProposeReplanningOpen(true);
+  };
+
+  // Fire propose_replanning. Modal stays open on server-side rejection so the
+  // user can read the friendly-translated error and either correct or cancel.
+  const submitProposeReplanning = async () => {
+    const reason = replanningReason.trim();
+    if (!reason) return;
+    const result = await mutate('propose_replanning', { reason });
+    if (result !== null) {
+      setProposeReplanningOpen(false);
+      setReplanningReason('');
     }
   };
 
@@ -520,6 +552,31 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
         </div>
       )}
 
+      {/* Affordance A — propose-replanning button (Commit P.A per
+          collaborative-proposal-workflow-spec-2026-05-15.md §UI affordances).
+          Per-seat surface for the school-of-fish rule: any active seat that
+          hits a plan gap during execution can SIGNAL the moderator to flip
+          the team back to planning. Gate excludes the moderator themselves
+          (per UI-arch msg 1925: moderator already has fast-flip authority,
+          propose-button-to-self is a noop with a noisy modal). Also gated on
+          assembly being active, phase being execution, and selfRole !== null
+          (human view uses the phase pill directly). */}
+      {assemblyActive
+        && phase === 'execution'
+        && selfRole !== null
+        && moderator !== selfSeatLabel && (
+        <div className="assembly-propose-replanning-row">
+          <button
+            type="button"
+            className="assembly-propose-replanning-btn"
+            onClick={openProposeReplanning}
+            title="Propose replanning — signal a plan gap to the moderator. The moderator decides whether to flip the team back to planning."
+          >
+            ⚠ Plan gap — propose replanning
+          </button>
+        </div>
+      )}
+
       {/* Per-mechanism status strip — UI-arch msg 969 fold. "Currently:"
           segment dropped in B.3 Item 5 (per UX-eng spec §131): the current
           speaker is now embedded in the assembly button's label, making the
@@ -624,6 +681,56 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                 disabled={!planPathInput.trim()}
               >
                 {planEntryMode === 'accept' ? 'Accept plan' : 'Revise plan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Affordance A — propose-replanning modal (Commit P.A). Textarea for
+          the reason; submit fires protocol_mutate('propose_replanning',
+          {reason}). Modal stays open on server-side rejection so the user
+          sees the friendly-translated error (same B.1 baseline-snapshot
+          pattern as the other modals). */}
+      {proposeReplanningOpen && (
+        <div className="assembly-modal-backdrop" onClick={() => setProposeReplanningOpen(false)}>
+          <div className="assembly-modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="assembly-modal-title">Propose replanning</div>
+            <div className="assembly-modal-body">
+              <label className="assembly-modal-field">
+                <span>Reason for proposing replanning:</span>
+                <textarea
+                  ref={replanningReasonRef}
+                  className="assembly-modal-input assembly-modal-textarea"
+                  rows={3}
+                  maxLength={REPLANNING_REASON_MAX}
+                  value={replanningReason}
+                  onChange={(e) => setReplanningReason(e.target.value)}
+                  placeholder="e.g. test-item rendering requires construct-validity arbitration not in the plan"
+                />
+              </label>
+              <div className="assembly-modal-hint">
+                The moderator will see your proposal and decide whether to flip the team back to planning.
+                School-of-fish: when accepted, the whole team pivots together.
+                <span className="assembly-modal-char-count"> {replanningReason.length}/{REPLANNING_REASON_MAX}</span>
+              </div>
+            </div>
+            {displayError && (
+              <div className="assembly-modal-error" role="alert">
+                {displayError}
+              </div>
+            )}
+            <div className="assembly-modal-actions">
+              <button type="button" className="assembly-modal-cancel" onClick={() => setProposeReplanningOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="assembly-modal-confirm"
+                onClick={submitProposeReplanning}
+                disabled={!replanningReason.trim()}
+              >
+                Propose replanning
               </button>
             </div>
           </div>
