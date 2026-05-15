@@ -4080,10 +4080,19 @@ fn do_protocol_mutate_inner(
                         }
                     }
                 }
-                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P).
+                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P + P.B).
                 // Mirror of vaak-mcp.rs apply_propose_replanning per
                 // feedback_mirror_binary_parity_audit. Same gate, same queue
                 // append. No role gate — any active seat can propose.
+                //
+                // ts injection per spec v6 line 29 (dev-challenger msg 1939 #3
+                // + architect msg 1944 fold): production callers (this Tauri
+                // dispatch + the vaak-mcp.rs MCP dispatch) ignore any
+                // caller-supplied args.ts and always fill with now(). The
+                // explicit ts parameter on apply_propose_replanning exists
+                // only for test-side deterministic seeding (R3 N≥4 FIFO
+                // assertion at sub-millisecond resolution); production never
+                // exposes the field to MCP/Tauri callers.
                 "propose_replanning" => {
                     let phase = current.floor.phase.as_deref().unwrap_or("execution");
                     if phase != "execution" {

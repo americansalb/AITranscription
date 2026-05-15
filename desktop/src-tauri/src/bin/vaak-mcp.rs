@@ -3605,8 +3605,16 @@ fn do_protocol_mutate(
                 "raise_hand" => apply_raise_hand(&mut current, actor),
                 "grant_mic" => apply_grant_mic(&mut current, &args, actor),
                 "set_moderator" => apply_set_moderator(&mut current, &args, actor),
-                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P).
-                "propose_replanning" => apply_propose_replanning(&mut current, &args, actor),
+                // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P + P.B).
+                // ts injection: production caller passes None per spec v6 line 29;
+                // tests call apply_propose_replanning directly with Some(...).
+                "propose_replanning" => {
+                    let reason = args.get("reason").and_then(|v| v.as_str());
+                    match reason {
+                        Some(r) => apply_propose_replanning(&mut current, actor, r, None),
+                        None => Err("[InvalidArgs] propose_replanning requires args.reason (string)".to_string()),
+                    }
+                }
                 other => Err(format!("[InvalidAction] no such action: {}", other)),
             };
 
@@ -4969,10 +4977,19 @@ fn apply_set_moderator(
 /// floor.replanning_requests multi-writer queue. The outer `with_file_lock`
 /// in `do_protocol_mutate` serializes appends so N simultaneous proposals
 /// land FIFO without erasing each other (R3 invariant).
+///
+/// ts injection per spec v6 line 29 (dev-challenger msg 1939 #3 +
+/// architect msg 1944 fold): the `ts: Option<i64>` parameter lets test
+/// code seed deterministic timestamps so R3's N≥4-FIFO assertion can
+/// discriminate FIFO from random-but-serialized at sub-millisecond
+/// resolution. Production callers (the protocol_mutate dispatcher below)
+/// pass None and the server fills with now(). Avoids #[cfg(test)] clock-
+/// override per architect's "option a, not cfg(test)" call.
 fn apply_propose_replanning(
     state: &mut serde_json::Value,
-    args: &serde_json::Value,
     actor: &str,
+    reason: &str,
+    ts: Option<i64>,
 ) -> Result<(), String> {
     let phase = state
         .get("floor")
@@ -4985,14 +5002,12 @@ fn apply_propose_replanning(
             phase
         ));
     }
-    let reason = args
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .ok_or("[InvalidArgs] propose_replanning requires args.reason (string)")?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let ts = ts.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    });
     if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
         let queue = floor
             .entry("replanning_requests".to_string())
@@ -6404,12 +6419,8 @@ mod protocol_slice2_tests {
     fn r1_propose_replanning_from_execution_pushes_to_queue() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("execution");
-        apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "plan gap on test rubric"}),
-            "developer:1",
-        )
-        .expect("execution-phase propose must succeed");
+        apply_propose_replanning(&mut s, "developer:1", "plan gap on test rubric", None)
+            .expect("execution-phase propose must succeed");
         let queue = s["floor"]["replanning_requests"].as_array().unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0]["seat"], "developer:1");
@@ -6423,12 +6434,8 @@ mod protocol_slice2_tests {
     fn r1_propose_replanning_from_planning_rejects() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("planning");
-        let err = apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "should not land"}),
-            "developer:1",
-        )
-        .unwrap_err();
+        let err = apply_propose_replanning(&mut s, "developer:1", "should not land", None)
+            .unwrap_err();
         assert!(
             err.starts_with("[ProposeReplanningPhaseInvalid]"),
             "got: {}",
@@ -6439,14 +6446,22 @@ mod protocol_slice2_tests {
         assert!(queue.is_empty());
     }
 
-    /// R1 — missing args.reason rejects with [InvalidArgs].
+    /// R1 — missing args.reason rejects with [InvalidArgs] at the dispatcher
+    /// layer. apply_propose_replanning itself takes `reason: &str` directly
+    /// (per spec v6 signature), so the InvalidArgs envelope is constructed
+    /// in the dispatcher when args.reason is absent. Verifying the
+    /// dispatcher contract: this is exercised by integration through
+    /// handle_protocol_mutate but the apply-layer test here pins the fact
+    /// that an empty string still pushes (server-side gate is phase-only).
     #[test]
-    fn r1_propose_replanning_missing_reason_invalid_args() {
+    fn r1_propose_replanning_empty_reason_still_pushes() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("execution");
-        let err = apply_propose_replanning(&mut s, &serde_json::json!({}), "developer:1")
-            .unwrap_err();
-        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        apply_propose_replanning(&mut s, "developer:1", "", None)
+            .expect("apply layer accepts any &str reason; dispatcher enforces non-null");
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["reason"], "");
     }
 
     /// R2 — propose_replanning has NO role gate. A non-moderator,
@@ -6456,36 +6471,24 @@ mod protocol_slice2_tests {
     fn r2_propose_replanning_no_role_gate_developer_succeeds() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("execution");
-        apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "developer-lens plan gap"}),
-            "developer:1",
-        )
-        .expect("developer must be accepted — no role gate on propose_replanning");
+        apply_propose_replanning(&mut s, "developer:1", "developer-lens plan gap", None)
+            .expect("developer must be accepted — no role gate on propose_replanning");
     }
 
     #[test]
     fn r2_propose_replanning_no_role_gate_dev_challenger_succeeds() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("execution");
-        apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "adversarial concern"}),
-            "dev-challenger:0",
-        )
-        .expect("dev-challenger must be accepted — no role gate on propose_replanning");
+        apply_propose_replanning(&mut s, "dev-challenger:0", "adversarial concern", None)
+            .expect("dev-challenger must be accepted — no role gate on propose_replanning");
     }
 
     #[test]
     fn r2_propose_replanning_no_role_gate_audience_succeeds() {
         let mut s = fresh_state();
         s["floor"]["phase"] = serde_json::json!("execution");
-        apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "learner-persona gap"}),
-            "audience:0",
-        )
-        .expect("audience must be accepted — no role gate on propose_replanning");
+        apply_propose_replanning(&mut s, "audience:0", "learner-persona gap", None)
+            .expect("audience must be accepted — no role gate on propose_replanning");
     }
 
     /// R1 — phase field missing in floor (legacy/pre-Commit-P state) defaults
@@ -6498,12 +6501,31 @@ mod protocol_slice2_tests {
         if let Some(floor) = s["floor"].as_object_mut() {
             floor.remove("phase");
         }
-        apply_propose_replanning(
-            &mut s,
-            &serde_json::json!({"reason": "back-compat path"}),
-            "developer:1",
-        )
-        .expect("missing phase must default to execution and accept");
+        apply_propose_replanning(&mut s, "developer:1", "back-compat path", None)
+            .expect("missing phase must default to execution and accept");
+    }
+
+    /// R3 precondition (Commit P.B per architect msg 1944 + dev-challenger
+    /// msg 1939 #3) — explicit ts parameter is honored. Production calls
+    /// with None get a now()-based ts; tests with Some(T) get T. This is
+    /// what unblocks tester's R3 fixture (msg 1937) — without the
+    /// parameter, natural now() jitter at μs scale can't discriminate
+    /// FIFO from random-but-serialized for N≥4 simultaneous appenders.
+    #[test]
+    fn r3_precondition_explicit_ts_is_honored() {
+        let mut s = fresh_state();
+        s["floor"]["phase"] = serde_json::json!("execution");
+        apply_propose_replanning(&mut s, "developer:1", "first", Some(1_700_000_000_000))
+            .unwrap();
+        apply_propose_replanning(&mut s, "developer:1", "second", Some(1_700_000_000_001))
+            .unwrap();
+        apply_propose_replanning(&mut s, "developer:1", "third", Some(1_700_000_000_002))
+            .unwrap();
+        let queue = s["floor"]["replanning_requests"].as_array().unwrap();
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0]["ts"].as_i64().unwrap(), 1_700_000_000_000);
+        assert_eq!(queue[1]["ts"].as_i64().unwrap(), 1_700_000_000_001);
+        assert_eq!(queue[2]["ts"].as_i64().unwrap(), 1_700_000_000_002);
     }
 
     /// F5 (dev-challenger msg 1115): A9 PlanPathOutsideDesignNotes must fire
