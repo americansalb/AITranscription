@@ -80,6 +80,96 @@ def parse_scope_block(plan_text: str):
     return body.split()
 
 
+def parse_delegation_blocks(plan_text: str):
+    """Commit H — Python mirror of main.rs parse_delegation_blocks (Commit D
+    0a9fcb1). Uses the same non-greedy grammar pinned in spec line 102 +
+    platform-eng msg 1916 #2. Returns list of dicts; each dict has keys
+    'owner', 'section', and optional 'deadline' / 'deps'. Malformed blocks
+    are silently dropped here (lenient parser used for collection; the
+    duplicate-detection + owner-validation steps in main() enforce the
+    well-formedness gate per spec line 115-116).
+
+    Cross-language parity with the Rust parser is the v1.6 corpus test
+    surface (dev-challenger msg 1939 #4); for v1 the two parsers share
+    the same grammar by spec convention."""
+    blocks = []
+    for m in re.finditer(r"<!--\s*delegation:\s*(.+?)\s*-->", plan_text, re.DOTALL):
+        body = m.group(1).strip()
+        entry = {}
+        for tok in body.split():
+            if "=" not in tok:
+                continue
+            k, v = tok.split("=", 1)
+            if k == "owner":
+                entry["owner"] = v
+            elif k == "section":
+                entry["section"] = v
+            elif k == "deadline":
+                entry["deadline"] = v
+            elif k == "deps":
+                entry["deps"] = [d.strip() for d in v.split(",") if d.strip()]
+            # Unknown keys silently dropped (forward-compat).
+        if "owner" in entry and "section" in entry:
+            blocks.append(entry)
+        # Else: missing required fields — silently drop (matches Rust
+        # lenient parser). Strict-mode error reporting happens in the
+        # well-formedness validator below.
+    return blocks
+
+
+def read_team_status_seats(root: Path) -> set:
+    """Read .vaak/project.json + .vaak/sessions.json to build the set of
+    known team seat slugs (role:instance form) for delegation-owner
+    validation per spec line 116. Returns empty set if either file is
+    missing or unparseable — hook defensively allows commits when team
+    state is unreadable (vs blocking on a transient I/O issue).
+
+    A seat is 'known' if it appears in project.json:roles[*] regardless of
+    active status. Hook well-formedness is about plan-doc correctness
+    (typo guard), not session liveness — the latter belongs to a v1.6
+    upgrade per spec line 121."""
+    seats = set()
+    project_path = root / ".vaak" / "project.json"
+    try:
+        proj = json.loads(project_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return seats
+    for role_entry in proj.get("roles", []) or []:
+        role_slug = role_entry.get("slug")
+        if not role_slug:
+            continue
+        max_instances = role_entry.get("max_instances") or role_entry.get("maxInstances") or 1
+        try:
+            n = max(int(max_instances), 1)
+        except (TypeError, ValueError):
+            n = 1
+        for i in range(n):
+            seats.add(f"{role_slug}:{i}")
+    # Always-known: human:0 is the human-as-actor seat slug; explicitly
+    # added so a plan can delegate to 'human:0' without needing a roles
+    # entry for it.
+    seats.add("human:0")
+    return seats
+
+
+def write_audit_marker(root: Path, plan_path: str, sections_touched: list) -> None:
+    """Cooperative audit marker per spec line 119 (Commit H). Writes
+    .vaak/last-pre-commit.json on every hook PASS so later review can ask
+    'which sections were touched at this commit?' Best-effort — failure to
+    write is non-fatal (audit is informational, not gating)."""
+    marker = root / ".vaak" / "last-pre-commit.json"
+    payload = {
+        "ts": __import__("time").time() * 1000,
+        "plan_path": plan_path,
+        "sections_touched": sections_touched,
+    }
+    try:
+        marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        # Audit-trail write failure is non-fatal — hook still allows commit.
+        pass
+
+
 def staged_files() -> list:
     """Files in the index, relative to repo root."""
     out = subprocess.check_output(
@@ -173,7 +263,11 @@ def main() -> None:
         )
 
     if not scope:
-        # Unrestricted * → no scope check.
+        # Unrestricted * → scope check skipped. Delegation validation still
+        # runs below (Commit H: plan-doc well-formedness independent of
+        # file-scope discipline).
+        _run_delegation_validation(root, plan_full, plan_path)
+        write_audit_marker(root, plan_path, sections_touched=[])
         sys.exit(0)
 
     # Convert scope entries to a comparable set. Scope entries are exact paths
@@ -210,7 +304,113 @@ def main() -> None:
             "block (architect/manager/human only).",
         )
 
+    # Scope check passed. Delegation well-formedness next (Commit H).
+    sections_touched = _run_delegation_validation(root, plan_full, plan_path)
+    write_audit_marker(root, plan_path, sections_touched=sections_touched)
+
     sys.exit(0)
+
+
+def _run_delegation_validation(root: Path, plan_full: Path, plan_path: str) -> list:
+    """Commit H — delegation-block well-formedness gate per spec lines
+    108-119. Three classes of rejection:
+
+      [delegation_drift]          duplicate section across blocks (plan
+                                  doc has two blocks both claiming the
+                                  same section ID — first-one-wins would
+                                  silently mask the drift)
+      [delegation_owner_unknown]  owner=X where X is not in team_status
+                                  (typo guard; v1 uses
+                                  project.json:roles[*] as the source of
+                                  truth, not session liveness)
+      [delegation_target_unmapped] a staged file contains
+                                  <!-- delegation-target: section=Y -->
+                                  but Y is not in the section-owner
+                                  mapping
+
+    NO committer-author identity check per architect msg 1909 #1 narrowing:
+    single-machine git-config can't discriminate seats. Honor-system
+    cooperative trail; the .vaak/last-pre-commit.json marker captures
+    intent for post-hoc review.
+
+    Returns the list of sections touched (intersection of staged-file
+    delegation-target markers + the section-owner mapping) for the audit
+    marker."""
+    try:
+        plan_text = plan_full.read_text(encoding="utf-8")
+    except OSError:
+        # Plan unreadable but scope check passed earlier — defensive: skip
+        # delegation gate without blocking.
+        return []
+
+    blocks = parse_delegation_blocks(plan_text)
+    if not blocks:
+        # No <!-- delegation: --> blocks → nothing to validate. Allow.
+        return []
+
+    # 1. Duplicate-section detection — plan-doc drift.
+    seen_sections = {}
+    for entry in blocks:
+        sec = entry["section"]
+        if sec in seen_sections:
+            reject(
+                "delegation_drift",
+                f"Plan '{plan_path}' has two delegation blocks for section "
+                f"'{sec}': first owner={seen_sections[sec]}, second "
+                f"owner={entry['owner']}. The proposal document is the "
+                "source of truth — split the section or pick one owner.",
+            )
+        seen_sections[sec] = entry["owner"]
+
+    # 2. Owner-in-team_status validation — typo guard.
+    known_seats = read_team_status_seats(root)
+    if known_seats:
+        # Only validate when we successfully read project.json; if team
+        # state is unreadable (transient I/O or fresh checkout), skip the
+        # owner gate rather than block a commit on infrastructure trouble.
+        unknown_owners = sorted(
+            {entry["owner"] for entry in blocks if entry["owner"] not in known_seats}
+        )
+        if unknown_owners:
+            reject(
+                "delegation_owner_unknown",
+                f"Plan '{plan_path}' delegates to seats not in "
+                f".vaak/project.json:roles[*]:\n  "
+                + "\n  ".join(unknown_owners)
+                + "\n\nKnown seats (from project.json + human:0):\n  "
+                + "\n  ".join(sorted(known_seats))
+                + "\n\nFix the plan-doc owner=... value or add the role "
+                "to project.json:roles[*].",
+            )
+
+    # 3. delegation-target marker validation (opt-in per spec line 117).
+    #    Files self-tag with <!-- delegation-target: section=Y -->; if Y
+    #    isn't in the section-owner mapping, reject. No target marker → no
+    #    check (forward-compat for v1.X plan docs without target tagging).
+    target_re = re.compile(r"<!--\s*delegation-target:\s*section=([^\s-][^\s]*)\s*-->")
+    sections_touched = []
+    for staged in staged_files():
+        try:
+            content = (root / staged).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Binary or unreadable file — skip target-marker check.
+            continue
+        for m in target_re.finditer(content):
+            target_section = m.group(1)
+            if target_section not in seen_sections:
+                reject(
+                    "delegation_target_unmapped",
+                    f"Staged file '{staged}' declares "
+                    f"<!-- delegation-target: section={target_section} --> "
+                    f"but section '{target_section}' is not in the plan's "
+                    f"delegation mapping. Either add a "
+                    f"<!-- delegation: owner=... section={target_section} --> "
+                    "block to the plan, or remove the target marker.",
+                )
+            if target_section not in sections_touched:
+                sections_touched.append(target_section)
+
+    return sections_touched
 
 
 if __name__ == "__main__":
