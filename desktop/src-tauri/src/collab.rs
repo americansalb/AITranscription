@@ -156,6 +156,37 @@ pub struct RoleConfig {
     /// true for roles the user created via UI; false for system/imported roles
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
+    /// Character/stats system per human msg 3254 + spec at
+    /// .vaak/design-notes/character-stats-system-2026-05-16.md.
+    /// Phase 1: stats stored at role level (all instances inherit). Each
+    /// stat is 1-10. None = legacy role with no stats yet; UI/prompt
+    /// generator defaults to 5 across the board until human edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<RoleStats>,
+    /// Optional avatar URL (HTTPS only per Phase 1). Fallback to
+    /// role-color initial circle when missing or load fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// Per-role character stats. Each axis 1-10. See human msg 3254 + spec for
+/// definitions. Phase 1: data-only — prompt generator + UI consume.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleStats {
+    /// Technical Depth — code/architecture/systems engagement
+    pub td: u8,
+    /// Adversarial Rigor — push-back + verification
+    pub ar: u8,
+    /// Communication Precision — clarity + conciseness
+    pub cp: u8,
+    /// Domain Ownership — depth in one area vs spread
+    /// (uses `domain` field name to avoid Rust `do` keyword collision)
+    #[serde(rename = "do")]
+    pub domain: u8,
+    /// Process Discipline — verify-before-asserting
+    pub pd: u8,
+    /// Judgment Under Ambiguity — clean calls under uncertainty
+    pub ja: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1781,6 +1812,10 @@ fn create_role_inner(
         tags: tags.to_vec(),
         companions: companions.to_vec(),
         custom: true,
+        // Character/stats Phase 1: new role created via UI starts with no
+        // stats. Human edits values via future Roles tab post-create.
+        stats: None,
+        avatar_url: None,
     };
 
     // Add role to config

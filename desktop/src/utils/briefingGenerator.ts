@@ -190,6 +190,92 @@ export interface PeerRole {
   description: string;
   tags: string[];
   permissions: string[];
+  /** Character/stats per human msg 3254 + spec. Optional — legacy peers
+      without stats omit; specialist-lookup falls back to generic role names. */
+  stats?: RoleStats;
+}
+
+/**
+ * Character/stats system per human msg 3254 + spec at
+ * .vaak/design-notes/character-stats-system-2026-05-16.md.
+ * Each axis 1-10. Mirrors RoleStats in collab.rs.
+ */
+export interface RoleStats {
+  td: number; // Technical Depth
+  ar: number; // Adversarial Rigor
+  cp: number; // Communication Precision
+  do: number; // Domain Ownership
+  pd: number; // Process Discipline
+  ja: number; // Judgment Under Ambiguity
+}
+
+const STAT_DIMENSIONS: Array<{ key: keyof RoleStats; label: string }> = [
+  { key: "td", label: "Technical Depth" },
+  { key: "ar", label: "Adversarial Rigor" },
+  { key: "cp", label: "Communication Precision" },
+  { key: "do", label: "Domain Ownership" },
+  { key: "pd", label: "Process Discipline" },
+  { key: "ja", label: "Judgment Under Ambiguity" },
+];
+
+/**
+ * Generate the cognitive-budget framing block per spec §5.
+ *
+ * CRITICAL per spec §5 + evil-arch msg 3263 §4: NO LITERAL NUMBERS in
+ * output text. Stats are read as DATA; output is FRAMING TEXT only.
+ * Prevents recursive "per my AR=10..." citation pattern.
+ *
+ * CRITICAL per spec §3 corollary + dev-challenger msg 3266 §5: low stats
+ * bias attention budget but do NOT exempt the agent from verification
+ * responsibilities. Multi-verifier coverage is load-bearing.
+ */
+function generateStatFraming(
+  roleTitle: string,
+  stats: RoleStats,
+  peers: PeerRole[],
+): string {
+  // For each stat with stat ≤ 6, find the peer with the highest matching
+  // stat to name as deferral target. Tie-break alphabetical for stability.
+  const findSpecialist = (dim: keyof RoleStats): string | null => {
+    let best: PeerRole | null = null;
+    for (const peer of peers) {
+      if (!peer.stats) continue;
+      if (best == null || peer.stats[dim] > best.stats![dim] ||
+          (peer.stats[dim] === best.stats![dim] && peer.slug < best.slug)) {
+        best = peer;
+      }
+    }
+    return best ? best.title : null;
+  };
+
+  const lines: string[] = [];
+  for (const { key, label } of STAT_DIMENSIONS) {
+    const v = stats[key];
+    if (v >= 9) {
+      lines.push(`- You're the team's strongest voice on ${label}. Lead here.`);
+    } else if (v >= 7) {
+      lines.push(`- Strong on ${label}. Engage when needed.`);
+    } else if (v >= 5) {
+      const specialist = findSpecialist(key);
+      const target = specialist ? specialist : "the team's specialist";
+      lines.push(
+        `- ${label} isn't your primary focus. When complex ${label} decisions arise, flag them for ${target}. Your cognitive budget is better spent on your strongest dimensions.`,
+      );
+    } else {
+      const specialist = findSpecialist(key);
+      const target = specialist ? specialist : "the team's specialist";
+      lines.push(`- ${label} is explicitly outside your scope. Always defer to ${target}.`);
+    }
+  }
+
+  return `## 0. Your Cognitive Budget
+
+You're playing the role of ${roleTitle}. You have a limited cognitive budget; spend it where you're the team's strongest voice. Below: what to lead on, what to flag for specialists.
+
+${lines.join("\n")}
+
+**Verification responsibility preserved:** your stat profile biases your cognitive budget toward your 9s and 10s, but does NOT exempt you from verification responsibilities. If a peer specialist's output crosses your read path, you still independently verify what crosses your lane — multi-verifier coverage is a safety net, not redundant overhead.
+`;
 }
 
 function generatePeerRelationships(
@@ -235,10 +321,18 @@ export interface BriefingInput {
   permissions: string[];
   peers: PeerRole[];
   maxInstances?: number;
+  /** Character/stats per human msg 3254. Optional — when absent the
+      cognitive-budget framing section is omitted (legacy roles). */
+  stats?: RoleStats;
 }
 
 export function generateBriefing(input: BriefingInput): string {
-  const { title, description, tags, permissions, peers, maxInstances } = input;
+  const { title, description, tags, permissions, peers, maxInstances, stats } = input;
+
+  // Section 0: Cognitive-budget framing (per human msg 3254 character/stats
+  // system). Renders before Identity when stats present. Empty string for
+  // legacy roles without stats — keeps Phase 1 backward-compatible.
+  const cognitiveBudget = stats ? generateStatFraming(title, stats, peers) : "";
 
   // Section 1: Identity
   const identity = `You are the ${title}. ${description}`;
@@ -295,7 +389,7 @@ When multiple instances of this role are active:
   const sectionNum = (maxInstances ?? 1) > 1 ? 7 : 6;
 
   return `# ${title}
-
+${cognitiveBudget}
 ## 1. Identity
 ${identity}
 

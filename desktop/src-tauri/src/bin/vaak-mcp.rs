@@ -200,6 +200,119 @@ fn role_briefing_path(project_dir: &str, role: &str) -> PathBuf {
     vaak_dir(project_dir).join("roles").join(format!("{}.md", role))
 }
 
+/// Character/stats Phase 1 dynamic injection — reads stats from project.json
+/// and prepends a cognitive-budget framing block to the briefing.
+///
+/// Per human msg 3254 + spec at
+/// .vaak/design-notes/character-stats-system-2026-05-16.md:
+/// - NO literal stat numbers in output text (recursion prevention)
+/// - 4-band classification: ≥9 / 7-8 / 5-6 / ≤4 with distinct framing
+/// - Anti-deference-on-verification clause baked in
+/// - Specialist lookup picks highest-stat peer in each low-stat dimension
+///
+/// Mirror of TS generateStatFraming in briefingGenerator.ts. Same shape.
+/// Returns briefing_raw unchanged when the role has no stats (legacy roles).
+fn inject_stat_framing(project_dir: &str, role: &str, briefing_raw: &str) -> String {
+    let config = match read_project_config(project_dir) {
+        Ok(c) => c,
+        Err(_) => return briefing_raw.to_string(),
+    };
+    let roles_obj = match config.get("roles").and_then(|r| r.as_object()) {
+        Some(o) => o,
+        None => return briefing_raw.to_string(),
+    };
+    let my_role_obj = match roles_obj.get(role) {
+        Some(r) => r,
+        None => return briefing_raw.to_string(),
+    };
+    let stats = match my_role_obj.get("stats").and_then(|s| s.as_object()) {
+        Some(s) => s,
+        None => return briefing_raw.to_string(), // legacy role without stats
+    };
+
+    let title = my_role_obj
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or(role);
+
+    // Stat dimensions in display order
+    let dimensions: &[(&str, &str)] = &[
+        ("td", "Technical Depth"),
+        ("ar", "Adversarial Rigor"),
+        ("cp", "Communication Precision"),
+        ("do", "Domain Ownership"),
+        ("pd", "Process Discipline"),
+        ("ja", "Judgment Under Ambiguity"),
+    ];
+
+    // Find specialist for a given dim by max stat among OTHER roles
+    // (alphabetical slug tie-break). Returns peer's title or fallback string.
+    let find_specialist = |dim_key: &str| -> String {
+        let mut best: Option<(&String, &serde_json::Value, u64)> = None;
+        for (slug, role_obj) in roles_obj.iter() {
+            if slug == role {
+                continue; // skip self per spec §5 self-reference avoidance
+            }
+            let v = role_obj
+                .get("stats")
+                .and_then(|s| s.as_object())
+                .and_then(|s| s.get(dim_key))
+                .and_then(|n| n.as_u64());
+            if let Some(val) = v {
+                let take = match best {
+                    None => true,
+                    Some((bs, _, bv)) => val > bv || (val == bv && slug < bs),
+                };
+                if take {
+                    best = Some((slug, role_obj, val));
+                }
+            }
+        }
+        match best {
+            Some((_, role_obj, _)) => role_obj
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("the team's specialist")
+                .to_string(),
+            None => "the team's specialist".to_string(),
+        }
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    for (key, label) in dimensions {
+        let v = stats.get(*key).and_then(|n| n.as_u64()).unwrap_or(5);
+        let line = if v >= 9 {
+            format!("- You're the team's strongest voice on {}. Lead here.", label)
+        } else if v >= 7 {
+            format!("- Strong on {}. Engage when needed.", label)
+        } else if v >= 5 {
+            let target = find_specialist(key);
+            format!(
+                "- {} isn't your primary focus. When complex {} decisions arise, flag them for {}. Your cognitive budget is better spent on your strongest dimensions.",
+                label, label, target
+            )
+        } else {
+            let target = find_specialist(key);
+            format!(
+                "- {} is explicitly outside your scope. Always defer to {}.",
+                label, target
+            )
+        };
+        lines.push(line);
+    }
+
+    let block = format!(
+        "## 0. Your Cognitive Budget\n\n\
+         You're playing the role of {}. You have a limited cognitive budget; spend it where you're the team's strongest voice. Below: what to lead on, what to flag for specialists.\n\n\
+         {}\n\n\
+         **Verification responsibility preserved:** your stat profile biases your cognitive budget toward your 9s and 10s, but does NOT exempt you from verification responsibilities. If a peer specialist's output crosses your read path, you still independently verify what crosses your lane — multi-verifier coverage is a safety net, not redundant overhead.\n\n---\n\n",
+        title,
+        lines.join("\n")
+    );
+
+    format!("{}{}", block, briefing_raw)
+}
+
 /// Path to the per-session last-seen-id tracker file.
 ///
 /// Keyed on (session_id, section) because board.jsonl is itself section-scoped
@@ -8018,7 +8131,16 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 
     // Read role briefing
     let briefing_path = role_briefing_path(&normalized, role);
-    let briefing = std::fs::read_to_string(&briefing_path).unwrap_or_default();
+    let briefing_raw = std::fs::read_to_string(&briefing_path).unwrap_or_default();
+
+    // Character/stats Phase 1 dynamic injection (Y) per human msg 3254 +
+    // spec at .vaak/design-notes/character-stats-system-2026-05-16.md.
+    // Reads role's stats from project.json + prepends a cognitive-budget
+    // framing block to the briefing returned to the agent. Fresh-always:
+    // human edits stats via future Roles tab → next project_join reflects.
+    // No file-state drift (vs (X) one-shot regen which would defeat
+    // editability per `[[feedback_auto_helpful_defeats_explicit_design]]`).
+    let briefing = inject_stat_framing(&normalized, role, &briefing_raw);
 
     // Read last 10 messages directed to this role, this instance, or 'all'
     let my_instance_label = format!("{}:{}", role, instance);
