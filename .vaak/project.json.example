@@ -1,0 +1,704 @@
+{
+  "active_section": "main",
+  "created_at": "TEMPLATE_CREATED_AT_PLACEHOLDER",
+  "description": "AI-assisted development project",
+  "name": "AITranscription",
+  "project_id": "TEMPLATE_PROJECT_ID_PLACEHOLDER",
+  "role_groups": [
+    {
+      "description": "",
+      "icon": "📦",
+      "name": "Medical",
+      "roles": [
+        {
+          "instances": 1,
+          "slug": "med-challenger",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "med-diagnostician",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "med-evidence",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "med-presenter",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "med-synthesizer",
+          "tags": []
+        }
+      ],
+      "slug": "medical"
+    },
+    {
+      "description": "Curriculum development team for educational programs including CEU, K-12, higher ed, and professional development",
+      "icon": "📚",
+      "name": "Curriculum",
+      "roles": [
+        {
+          "instances": 1,
+          "slug": "cd-architect",
+          "tags": []
+        },
+        {
+          "instances": 2,
+          "slug": "cd-designer",
+          "tags": []
+        },
+        {
+          "instances": 3,
+          "slug": "cd-author",
+          "tags": []
+        },
+        {
+          "instances": 2,
+          "slug": "cd-assessment",
+          "tags": []
+        },
+        {
+          "instances": 2,
+          "slug": "cd-sme",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "cd-compliance",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "cd-technologist",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "cd-adaptive",
+          "tags": []
+        },
+        {
+          "instances": 2,
+          "slug": "cd-qa",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "cd-accessibility",
+          "tags": []
+        },
+        {
+          "instances": 1,
+          "slug": "cd-advocate",
+          "tags": []
+        }
+      ],
+      "slug": "curriculum"
+    }
+  ],
+  "roles": {
+    "architect": {
+      "created_at": "2026-02-10T18:21:33.953Z",
+      "description": "Owns the technical vision, reviews architecture decisions, ensures consistency across the codebase",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "review",
+        "assign_tasks"
+      ],
+      "stats": {
+        "ar": 8,
+        "cp": 8,
+        "do": 9,
+        "ja": 9,
+        "pd": 8,
+        "td": 7
+      },
+      "tags": [
+        "architecture",
+        "code-review",
+        "coordination"
+      ],
+      "title": "Architect"
+    },
+    "audience": {
+      "created_at": "2026-02-10T18:29:47Z",
+      "description": "Active debate participants who watch discussions, ask questions to debaters, challenge arguments, and vote on outcomes. Each instance represents one audience pool with configurable personas across multiple AI providers.",
+      "max_instances": 999,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis"
+      ],
+      "title": "Audience"
+    },
+    "cd-accessibility": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Asset-level accessibility enforcer — tests every deliverable against WCAG 2.1 AA, ADA Section 508, and universal design principles, ensuring all learners can access content regardless of ability for the Curriculum Developer system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "testing",
+        "compliance"
+      ],
+      "title": "Accessibility Specialist"
+    },
+    "cd-adaptive": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Branching logic architect — designs mastery gates, remediation pathways, and competency-based progression systems that adapt to individual learner performance for the Curriculum Developer system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "implementation",
+        "architecture"
+      ],
+      "title": "Adaptive Learning Engineer"
+    },
+    "cd-advocate": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Persona-based completion tester — conducts end-to-end experiential walkthroughs as representative learner personas, identifies dropout risk points, and validates that the curriculum works for real humans with real constraints for the Curriculum Developer system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "testing",
+        "analysis"
+      ],
+      "title": "Learner Advocate"
+    },
+    "cd-architect": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Owns curriculum structure, learning pathway architecture, and module sequencing. Arbitrates substance disputes and ensures pedagogical coherence across all educational programs.",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "assign_tasks",
+        "review"
+      ],
+      "tags": [
+        "architecture",
+        "coordination"
+      ],
+      "title": "Curriculum Architect"
+    },
+    "cd-assessment": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Designs assessments, rubrics, and competency demonstrations. Instance 0 focuses on formative assessments (knowledge checks, practice problems); Instance 1 focuses on summative assessments (final exams, competency demonstrations).",
+      "max_instances": 2,
+      "permissions": [
+        "status",
+        "question",
+        "handoff",
+        "broadcast"
+      ],
+      "tags": [
+        "implementation",
+        "testing"
+      ],
+      "title": "Assessment Designer"
+    },
+    "cd-author": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Writes educational content, lesson materials, and learning resources. Domain-scoped instances assigned by the Curriculum Architect.",
+      "max_instances": 3,
+      "permissions": [
+        "status",
+        "question",
+        "handoff",
+        "broadcast"
+      ],
+      "tags": [
+        "implementation",
+        "documentation"
+      ],
+      "title": "Content Author"
+    },
+    "cd-compliance": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Ensures curriculum meets accreditation standards (IACET, ANCC, ACCME, FERPA) and regulatory requirements at the program level. Validates credit hour calculations, CE requirements, and institutional compliance.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "review",
+        "broadcast"
+      ],
+      "tags": [
+        "compliance",
+        "documentation"
+      ],
+      "title": "Compliance & Accreditation Officer"
+    },
+    "cd-designer": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Designs learning experiences, pedagogy strategies, and instructional frameworks. Instance 0 focuses on synchronous delivery; Instance 1 focuses on asynchronous/self-paced delivery.",
+      "max_instances": 2,
+      "permissions": [
+        "status",
+        "question",
+        "handoff",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis",
+        "documentation",
+        "implementation"
+      ],
+      "title": "Instructional Designer"
+    },
+    "cd-qa": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Final gate before publication — QA:0 handles editorial quality (grammar, style, alignment audit) and QA:1 handles persona-based experiential testing (completion walkthroughs, cognitive load assessment) for the Curriculum Developer system.",
+      "max_instances": 2,
+      "permissions": [
+        "status",
+        "question",
+        "review",
+        "broadcast"
+      ],
+      "tags": [
+        "testing",
+        "code-review"
+      ],
+      "title": "Quality Assurance Editor"
+    },
+    "cd-sme": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Validates content accuracy and pedagogical soundness through adversarial review. Review-only — does not author content. Challenges claims with citations and flags factual errors.",
+      "max_instances": 2,
+      "permissions": [
+        "status",
+        "question",
+        "review",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis",
+        "code-review"
+      ],
+      "title": "Subject Matter Expert"
+    },
+    "cd-technologist": {
+      "created_at": "2026-02-12T21:30:00Z",
+      "description": "Delivery platform specialist — selects and configures LMS environments, specifies multimedia production requirements, and ensures technical feasibility of instructional designs for the Curriculum Developer system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "implementation",
+        "architecture"
+      ],
+      "title": "Instructional Technologist"
+    },
+    "code-interpreter": {
+      "created_at": "2026-03-10T06:54:00Z",
+      "description": "Bridges the gap between the coding team and the human. Monitors all team activity, translates technical discussions into clear language the human can act on, and helps the human communicate intentions back to the team — without errors, omissions, or additions of meaning. Meets the human at their register and synthesizes coherently.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast",
+        "review"
+      ],
+      "tags": [
+        "analysis",
+        "documentation",
+        "coordination"
+      ],
+      "title": "Code Translator"
+    },
+    "dev-challenger": {
+      "created_at": "2026-02-16T06:52:50Z",
+      "description": "Adversarial development peer who proactively challenges implementations, technical decisions, and estimates to prevent groupthink",
+      "max_instances": 2,
+      "permissions": [
+        "status",
+        "question",
+        "handoff",
+        "broadcast"
+      ],
+      "stats": {
+        "ar": 10,
+        "cp": 7,
+        "do": 7,
+        "ja": 8,
+        "pd": 9,
+        "td": 8
+      },
+      "tags": [
+        "red-team",
+        "code-review",
+        "analysis",
+        "testing"
+      ],
+      "title": "Developer Challenger"
+    },
+    "developer": {
+      "created_at": "2026-02-10T18:21:33.953Z",
+      "description": "Implements features, fixes bugs, writes code",
+      "max_instances": 3,
+      "permissions": [
+        "status",
+        "handoff",
+        "question",
+        "broadcast"
+      ],
+      "stats": {
+        "ar": 6,
+        "cp": 6,
+        "do": 9,
+        "ja": 7,
+        "pd": 7,
+        "td": 10
+      },
+      "tags": [
+        "implementation",
+        "code-review",
+        "testing"
+      ],
+      "title": "Developer"
+    },
+    "evil-architect": {
+      "created_at": "2026-02-16T07:03:10Z",
+      "description": "Adversarial architectural peer who challenges technical decisions, surfaces risks, and forces accountability through structured conflict",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "review",
+        "status",
+        "question"
+      ],
+      "stats": {
+        "ar": 10,
+        "cp": 7,
+        "do": 7,
+        "ja": 9,
+        "pd": 9,
+        "td": 8
+      },
+      "tags": [
+        "architecture",
+        "red-team",
+        "code-review",
+        "analysis"
+      ],
+      "title": "Evil Architect"
+    },
+    "manager": {
+      "created_at": "2026-02-10T18:21:33.953Z",
+      "description": "Coordinates tasks, reviews work, manages priorities",
+      "max_instances": 1,
+      "permissions": [
+        "assign_tasks",
+        "broadcast",
+        "review",
+        "see_all"
+      ],
+      "stats": {
+        "ar": 6,
+        "cp": 9,
+        "do": 9,
+        "ja": 9,
+        "pd": 8,
+        "td": 5
+      },
+      "tags": [
+        "coordination"
+      ],
+      "title": "Project Manager"
+    },
+    "med-challenger": {
+      "created_at": "2026-02-12T19:36:00Z",
+      "description": "Dedicated adversarial analyst — attacks diagnostic consensus, surfaces overlooked conditions, and identifies cognitive biases in the team's reasoning for the Medical Differential Diagnosis system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis",
+        "red-team"
+      ],
+      "title": "Diagnostic Challenger"
+    },
+    "med-diagnostician": {
+      "created_at": "2026-02-12T16:18:00Z",
+      "description": "Lens-specific analyst — applies a medical specialty perspective to generate independent blind differential diagnoses in the Medical Differential Diagnosis system.",
+      "max_instances": 5,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis"
+      ],
+      "title": "Diagnostician"
+    },
+    "med-evidence": {
+      "created_at": "2026-02-12T16:18:00Z",
+      "description": "Reality check — maps evidence-supported conditions using GRADE framework, grounds diagnostic reasoning in published medical evidence for the Medical Differential Diagnosis system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis",
+        "documentation"
+      ],
+      "title": "Evidence Analyst"
+    },
+    "med-presenter": {
+      "created_at": "2026-02-12T16:18:00Z",
+      "description": "Assumption firewall — structures raw patient data into standardized case format, strips diagnostic biases, recommends specialty panel for the Medical Differential Diagnosis system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "broadcast",
+        "question"
+      ],
+      "tags": [
+        "analysis",
+        "documentation"
+      ],
+      "title": "Case Presenter"
+    },
+    "med-synthesizer": {
+      "created_at": "2026-02-12T16:18:00Z",
+      "description": "Divergence mapper — produces structured Convergence/Divergence/Blind Spots report from multi-specialist Delphi output for the Medical Differential Diagnosis system.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "broadcast"
+      ],
+      "tags": [
+        "analysis",
+        "documentation"
+      ],
+      "title": "Clinical Synthesizer"
+    },
+    "moderator": {
+      "companions": [
+        {
+          "default_enabled": true,
+          "optional": true,
+          "role": "audience"
+        }
+      ],
+      "created_at": "2026-02-10T18:22:24Z",
+      "description": "Runs structured debates (Delphi, Oxford, Red Team, Continuous). Manages rounds, enforces rules, maintains absolute neutrality. Orchestrates audience participation when enabled.",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "moderation"
+      ],
+      "stats": {
+        "ar": 6,
+        "cp": 9,
+        "do": 9,
+        "ja": 8,
+        "pd": 9,
+        "td": 4
+      },
+      "tags": [
+        "moderation"
+      ],
+      "title": "Debate Moderator"
+    },
+    "platform-engineer": {
+      "created_at": "2026-02-17T05:52:00Z",
+      "description": "Cross-platform parity specialist — audits code changes for OS-specific assumptions, verifies conditional compilation blocks, validates platform APIs and conventions. Expert on Windows, macOS, Linux, iOS, and Android. Adapts focus to whatever platforms the project targets.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "review",
+        "handoff",
+        "broadcast"
+      ],
+      "tags": [
+        "platform",
+        "testing",
+        "analysis",
+        "code-review"
+      ],
+      "title": "Platform Engineer"
+    },
+    "role-creator": {
+      "created_at": "2026-02-10T18:55:54Z",
+      "description": "He is an expert on identifying use-cases for this AI collaboration system and identifying roles within those use cases. He will guide the team on creating the perfect roles. Services as a consultant to architect.",
+      "max_instances": 2,
+      "permissions": [
+        "review",
+        "status",
+        "handoff",
+        "broadcast",
+        "assign_tasks",
+        "question"
+      ],
+      "tags": [
+        "code-review",
+        "architecture",
+        "analysis",
+        "debugging",
+        "documentation",
+        "compliance",
+        "deep-research"
+      ],
+      "title": "Role Creator"
+    },
+    "stats-auditor": {
+      "created_at": "2026-02-16T06:46:45Z",
+      "description": "Proactive statistical challenger who validates methodology, catches reasoning errors, and ensures mathematical rigor across all team decisions",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "review",
+        "status",
+        "question"
+      ],
+      "tags": [
+        "analysis",
+        "code-review",
+        "red-team"
+      ],
+      "title": "Statistical Auditor"
+    },
+    "tech-leader": {
+      "created_at": "2026-03-17T15:53:21Z",
+      "custom": true,
+      "description": "Precision director who reads all code, reviews all assignments, enforces narrative documentation, and orchestrates team decisions through collaborative debate",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "review",
+        "assign_tasks",
+        "status",
+        "question",
+        "handoff"
+      ],
+      "tags": [
+        "coordination",
+        "architecture",
+        "code-review",
+        "documentation"
+      ],
+      "title": "Technical Project Leader"
+    },
+    "tester": {
+      "created_at": "2026-02-10T18:21:33.953Z",
+      "description": "Writes and runs tests, validates implementations, reports bugs",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "question",
+        "broadcast"
+      ],
+      "stats": {
+        "ar": 9,
+        "cp": 7,
+        "do": 9,
+        "ja": 7,
+        "pd": 9,
+        "td": 6
+      },
+      "tags": [
+        "testing",
+        "code-review",
+        "red-team"
+      ],
+      "title": "Tester"
+    },
+    "ui-architect": {
+      "created_at": "2026-05-05T00:52:05Z",
+      "custom": true,
+      "description": "Singular UI authority who ensures visual craft and implementation quality are never compromised across all features",
+      "max_instances": 1,
+      "permissions": [
+        "broadcast",
+        "review",
+        "status",
+        "question",
+        "assign_tasks"
+      ],
+      "stats": {
+        "ar": 7,
+        "cp": 8,
+        "do": 9,
+        "ja": 8,
+        "pd": 7,
+        "td": 8
+      },
+      "tags": [
+        "architecture",
+        "implementation",
+        "code-review"
+      ],
+      "title": "UI Architect"
+    },
+    "ux-engineer": {
+      "created_at": "2026-02-10T22:58:49Z",
+      "description": "Obsessive about user experience — designs, reviews, and builds UI that feels intuitive and delightful. Full-stack, thinks from the user's perspective, sees the whole picture.",
+      "max_instances": 1,
+      "permissions": [
+        "status",
+        "review",
+        "question",
+        "handoff",
+        "broadcast"
+      ],
+      "tags": [
+        "implementation",
+        "code-review",
+        "architecture",
+        "analysis"
+      ],
+      "title": "UX Engineer"
+    }
+  },
+  "roster": [],
+  "sections": [
+    "3-12",
+    "322",
+    "3-27",
+    "4-5",
+    "4-15",
+    "new-vaak"
+  ],
+  "settings": {
+    "auto_collab": false,
+    "consecutive_timeout_secs": 30,
+    "discussion_mode": "open",
+    "heartbeat_timeout_seconds": 300,
+    "human_in_loop": false,
+    "message_retention_days": 30,
+    "work_mode": "simultaneous",
+    "workflow_type": "full"
+  },
+  "updated_at": "TEMPLATE_UPDATED_AT_PLACEHOLDER"
+}
