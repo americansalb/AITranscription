@@ -10478,10 +10478,16 @@ fn generate_fallback_id() -> String {
 
 /// Get a stable session ID using a priority chain of methods
 fn get_session_id() -> String {
-    // Tier 1.5 diagnostic breadcrumb (architect msg 2681): empirical capture of
-    // env state at the moment get_session_id() reads it. Discriminates between
-    // (a) env var absent at MCP-child spawn, (b) env var set after spawn, and
-    // (c) wrong binary live. Diagnostic-only; fold or revert after data lands.
+    // Tier 1.5 diagnostic breadcrumb (architect msg 2681 / revised msg 2685
+    // + evil-arch msg 2687): empirical capture of env state at the moment
+    // get_session_id() reads it. Discriminates between (a) env var absent at
+    // MCP-child spawn, (b) env var set after spawn, (c) wrong binary on disk,
+    // and (c′) live process from a stale embedded binary. breadcrumb_version
+    // constant rises with each diagnostic respec so live-vs-stale binaries
+    // are deterministically discriminable from the JSONL output without
+    // relying on filesystem mtimes. Diagnostic-only; fold or revert after
+    // data lands.
+    const TIER_15_BREADCRUMB_VERSION: u32 = 1;
     let ppid_str = get_parent_pid().map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
     eprintln!(
         "[vaak-mcp startup] CLAUDE_CODE_SESSION_ID={:?} CLAUDE_SESSION_ID={:?} PPID={}",
@@ -10489,6 +10495,29 @@ fn get_session_id() -> String {
         std::env::var("CLAUDE_SESSION_ID").ok(),
         ppid_str
     );
+    if let Some(root) = find_project_root() {
+        let diag_dir = std::path::Path::new(&root).join(".vaak").join("diagnostics");
+        let _ = std::fs::create_dir_all(&diag_dir);
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let payload = serde_json::json!({
+            "ts_ms": ts_ms,
+            "ppid": ppid_str,
+            "breadcrumb_version": TIER_15_BREADCRUMB_VERSION,
+            "CLAUDE_CODE_SESSION_ID": std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+            "CLAUDE_SESSION_ID": std::env::var("CLAUDE_SESSION_ID").ok(),
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(diag_dir.join("startup-env.jsonl"))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", payload);
+        }
+    }
 
     // Bug #3 fix (tester msg 2503 + architect msg 2511): Claude Code exports
     // CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID. Without this match the
