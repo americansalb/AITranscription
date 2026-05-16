@@ -10478,6 +10478,18 @@ fn generate_fallback_id() -> String {
 
 /// Get a stable session ID using a priority chain of methods
 fn get_session_id() -> String {
+    // Tier 1.5 diagnostic breadcrumb (architect msg 2681): empirical capture of
+    // env state at the moment get_session_id() reads it. Discriminates between
+    // (a) env var absent at MCP-child spawn, (b) env var set after spawn, and
+    // (c) wrong binary live. Diagnostic-only; fold or revert after data lands.
+    let ppid_str = get_parent_pid().map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+    eprintln!(
+        "[vaak-mcp startup] CLAUDE_CODE_SESSION_ID={:?} CLAUDE_SESSION_ID={:?} PPID={}",
+        std::env::var("CLAUDE_CODE_SESSION_ID").ok(),
+        std::env::var("CLAUDE_SESSION_ID").ok(),
+        ppid_str
+    );
+
     // Bug #3 fix (tester msg 2503 + architect msg 2511): Claude Code exports
     // CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID. Without this match the
     // sidecar falls through to a fallback hash and writes DESKTOP-<host>-<hash>
