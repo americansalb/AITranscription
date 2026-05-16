@@ -8829,14 +8829,26 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         // body's `Rotation:` line. Mirror of the frontend
                         // filters in 09a29dd (ProtocolPanel.tsx CompactMicLine
                         // + AssemblyControls.tsx renderStatusLine).
+                        // Architect msg 2808 tightening (UI-arch msg 2806 empirical
+                        // finding): handle_project_kick at vaak-mcp.rs:9646 marks
+                        // status="revoked" but KEEPS the binding entry, while
+                        // handle_project_leave at vaak-mcp.rs:9544-9548 physically
+                        // removes the entry. Without status-exclusion, a kicked seat
+                        // would still pass seat_has_binding because the revoked entry
+                        // remains in sessions.json:bindings. Exclude inactive statuses
+                        // to match the canonical presence predicate per architect msg
+                        // 2808: `binding_exists AND status NOT IN {"revoked", "left"}`.
                         let seat_has_binding = |seat: &str| -> bool {
                             let mut sp = seat.splitn(2, ':');
                             let Some(role) = sp.next() else { return false; };
                             let Some(inst) = sp.next().and_then(|s| s.parse::<u64>().ok()) else { return false; };
                             sessions.get("bindings").and_then(|b| b.as_array())
                                 .map(|arr| arr.iter().any(|b| {
-                                    b.get("role").and_then(|r| r.as_str()) == Some(role)
-                                        && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == inst
+                                    let role_ok = b.get("role").and_then(|r| r.as_str()) == Some(role);
+                                    let inst_ok = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == inst;
+                                    let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                                    let status_active = status != "revoked" && status != "left";
+                                    role_ok && inst_ok && status_active
                                 }))
                                 .unwrap_or(false)
                         };
