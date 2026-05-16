@@ -10770,8 +10770,32 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
     let method = request.get("method")?.as_str()?;
     let id = request.get("id").cloned();
 
+    // Bug #3 Part B v2 Phase 0 additive diagnostic (architect msg 2718,
+    // Correction D): capture params._meta + clientInfo on every JSON-RPC
+    // request, not just initialize. Discriminates whether Claude Code populates
+    // session_id in MCP-spec per-request `_meta` channel (preferred Phase 1
+    // primitive — survives mid-session UUID rotation) vs only at initialize
+    // handshake (which is single-shot and goes stale). Diagnostic-only;
+    // revert after data lands.
+    eprintln!(
+        "[vaak-mcp jsonrpc] method={:?} params_meta={:?} client_info={:?}",
+        method,
+        request.get("params").and_then(|p| p.get("_meta")),
+        request.get("params").and_then(|p| p.get("clientInfo"))
+    );
+
     let result = match method {
         "initialize" => {
+            // Bug #3 Part B v2 Phase 0 diagnostic (architect msg 2707): capture
+            // MCP initialize params payload to determine if Claude Code carries
+            // session_id at protocol level. Discriminates Option A (initialize-
+            // payload source) vs Option B (PPID cmdline introspection). Diag-
+            // nostic-only; revert after data lands.
+            eprintln!(
+                "[vaak-mcp init-params] {}",
+                serde_json::to_string(request.get("params").unwrap_or(&serde_json::Value::Null))
+                    .unwrap_or_default()
+            );
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
