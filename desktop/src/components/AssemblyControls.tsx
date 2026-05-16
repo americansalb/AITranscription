@@ -467,7 +467,14 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       if (rotationOrder.length === 0) {
         return <span className="assembly-status-empty">No rotation set</span>;
       }
-      const visibleOrder = rotationOrder.filter((seat) => !isModeratorExempt(seat));
+      // Zombie-seat filter (human msg 2747): rotation_order may carry seats
+      // kicked / disconnected without a corresponding rotation mutation.
+      // Filter against activeSeats so the "Next:" preview doesn't surface
+      // dead seats. Fall through to unfiltered when activeSeats hasn't
+      // loaded yet (initial render).
+      const visibleOrder = rotationOrder
+        .filter((seat) => !isModeratorExempt(seat))
+        .filter((seat) => activeSeats.length === 0 || activeSeatSet.has(seat));
       const currentIdx = currentSpeaker ? visibleOrder.indexOf(currentSpeaker) : -1;
       const next = visibleOrder
         .slice(currentIdx + 1)

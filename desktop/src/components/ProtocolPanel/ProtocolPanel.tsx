@@ -316,9 +316,16 @@ function CompactMicLine({
     ? protocol.floor.moderator
     : null;
   const rawRotation = protocol.floor.rotation_order;
-  const rotation = moderatorExempt
-    ? rawRotation.filter((seat) => seat !== moderatorExempt)
-    : rawRotation;
+  // Zombie-seat filter (human msg 2747): rotation_order may contain seats
+  // that were kicked / left without a project_leave but the protocol mutation
+  // never cleared them out of rotation. Filter against live heartbeats so
+  // disconnected/vacant seats don't render as pills. If heartbeats hasn't
+  // populated yet (initial load), fall back to the unfiltered list so the UI
+  // works during the boot window.
+  const heartbeatsLoaded = Object.keys(heartbeats).length > 0;
+  const rotation = rawRotation
+    .filter((seat) => !moderatorExempt || seat !== moderatorExempt)
+    .filter((seat) => !heartbeatsLoaded || heartbeats[seat]?.connected === true);
   const speakerIdx = speaker ? rotation.indexOf(speaker) : -1;
   const nextUp = isAssemblyLine && rotation.length > 0 && speakerIdx >= 0
     ? rotation[(speakerIdx + 1) % rotation.length]
