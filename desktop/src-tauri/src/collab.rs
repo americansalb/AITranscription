@@ -1719,6 +1719,8 @@ pub fn create_role(
     briefing: &str,
     tags: Vec<String>,
     companions: Vec<CompanionConfig>,
+    stats: Option<RoleStats>,
+    avatar_url: Option<String>,
 ) -> Result<RoleConfig, String> {
     validate_slug(slug)?;
 
@@ -1748,7 +1750,7 @@ pub fn create_role(
             return Err("Failed to acquire lock".to_string());
         }
 
-        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions);
+        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions, stats.as_ref(), avatar_url.as_deref());
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
         result
@@ -1762,7 +1764,7 @@ pub fn create_role(
             return Err("Failed to acquire lock".to_string());
         }
 
-        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions);
+        let result = create_role_inner(&config_path, &vaak_dir, slug, title, description, &permissions, max_instances, briefing, &tags, &companions, stats.as_ref(), avatar_url.as_deref());
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -1789,6 +1791,8 @@ fn create_role_inner(
     briefing: &str,
     tags: &[String],
     companions: &[CompanionConfig],
+    stats: Option<&RoleStats>,
+    avatar_url: Option<&str>,
 ) -> Result<RoleConfig, String> {
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
@@ -1812,10 +1816,8 @@ fn create_role_inner(
         tags: tags.to_vec(),
         companions: companions.to_vec(),
         custom: true,
-        // Character/stats Phase 1: new role created via UI starts with no
-        // stats. Human edits values via future Roles tab post-create.
-        stats: None,
-        avatar_url: None,
+        stats: stats.cloned(),
+        avatar_url: avatar_url.map(|s| s.to_string()),
     };
 
     // Add role to config
@@ -1831,6 +1833,15 @@ fn create_role_inner(
     if !companions.is_empty() {
         role_json["companions"] = serde_json::to_value(companions)
             .map_err(|e| format!("Failed to serialize companions: {}", e))?;
+    }
+    if let Some(s) = stats {
+        role_json["stats"] = serde_json::to_value(s)
+            .map_err(|e| format!("Failed to serialize stats: {}", e))?;
+    }
+    if let Some(url) = avatar_url {
+        if !url.is_empty() {
+            role_json["avatar_url"] = serde_json::Value::String(url.to_string());
+        }
     }
 
     config.get_mut("roles")
@@ -1867,6 +1878,8 @@ pub fn update_role(
     briefing: Option<&str>,
     tags: Option<Vec<String>>,
     companions: Option<Vec<CompanionConfig>>,
+    stats: Option<RoleStats>,
+    avatar_url: Option<String>,
 ) -> Result<RoleConfig, String> {
     let vaak_dir = Path::new(dir).join(".vaak");
     let config_path = vaak_dir.join("project.json");
@@ -1893,7 +1906,7 @@ pub fn update_role(
             return Err("Failed to acquire lock".to_string());
         }
 
-        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref());
+        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref(), stats.as_ref(), avatar_url.as_deref());
 
         unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut overlapped); }
         result
@@ -1907,7 +1920,7 @@ pub fn update_role(
             return Err("Failed to acquire lock".to_string());
         }
 
-        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref());
+        let result = update_role_inner(&config_path, &vaak_dir, slug, title, description, permissions.as_deref(), max_instances, briefing, tags.as_deref(), companions.as_deref(), stats.as_ref(), avatar_url.as_deref());
 
         unsafe { libc::flock(fd, libc::LOCK_UN); }
         result
@@ -1925,6 +1938,8 @@ fn update_role_inner(
     briefing: Option<&str>,
     tags: Option<&[String]>,
     companions: Option<&[CompanionConfig]>,
+    stats: Option<&RoleStats>,
+    avatar_url: Option<&str>,
 ) -> Result<RoleConfig, String> {
     let content = std::fs::read_to_string(config_path)
         .map_err(|e| format!("Failed to read project.json: {}", e))?;
@@ -1958,6 +1973,17 @@ fn update_role_inner(
             } else {
                 role["companions"] = serde_json::to_value(c)
                     .map_err(|e| format!("Failed to serialize companions: {}", e))?;
+            }
+        }
+        if let Some(s) = stats {
+            role["stats"] = serde_json::to_value(s)
+                .map_err(|e| format!("Failed to serialize stats: {}", e))?;
+        }
+        if let Some(url) = avatar_url {
+            if url.is_empty() {
+                role.as_object_mut().map(|o| o.remove("avatar_url"));
+            } else {
+                role["avatar_url"] = serde_json::Value::String(url.to_string());
             }
         }
     }

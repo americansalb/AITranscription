@@ -4679,9 +4679,11 @@ fn create_role(
     briefing: String,
     tags: Vec<String>,
     companions: Option<Vec<collab::CompanionConfig>>,
+    stats: Option<collab::RoleStats>,
+    avatar_url: Option<String>,
 ) -> Result<collab::RoleConfig, String> {
     // Auto-save to global templates happens inside collab::create_role
-    let result = collab::create_role(&project_dir, &slug, &title, &description, permissions, max_instances, &briefing, tags, companions.unwrap_or_default());
+    let result = collab::create_role(&project_dir, &slug, &title, &description, permissions, max_instances, &briefing, tags, companions.unwrap_or_default(), stats, avatar_url);
     if result.is_ok() { notify_collab_change(); }
     result
 }
@@ -4697,6 +4699,8 @@ fn update_role(
     briefing: Option<String>,
     tags: Option<Vec<String>>,
     companions: Option<Vec<collab::CompanionConfig>>,
+    stats: Option<collab::RoleStats>,
+    avatar_url: Option<String>,
 ) -> Result<collab::RoleConfig, String> {
     let result = collab::update_role(
         &project_dir,
@@ -4708,6 +4712,8 @@ fn update_role(
         briefing.as_deref(),
         tags,
         companions,
+        stats,
+        avatar_url,
     )?;
     // Auto-update global template on edit (non-blocking)
     if let Err(e) = collab::save_role_as_global_template(&project_dir, &slug) {

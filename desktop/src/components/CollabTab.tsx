@@ -15,7 +15,17 @@ import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetecto
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { getAuthToken } from "../lib/api";
-import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate } from "../utils/briefingGenerator";
+import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
+
+const STAT_AXES: Array<{ key: keyof RoleStats; label: string; short: string; hint: string }> = [
+  { key: "td", label: "Technical Depth", short: "TD", hint: "Code, architecture, systems engagement" },
+  { key: "ar", label: "Adversarial Rigor", short: "AR", hint: "Push-back + verification intensity" },
+  { key: "cp", label: "Communication Precision", short: "CP", hint: "Clarity + conciseness in messages" },
+  { key: "do", label: "Domain Ownership", short: "DO", hint: "Depth in one area vs spread" },
+  { key: "pd", label: "Process Discipline", short: "PD", hint: "Verify-before-asserting reflex" },
+  { key: "ja", label: "Judgment Under Ambiguity", short: "JA", hint: "Clean calls under uncertainty" },
+];
+const DEFAULT_STATS: RoleStats = { td: 5, ar: 5, cp: 5, do: 5, pd: 5, ja: 5 };
 import { trimVoiceAssignments } from "../lib/storageManager";
 import "../styles/collab.css";
 
@@ -933,6 +943,8 @@ export function CollabTab() {
   const [roleFormPurpose, setRoleFormPurpose] = useState("");
   const [roleFormBoundaries, setRoleFormBoundaries] = useState("");
   const [roleFormDifferentiator, setRoleFormDifferentiator] = useState("");
+  const [roleFormStats, setRoleFormStats] = useState<RoleStats>(DEFAULT_STATS);
+  const [roleFormAvatarUrl, setRoleFormAvatarUrl] = useState("");
   // Role creation mode: null = show choice screen, "wizard" = manual form, "interview" = AI chat
   const [roleCreationMode, setRoleCreationMode] = useState<"wizard" | "interview" | null>(null);
   // LLM interview chat state
@@ -946,8 +958,8 @@ export function CollabTab() {
   const interviewChatRef = useRef<HTMLDivElement>(null);
 
   const WIZARD_STEPS = roleFormEditing
-    ? ["Name", "Description", "Capabilities", "Permissions", "Instances", "Briefing"]
-    : ["Template", "Name", "Description", "Capabilities", "Permissions", "Instances", "Briefing"];
+    ? ["Name", "Description", "Capabilities", "Permissions", "Instances", "Stats", "Briefing"]
+    : ["Template", "Name", "Description", "Capabilities", "Permissions", "Instances", "Stats", "Briefing"];
 
   /** Smart permission defaults based on selected tags */
   const smartPermsFromTags = (tags: string[]): string[] => {
@@ -1031,6 +1043,8 @@ export function CollabTab() {
     setRoleFormPurpose("");
     setRoleFormBoundaries("");
     setRoleFormDifferentiator("");
+    setRoleFormStats(DEFAULT_STATS);
+    setRoleFormAvatarUrl("");
     setRoleCreationMode(null);
     setInterviewMessages([]);
     setInterviewInput("");
@@ -1077,6 +1091,8 @@ export function CollabTab() {
     setRoleFormPerms([...role.permissions]);
     setRoleFormMaxInst(role.max_instances);
     setRoleFormTags([...(role.tags || [])]);
+    setRoleFormStats((role as any).stats || DEFAULT_STATS);
+    setRoleFormAvatarUrl((role as any).avatar_url || "");
     setRoleFormError(null);
     setRoleCreationMode("wizard"); // edit always uses wizard mode
     setRoleFormStep(0); // edit mode starts at "Name" (step 0 in edit WIZARD_STEPS)
@@ -1108,6 +1124,8 @@ export function CollabTab() {
           maxInstances: roleFormMaxInst,
           briefing: roleFormBriefing || null,
           tags: roleFormTags,
+          stats: roleFormStats,
+          avatarUrl: roleFormAvatarUrl,
         });
       } else {
         if (!roleFormSlug) {
@@ -1125,6 +1143,8 @@ export function CollabTab() {
           maxInstances: roleFormMaxInst,
           briefing,
           tags: roleFormTags,
+          stats: roleFormStats,
+          avatarUrl: roleFormAvatarUrl,
         });
       }
       setRoleFormOpen(false);
@@ -5306,6 +5326,83 @@ When multiple instances of this role are active:
                         autoFocus
                       />
                     </div>
+                  </div>
+                )}
+
+                {/* Step: Stats — character/stats system per spec §3 */}
+                {WIZARD_STEPS[roleFormStep] === "Stats" && (
+                  <div className="wizard-step-content">
+                    <h3 className="wizard-step-heading">Cognitive budget</h3>
+                    <p className="wizard-step-hint">
+                      Six axes shape how this role engages with work. Each axis is 1–10. A score of 5 means "not your primary focus — flag for a specialist." A 9–10 means "your strongest voice." Calibration is empirical, not aspirational — what does this role actually do best?
+                    </p>
+                    <div className="role-form-field">
+                      <label className="role-form-label">Avatar URL (HTTPS, optional)</label>
+                      <input
+                        className="role-form-input"
+                        type="url"
+                        value={roleFormAvatarUrl}
+                        onChange={(e) => setRoleFormAvatarUrl(e.target.value)}
+                        placeholder="https://example.com/avatar.png"
+                        disabled={roleFormSaving}
+                      />
+                      <span className="role-form-hint">Falls back to the role's color initial when blank or load fails.</span>
+                    </div>
+                    <div className="stats-grid">
+                      {STAT_AXES.map(({ key, label, short, hint }) => (
+                        <div key={key} className="stat-row">
+                          <div className="stat-row-header">
+                            <span className="stat-row-short">{short}</span>
+                            <span className="stat-row-label">{label}</span>
+                            <span className="stat-row-value" aria-live="polite">{roleFormStats[key]}</span>
+                          </div>
+                          <input
+                            type="range"
+                            className="stat-row-slider"
+                            min={1}
+                            max={10}
+                            step={1}
+                            value={roleFormStats[key]}
+                            onChange={(e) => setRoleFormStats({ ...roleFormStats, [key]: parseInt(e.target.value, 10) })}
+                            disabled={roleFormSaving}
+                            aria-label={`${label}: ${roleFormStats[key]} of 10`}
+                            aria-valuetext={`${roleFormStats[key]} of 10 — ${hint}`}
+                          />
+                          <span className="stat-row-hint">{hint}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {project && (
+                      <details className="stats-compare">
+                        <summary>Compare with team</summary>
+                        <table className="stats-compare-table">
+                          <thead>
+                            <tr>
+                              <th>Role</th>
+                              {STAT_AXES.map(a => <th key={a.key} title={a.label}>{a.short}</th>)}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {Object.entries(project.config.roles)
+                              .filter(([, role]) => (role as any).stats)
+                              .sort(([a], [b]) => a.localeCompare(b))
+                              .map(([slug, role]) => {
+                                const s = (role as any).stats as RoleStats;
+                                return (
+                                  <tr key={slug}>
+                                    <td className="stats-compare-name">{role.title}</td>
+                                    {STAT_AXES.map(a => <td key={a.key}>{s[a.key]}</td>)}
+                                  </tr>
+                                );
+                              })}
+                            <tr className="stats-compare-current">
+                              <td className="stats-compare-name">This role</td>
+                              {STAT_AXES.map(a => <td key={a.key}>{roleFormStats[a.key]}</td>)}
+                            </tr>
+                          </tbody>
+                        </table>
+                      </details>
+                    )}
                   </div>
                 )}
 
