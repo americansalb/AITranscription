@@ -9501,9 +9501,28 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
 
         // Check timeout
         if start.elapsed() >= timeout {
+            // Camp A fix per human msg 3518 (session-persistence bug
+            // adjudicated 2026-05-16): an empty timeout response left the
+            // model with "nothing to do" and ended its turn — that's why
+            // agents went idle and needed "come back" prompts to resume.
+            // Synthetic keepalive in the response gives the model
+            // something actionable on every timeout so the turn stays
+            // alive. Per dev-challenger msg 3522 caveats: use a distinct
+            // `from` ("system:keepalive") so agents don't desensitize to
+            // real "system" events, and explicit "do not respond"
+            // framing so the agent doesn't reply to keepalive ticks.
+            let keepalive = serde_json::json!({
+                "from": "system:keepalive",
+                "type": "keepalive_tick",
+                "subject": "[standby tick]",
+                "body": "No new messages. Call project_wait again to remain available. Do not respond to this tick.",
+                "id": 0,
+                "to": &state.role,
+                "timestamp": utc_now_iso()
+            });
             return Ok(serde_json::json!({
                 "status": "timeout",
-                "messages": [],
+                "messages": [keepalive],
                 "count": 0,
                 "waited_secs": timeout_secs
             }));
