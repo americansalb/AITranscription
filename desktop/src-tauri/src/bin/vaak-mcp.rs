@@ -8821,6 +8821,31 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         // seat's last_heartbeat, stored activity decays to
                         // "idle" (evil-architect msg 267 requirement).
                         let sessions = read_sessions(&state.project_dir);
+                        // Zombie-seat filter (human msg 2747 + ui-arch msg 2754
+                        // server-side port): rotation_order may contain seats
+                        // kicked / disconnected without a corresponding
+                        // rotation mutation. Filter against sessions.json
+                        // bindings so dead seats don't appear in mic_landed
+                        // body's `Rotation:` line. Mirror of the frontend
+                        // filters in 09a29dd (ProtocolPanel.tsx CompactMicLine
+                        // + AssemblyControls.tsx renderStatusLine).
+                        let seat_has_binding = |seat: &str| -> bool {
+                            let mut sp = seat.splitn(2, ':');
+                            let Some(role) = sp.next() else { return false; };
+                            let Some(inst) = sp.next().and_then(|s| s.parse::<u64>().ok()) else { return false; };
+                            sessions.get("bindings").and_then(|b| b.as_array())
+                                .map(|arr| arr.iter().any(|b| {
+                                    b.get("role").and_then(|r| r.as_str()) == Some(role)
+                                        && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == inst
+                                }))
+                                .unwrap_or(false)
+                        };
+                        let order: Vec<String> = order.into_iter()
+                            .filter(|seat| seat_has_binding(seat))
+                            .collect();
+                        if order.is_empty() {
+                            String::new()
+                        } else {
                         const ACTIVITY_TTL_SECS: i64 = 60;
                         let now_secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -8864,6 +8889,7 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                             }
                         }).collect();
                         format!("\nRotation: {}", parts.join(" → "))
+                        }
                     }
                 };
                 // Body composition (human msg 411, 2026-05-13): the prior
