@@ -25,7 +25,6 @@ on Windows. Exit 0 always — hook failure shouldn't block tool calls.
 """
 
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -124,7 +123,11 @@ def main() -> None:
         sys.exit(0)
     vaak_dir = vaak_dir_root / ".vaak"
 
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    # Claude Code's hook contract passes session_id in the stdin payload
+    # (verified: CLAUDE_CODE_SESSION_ID is the actual env var name; payload.
+    # session_id is the canonical source). Tester msg 2503 + architect msg 2511
+    # verified the prior env var path was inert.
+    session_id = payload.get("session_id", "")
     if not session_id:
         sys.exit(0)
 

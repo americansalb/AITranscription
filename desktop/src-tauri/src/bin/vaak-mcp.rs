@@ -10473,9 +10473,23 @@ fn generate_fallback_id() -> String {
 
 /// Get a stable session ID using a priority chain of methods
 fn get_session_id() -> String {
+    // Bug #3 fix (tester msg 2503 + architect msg 2511): Claude Code exports
+    // CLAUDE_CODE_SESSION_ID, not CLAUDE_SESSION_ID. Without this match the
+    // sidecar falls through to a fallback hash and writes DESKTOP-<host>-<hash>
+    // as the binding's session_id, which the hook's payload.session_id lookup
+    // (Claude Code UUID) can never match — entire hook subsystem inert. Check
+    // CLAUDE_CODE_SESSION_ID first, retain legacy CLAUDE_SESSION_ID for back-
+    // compat with any caller still exporting the old name.
+    if let Ok(env_session) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+        if !env_session.is_empty() {
+            eprintln!("[vaak-mcp] Session source: CLAUDE_CODE_SESSION_ID env var");
+            return env_session;
+        }
+    }
+
     if let Ok(env_session) = std::env::var("CLAUDE_SESSION_ID") {
         if !env_session.is_empty() {
-            eprintln!("[vaak-mcp] Session source: CLAUDE_SESSION_ID env var");
+            eprintln!("[vaak-mcp] Session source: CLAUDE_SESSION_ID env var (legacy)");
             return env_session;
         }
     }

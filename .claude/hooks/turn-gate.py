@@ -16,8 +16,8 @@ Exempt seats (all levels):
   - seat == floor.current_speaker
 
 Reads `.vaak/sections/<active-section>/protocol.json` (or `.vaak/protocol.json`
-for default section). Derives seat via CLAUDE_SESSION_ID against
-sessions.json bindings.
+for default section). Derives seat via `payload.session_id` (Claude Code
+hook contract) against sessions.json bindings.
 
 Output schema (Claude Code PreToolUse contract): emit JSON to stdout to
 deny via {"decision": "block", "reason": "..."}. Exit 0 always — the
@@ -27,7 +27,6 @@ stdlib only.
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -146,8 +145,12 @@ def main() -> None:
     if level < 6:
         sys.exit(0)
 
-    # Determine caller seat.
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "")
+    # Determine caller seat. Claude Code's hook contract passes session_id in
+    # the stdin payload (verified: env grep shows CLAUDE_CODE_SESSION_ID is set
+    # but no CLAUDE_SESSION_ID; payload.session_id is the canonical source per
+    # https://docs.claude.com/en/docs/claude-code/hooks). Tester msg 2503 +
+    # architect msg 2511 verified the prior env var path was inert.
+    session_id = payload.get("session_id", "")
     if not session_id:
         sys.exit(0)
     seat = seat_for_session(vaak_dir, session_id)
