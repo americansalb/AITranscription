@@ -429,31 +429,44 @@
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-/* Current speaker — filled indigo, white text. Gentle pulse to draw the eye. */
+/* Human msg 3079 color-consistency pass — pills carry role identity color
+ * (canonical from roleColors.ts via inline --role-color CSS variable).
+ * State (current/next/idle) expressed via opacity + animation, not hue.
+ * color-mix() requires Chromium 111+ / Safari 16.2+ / Firefox 113+ — all
+ * supported by Tauri WebView2 on Windows. */
+
+/* Current speaker — Tier 1 PRIMARY hue per human msg 3207/3243 (β interpretation).
+ * The CURRENT-speaker pill swaps role-color background for the Tier 1 primary
+ * (var(--collab-accent) = #6366f1 indigo) so it reads as "interactive/active"
+ * alongside buttons + slider thumb + focused inputs. Non-current pills (.is-next,
+ * .is-idle) keep role-color identity at Tier 3 brightness — see below.
+ * Note: this deviates from msg 3079 strict "same hex everywhere" for THIS one
+ * pill state only; non-current pills + message borders + role cards continue
+ * to honor msg 3079 with role-color identity. */
 .protocol-al-seat-pill.is-current {
-  background: #6366f1;
-  border-color: #818cf8;
+  background: var(--collab-accent, #6366f1);
+  border-color: var(--collab-accent-hover, #818cf8);
   color: white;
   font-weight: 700;
   animation: protocol-al-current-pulse 2.4s ease-in-out infinite;
 }
 @keyframes protocol-al-current-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(129, 140, 248, 0); }
-  50%      { box-shadow: 0 0 0 4px rgba(129, 140, 248, 0.28); }
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--collab-accent, #818cf8) 28%, transparent); }
 }
 
-/* Next-up — outlined indigo, light text on dark surface. */
+/* Next-up — outlined role color, tinted background, brighter role-color text. */
 .protocol-al-seat-pill.is-next {
-  background: rgba(129, 140, 248, 0.18);
-  border-color: #818cf8;
-  color: #c7d2fe;
+  background: color-mix(in srgb, var(--role-color, #818cf8) 18%, transparent);
+  border-color: var(--role-color, #818cf8);
+  color: color-mix(in srgb, var(--role-color, #c7d2fe) 70%, white);
 }
 
-/* Idle — muted but legible against dark shell. */
+/* Idle — muted background + faded role-color border, role-color text. */
 .protocol-al-seat-pill.is-idle {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.12);
-  color: var(--collab-text-secondary, #a1a1aa);
+  background: color-mix(in srgb, var(--role-color, #ffffff) 5%, transparent);
+  border-color: color-mix(in srgb, var(--role-color, #ffffff) 25%, transparent);
+  color: color-mix(in srgb, var(--role-color, #a1a1aa) 75%, var(--collab-text-secondary, #a1a1aa));
   font-weight: 500;
 }
 

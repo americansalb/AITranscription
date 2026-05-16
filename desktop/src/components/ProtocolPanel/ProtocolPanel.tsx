@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useProtocolState } from '../../hooks/useProtocolState';
 import type { Heartbeats, Protocol } from '../../hooks/useProtocolState';
 import { SeatChip } from './SeatChip';
+import { getRoleColor } from '../../utils/roleColors';
 import { PhasePlanEditor } from './PhasePlanEditor';
 import { HealthPill } from './HealthPill';
 import './ProtocolPanel.css';
@@ -407,10 +408,20 @@ function CompactMicLine({
               : isNext
                 ? 'is-next'
                 : 'is-idle';
+            // Human msg 3079: pills carry role identity color (canonical from
+            // roleColors.ts — same source as message left-borders + role-card
+            // titles). State (current/next/idle) is expressed via background
+            // opacity + animation, not by color hue. Sets --role-color CSS
+            // variable; CSS uses color-mix() to derive per-state fills.
+            const seatRole = seat.split(':')[0];
+            const seatColor = getRoleColor(seatRole);
             return (
               <span key={seat} className="protocol-al-rotation-item" role="listitem">
                 {i > 0 && <span className="protocol-al-arrow" aria-hidden="true">→</span>}
-                <span className={`protocol-al-seat-pill ${stateClass}`}>
+                <span
+                  className={`protocol-al-seat-pill ${stateClass}`}
+                  style={{ ['--role-color' as string]: seatColor } as React.CSSProperties}
+                >
                   {seat}
                 </span>
               </span>

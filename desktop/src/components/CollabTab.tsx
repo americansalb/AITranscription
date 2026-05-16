@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
@@ -325,6 +325,167 @@ function MessageTypeBadge({ type: msgType }: { type: string }) {
   return <span className={`message-type-badge badge-${msgType}`}>{msgType}</span>;
 }
 
+// Minimal markdown renderer for message bodies (human msg 2981).
+// Subset covered: **bold**, `inline code`, ```fenced code blocks```, # headers,
+// - / * / 1. lists, > blockquotes. Storage/transport unchanged — render-only.
+// Long messages (>100 words) collapse to ~3-line preview with expand toggle;
+// the full text stays in the DOM behind the toggle (not deleted/summarized)
+// per human directive "All content must remain accessible."
+function renderInline(text: string, keyPrefix: string): ReactNode[] {
+  // Tokenize on `code` and **bold** simultaneously via single regex pass.
+  // Backtick takes precedence (so **`x`** keeps the literal asterisks inside code).
+  const parts: ReactNode[] = [];
+  const re = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[1]) {
+      parts.push(<code key={`${keyPrefix}-c${i++}`}>{m[1].slice(1, -1)}</code>);
+    } else if (m[2]) {
+      parts.push(<strong key={`${keyPrefix}-b${i++}`}>{m[2].slice(2, -2)}</strong>);
+    }
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function renderMarkdown(body: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const lines = body.split("\n");
+  let i = 0;
+  let key = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    // Fenced code block
+    if (line.trim().startsWith("```")) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      if (i < lines.length) i++; // skip closing fence
+      out.push(<pre key={`md-${key++}`}><code>{codeLines.join("\n")}</code></pre>);
+      continue;
+    }
+    // Header
+    const hMatch = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (hMatch) {
+      const level = hMatch[1].length;
+      const content = renderInline(hMatch[2], `md-${key}`);
+      if (level === 1) out.push(<h1 key={`md-${key++}`}>{content}</h1>);
+      else if (level === 2) out.push(<h2 key={`md-${key++}`}>{content}</h2>);
+      else out.push(<h3 key={`md-${key++}`}>{content}</h3>);
+      i++;
+      continue;
+    }
+    // Blockquote (consecutive > lines)
+    if (/^>\s/.test(line)) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(
+        <blockquote key={`md-${key++}`}>
+          {quoteLines.map((ql, j) => (
+            <div key={j}>{renderInline(ql, `md-${key}-q${j}`)}</div>
+          ))}
+        </blockquote>
+      );
+      continue;
+    }
+    // Unordered list (consecutive - or * lines)
+    if (/^[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*]\s+/, ""));
+        i++;
+      }
+      out.push(
+        <ul key={`md-${key++}`}>
+          {items.map((it, j) => (
+            <li key={j}>{renderInline(it, `md-${key}-li${j}`)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+    // Ordered list (consecutive `1. ` `2. ` lines)
+    if (/^\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ""));
+        i++;
+      }
+      out.push(
+        <ol key={`md-${key++}`}>
+          {items.map((it, j) => (
+            <li key={j}>{renderInline(it, `md-${key}-oli${j}`)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+    // Blank line → paragraph separator
+    if (line.trim() === "") {
+      out.push(<div key={`md-${key++}`} className="md-blank" />);
+      i++;
+      continue;
+    }
+    // Plain text line — collect consecutive non-special lines into one paragraph
+    const para: string[] = [line];
+    i++;
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !lines[i].trim().startsWith("```") &&
+      !/^(#{1,3}\s|>\s|[-*]\s+|\d+\.\s+)/.test(lines[i])
+    ) {
+      para.push(lines[i]);
+      i++;
+    }
+    out.push(
+      <p key={`md-${key++}`}>{renderInline(para.join("\n"), `md-${key}`)}</p>
+    );
+  }
+  return out;
+}
+
+function MarkdownBody({ text, className }: { text: string; className?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const wordCount = text.trim() === "" ? 0 : text.trim().split(/\s+/).length;
+  const isLong = wordCount > 100;
+  // Human msg 3313: highlight+copy must capture FULL body even when collapsed.
+  // Render the full markdown tree ALWAYS — visual collapse is a CSS-only
+  // `max-height: overflow-hidden` clip (with a fade-out gradient). Selection
+  // can extend through the hidden region; browsers copy the underlying DOM
+  // text including the clipped portion. No conditional render swap that
+  // strips text out of the DOM.
+  const collapsedClipped = isLong && !expanded;
+  return (
+    <div className={`md-body${isLong ? " md-body-collapsible" : ""}${collapsedClipped ? " md-body-clipped" : ""}${className ? ` ${className}` : ""}`}>
+      <div className="md-body-content">
+        {renderMarkdown(text)}
+      </div>
+      {collapsedClipped && <span className="md-preview-fade" aria-hidden="true">…</span>}
+      {isLong && (
+        <button
+          type="button"
+          className="md-expand-toggle"
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+          aria-expanded={expanded}
+        >
+          {expanded ? "Collapse" : `Expand (${wordCount} words)`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function getAnswerForQuestion(questionId: number, messages: BoardMessage[]): { choiceId: string } | null {
   const answer = messages.find(
     (m) => m.metadata?.in_reply_to === questionId && m.type === "answer"
@@ -373,7 +534,7 @@ function QuestionCard({
         {onPlay && <button className="message-play-btn" onClick={(e) => { e.stopPropagation(); onPlay(msg.id, `${msg.subject || ""}. ${msg.body}`, fromRole); }} title={playingMsgId === msg.id ? "Stop" : "Play"}>{playingMsgId === msg.id ? "\u23F9" : "\u25B6"}</button>}
       </div>
       {msg.subject && <div className="message-card-subject">{msg.subject}</div>}
-      <div className="message-card-body">{msg.body}</div>
+      <MarkdownBody text={msg.body} className="message-card-body" />
       <div className="question-choices">
         {choices.map((choice) => (
           <button
@@ -426,7 +587,7 @@ function VoteCard({
       <div className="message-card-subject">
         Workflow change: <span style={{ color: workflowDisplay.color }}>{workflowDisplay.label}</span>
       </div>
-      {tally.reason && <div className="message-card-body">{tally.reason}</div>}
+      {tally.reason && <MarkdownBody text={tally.reason} className="message-card-body" />}
       <div className="vote-tally">
         <div className="vote-tally-info">
           <span>{tally.yesVotes.length} yes / {tally.noVotes.length} no</span>
@@ -686,6 +847,12 @@ export function CollabTab() {
   } = useProtocolState(projectDir, activeSection || "default");
   const [newSectionName, setNewSectionName] = useState("");
   const [creatingSectionMode, setCreatingSectionMode] = useState(false);
+  // Human msg 3191: max 4 visible tabs (active + 3 most recently active);
+  // remaining sections live in an "All sections" dropdown with name-filter
+  // typing. Everything reachable; tab bar stops scrolling past 4.
+  const [sectionDropdownOpen, setSectionDropdownOpen] = useState(false);
+  const [sectionFilterText, setSectionFilterText] = useState("");
+  const sectionDropdownRef = useRef<HTMLDivElement | null>(null);
   const [sectionLoading, setSectionLoading] = useState(false);
   const [savedProjects, setSavedProjects] = useState(() => loadSavedProjects());
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
@@ -699,7 +866,9 @@ export function CollabTab() {
   const prevMsgCountRef = useRef(0);
   const savedScrollRef = useRef<number | null>(null);
   const scrollingToBottomRef = useRef(false);
-  const MSG_PAGE_SIZE = 50;
+  // Human msg 3194 initial-scroll-to-bottom ref declared down at line ~2454
+  // alongside its useLayoutEffect (per-section tracking).
+  const MSG_PAGE_SIZE = 100;
   const [visibleMsgLimit, setVisibleMsgLimit] = useState(MSG_PAGE_SIZE);
 
   // Team Launcher state
@@ -1278,6 +1447,19 @@ When multiple instances of this role are active:
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [workflowDropdownOpen]);
 
+  // Human msg 3191: close section overflow dropdown on click outside.
+  useEffect(() => {
+    if (!sectionDropdownOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (sectionDropdownRef.current && !sectionDropdownRef.current.contains(e.target as Node)) {
+        setSectionDropdownOpen(false);
+        setSectionFilterText("");
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [sectionDropdownOpen]);
+
   // Close discussion mode dropdown on click outside
   useEffect(() => {
     if (!discussionModeOpen) return;
@@ -1849,11 +2031,11 @@ When multiple instances of this role are active:
   };
 
   const handleRemoveRosterSlot = async (role: string, instance: number) => {
-    const roleTitle = project?.config?.roles?.[role]?.title || role;
+    const seatLabel = `${role}:${instance}`;
     setConfirmAction({
-      title: "Remove from roster",
-      message: `Remove ${roleTitle} :${instance} from the roster? This hides the card and disconnects any active agent.`,
-      confirmLabel: "Remove",
+      title: "Kick from project",
+      message: `Kick ${seatLabel} from this project? Their seat will be released, their rotation slot cleared, and they will need to be re-invited to rejoin.`,
+      confirmLabel: "Kick",
       onConfirm: async () => {
         try {
           if (window.__TAURI__) {
@@ -2194,8 +2376,15 @@ When multiple instances of this role are active:
     prevMsgCountRef.current = currentCount;
 
     if (added > 0) {
-      // Grow visible limit so new messages don't shift the slice window
-      setVisibleMsgLimit((prev) => prev + added);
+      // Human msg 3330 perf fix: only grow visible limit if user is scrolled UP
+      // (preserves their view of older revealed messages by extending the slice).
+      // If user is at bottom (following the newest), DON'T grow — new messages
+      // appear in the existing last-N slice; older slice contents slide out
+      // naturally. Prevents visibleMsgLimit from creeping toward total count
+      // over a long session (was hitting 3K → defeating pagination + render lag).
+      if (!isAtBottom) {
+        setVisibleMsgLimit((prev) => prev + added);
+      }
 
       // Always scroll to bottom if the newest message is from the human (they just sent it)
       const newestMsg = messages?.[currentCount - 1];
@@ -2244,6 +2433,45 @@ When multiple instances of this role are active:
     setNewMsgCount(0);
     setTimeout(() => { scrollingToBottomRef.current = false; }, 500);
   };
+
+  // Human msg 3194: on initial chat load (Vaak restart / session reload /
+  // section switch), scroll to bottom — newest messages first — instead of
+  // defaulting to top. Tracks a "has-scrolled-on-load" ref per section so
+  // the auto-scroll fires ONCE per section-load, not on every re-render.
+  //
+  // Human msg 3231 follow-up: prior implementation used useLayoutEffect +
+  // direct scrollTop = scrollHeight, which raced against the save-and-
+  // restore useLayoutEffect at line 2400 that captures user scroll position
+  // on each project update. The save/restore could capture scrollTop=0
+  // during a transient pre-paint moment and restore 0 over our scrollHeight.
+  // Switching to: rAF-deferred scrollIntoView on messagesEndRef, which
+  // matches the existing smart-scroll pattern AND runs after the save/
+  // restore effect has finished (and clears savedScrollRef so the next
+  // listener save doesn't capture our 0→scrollHeight midpoint).
+  // Human msg 3351 "still started at the top" — fix v3. Root cause of v2
+  // failure: cleanup `cancelAnimationFrame(raf1)` fired on the very next
+  // [project, activeSection] dep change (which happens on EVERY heartbeat
+  // tick because project is a fresh object reference each update). The rAF
+  // was cancelled before it fired, scroll never executed, then the next
+  // effect call early-returned because the ref was already set.
+  //
+  // Fix: (a) depend on `messages?.length + activeSection` not the whole
+  // project (so heartbeat-only updates don't re-trigger). (b) drop the rAF
+  // cleanup entirely — scrollToBottom is idempotent + cheap; let the rAF
+  // fire even if deps change. (c) set the ref AFTER the scroll completes,
+  // not before — so a cancelled rAF can be retried by the next effect call.
+  // Human msg 3404 — pivot to anchor pattern. Three iterations of rAF/
+  // setTimeout/scrollHeight observation all failed live. The `messagesEndRef`
+  // sentinel already exists at the bottom of the message list (line 4649);
+  // browser's native scrollIntoView on it is the right primitive. Fires on
+  // mount + section switch only. No project state observation, no rAF dance,
+  // no scrollHeight measurement. Per evil-arch msg 3402 detection heuristic:
+  // single lifecycle stage (browser native scroll-to-target).
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ block: "end" });
+    setIsAtBottom(true);
+    setNewMsgCount(0);
+  }, [activeSection]);
 
   // Listen for project file change events from backend
   useEffect(() => {
@@ -2640,6 +2868,24 @@ When multiple instances of this role are active:
             {project?.config?.description && (
               <span className="project-header-desc">{project.config.description}</span>
             )}
+            {/* Folder icon — human msg 3067: replaced full-width "Watching:" row.
+                Hover shows full path; click copies path to clipboard. */}
+            {projectDir && (
+              <button
+                type="button"
+                className="project-filepath-icon"
+                title={`${projectDir}/.vaak/  (click to copy)`}
+                aria-label={`Watching ${projectDir}/.vaak/. Click to copy path to clipboard.`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void navigator.clipboard.writeText(`${projectDir}/.vaak/`)
+                    .then(() => showToast("Path copied to clipboard", "info"))
+                    .catch(() => showToast("Couldn't copy path — see browser console", "error"));
+                }}
+              >
+                <span aria-hidden="true">📁</span>
+              </button>
+            )}
           </div>
           <label className="auto-collab-toggle" title="When enabled, agents autonomously check messages, act on directives, and communicate without manual prompting">
             <input
@@ -2817,58 +3063,130 @@ When multiple instances of this role are active:
           </div>
         )}
 
-        {/* File path */}
-        <div className="project-filepath">
-          <span className="project-filepath-label">Watching:</span>
-          <code>{projectDir}/.vaak/</code>
-        </div>
+        {/* File path — human msg 3067: replaced full-width row with compact
+            folder icon. Click copies path to clipboard; hover shows full path
+            in tooltip. Same data, ~24px footprint vs the prior ~600px row. */}
 
-        {/* Section Tabs */}
-        <div className="section-tabs">
-          {sections.map(s => (
-            <button
-              key={s.slug}
-              className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}${sectionLoading ? " section-tab-loading" : ""}`}
-              onClick={() => handleSwitchSection(s.slug)}
-              disabled={sectionLoading}
-            >
-              <span className="section-tab-hash">#</span>
-              <span className="section-tab-name">{s.name}</span>
-              {s.message_count > 0 && (
-                <span className="section-tab-count">{s.message_count}</span>
+        {/* Section Tabs \u2014 human msg 3191: max 4 visible (active + 3 most
+            recently active), rest behind "All sections" dropdown with
+            name-filter typing. "+ New" stays accent-colored, visually
+            separate from tabs. Every section reachable via dropdown. */}
+        {(() => {
+          const activeSec = sections.find(s => s.slug === activeSection);
+          const nonActive = sections.filter(s => s.slug !== activeSection);
+          // Sort non-active sections by last_activity desc (most-recent first);
+          // null/missing last_activity sorts to bottom by created_at desc.
+          const sortedNonActive = [...nonActive].sort((a, b) => {
+            const aLA = a.last_activity ?? "";
+            const bLA = b.last_activity ?? "";
+            if (aLA && bLA) return bLA.localeCompare(aLA);
+            if (aLA) return -1;
+            if (bLA) return 1;
+            return (b.created_at || "").localeCompare(a.created_at || "");
+          });
+          const recentNonActive = sortedNonActive.slice(0, 3);
+          const visibleTabs = activeSec ? [activeSec, ...recentNonActive] : recentNonActive.slice(0, 4);
+          const hiddenSections = sortedNonActive.slice(3);
+          const filteredHidden = sectionFilterText.trim()
+            ? hiddenSections.filter(s => s.name.toLowerCase().includes(sectionFilterText.toLowerCase()))
+            : hiddenSections;
+          return (
+            <div className="section-tabs">
+              {visibleTabs.map(s => (
+                <button
+                  key={s.slug}
+                  className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}${sectionLoading ? " section-tab-loading" : ""}`}
+                  onClick={() => handleSwitchSection(s.slug)}
+                  disabled={sectionLoading}
+                >
+                  <span className="section-tab-hash">#</span>
+                  <span className="section-tab-name">{s.name}</span>
+                  {s.message_count > 0 && (
+                    <span className="section-tab-count">{s.message_count}</span>
+                  )}
+                </button>
+              ))}
+              {hiddenSections.length > 0 && (
+                <div className="section-tab-dropdown-wrap" ref={sectionDropdownRef}>
+                  <button
+                    className={`section-tab section-tab-overflow${sectionDropdownOpen ? " section-tab-overflow-open" : ""}`}
+                    onClick={() => setSectionDropdownOpen(v => !v)}
+                    aria-haspopup="listbox"
+                    aria-expanded={sectionDropdownOpen}
+                  >
+                    All sections ({hiddenSections.length}) <span className="section-tab-overflow-caret" aria-hidden="true">{'\u25be'}</span>
+                  </button>
+                  {sectionDropdownOpen && (
+                    <div className="section-tab-dropdown" role="listbox">
+                      <input
+                        className="section-tab-dropdown-filter"
+                        type="text"
+                        placeholder="Filter sections\u2026"
+                        value={sectionFilterText}
+                        onChange={e => setSectionFilterText(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="section-tab-dropdown-list">
+                        {filteredHidden.length === 0 ? (
+                          <div className="section-tab-dropdown-empty">No matching sections</div>
+                        ) : filteredHidden.map(s => (
+                          <button
+                            key={s.slug}
+                            className="section-tab-dropdown-item"
+                            role="option"
+                            aria-selected={s.slug === activeSection}
+                            onClick={() => {
+                              handleSwitchSection(s.slug);
+                              setSectionDropdownOpen(false);
+                              setSectionFilterText("");
+                            }}
+                          >
+                            <span className="section-tab-dropdown-item-name">#{s.name}</span>
+                            {s.message_count > 0 && (
+                              <span className="section-tab-dropdown-item-count">{s.message_count}</span>
+                            )}
+                            {s.last_activity && (
+                              <span className="section-tab-dropdown-item-time" title={s.last_activity}>
+                                {formatRelativeTime(s.last_activity)}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
-            </button>
-          ))}
-          {creatingSectionMode ? (
-            <div className="section-tab-create">
-              <input
-                className="section-tab-create-input"
-                type="text"
-                placeholder="Name..."
-                value={newSectionName}
-                onChange={e => setNewSectionName(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter") handleCreateSection();
-                  if (e.key === "Escape") { setCreatingSectionMode(false); setNewSectionName(""); }
-                }}
-                autoFocus
-              />
-              <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "+"}</button>
-              <button className="section-tab-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
+              {creatingSectionMode ? (
+                <div className="section-tab-create">
+                  <input
+                    className="section-tab-create-input"
+                    type="text"
+                    placeholder="Name..."
+                    value={newSectionName}
+                    onChange={e => setNewSectionName(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") handleCreateSection();
+                      if (e.key === "Escape") { setCreatingSectionMode(false); setNewSectionName(""); }
+                    }}
+                    autoFocus
+                  />
+                  <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "+"}</button>
+                  <button className="section-tab-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
+                </div>
+              ) : (
+                <button className="section-tab section-tab-new" onClick={() => setCreatingSectionMode(true)}>
+                  + New
+                </button>
+              )}
             </div>
-          ) : (
-            <button className="section-tab section-tab-new" onClick={() => setCreatingSectionMode(true)}>
-              + New
-            </button>
-          )}
-        </div>
+          );
+        })()}
 
-        {/* Section join hint for discoverability */}
-        {sections.length > 1 && activeSection && (
-          <div className="section-join-hint">
-            Tell agents: <span className="section-join-hint-cmd">join as [role], section {activeSection}</span>
-          </div>
-        )}
+        {/* Section join hint removed per human msg 3069 — "Tell agents: join as
+            [role], section X" was a noisy permanent line for info almost never
+            needed. Agents discover section via project_join's section arg or
+            project_status; no UI surface needed. */}
 
         {/* Discussion Status Panel — REMOVED per spec §1.1 (human #1062 "two UIs").
             ProtocolPanel's ConsensusRow renders the topic + phase + close button
@@ -3235,11 +3553,11 @@ When multiple instances of this role are active:
                                       <span className="role-card-title" style={{ color: card.roleColor }}>{card.title}</span>
                                       {card.instance > 0 && <span className="role-card-instance">#{card.instance}</span>}
                                       <button
-                                        className="role-card-remove-x"
+                                        className="role-card-kick-btn"
                                         onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
-                                        title="Remove from roster"
-                                        aria-label={`Remove ${card.title} from roster`}
-                                      >&times;</button>
+                                        title={`Kick ${card.slug}:${card.instance >= 0 ? card.instance : 0} from this project`}
+                                        aria-label={`Kick ${card.slug}:${card.instance >= 0 ? card.instance : 0} from this project`}
+                                      >Kick</button>
                                     </div>
                                     <div className="role-card-status">{getStatusLabel(card.status)}</div>
                                     {card.status === "vacant" && (
@@ -3633,11 +3951,11 @@ When multiple instances of this role are active:
                             {card.title}
                           </span>
                           <button
-                            className="role-card-remove-x"
+                            className="role-card-kick-btn"
                             onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}
-                            title="Remove from roster"
-                            aria-label={`Remove ${card.title} from roster`}
-                          >&times;</button>
+                            title={`Kick ${card.slug}:${card.instance >= 0 ? card.instance : 0} from this project`}
+                            aria-label={`Kick ${card.slug}:${card.instance >= 0 ? card.instance : 0} from this project`}
+                          >Kick</button>
                         </div>
                         <div className="role-card-meta">
                           <span className="role-card-slug">{card.slug}</span>
@@ -4114,7 +4432,7 @@ When multiple instances of this role are active:
                       <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
                       <button className="message-play-btn" onClick={(e) => { e.stopPropagation(); playMessage(msg.id, `${msg.subject || ""}. ${msg.body}`, msg.from.split(":")[0]); }} title={playingMsgId === msg.id ? "Stop" : "Play"}>{playingMsgId === msg.id ? "\u23F9" : "\u25B6"}</button>
                     </div>
-                    <div className="discussion-event-body">{msg.body}</div>
+                    <MarkdownBody text={msg.body} className="discussion-event-body" />
                   </div>
                 );
               }
@@ -4134,7 +4452,7 @@ When multiple instances of this role are active:
                       <button className="message-play-btn" onClick={(e) => { e.stopPropagation(); playMessage(msg.id, `${msg.subject || ""}. ${msg.body}`, fromRole); }} title={playingMsgId === msg.id ? "Stop" : "Play"}>{playingMsgId === msg.id ? "\u23F9" : "\u25B6"}</button>
                     </div>
                     {msg.subject && <div className="message-card-subject">{msg.subject}</div>}
-                    <div className="message-card-body">{msg.body}</div>
+                    <MarkdownBody text={msg.body} className="message-card-body" />
                   </div>
                 );
               }
@@ -4155,34 +4473,79 @@ When multiple instances of this role are active:
                 );
               }
 
-              if (msg.type === "mic_landed" && typeof msg.metadata?.prev_turn_type === "string") {
+              // Compact single-line divider for system mic events (human msg 2975).
+              // Body (which contains the rotation strip) collapses behind <details>
+              // disclosure — visible on expand for debugging. All data stays in
+              // msg.body / msg.metadata; only render compacts.
+              if (msg.type === "mic_landed") {
                 const targetRole = msg.to.split(":")[0];
                 const targetColor = getRoleColor(targetRole);
-                const prevTurnType = msg.metadata.prev_turn_type as string;
-                const prevSecs = typeof msg.metadata.prev_expected_duration_secs === "number"
+                const prevTurnType = typeof msg.metadata?.prev_turn_type === "string"
+                  ? (msg.metadata.prev_turn_type as string)
+                  : null;
+                const prevSecs = typeof msg.metadata?.prev_expected_duration_secs === "number"
                   ? (msg.metadata.prev_expected_duration_secs as number)
                   : null;
                 const prevDisplay = prevSecs !== null
-                  ? prevSecs >= 60
-                    ? `~${Math.round(prevSecs / 60)}min`
-                    : `~${prevSecs}s`
+                  ? prevSecs >= 60 ? `~${Math.round(prevSecs / 60)}min` : `~${prevSecs}s`
                   : "";
-                const prevLabel = prevTurnType.charAt(0).toUpperCase() + prevTurnType.slice(1);
-                const prevSpeaker = typeof msg.metadata.from_speaker === "string"
+                const prevLabel = prevTurnType ? prevTurnType.charAt(0).toUpperCase() + prevTurnType.slice(1) : null;
+                const prevSpeaker = typeof msg.metadata?.from_speaker === "string"
                   ? (msg.metadata.from_speaker as string)
                   : null;
+                const floorSecs = typeof msg.metadata?.floor_time_seconds === "number"
+                  ? (msg.metadata.floor_time_seconds as number)
+                  : null;
                 return (
-                  <div key={msg.id} className="mic-landed-card" style={{ borderLeftColor: targetColor }}>
-                    <div className="mic-landed-header">
-                      <span className="mic-landed-label">[YOUR TURN]</span>
-                      <span className="mic-landed-target" style={{ color: targetColor }}>{msg.to}</span>
-                      <span className={`mic-landed-prev-turn turn-type-${prevTurnType}`}>
-                        prev{prevSpeaker ? `: ${prevSpeaker}` : ""} was {prevLabel}{prevDisplay ? ` ${prevDisplay}` : ""}
-                      </span>
-                      <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
-                    </div>
-                    {msg.body && <div className="mic-landed-body">{msg.body}</div>}
-                  </div>
+                  <details
+                    key={msg.id}
+                    className="mic-event-divider mic-landed-divider"
+                    style={{ borderLeftColor: targetColor }}
+                  >
+                    <summary title={msg.body || msg.timestamp}>
+                      <span className="mic-event-icon" aria-hidden="true">🎙</span>
+                      <span className="mic-event-label">→</span>
+                      <span className="mic-event-target" style={{ color: targetColor }}>{msg.to}</span>
+                      {floorSecs !== null && <span className="mic-event-meta">{floorSecs}s</span>}
+                      {prevTurnType && (
+                        <span className={`mic-event-prev turn-type-${prevTurnType}`}>
+                          prev{prevSpeaker ? ` ${prevSpeaker}` : ""} {prevLabel}{prevDisplay ? ` ${prevDisplay}` : ""}
+                        </span>
+                      )}
+                      <span className="mic-event-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
+                    </summary>
+                    {msg.body && <MarkdownBody text={msg.body} className="mic-event-body" />}
+                  </details>
+                );
+              }
+
+              if (msg.type === "mic_released") {
+                const fromSpeaker = typeof msg.metadata?.from_speaker === "string"
+                  ? (msg.metadata.from_speaker as string)
+                  : msg.from;
+                const fromRole = fromSpeaker.includes(":") ? fromSpeaker.split(":")[0] : fromSpeaker;
+                const fromColor = getRoleColor(fromRole);
+                const reason = typeof msg.metadata?.reason === "string" ? (msg.metadata.reason as string) : null;
+                const idleSecs = typeof msg.metadata?.idle_secs === "number" ? (msg.metadata.idle_secs as number) : null;
+                const reasonLabel = reason === "floor_stall" ? "stalled"
+                  : reason === "max_floor_exceeded" ? "max floor"
+                  : reason === "stall_threshold_exceeded" ? "stalled"
+                  : reason ?? "released";
+                return (
+                  <details
+                    key={msg.id}
+                    className="mic-event-divider mic-released-divider"
+                    style={{ borderLeftColor: fromColor }}
+                  >
+                    <summary title={msg.body || msg.timestamp}>
+                      <span className="mic-event-icon" aria-hidden="true">🔇</span>
+                      <span className="mic-event-label">released from</span>
+                      <span className="mic-event-target" style={{ color: fromColor }}>{fromSpeaker}</span>
+                      <span className="mic-event-meta mic-event-reason">{reasonLabel}{idleSecs !== null ? ` (${idleSecs}s idle)` : ""}</span>
+                      <span className="mic-event-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
+                    </summary>
+                    {msg.body && <MarkdownBody text={msg.body} className="mic-event-body" />}
+                  </details>
                 );
               }
 
@@ -4211,7 +4574,7 @@ When multiple instances of this role are active:
                   {msg.subject && (
                     <div className="message-card-subject">{msg.subject}</div>
                   )}
-                  <div className="message-card-body">{msg.body}</div>
+                  <MarkdownBody text={msg.body} className="message-card-body" />
                   {/* Expandable audience vote grid for board messages with vote data */}
                   {!!msg.metadata?.audience_vote && Array.isArray(msg.metadata?.votes) && (msg.metadata.votes as any[]).length > 0 && (
                     <div className="audience-board-votes">

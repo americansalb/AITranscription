@@ -25,6 +25,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { Protocol } from '../hooks/useProtocolState';
+import { getRoleColor } from '../utils/roleColors';
 import './AssemblyControls.css';
 
 type Mutate = (action: string, args?: object) => Promise<Protocol | null>;
@@ -488,7 +489,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
             : next.map((seat, i) => (
                 <span key={seat}>
                   {i > 0 && <span className="assembly-status-arrow"> → </span>}
-                  <span className="assembly-status-seat">{seat}</span>
+                  <span className="assembly-status-seat" style={{ color: getRoleColor(seat.split(':')[0]) }}>{seat}</span>
                 </span>
               ))}
         </>
@@ -506,7 +507,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
             : visibleQueue.map((seat, i) => (
                 <span key={seat}>
                   {i > 0 && <span className="assembly-status-sep">, </span>}
-                  <span className="assembly-status-seat">{seat}</span>
+                  <span className="assembly-status-seat" style={{ color: getRoleColor(seat.split(':')[0]) }}>{seat}</span>
                 </span>
               ))}{' '}
           <button
@@ -522,12 +523,26 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
       );
     }
     if (micMode === 'moderator') {
+      // Human msg 2987: moderator name should appear once. The dropdown below
+      // (assembly-moderator-picker, lines ~622-636) already shows the assigned
+      // moderator AND lets human change it, so we suppress the duplicate
+      // "Moderator: <name>" in the status line when the picker is visible
+      // (human view + assembly active). For agent viewers the picker doesn't
+      // render, so the status text is the only signal — keep it. For an
+      // agent who IS moderator themselves, skip the name (they know their
+      // own seat) and just surface the action hint.
+      const pickerVisible = assemblyActive && selfRole === null;
+      const isAgentModerator = selfRole !== null && moderator === `${selfRole}:0`;
       return (
         <>
-          <span className="assembly-status-label">Moderator:</span>{' '}
-          <span className="assembly-status-seat">{moderator ?? 'unset'}</span>
-          {selfRole !== null && moderator === `${selfRole}:0` && (
-            <span className="assembly-status-hint"> (you pick next speaker via grant_mic)</span>
+          {!pickerVisible && !isAgentModerator && (
+            <>
+              <span className="assembly-status-label">Moderator:</span>{' '}
+              <span className="assembly-status-seat">{moderator ?? 'unset'}</span>
+            </>
+          )}
+          {isAgentModerator && (
+            <span className="assembly-status-hint">You are moderator (pick next via grant_mic)</span>
           )}
         </>
       );
@@ -854,25 +869,68 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
 
       {/* Commit S.A — review-intensity slider. Gated to moderator/privileged.
           1=ship-direct ... 5=default ... 10=strict turn discipline per
-          spec §The Slider — 10 Discipline Levels. */}
-      {assemblyActive && canSetReviewIntensity && (
-        <div className="assembly-review-intensity-row">
-          <span className="assembly-review-intensity-label" title="Review intensity 1-10: higher = stricter discipline">
-            Review intensity:
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={10}
-            step={1}
-            value={reviewIntensity}
-            onChange={handleReviewIntensityChange}
-            className="assembly-review-intensity-slider"
-            aria-label="Review intensity slider 1 to 10"
-          />
-          <span className="assembly-review-intensity-value">{reviewIntensity}</span>
-        </div>
-      )}
+          spec §The Slider — 10 Discipline Levels.
+          Human msg 2992 UI refresh: labeled endpoints, visible tick marks,
+          prominent value, level-meaning hint. step=1 already snaps to ints. */}
+      {assemblyActive && canSetReviewIntensity && (() => {
+        const levelMeaning = (level: number): string => {
+          if (level <= 1) return "Ship-direct — minimal review, fastest ship";
+          if (level <= 3) return "Light — quick sanity check before ship";
+          if (level <= 5) return "Default — standard peer review";
+          if (level <= 7) return "Thorough — multi-lens review, slower cadence";
+          if (level <= 9) return "Adversarial — challenge-driven review";
+          return "Strict — full adversarial-cycle discipline";
+        };
+        return (
+          <div className="assembly-review-intensity-row">
+            <div className="assembly-review-intensity-header">
+              <span className="assembly-review-intensity-label" title="Review intensity 1-10: higher = stricter discipline">
+                Review intensity:
+              </span>
+              <span className="assembly-review-intensity-value" aria-live="polite">
+                {reviewIntensity}
+              </span>
+            </div>
+            <div className="assembly-review-intensity-slider-wrap">
+              <span className="assembly-review-intensity-endpoint endpoint-low">1 Low</span>
+              <div className="assembly-review-intensity-slider-col">
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={reviewIntensity}
+                  onChange={handleReviewIntensityChange}
+                  list="review-intensity-ticks"
+                  className="assembly-review-intensity-slider"
+                  aria-label="Review intensity slider 1 to 10"
+                  aria-valuetext={`${reviewIntensity}: ${levelMeaning(reviewIntensity)}`}
+                  aria-describedby="review-intensity-meaning"
+                  title={`${reviewIntensity}: ${levelMeaning(reviewIntensity)}`}
+                />
+                <datalist id="review-intensity-ticks">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                    <option key={n} value={n} label={String(n)} />
+                  ))}
+                </datalist>
+                <div className="assembly-review-intensity-tick-marks" aria-hidden="true">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                    <span
+                      key={n}
+                      className={`assembly-review-intensity-tick${n === reviewIntensity ? " tick-active" : ""}`}
+                      data-num={n}
+                    />
+                  ))}
+                </div>
+              </div>
+              <span className="assembly-review-intensity-endpoint endpoint-high">10 Strict</span>
+            </div>
+            <div id="review-intensity-meaning" className="assembly-review-intensity-meaning" aria-live="polite">
+              {levelMeaning(reviewIntensity)}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Affordance A — propose-replanning button (Commit P.A per
           collaborative-proposal-workflow-spec-2026-05-15.md §UI affordances).

@@ -722,14 +722,23 @@
   background: linear-gradient(90deg, rgba(46, 139, 87, 0.08), rgba(91, 108, 184, 0.08));
 }
 
-/* Commit S.A — Review-intensity slider row. Compact 1-10 range input
- * with label + live value. Gated to moderator/privileged at render. */
+/* Commit S.A — Review-intensity slider row. 1-10 range input with labeled
+ * endpoints, tick marks, prominent current value, level-meaning hint.
+ * Gated to moderator/privileged at render.
+ * Human msg 2992 refresh — column layout, endpoints + datalist tick marks,
+ * larger value display, dynamic meaning text. */
 .assembly-review-intensity-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
   font-size: 12px;
+}
+
+.assembly-review-intensity-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .assembly-review-intensity-label {
@@ -738,18 +747,83 @@
   font-size: 11px;
 }
 
-.assembly-review-intensity-slider {
-  flex: 1;
-  max-width: 200px;
-  accent-color: #5b6cb8;
-}
-
 .assembly-review-intensity-value {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #c7d2fe;
-  min-width: 18px;
-  text-align: right;
+  font-weight: 700;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.assembly-review-intensity-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assembly-review-intensity-endpoint {
+  color: #6b7280;
+  font-size: 10px;
   font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.assembly-review-intensity-endpoint.endpoint-low {
+  color: #6ee7b7;
+}
+
+.assembly-review-intensity-endpoint.endpoint-high {
+  color: #fca5a5;
+}
+
+.assembly-review-intensity-slider-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  max-width: 280px;
+  gap: 2px;
+}
+
+.assembly-review-intensity-slider {
+  width: 100%;
+  accent-color: #5b6cb8;
+  /* datalist tick marks supported in Firefox + Edge; Chromium ignores them.
+   * The tick-marks div below provides a CSS-rendered visual fallback that
+   * works across all browsers regardless of datalist support. */
+}
+
+/* CSS-rendered tick marks — 10 evenly-spaced markers below the slider track,
+ * aligned via flex space-between. Active tick (matches current value)
+ * highlighted in accent color. */
+.assembly-review-intensity-tick-marks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 6px; /* matches slider thumb half-width offset */
+  height: 6px;
+  pointer-events: none;
+}
+
+.assembly-review-intensity-tick {
+  width: 1px;
+  height: 5px;
+  background: rgba(199, 210, 254, 0.35);
+}
+
+.assembly-review-intensity-tick.tick-active {
+  background: #c7d2fe;
+  width: 2px;
+  margin-left: -0.5px;
+  margin-right: -0.5px;
+}
+
+.assembly-review-intensity-meaning {
+  color: #a0aec0;
+  font-size: 11px;
+  font-style: italic;
+  padding-left: 4px;
 }
 
 /* Affordance B — Delegation chart in plan link area (Commit D.A per
