@@ -113,12 +113,12 @@
         "assign_tasks"
       ],
       "stats": {
-        "ar": 8,
+        "ar": 6,
         "cp": 8,
-        "do": 9,
+        "do": 10,
         "ja": 9,
-        "pd": 8,
-        "td": 7
+        "pd": 7,
+        "td": 8
       },
       "tags": [
         "architecture",
@@ -341,11 +341,11 @@
         "broadcast"
       ],
       "stats": {
-        "ar": 10,
-        "cp": 7,
-        "do": 7,
-        "ja": 8,
-        "pd": 9,
+        "ar": 9,
+        "cp": 8,
+        "do": 5,
+        "ja": 7,
+        "pd": 7,
         "td": 8
       },
       "tags": [
@@ -367,11 +367,11 @@
         "broadcast"
       ],
       "stats": {
-        "ar": 6,
+        "ar": 5,
         "cp": 6,
-        "do": 9,
+        "do": 7,
         "ja": 7,
-        "pd": 7,
+        "pd": 8,
         "td": 10
       },
       "tags": [
@@ -394,10 +394,10 @@
       "stats": {
         "ar": 10,
         "cp": 7,
-        "do": 7,
-        "ja": 9,
-        "pd": 9,
-        "td": 8
+        "do": 5,
+        "ja": 8,
+        "pd": 7,
+        "td": 6
       },
       "tags": [
         "architecture",
@@ -620,12 +620,12 @@
         "broadcast"
       ],
       "stats": {
-        "ar": 9,
+        "ar": 8,
         "cp": 7,
-        "do": 9,
-        "ja": 7,
-        "pd": 9,
-        "td": 6
+        "do": 6,
+        "ja": 6,
+        "pd": 10,
+        "td": 7
       },
       "tags": [
         "testing",
@@ -647,12 +647,12 @@
         "assign_tasks"
       ],
       "stats": {
-        "ar": 7,
-        "cp": 8,
-        "do": 9,
-        "ja": 8,
-        "pd": 7,
-        "td": 8
+        "ar": 5,
+        "cp": 9,
+        "do": 8,
+        "ja": 7,
+        "pd": 6,
+        "td": 7
       },
       "tags": [
         "architecture",
