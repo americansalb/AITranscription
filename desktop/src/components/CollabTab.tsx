@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useRef, useMemo, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, useRef, useMemo, useCallback, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
@@ -496,10 +496,27 @@ function MarkdownBody({ text, className }: { text: string; className?: string })
   );
 }
 
-function getAnswerForQuestion(questionId: number, messages: BoardMessage[]): { choiceId: string } | null {
-  const answer = messages.find(
-    (m) => m.metadata?.in_reply_to === questionId && m.type === "answer"
-  );
+// First answer wins, preserves messages.find(...) original semantics.
+// Build once per messages-reference change via useMemo at the call site.
+function buildAnswerLookup(messages: BoardMessage[]): Map<number, BoardMessage> {
+  const m = new Map<number, BoardMessage>();
+  for (const msg of messages) {
+    if (
+      msg.type === "answer" &&
+      typeof msg.metadata?.in_reply_to === "number" &&
+      !m.has(msg.metadata.in_reply_to)
+    ) {
+      m.set(msg.metadata.in_reply_to, msg);
+    }
+  }
+  return m;
+}
+
+function getAnswerForQuestion(
+  questionId: number,
+  lookup: Map<number, BoardMessage>
+): { choiceId: string } | null {
+  const answer = lookup.get(questionId);
   if (answer?.metadata?.choice_id) {
     return { choiceId: answer.metadata.choice_id as string };
   }
@@ -869,7 +886,13 @@ export function CollabTab() {
   const [projectSections, setProjectSections] = useState<Record<string, Section[]>>({});
   const workflowDropdownRef = useRef<HTMLDivElement>(null);
   const discussionModeRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Held in MutableRefObject form (not RefObject) so messagesEndCallbackRef
+  // below can assign .current = el manually while React drives the lifecycle.
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Tracks which section we've already auto-scrolled-to-bottom for. Prevents
+  // re-firing the initial scroll on every re-render while still firing once
+  // per section-switch. Paired with messagesEndCallbackRef below.
+  const initialScrollSectionRef = useRef<string | null>(null);
   const messageTimelineRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMsgCount, setNewMsgCount] = useState(0);
@@ -1340,7 +1363,7 @@ When multiple instances of this role are active:
         _setGlobalTemplates(new Set(Object.keys(templates)));
       } catch { /* ignore — non-critical */ }
     })();
-  }, [project]); // Re-check when project data changes
+  }, [project?.config?.roles?.length]); // A6: coarsen deps — was [project], fired on every heartbeat tick
 
   function getCollabVoiceForRole(roleSlug: string): string {
     return collabVoices[roleSlug] || getDefaultVoice();
@@ -2487,10 +2510,29 @@ When multiple instances of this role are active:
   // mount + section switch only. No project state observation, no rAF dance,
   // no scrollHeight measurement. Per evil-arch msg 3402 detection heuristic:
   // single lifecycle stage (browser native scroll-to-target).
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ block: "end" });
-    setIsAtBottom(true);
-    setNewMsgCount(0);
+  // Human msg 3568 "STILL STARTING AT TOP BTW" — iteration v5, callback-ref pivot.
+  // Root cause of v4 anchor-pattern failure (tester msg 3573): on first mount,
+  // project is null → message-timeline conditional render skips the children
+  // that contain the messagesEndRef <div> → ref.current stays null when the
+  // useEffect fires → optional chaining silently no-ops → user stays at top.
+  // When project eventually loads and the ref populates, activeSection hasn't
+  // changed → useEffect doesn't re-fire → never recovers.
+  //
+  // Callback-ref fires WHEN the DOM element becomes non-null, not when the
+  // useEffect dep changes. This sidesteps the ref-mount-timing-vs-effect-fire
+  // race entirely. initialScrollSectionRef tracks which section we've already
+  // auto-scrolled for, so re-renders within the same section don't yank scroll
+  // away from the user (preserves smart-scroll UX). Section-switch creates a
+  // new callback identity (useCallback deps change) → React detaches old + re-
+  // attaches new → callback fires with el → scroll fires.
+  const messagesEndCallbackRef = useCallback((el: HTMLDivElement | null) => {
+    messagesEndRef.current = el;
+    if (el && initialScrollSectionRef.current !== activeSection) {
+      el.scrollIntoView({ block: "end" });
+      initialScrollSectionRef.current = activeSection;
+      setIsAtBottom(true);
+      setNewMsgCount(0);
+    }
   }, [activeSection]);
 
   // Listen for project file change events from backend
@@ -2818,14 +2860,29 @@ When multiple instances of this role are active:
     return detectMicTo(msgBody, seatList, null, null);
   }, [msgBody, project?.sessions, micToHintDismissed]);
 
+  // O(N²) → O(N): pre-build question→answer Map once per messages-reference change,
+  // then O(1) lookup at every render. Backend re-parses board.jsonl on every emit,
+  // so the messages reference is the canonical change signal.
+  const answerLookup = useMemo(
+    () => buildAnswerLookup(project?.messages || []),
+    [project?.messages]
+  );
+
+  const pendingQuestionCount = useMemo(() => {
+    if (!project) return 0;
+    return project.messages.filter(
+      (m) =>
+        m.to === "human" &&
+        m.type === "question" &&
+        m.metadata?.choices?.length &&
+        !getAnswerForQuestion(m.id, answerLookup)
+    ).length;
+  }, [project?.messages, answerLookup]);
+
   // ===== WATCHING STATE: Project Dashboard =====
   if (watching) {
     const hasNoSessions = !project || project.sessions.length === 0;
     const hasNoMessages = !project || project.messages.length === 0;
-    const pendingQuestionCount = project ? project.messages.filter(
-      (m) => m.to === "human" && m.type === "question" && m.metadata?.choices?.length &&
-        !getAnswerForQuestion(m.id, project.messages)
-    ).length : 0;
 
     return (
       <div className="project-tab">
@@ -4479,7 +4536,7 @@ When multiple instances of this role are active:
 
               // Interactive question card for human-targeted questions with choices
               if (msg.to === "human" && msg.type === "question" && msg.metadata?.choices?.length) {
-                const answered = getAnswerForQuestion(msg.id, project!.messages);
+                const answered = getAnswerForQuestion(msg.id, answerLookup);
                 return (
                   <QuestionCard
                     key={msg.id}
@@ -4658,7 +4715,7 @@ When multiple instances of this role are active:
             })}</>);
             })()
           )}
-          <div ref={messagesEndRef} />
+          <div ref={messagesEndCallbackRef} />
         </div>
 
         {/* New messages indicator */}
