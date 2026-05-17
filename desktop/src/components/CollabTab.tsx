@@ -10,6 +10,7 @@ import { useToast } from "./Toast";
 // (Slice 6 owns that decom) but the UI surface is unified.
 import { ProtocolPanel } from "./ProtocolPanel";
 import { AssemblyControls } from "./AssemblyControls";
+import { Avatar } from "./Avatar";
 import { useProtocolState } from "../hooks/useProtocolState";
 import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
@@ -4100,6 +4101,14 @@ When multiple instances of this role are active:
                         onKeyDown={handleCardKeyDown}
                       >
                         <div className="role-card-header">
+                          <Avatar
+                            slug={card.slug}
+                            title={card.title}
+                            instance={card.instance >= 0 ? card.instance : 0}
+                            avatarUrl={(project.config.roles[card.slug] as { avatar_url?: string } | undefined)?.avatar_url || null}
+                            sizePx={28}
+                            className="role-card-avatar-collab"
+                          />
                           <span className={getStatusDotClass(card.status)} />
                           <span className="role-card-title" style={{ color: card.roleColor }}>
                             {card.title}

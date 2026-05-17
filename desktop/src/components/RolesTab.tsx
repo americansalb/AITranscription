@@ -7,7 +7,7 @@
 // is R5; rotation-strip tooltip is R6.
 import { useEffect, useState } from "react";
 import type { ParsedProject, RoleConfig } from "../lib/collabTypes";
-import { generateAvatarDataUrl } from "../utils/proceduralAvatar";
+import { Avatar } from "./Avatar";
 
 const PROJECT_DIR_STORAGE_KEY = "vaak_collab_project_dir";
 
@@ -82,26 +82,17 @@ export function RolesTab() {
         </p>
       </div>
       <div className="roles-grid">
-        {roles.map(({ slug, role, avatarUrl }) => {
-          // Phase 2.B per ui-architect:1 msg 4645 + avatar v6.9 §3.1 + §4:
-          // procedural is the default + fallback; avatar_url overrides when set,
-          // with onError fallback to procedural per spec §4.
-          const proceduralSrc = generateAvatarDataUrl(slug);
-          const altText = `${role.title || slug} (${slug}) avatar`;
-          return (
+        {roles.map(({ slug, role, avatarUrl }) => (
+          // Phase 2.B Part 2 per ui-architect:1 msg 4656: shared <Avatar>.
+          // Role-definition surface — no instance prop, alt text omits :${instance}.
           <article key={slug} className="role-card" tabIndex={0}>
             <div className="role-card-avatar">
-              <img
-                src={avatarUrl || proceduralSrc}
-                alt={altText}
+              <Avatar
+                slug={slug}
+                title={role.title}
+                avatarUrl={avatarUrl}
+                sizePx={48}
                 className="role-card-avatar-img"
-                loading="lazy"
-                onError={(e) => {
-                  // avatar_url load failure (HTTPS 404, decode error, etc.) →
-                  // fall back to procedural per spec §4 fallback contract.
-                  const img = e.currentTarget;
-                  if (img.src !== proceduralSrc) img.src = proceduralSrc;
-                }}
               />
             </div>
             <div className="role-card-body">
@@ -115,8 +106,7 @@ export function RolesTab() {
               </div>
             </div>
           </article>
-          );
-        })}
+        ))}
       </div>
     </div>
   );
