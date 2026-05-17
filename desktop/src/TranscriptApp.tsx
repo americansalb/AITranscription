@@ -11,6 +11,7 @@ import {
 } from "./lib/sessionManager";
 import { transcriptListener } from "./lib/transcriptListener";
 import { CollabTab } from "./components/CollabTab";
+import { RolesTab } from "./components/RolesTab";
 import { useToast } from "./components/Toast";
 import { PreferencesTab } from "./components/PreferencesTab";
 import { SessionsPanel } from "./components/SessionsPanel";
@@ -30,7 +31,7 @@ import {
 } from "./lib/queueStore";
 
 // Tab type for navigation
-type TabType = "preferences" | "sessions" | "collab";
+type TabType = "preferences" | "sessions" | "roles" | "collab";
 
 
 export function TranscriptApp() {
@@ -312,6 +313,9 @@ export function TranscriptApp() {
         >
           Preferences
         </button>
+        {/* Roles tab button is rendered AFTER Sessions, BEFORE Collab below.
+            Preferences ArrowLeft wraps to Collab (last tab); Preferences ArrowRight
+            goes to Sessions. Order: Preferences → Sessions → Roles → Collab. */}
         <button
           className={`main-tab ${activeTab === "sessions" ? "active" : ""}`}
           onClick={() => setActiveTab("sessions")}
@@ -320,11 +324,25 @@ export function TranscriptApp() {
           aria-controls="panel-sessions"
           tabIndex={activeTab === "sessions" ? 0 : -1}
           onKeyDown={(e) => {
-            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("collab"); }
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("roles"); }
             if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("preferences"); }
           }}
         >
           Sessions
+        </button>
+        <button
+          className={`main-tab ${activeTab === "roles" ? "active" : ""}`}
+          onClick={() => setActiveTab("roles")}
+          role="tab"
+          aria-selected={activeTab === "roles"}
+          aria-controls="panel-roles"
+          tabIndex={activeTab === "roles" ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("collab"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("sessions"); }
+          }}
+        >
+          Roles
         </button>
         <button
           className={`main-tab ${activeTab === "collab" ? "active" : ""}`}
@@ -335,7 +353,7 @@ export function TranscriptApp() {
           tabIndex={activeTab === "collab" ? 0 : -1}
           onKeyDown={(e) => {
             if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("preferences"); }
-            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("sessions"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("roles"); }
           }}
         >
           Collab
@@ -354,6 +372,16 @@ export function TranscriptApp() {
           onVoiceDetailChange={handleVoiceDetailChange}
           onVoiceAutoChange={handleVoiceAutoChange}
         />
+      )}
+
+      {/* Roles Tab — per roles-tab-spec-2026-05-17.md v2 R1 (Roster view skeleton).
+          Mounted only when active to avoid initial-load IPC for users who don't
+          visit this tab. (Different pattern than CollabTab which is always mounted
+          for event-listener continuity — RolesTab has no live listeners.) */}
+      {activeTab === "roles" && (
+        <div id="panel-roles" role="tabpanel" aria-labelledby="tab-roles" style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+          <RolesTab />
+        </div>
       )}
 
       {/* Collab Tab — always mounted so event listeners stay active */}
