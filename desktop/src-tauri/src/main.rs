@@ -1215,7 +1215,15 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                         let vaak_dir = std::path::Path::new(&dir).join(".vaak");
                         let project_path = vaak_dir.join("project.json");
                         let sessions_path = vaak_dir.join("sessions.json");
-                        let board_path = vaak_dir.join("board.jsonl");
+                        // Section-aware per dev-challenger:1 msg 4070 catch on dfbfc57:
+                        // polling watcher (line 5290) uses active_board_path which
+                        // resolves to .vaak/sections/<section>/board.jsonl for non-default
+                        // sections. Hardcoding .vaak/board.jsonl here would miss real
+                        // board writes when the active section is e.g. "5-12", causing
+                        // A0 dedup to leak (tuple's board element never changes from
+                        // active-section activity) and false-emit when default-section
+                        // board.jsonl shifts independently.
+                        let board_path = collab::active_board_path(&dir);
                         let claims_path = vaak_dir.join("claims.json");
 
                         let current_mtimes = (
