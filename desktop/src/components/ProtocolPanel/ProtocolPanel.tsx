@@ -424,13 +424,22 @@ function CompactMicLine({
             // opacity + animation, not by color hue. Sets --role-color CSS
             // variable; CSS uses color-mix() to derive per-state fills.
             const [seatRole, seatInstanceStr] = seat.split(':');
-            // Truthy check covers undefined (no colon) AND empty-string (trailing
-            // colon like "developer:") — both map to instance=undefined → Avatar
-            // uses role-definition alt-text branch. Per dev-challenger:0 msg 4705
-            // F-DC-AVATAR-2C-SENTINEL (same class as F-EA-VACANT-SENTINEL-CLASS
-            // from Phase 2.B Part 2). `Number("")` would otherwise return 0 and
-            // falsely route to instance-runtime branch with ":0" alt text.
-            const seatInstance = seatInstanceStr ? Number(seatInstanceStr) : undefined;
+            // Defensive degenerate-input guard per evil-architect:0 msg 4707
+            // F-EA-EMPTY-ROLE-CLAMP — seat like ":0" produces empty seatRole;
+            // skip rendering rather than emit Avatar with slug="" + falsely-
+            // hashing-to-variant-0 silhouette + degenerate alt text " (:0)".
+            if (!seatRole) return null;
+            // Truthy + Number.isInteger guards cover three F-EA/F-DC sentinel-
+            // class failure modes (see Phase 2.B Part 2 sister-fix 8763927 +
+            // Phase 2.C sister-fix b8ac702 + evil-architect:0 msg 4707):
+            //   (a) undefined  ("human", no colon)              → Number(undefined)=NaN → !isInteger → undefined ✓
+            //   (b) empty-str  ("developer:", trailing colon)   → Number("")=0 → IS integer but seatInstanceStr is falsy → undefined ✓
+            //   (c) non-numeric("developer:abc", corruption)    → Number("abc")=NaN → !isInteger → undefined ✓
+            //   (d) "0", "1", etc. (legitimate instance)        → Number(...)=int → IS integer → instance ✓
+            // Either case-a/b/c routes to Avatar's role-definition alt-text
+            // branch (no false ":0" or ":NaN" announced to screen readers).
+            const seatInstanceNum = seatInstanceStr ? Number(seatInstanceStr) : NaN;
+            const seatInstance = Number.isInteger(seatInstanceNum) ? seatInstanceNum : undefined;
             const seatColor = getRoleColor(seatRole);
             // Phase 2.C per ui-arch:1 msg 4687 + spec §3.3.1: 24px avatar + speaker-
             // glow ring (CSS box-shadow handled via is-current state class). Rotation
