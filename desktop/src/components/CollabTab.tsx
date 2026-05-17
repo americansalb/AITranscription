@@ -2882,11 +2882,28 @@ When multiple instances of this role are active:
   // Wave 1.5 partial B1+B2+B3 per architect Ruling 7 + human msg 4264:
   // cache the IIFE's derived data (activeCount, voteTallies, voteProposalIds,
   // voteResponseIds, allMessages, totalCount, hasHiddenMessages, visibleMessages)
-  // keyed on [project?.messages, project?.sessions, visibleMsgLimit] so per-render
-  // O(N²) walks + Set allocations only happen when underlying data actually changes.
-  // Per-keystroke composer re-renders still re-execute the IIFE BODY but skip the
-  // expensive computation. Full IIFE-to-useMemo lift (~425 LOC of JSX) deferred to
-  // next focused work cycle per developer:1 msg 4272 context-budget honest disclosure.
+  // so per-render O(N²) walks + Set allocations only happen when underlying
+  // data actually changes. Per-keystroke composer re-renders still re-execute
+  // the IIFE BODY but skip the expensive computation. Full IIFE-to-useMemo lift
+  // (~425 LOC of JSX) deferred to next focused work cycle per developer:1
+  // msg 4272 context-budget honest disclosure.
+  //
+  // Content-stable dep proxy per ui-architect:1 msg 4279 F-UI-A:
+  // `project` is a fresh object reference every heartbeat tick (per line 2497
+  // comment chain documenting prior scroll-effect bugs). Bare `[project?.messages]`
+  // as a useMemo dep would invalidate every 30s heartbeat → cache becomes no-op,
+  // O(N²) walks re-execute defeating Wave 1.5's perf intent. Per board.jsonl
+  // append-only invariant: `messagesLength + lastMsgId` covers append + delete-
+  // from-end + in-place-edit-on-tail. Edge case (in-place mutation on non-tail
+  // message at index < N-1): currently impossible per write-side audit; if ever
+  // introduced, this dep proxy needs to change.
+  const messagesLength = project?.messages?.length ?? 0;
+  const lastMsgId = project?.messages?.[messagesLength - 1]?.id;
+  const sessionsLength = project?.sessions?.length ?? 0;
+  // Sessions can change status without length change; sessions[i].status hash
+  // is content-stable enough since activeCount only needs status changes.
+  const sessionsActiveCount = project?.sessions?.filter((s) => s.status === "active").length ?? 0;
+
   const messageListDerivedCache = useMemo(() => {
     const sessions = project?.sessions || [];
     const messages = project?.messages || [];
@@ -2914,7 +2931,13 @@ When multiple instances of this role are active:
       hasHiddenMessages,
       visibleMessages,
     };
-  }, [project?.messages, project?.sessions, visibleMsgLimit]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // ^ deps are intentionally content-proxy (messagesLength + lastMsgId +
+    // sessionsLength + sessionsActiveCount) not full project ref, to avoid
+    // heartbeat-fresh-ref cache defeat per ui-architect:1 msg 4279 F-UI-A.
+    // Linter would suggest [project?.messages, project?.sessions, visibleMsgLimit]
+    // which IS the no-op pattern this fix addresses.
+  }, [messagesLength, lastMsgId, sessionsLength, sessionsActiveCount, visibleMsgLimit]);
 
   // ===== WATCHING STATE: Project Dashboard =====
   if (watching) {
