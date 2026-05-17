@@ -418,7 +418,8 @@
 .protocol-al-seat-pill {
   display: inline-flex;
   align-items: center;
-  padding: 5px 12px;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
   border-radius: 999px;
   font-size: 0.82rem;
   font-weight: 600;
@@ -427,6 +428,20 @@
   white-space: nowrap;
   line-height: 1.2;
   transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+/* Phase 2.C per ui-architect:1 msg 4687 + spec §3.3.1 rotation strip surface:
+ * 24px avatar prepended inside each pill (Avatar.tsx carries width/height/borderRadius
+ * inline). Speaker-glow ring uses 2px box-shadow on the current-speaker's avatar only —
+ * complements the existing pill-wide pulse animation without doubling the visual weight. */
+.protocol-al-seat-avatar {
+  flex: 0 0 auto;
+}
+.protocol-al-seat-pill.is-current .protocol-al-seat-avatar {
+  box-shadow: 0 0 0 2px var(--collab-accent, #6366f1);
+}
+.protocol-al-seat-label {
+  display: inline-block;
 }
 
 /* Human msg 3079 color-consistency pass — pills carry role identity color

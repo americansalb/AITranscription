@@ -3177,6 +3177,7 @@ When multiple instances of this role are active:
           section={activeSection || "default"}
           selfSeat={null /* this is the human's view; selfSeat = null */}
           rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+          rolesConfig={project?.config?.roles}
         />
 
         {/* Settings Panel */}

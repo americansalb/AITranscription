@@ -16,6 +16,8 @@ import { SeatChip } from './SeatChip';
 import { getRoleColor } from '../../utils/roleColors';
 import { PhasePlanEditor } from './PhasePlanEditor';
 import { HealthPill } from './HealthPill';
+import { Avatar } from '../Avatar';
+import type { RoleConfig } from '../../lib/collabTypes';
 import './ProtocolPanel.css';
 
 export type ProtocolPanelProps = {
@@ -23,6 +25,10 @@ export type ProtocolPanelProps = {
   section: string;
   selfSeat: string | null; // "role:N" of the current viewer (null if human)
   rosterRoles: string[]; // role slugs from project config (legacy — CollabTab owns roster post-#1100)
+  /** Full role config map for avatar_url override lookup in the rotation strip.
+   * Optional — when omitted, rotation pills render procedural avatars only.
+   * Phase 2.C per ui-arch:1 msg 4687 + spec §3.3.1 rotation-strip surface. */
+  rolesConfig?: Record<string, RoleConfig>;
   defaultExpanded?: boolean; // human #1100: panel collapsed by default; tests + power users may force-expand
 };
 
@@ -31,6 +37,7 @@ export function ProtocolPanel({
   section,
   selfSeat,
   rosterRoles: _rosterRoles,
+  rolesConfig,
   defaultExpanded = false,
 }: ProtocolPanelProps) {
   // _rosterRoles is intentionally unused after the human #1100 collapse —
@@ -112,6 +119,7 @@ export function ProtocolPanel({
           selfSeat={selfSeat}
           now={now}
           mutate={mutate}
+          rolesConfig={rolesConfig}
         />
         <HealthPill projectDir={projectDir} />
       </div>
@@ -283,12 +291,14 @@ function CompactMicLine({
   selfSeat,
   now,
   mutate,
+  rolesConfig,
 }: {
   protocol: Protocol;
   heartbeats: Heartbeats;
   selfSeat: string | null;
   now: number;
   mutate: (action: string, args?: object) => Promise<unknown>;
+  rolesConfig?: Record<string, RoleConfig>;
 }) {
   const speaker = protocol.floor.current_speaker;
   const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
@@ -413,8 +423,14 @@ function CompactMicLine({
             // titles). State (current/next/idle) is expressed via background
             // opacity + animation, not by color hue. Sets --role-color CSS
             // variable; CSS uses color-mix() to derive per-state fills.
-            const seatRole = seat.split(':')[0];
+            const [seatRole, seatInstanceStr] = seat.split(':');
+            const seatInstance = seatInstanceStr !== undefined ? Number(seatInstanceStr) : undefined;
             const seatColor = getRoleColor(seatRole);
+            // Phase 2.C per ui-arch:1 msg 4687 + spec §3.3.1: 24px avatar + speaker-
+            // glow ring (CSS box-shadow handled via is-current state class). Rotation
+            // pills are instance-runtime surface → pass instance for proper alt text.
+            const seatAvatarUrl = rolesConfig?.[seatRole]?.avatar_url || null;
+            const seatTitle = rolesConfig?.[seatRole]?.title || seatRole;
             return (
               <span key={seat} className="protocol-al-rotation-item" role="listitem">
                 {i > 0 && <span className="protocol-al-arrow" aria-hidden="true">→</span>}
@@ -422,7 +438,15 @@ function CompactMicLine({
                   className={`protocol-al-seat-pill ${stateClass}`}
                   style={{ ['--role-color' as string]: seatColor } as React.CSSProperties}
                 >
-                  {seat}
+                  <Avatar
+                    slug={seatRole}
+                    title={seatTitle}
+                    instance={seatInstance}
+                    avatarUrl={seatAvatarUrl}
+                    sizePx={24}
+                    className="protocol-al-seat-avatar"
+                  />
+                  <span className="protocol-al-seat-label">{seat}</span>
                 </span>
               </span>
             );
