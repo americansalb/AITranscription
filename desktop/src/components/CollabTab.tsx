@@ -781,11 +781,18 @@ export function CollabTab() {
   const [selectedRole, setSelectedRole] = useState<RoleStatus | null>(null);
   const [msgTo, setMsgTo] = useState("all");
   const [msgBody, setMsgBodyRaw] = useState(() => localStorage.getItem("vaak_compose_draft") || "");
-  const MAX_DRAFT_LENGTH = 50000; // 50KB cap to prevent unbounded localStorage growth
+  // Per human msg 4346 "make it so i can add ulimited text to you" — cap removed.
+  // localStorage will accept arbitrarily large strings up to ~5-10MB browser limit;
+  // if the draft exceeds localStorage quota, setItem silently fails (caught + ignored
+  // so typing isn't interrupted). In-memory msgBody state remains unlimited regardless.
   const setMsgBody = (v: string) => {
-    const capped = v.length > MAX_DRAFT_LENGTH ? v.slice(0, MAX_DRAFT_LENGTH) : v;
-    setMsgBodyRaw(capped);
-    localStorage.setItem("vaak_compose_draft", capped);
+    setMsgBodyRaw(v);
+    try {
+      localStorage.setItem("vaak_compose_draft", v);
+    } catch {
+      // QuotaExceededError on very large drafts → fall back to no-persist;
+      // user's in-progress text remains usable until window close.
+    }
   };
   const [sending, setSending] = useState(false);
   // Slice 4 — mic_to composer state. Spec §4.3: regex is hint, metadata is
