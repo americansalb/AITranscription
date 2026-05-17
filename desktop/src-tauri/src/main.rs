@@ -1198,12 +1198,57 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
 
             // ===== Project notify endpoint (fire-and-forget ping from MCP sidecar) =====
             if method == "POST" && url == "/collab/notify" {
-                // Emit event to ALL windows so the collab tab re-reads project files
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.emit("project-file-changed", serde_json::json!({}));
-                }
-                if let Some(window) = app_handle.get_webview_window("transcript") {
-                    let _ = window.emit("project-file-changed", serde_json::json!({}));
+                // A0 (Wave 1 slowdown fix per architect msg 3651 + Ruling 6 v4):
+                // mtime-tuple dedup. The MCP sidecar fires this endpoint on EVERY
+                // board write (heartbeat × N agents + every board.jsonl append +
+                // every claims.json update). With 7+ active agents that's the
+                // dominant source of setProject re-renders. Mirror of the polling
+                // watcher's dedup at line 5247 — only emit project-file-changed
+                // when the 4-mtime tuple actually changed since last emit.
+                //
+                // Skip dedup if no dir watched (early in startup). Skip dedup
+                // gracefully on metadata-read failure — emit (preserves old
+                // fire-on-every-call behavior for safety) rather than swallow.
+                let should_emit = {
+                    let dir_opt = get_project_watched_dir().lock().clone();
+                    if let Some(dir) = dir_opt {
+                        let vaak_dir = std::path::Path::new(&dir).join(".vaak");
+                        let project_path = vaak_dir.join("project.json");
+                        let sessions_path = vaak_dir.join("sessions.json");
+                        let board_path = vaak_dir.join("board.jsonl");
+                        let claims_path = vaak_dir.join("claims.json");
+
+                        let current_mtimes = (
+                            project_path.metadata().ok().and_then(|m| m.modified().ok()),
+                            sessions_path.metadata().ok().and_then(|m| m.modified().ok()),
+                            board_path.metadata().ok().and_then(|m| m.modified().ok()),
+                            claims_path.metadata().ok().and_then(|m| m.modified().ok()),
+                        );
+
+                        let mut last_lock = get_notify_last_mtimes().lock();
+                        let changed = current_mtimes.0 != last_lock.0
+                            || current_mtimes.1 != last_lock.1
+                            || current_mtimes.2 != last_lock.2
+                            || current_mtimes.3 != last_lock.3;
+
+                        if changed {
+                            *last_lock = current_mtimes;
+                        }
+                        changed
+                    } else {
+                        // No dir watched yet — fall through to emit (no dedup).
+                        true
+                    }
+                };
+
+                if should_emit {
+                    // Emit event to ALL windows so the collab tab re-reads project files
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.emit("project-file-changed", serde_json::json!({}));
+                    }
+                    if let Some(window) = app_handle.get_webview_window("transcript") {
+                        let _ = window.emit("project-file-changed", serde_json::json!({}));
+                    }
                 }
                 let response = Response::from_string(r#"{"status":"ok"}"#)
                     .with_header(
@@ -2143,6 +2188,18 @@ static PROJECT_LAST_MTIMES: std::sync::OnceLock<Mutex<(Option<std::time::SystemT
 /// — the UI's mic indicator becomes stale until the next Tauri-side mutation.
 static PROTOCOL_LAST_MTIME: std::sync::OnceLock<Mutex<Option<(String, std::time::SystemTime)>>> = std::sync::OnceLock::new();
 
+/// A0 (Wave 1 slowdown fix per architect msg 3651 + Ruling 6 v4):
+/// dedup state for the /collab/notify HTTP endpoint. The MCP sidecar fires
+/// POST /collab/notify on EVERY board write (sessions.json heartbeat × N
+/// agents + board.jsonl appends + claims.json updates) with no dedup at
+/// either end. With 7+ active agents this fires multiple times/second,
+/// each triggering setProject on the React side → full CollabTab re-render.
+/// Mirror of PROJECT_LAST_MTIMES (line 5247 polling watcher dedup) but
+/// distinct mutex so the push-path and poll-path dedup don't interfere.
+/// Reset implicitly on dir change because the four-tuple of mtimes from
+/// a different dir is guaranteed to differ.
+static NOTIFY_LAST_MTIMES: std::sync::OnceLock<Mutex<(Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>)>> = std::sync::OnceLock::new();
+
 fn get_project_watched_dir() -> &'static Mutex<Option<String>> {
     PROJECT_WATCHED_DIR.get_or_init(|| Mutex::new(None))
 }
@@ -2153,6 +2210,10 @@ fn get_project_last_mtimes() -> &'static Mutex<(Option<std::time::SystemTime>, O
 
 fn get_protocol_last_mtime() -> &'static Mutex<Option<(String, std::time::SystemTime)>> {
     PROTOCOL_LAST_MTIME.get_or_init(|| Mutex::new(None))
+}
+
+fn get_notify_last_mtimes() -> &'static Mutex<(Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>)> {
+    NOTIFY_LAST_MTIMES.get_or_init(|| Mutex::new((None, None, None, None)))
 }
 
 /// Tauri command: start watching a project directory for .vaak/ file changes
