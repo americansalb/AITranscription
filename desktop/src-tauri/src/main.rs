@@ -4353,6 +4353,18 @@ fn iso_now() -> String {
 
 #[tauri::command]
 fn send_team_message(dir: String, to: String, subject: String, body: String, msg_type: Option<String>, metadata: Option<serde_json::Value>) -> Result<u64, String> {
+    // DoS guard per evil-arch msg 4522 / dev-challenger msg 4516 flag on 171d832
+    // (removed frontend 50KB cap). Without backend guard, multi-GB bodies would
+    // fill disk via board.jsonl append. 10MB is well above any legitimate human-
+    // composed message (entire books fit in ~3MB plain text) but well below
+    // anything that would meaningfully impact disk in a single message.
+    const MAX_MESSAGE_BODY_BYTES: usize = 10 * 1024 * 1024;
+    if body.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(format!(
+            "Message body too large: {} bytes exceeds {} byte limit. Send as multiple smaller messages or attach as file (future feature).",
+            body.len(), MAX_MESSAGE_BODY_BYTES
+        ));
+    }
     let dir = validate_project_dir(&dir)?;
     let board_path = collab::active_board_path(&dir);
 
