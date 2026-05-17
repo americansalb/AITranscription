@@ -17,6 +17,7 @@ import { getRoleColor } from '../../utils/roleColors';
 import { PhasePlanEditor } from './PhasePlanEditor';
 import { HealthPill } from './HealthPill';
 import { Avatar } from '../Avatar';
+import { StatsRadar } from '../StatsRadar';
 import type { RoleConfig } from '../../lib/collabTypes';
 import './ProtocolPanel.css';
 
@@ -300,6 +301,10 @@ function CompactMicLine({
   mutate: (action: string, args?: object) => Promise<unknown>;
   rolesConfig?: Record<string, RoleConfig>;
 }) {
+  // Phase 2.F per ui-architect:1 msg 4731 + spec §3.6.5 + human msg 4347:
+  // hover/focus rotation-strip avatar → popover with 80px StatsRadar.
+  // Hovered seat string ("slug:instance") drives tooltip render; null = no hover.
+  const [hoveredSeat, setHoveredSeat] = useState<string | null>(null);
   const speaker = protocol.floor.current_speaker;
   const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
   const hb = speaker ? heartbeats[speaker] : undefined;
@@ -446,12 +451,23 @@ function CompactMicLine({
             // pills are instance-runtime surface → pass instance for proper alt text.
             const seatAvatarUrl = rolesConfig?.[seatRole]?.avatar_url || null;
             const seatTitle = rolesConfig?.[seatRole]?.title || seatRole;
+            // Phase 2.F: hover/focus on the pill → mini stats radar popover.
+            // Tooltip positioning is relative to the pill (CSS handles absolute
+            // placement above the pill); pointer-events:none on tooltip prevents
+            // re-entering hover loop when crossing between pill and tooltip.
+            const isHovered = hoveredSeat === seat;
+            const seatStats = rolesConfig?.[seatRole]?.stats;
             return (
               <span key={seat} className="protocol-al-rotation-item" role="listitem">
                 {i > 0 && <span className="protocol-al-arrow" aria-hidden="true">→</span>}
                 <span
                   className={`protocol-al-seat-pill ${stateClass}`}
                   style={{ ['--role-color' as string]: seatColor } as React.CSSProperties}
+                  onMouseEnter={() => setHoveredSeat(seat)}
+                  onMouseLeave={() => setHoveredSeat(prev => prev === seat ? null : prev)}
+                  onFocus={() => setHoveredSeat(seat)}
+                  onBlur={() => setHoveredSeat(prev => prev === seat ? null : prev)}
+                  tabIndex={0}
                 >
                   <Avatar
                     slug={seatRole}
@@ -462,6 +478,16 @@ function CompactMicLine({
                     className="protocol-al-seat-avatar"
                   />
                   <span className="protocol-al-seat-label">{seat}</span>
+                  {isHovered && (
+                    <span
+                      className="protocol-al-seat-tooltip"
+                      role="tooltip"
+                      aria-label={`${seatTitle} stats profile`}
+                    >
+                      <StatsRadar slug={seatRole} stats={seatStats} sizePx={80} />
+                      <span className="protocol-al-seat-tooltip-name">{seatTitle}</span>
+                    </span>
+                  )}
                 </span>
               </span>
             );

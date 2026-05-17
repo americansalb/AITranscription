@@ -444,6 +444,38 @@
   display: inline-block;
 }
 
+/* Phase 2.F per ui-architect:1 msg 4731 + spec §3.6.5 (rotation-strip-tooltip
+ * stats mini-radar). Hover/focus on pill → popover above with 80px StatsRadar +
+ * role title. Positioned absolute above the pill; pointer-events:none prevents
+ * hover-loop when crossing pill→tooltip boundary. */
+.protocol-al-seat-pill {
+  position: relative;
+}
+.protocol-al-seat-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 24, 35, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  z-index: 100;
+  white-space: nowrap;
+  font-weight: 500;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.protocol-al-seat-tooltip-name {
+  font-size: 11px;
+  color: var(--collab-text-primary, #e7e9ee);
+  letter-spacing: 0.02em;
+}
+
 /* Human msg 3079 color-consistency pass — pills carry role identity color
  * (canonical from roleColors.ts via inline --role-color CSS variable).
  * State (current/next/idle) expressed via opacity + animation, not hue.
