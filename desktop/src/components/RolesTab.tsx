@@ -7,7 +7,7 @@
 // is R5; rotation-strip tooltip is R6.
 import { useEffect, useState } from "react";
 import type { ParsedProject, RoleConfig } from "../lib/collabTypes";
-import { getRoleColor } from "../utils/roleColors";
+import { generateAvatarDataUrl } from "../utils/proceduralAvatar";
 
 const PROJECT_DIR_STORAGE_KEY = "vaak_collab_project_dir";
 
@@ -82,18 +82,27 @@ export function RolesTab() {
         </p>
       </div>
       <div className="roles-grid">
-        {roles.map(({ slug, role, avatarUrl }) => (
+        {roles.map(({ slug, role, avatarUrl }) => {
+          // Phase 2.B per ui-architect:1 msg 4645 + avatar v6.9 §3.1 + §4:
+          // procedural is the default + fallback; avatar_url overrides when set,
+          // with onError fallback to procedural per spec §4.
+          const proceduralSrc = generateAvatarDataUrl(slug);
+          const altText = `${role.title || slug} (${slug}) avatar`;
+          return (
           <article key={slug} className="role-card" tabIndex={0}>
-            <div
-              className="role-card-avatar"
-              style={{ backgroundColor: getRoleColor(slug) }}
-              aria-hidden="true"
-            >
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="" className="role-card-avatar-img" loading="lazy" />
-              ) : (
-                <span className="role-card-avatar-initial">{slug.charAt(0).toUpperCase()}</span>
-              )}
+            <div className="role-card-avatar">
+              <img
+                src={avatarUrl || proceduralSrc}
+                alt={altText}
+                className="role-card-avatar-img"
+                loading="lazy"
+                onError={(e) => {
+                  // avatar_url load failure (HTTPS 404, decode error, etc.) →
+                  // fall back to procedural per spec §4 fallback contract.
+                  const img = e.currentTarget;
+                  if (img.src !== proceduralSrc) img.src = proceduralSrc;
+                }}
+              />
             </div>
             <div className="role-card-body">
               <h3 className="role-card-title">{role.title || slug}</h3>
@@ -106,7 +115,8 @@ export function RolesTab() {
               </div>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
