@@ -40,6 +40,29 @@ export interface AvatarProps {
   className?: string;
 }
 
+/** Parse a "slug:instance" seat string (or bare "slug") into Avatar props.
+ *
+ * Extracted from Phase 2.C parsing logic (ProtocolPanel.tsx 81711a0) because
+ * Phase 2.D message-header avatars + future Phase 2.E/F consumers all need
+ * the same normalization. Per ui-architect:1 msg 4719 helper-extraction
+ * recommendation (pattern appearing in 3+ places).
+ *
+ * Sentinel-class discipline (F-EA-VACANT-SENTINEL-CLASS + F-EA-EMPTY-STRING-
+ * INSTANCE-CLAMP + F-EA-NAN-INSTANCE-CLAMP + F-EA-EMPTY-ROLE-CLAMP from
+ * Phase 2.B Part 2 + Phase 2.C sister-fix cycles):
+ *   - Empty slug ("", ":0") → returns slug:"" (caller decides to render or not)
+ *   - Empty instance ("developer:") → instance:undefined → role-definition alt
+ *   - Non-numeric instance ("developer:abc") → instance:undefined → role-definition
+ *   - Valid "slug:N" → instance:N → instance-runtime alt
+ *   - Bare "slug" → instance:undefined → role-definition alt
+ */
+export function parseSeatInstance(seat: string): { slug: string; instance: number | undefined } {
+  const [slug, instanceStr] = seat.split(":");
+  const instanceNum = instanceStr ? Number(instanceStr) : NaN;
+  const instance = Number.isInteger(instanceNum) ? instanceNum : undefined;
+  return { slug: slug || "", instance };
+}
+
 export function Avatar({ slug, title, instance, avatarUrl, sizePx, theme = "dark", className }: AvatarProps) {
   const proceduralSrc = generateAvatarDataUrl(slug, theme);
   const displayTitle = title || slug;

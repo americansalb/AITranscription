@@ -10,7 +10,7 @@ import { useToast } from "./Toast";
 // (Slice 6 owns that decom) but the UI surface is unified.
 import { ProtocolPanel } from "./ProtocolPanel";
 import { AssemblyControls } from "./AssemblyControls";
-import { Avatar } from "./Avatar";
+import { Avatar, parseSeatInstance } from "./Avatar";
 import { useProtocolState } from "../hooks/useProtocolState";
 import { detectMicTo, type SeatRef } from "./ProtocolPanel/composer/micToDetector";
 import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
@@ -4604,10 +4604,14 @@ When multiple instances of this role are active:
               // Submissions render with a distinct visual style
               if (msg.type === "submission") {
                 const fromRole = msg.from.split(":")[0];
+                const { slug: fromSlug, instance: fromInstance } = parseSeatInstance(msg.from);
+                const fromAvatarUrl = project?.config.roles[fromSlug]?.avatar_url || null;
+                const fromTitle = project?.config.roles[fromSlug]?.title || fromSlug;
                 return (
                   <div key={msg.id} className="submission-card" style={{ borderLeftColor: getRoleColor(fromRole) }}>
                     <div className="message-card-header">
                       <span className="message-card-id">#{msg.id}</span>
+                      <Avatar slug={fromSlug} title={fromTitle} instance={fromInstance} avatarUrl={fromAvatarUrl} sizePx={20} className="message-card-avatar" />
                       <span className="message-card-from" style={{ color: getRoleColor(fromRole) }}>{msg.from}</span>
                       <span className="message-card-arrow">&rarr;</span>
                       <span className="message-card-to" style={{ color: getRoleColor(msg.to) }}>{msg.to}</span>
@@ -4715,6 +4719,9 @@ When multiple instances of this role are active:
 
               const fromRole = msg.from.split(":")[0];
               const borderColor = getRoleColor(fromRole);
+              const { slug: fromSlug, instance: fromInstance } = parseSeatInstance(msg.from);
+              const fromAvatarUrl = project?.config.roles[fromSlug]?.avatar_url || null;
+              const fromTitle = project?.config.roles[fromSlug]?.title || fromSlug;
               return (
                 <div
                   key={msg.id}
@@ -4723,6 +4730,7 @@ When multiple instances of this role are active:
                 >
                   <div className="message-card-header">
                     <span className="message-card-id">#{msg.id}</span>
+                    <Avatar slug={fromSlug} title={fromTitle} instance={fromInstance} avatarUrl={fromAvatarUrl} sizePx={20} className="message-card-avatar" />
                     <span className="message-card-from" style={{ color: getRoleColor(fromRole) }}>
                       {msg.from}
                     </span>
