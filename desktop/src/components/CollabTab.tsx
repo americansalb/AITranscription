@@ -2879,6 +2879,43 @@ When multiple instances of this role are active:
     ).length;
   }, [project?.messages, answerLookup]);
 
+  // Wave 1.5 partial B1+B2+B3 per architect Ruling 7 + human msg 4264:
+  // cache the IIFE's derived data (activeCount, voteTallies, voteProposalIds,
+  // voteResponseIds, allMessages, totalCount, hasHiddenMessages, visibleMessages)
+  // keyed on [project?.messages, project?.sessions, visibleMsgLimit] so per-render
+  // O(N²) walks + Set allocations only happen when underlying data actually changes.
+  // Per-keystroke composer re-renders still re-execute the IIFE BODY but skip the
+  // expensive computation. Full IIFE-to-useMemo lift (~425 LOC of JSX) deferred to
+  // next focused work cycle per developer:1 msg 4272 context-budget honest disclosure.
+  const messageListDerivedCache = useMemo(() => {
+    const sessions = project?.sessions || [];
+    const messages = project?.messages || [];
+    const activeCount = sessions.filter((s) => s.status === "active").length;
+    const voteTallies = getActiveVotes(messages, activeCount);
+    const voteProposalIds = new Set(voteTallies.map((t) => t.proposalId));
+    const voteResponseIds = new Set(
+      messages
+        .filter((m) => m.type === "vote" && m.metadata?.in_reply_to)
+        .map((m) => m.id)
+    );
+    const allMessages = messages;
+    const totalCount = allMessages.length;
+    const hasHiddenMessages = totalCount > visibleMsgLimit;
+    const visibleMessages = hasHiddenMessages
+      ? allMessages.slice(totalCount - visibleMsgLimit)
+      : allMessages;
+    return {
+      activeCount,
+      voteTallies,
+      voteProposalIds,
+      voteResponseIds,
+      allMessages,
+      totalCount,
+      hasHiddenMessages,
+      visibleMessages,
+    };
+  }, [project?.messages, project?.sessions, visibleMsgLimit]);
+
   // ===== WATCHING STATE: Project Dashboard =====
   if (watching) {
     const hasNoSessions = !project || project.sessions.length === 0;
@@ -4289,24 +4326,19 @@ When multiple instances of this role are active:
             </div>
           ) : (
             (() => {
-              const activeCount = project!.sessions.filter(
-                (s) => s.status === "active"
-              ).length;
-              const voteTallies = getActiveVotes(project!.messages, activeCount);
-              const voteProposalIds = new Set(voteTallies.map((t) => t.proposalId));
-              // IDs of response votes — hide from timeline
-              const voteResponseIds = new Set(
-                project!.messages
-                  .filter((m) => m.type === "vote" && m.metadata?.in_reply_to)
-                  .map((m) => m.id)
-              );
-
-              const allMessages = project!.messages;
-              const totalCount = allMessages.length;
-              const hasHiddenMessages = totalCount > visibleMsgLimit;
-              const visibleMessages = hasHiddenMessages
-                ? allMessages.slice(totalCount - visibleMsgLimit)
-                : allMessages;
+              // Wave 1.5 partial B1+B2+B3 per human msg 4264 priority #1:
+              // derived values pulled from useMemo cache above, not recomputed per render.
+              // IIFE still re-executes on parent re-render (keystroke etc.) but inner
+              // O(N²) walks and Set allocations are cached. Full IIFE-to-useMemo lift
+              // deferred to next focused work cycle.
+              const activeCount = messageListDerivedCache.activeCount;
+              const voteTallies = messageListDerivedCache.voteTallies;
+              const voteProposalIds = messageListDerivedCache.voteProposalIds;
+              const voteResponseIds = messageListDerivedCache.voteResponseIds;
+              const allMessages = messageListDerivedCache.allMessages;
+              const totalCount = messageListDerivedCache.totalCount;
+              const hasHiddenMessages = messageListDerivedCache.hasHiddenMessages;
+              const visibleMessages = messageListDerivedCache.visibleMessages;
 
               return (<>
               {hasHiddenMessages && (
