@@ -1,14 +1,22 @@
 import { useEffect, useState } from "react";
+import { Avatar } from "./Avatar";
 
 interface RoleBriefingModalProps {
   projectDir: string;
   roleSlug: string;
   roleTitle: string;
   roleColor: string;
+  /** Optional avatar_url override from project.config.roles[slug].avatar_url.
+   * Forwarded to <Avatar> per character-avatar-system-spec v6.9 §3.1 + §4. */
+  avatarUrl?: string | null;
+  /** Optional live instance number. Pass for active-role detail surfaces;
+   * omit (undefined) for role-definition/vacant-card surfaces per F-EA-VACANT-
+   * SENTINEL-CLASS (Avatar.tsx JSDoc). */
+  instance?: number;
   onClose: () => void;
 }
 
-export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, onClose }: RoleBriefingModalProps) {
+export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, avatarUrl, instance, onClose }: RoleBriefingModalProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,7 +53,18 @@ export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, 
       <div className="briefing-modal">
         <div className="briefing-header" style={{ borderBottomColor: roleColor }}>
           <div className="briefing-header-left">
-            <span className="briefing-role-dot" style={{ background: roleColor }} />
+            {/* Phase 2.B Part 3 per ui-architect:1 msg 4677 + spec §3.3.1 popover 64px surface.
+             * Replaces the prior solid-color briefing-role-dot with the procedural avatar (or
+             * avatar_url override). roleColor is still used on the header border-bottom for
+             * the role-color affordance preserved. */}
+            <Avatar
+              slug={roleSlug}
+              title={roleTitle}
+              instance={instance}
+              avatarUrl={avatarUrl}
+              sizePx={64}
+              className="briefing-role-avatar"
+            />
             <h2 className="briefing-title">{roleTitle}</h2>
             <span className="briefing-slug">{roleSlug}</span>
           </div>
