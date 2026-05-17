@@ -2843,6 +2843,20 @@ When multiple instances of this role are active:
     }
   };
 
+  // Content-stable dep proxies per ui-architect:1 msg 4279 F-UI-A +
+  // dev-challenger:0 msg 4292 audit-extension. Hoisted above ALL useMemos
+  // that previously bare-keyed on `project?.X` (which is fresh ref per
+  // heartbeat tick per CollabTab.tsx:2497 comment chain, defeating those
+  // useMemo caches every 30s). Per board.jsonl append-only invariant +
+  // sessions activeCount being a primitive count, these proxies are stable
+  // across heartbeats unless content actually changes. Append-only edge
+  // case (in-place mutation on non-tail message): impossible per write-side
+  // audit; if backend ever introduces it, these proxies need to expand.
+  const messagesLength = project?.messages?.length ?? 0;
+  const lastMsgId = project?.messages?.[messagesLength - 1]?.id;
+  const sessionsLength = project?.sessions?.length ?? 0;
+  const sessionsActiveCount = project?.sessions?.filter((s) => s.status === "active").length ?? 0;
+
   // Compute the live mic_to candidate from msgBody. Pure function over the
   // current body + roster — re-runs each render. The candidate is the HINT
   // (spec §4.3); it does NOT auto-write metadata. The user must click confirm
@@ -2858,16 +2872,25 @@ When multiple instances of this role are active:
     // floor.current_speaker but we don't have it directly here. Use null —
     // self_target detection runs only when seat-bound, not the human-side UI.
     return detectMicTo(msgBody, seatList, null, null);
-  }, [msgBody, project?.sessions, micToHintDismissed]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // ^ F-UI-A class-of-bug per dev-challenger:0 msg 4292 audit:
+    // bare `project?.sessions` is fresh ref per heartbeat → useMemo defeated.
+    // Use sessionsLength + sessionsActiveCount proxy (declared below) instead.
+  }, [msgBody, sessionsLength, sessionsActiveCount, micToHintDismissed]);
 
-  // O(N²) → O(N): pre-build question→answer Map once per messages-reference change,
-  // then O(1) lookup at every render. Backend re-parses board.jsonl on every emit,
-  // so the messages reference is the canonical change signal.
+  // O(N²) → O(N): pre-build question→answer Map once per messages-reference change.
+  // Wave 1.5c F-DC-AUDIT-2 fix per dev-challenger:0 msg 4292: keyed on
+  // messagesLength + lastMsgId (content-stable per append-only invariant) instead
+  // of `project?.messages` (fresh ref per heartbeat → cache no-op).
   const answerLookup = useMemo(
     () => buildAnswerLookup(project?.messages || []),
-    [project?.messages]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [messagesLength, lastMsgId]
   );
 
+  // Wave 1.5c F-DC-AUDIT-3 fix per dev-challenger:0 msg 4292: same proxy as
+  // answerLookup. Without this, pendingQuestionCount re-walked all messages
+  // every heartbeat (cascading from answerLookup invalidation).
   const pendingQuestionCount = useMemo(() => {
     if (!project) return 0;
     return project.messages.filter(
@@ -2877,7 +2900,8 @@ When multiple instances of this role are active:
         m.metadata?.choices?.length &&
         !getAnswerForQuestion(m.id, answerLookup)
     ).length;
-  }, [project?.messages, answerLookup]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messagesLength, lastMsgId, answerLookup]);
 
   // Wave 1.5 partial B1+B2+B3 per architect Ruling 7 + human msg 4264:
   // cache the IIFE's derived data (activeCount, voteTallies, voteProposalIds,
@@ -2888,22 +2912,8 @@ When multiple instances of this role are active:
   // (~425 LOC of JSX) deferred to next focused work cycle per developer:1
   // msg 4272 context-budget honest disclosure.
   //
-  // Content-stable dep proxy per ui-architect:1 msg 4279 F-UI-A:
-  // `project` is a fresh object reference every heartbeat tick (per line 2497
-  // comment chain documenting prior scroll-effect bugs). Bare `[project?.messages]`
-  // as a useMemo dep would invalidate every 30s heartbeat → cache becomes no-op,
-  // O(N²) walks re-execute defeating Wave 1.5's perf intent. Per board.jsonl
-  // append-only invariant: `messagesLength + lastMsgId` covers append + delete-
-  // from-end + in-place-edit-on-tail. Edge case (in-place mutation on non-tail
-  // message at index < N-1): currently impossible per write-side audit; if ever
-  // introduced, this dep proxy needs to change.
-  const messagesLength = project?.messages?.length ?? 0;
-  const lastMsgId = project?.messages?.[messagesLength - 1]?.id;
-  const sessionsLength = project?.sessions?.length ?? 0;
-  // Sessions can change status without length change; sessions[i].status hash
-  // is content-stable enough since activeCount only needs status changes.
-  const sessionsActiveCount = project?.sessions?.filter((s) => s.status === "active").length ?? 0;
-
+  // messageListDerivedCache uses the same content-stable proxies hoisted above
+  // (messagesLength + lastMsgId + sessionsLength + sessionsActiveCount).
   const messageListDerivedCache = useMemo(() => {
     const sessions = project?.sessions || [];
     const messages = project?.messages || [];
