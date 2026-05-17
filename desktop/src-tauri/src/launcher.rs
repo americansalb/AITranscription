@@ -1743,11 +1743,38 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
     // Auto-respawn dead agents in a background thread so the Tauri command
     // returns promptly. 5s stagger between spawns (was 2s in bfa2199) gives
     // the human a tighter window to Ctrl-C if they didn't want auto-respawn.
-    if !dead_agents.is_empty() {
+    //
+    // 2026-05-17 — Path A gate per architect Ruling 6 v4 + human msg 3992 + 3994.
+    // Root cause incident: 7 active agents × 5s stagger = ~35s of heavy spawn
+    // I/O during Vaak startup window → "vaak is sooooo lagg i cant event open it"
+    // symptom. Default-off gate stops the cascade; orphan cleanup above (line 1727)
+    // still runs unconditionally so zombies don't accumulate.
+    //
+    // DESIGN RULE per evil-architect msg 4018 §"Design rule for Path A + affordance PR":
+    // manual user-initiated button is the ONLY sanctioned restore surface. Do NOT
+    // re-introduce auto-respawn through any opt-in pathway (no global flag, no
+    // per-agent flag, no per-session flag, no "remember last selection" checkbox).
+    // The cascade IS the bug, regardless of which code path triggers it.
+    // If user wants previous behavior, they click a launcher UI button per session.
+    //
+    // For future contributors: if you find yourself reaching to flip
+    // AUTO_RESPAWN_ON_RESTART to true OR adding a setting/flag/UI toggle that
+    // restores the auto-cascade, you are re-introducing the bug. See
+    // .vaak/design-notes/launcher-restore-affordance-spec-2026-05-17.md (Wave 2)
+    // for the manual-button-only affordance design.
+    const AUTO_RESPAWN_ON_RESTART: bool = false;
+
+    if AUTO_RESPAWN_ON_RESTART && !dead_agents.is_empty() {
         eprintln!("[launcher] Auto-respawning {} dead agent(s) with 5s stagger", dead_agents.len());
         let dir_clone = project_dir.clone();
         let spawned_clone = Arc::clone(&state.spawned);
         std::thread::spawn(move || {
+            // Defense-in-depth per evil-architect msg 4010 §2: 10s startup grace
+            // lets Vaak's React tree mount + become responsive before competing for
+            // CPU with child-process spawns. Even with the gate disabled by default,
+            // these guards prevent the original cascade if someone ever re-enables.
+            std::thread::sleep(std::time::Duration::from_secs(10));
+
             let bg_state = LauncherState {
                 spawned: spawned_clone,
                 project_dir: Mutex::new(Some(dir_clone.clone())),
@@ -1762,6 +1789,9 @@ pub fn repopulate_spawned(project_dir: String, state: State<'_, LauncherState>) 
                 }
             }
         });
+    } else if !dead_agents.is_empty() {
+        eprintln!("[launcher] Skipping auto-respawn for {} dead agent(s) — AUTO_RESPAWN_ON_RESTART=false per Path A. Orphan cleanup already ran. User can manually re-launch via launcher UI.",
+            dead_agents.len());
     }
 
     Ok(alive_count)
