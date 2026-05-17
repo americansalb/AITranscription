@@ -142,10 +142,16 @@ export type Theme = "light" | "dark";
 
 /** Text color for role labels — high visual weight, meets WCAG 4.5:1 body text.
  * Dark mode: canonical hex. Light mode: darkened toward black for contrast on
- * light bg. Per Light Mode spec v4 §5.7. */
+ * light bg. Per Light Mode spec v4 §5.7.
+ *
+ * sourceWeight=0.6 means 60% canonical + 40% BLACK per mixToward signature.
+ * Spec v4 §5.7 example: architect #1da1f2 + 40% black → #116191 (verified
+ * by hand: 29*0.6 + 0*0.4 = 17.4 → 0x11). Prior aa97198 used 0.4 (interpreting
+ * spec "0.4" as source weight) which produced strongly-darkened #0C4061 —
+ * tester msg 4581 caught the spec/implementation semantic mismatch. */
 export function getRoleColorText(slug: string, theme: Theme = "dark"): string {
   const canonical = lookupCanonical(slug);
-  if (theme === "light") return mixToward(canonical, BLACK, 0.4);
+  if (theme === "light") return mixToward(canonical, BLACK, 0.6);
   return canonical;
 }
 
@@ -155,7 +161,7 @@ export function getRoleColorText(slug: string, theme: Theme = "dark"): string {
  * (HSL desaturate prevents text/accent collapse in light mode). */
 export function getRoleColorAccent(slug: string, theme: Theme = "dark"): string {
   const canonical = lookupCanonical(slug);
-  if (theme === "light") return desaturate(mixToward(canonical, BLACK, 0.4), 0.3);
+  if (theme === "light") return desaturate(mixToward(canonical, BLACK, 0.6), 0.3);
   return mixToward(canonical, DARK_SURFACE, 0.6); // existing dark-mode Tier 3 dim
 }
 
