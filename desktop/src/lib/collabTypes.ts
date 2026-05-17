@@ -13,6 +13,12 @@ export interface RoleConfig {
   tags?: string[];
   companions?: CompanionConfig[];
   custom?: boolean;
+  /** Optional HTTPS URL to a hand-illustrated avatar overriding the procedural
+   * default. Shipped in project.json since 139a389; runtime-read by CollabTab
+   * (roster role cards) + RolesTab (config cards). Per character-avatar-system-
+   * spec-2026-05-17.md v6.9 §3.1 + §4 + privacy forward-flag in §4.1 (v6.10
+   * pending). */
+  avatar_url?: string;
 }
 
 export interface ProjectConfig {

@@ -23,8 +23,13 @@ import type { Theme } from "../utils/roleColors";
 export interface AvatarProps {
   slug: string;
   title?: string;
-  /** Instance number — pass for instance-runtime surfaces (CollabTab roster,
-   * rotation strip, message header). Omit for role-definition surfaces (RolesTab). */
+  /** Instance number — pass for instance-runtime surfaces with an ACTIVE seat
+   * (CollabTab roster active rows, rotation strip current speaker, message header).
+   * Omit for role-definition surfaces (RolesTab) AND for VACANT cards in the
+   * roster: passing `instance={0}` to a vacant card produces misleading alt
+   * text "title (slug:0) avatar" for screen readers, falsely claiming an
+   * instance exists. Pass `undefined` for vacant cards per F-EA-VACANT-SENTINEL-CLASS
+   * (evil-architect:0 msg 4665). */
   instance?: number;
   /** Optional avatar_url override; null/undefined falls through to procedural. */
   avatarUrl?: string | null;

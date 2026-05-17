@@ -4104,8 +4104,13 @@ When multiple instances of this role are active:
                           <Avatar
                             slug={card.slug}
                             title={card.title}
-                            instance={card.instance >= 0 ? card.instance : 0}
-                            avatarUrl={(project.config.roles[card.slug] as { avatar_url?: string } | undefined)?.avatar_url || null}
+                            // Vacant cards have no live instance → pass undefined
+                            // so Avatar uses the role-definition alt-text branch
+                            // ("Manager (manager) avatar") instead of falsely
+                            // claiming ":0" per dev-challenger:0 msg 4663 +
+                            // evil-architect:0 msg 4665 accessibility regression.
+                            instance={card.instance >= 0 ? card.instance : undefined}
+                            avatarUrl={project.config.roles[card.slug]?.avatar_url || null}
                             sizePx={28}
                             className="role-card-avatar-collab"
                           />
