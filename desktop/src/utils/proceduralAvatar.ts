@@ -24,6 +24,20 @@ import { getRoleColorAccent, getRoleColorText, hashSlug, type Theme } from "./ro
  * the determinism property (same slug → same shape after the rotation) holds. */
 const VARIANT_COUNT = 8;
 
+/** Explicit silhouette assignment for canonical roles. Prevents shape-collision
+ * on the 6 hottest slugs (per evil-architect:0 msg 4632 F-EA-AVATAR-MGR-ARCH-COLLISION:
+ * hashSlug('manager') % 8 = hashSlug('architect') % 8 = 4, two-stacked-bars,
+ * fails spec §3.3 silhouette-first squint test for colorblind/grayscale/20px contexts).
+ * Hash fallback preserved for custom roles via hashSlug. */
+const CANONICAL_VARIANT: Record<string, number> = {
+  manager: 5,    // plus/cross — coordination
+  architect: 1,  // upward triangle — leadership
+  developer: 2,  // diamond — craft
+  tester: 6,    // inset circle — lens
+  audience: 3,  // horizontal bar — seating row
+  user: 0,      // vertical bar — single individual
+};
+
 /** Foreground silhouette primitives. Each renders into a 64×64 viewBox over a
  * full-bleed background circle. Shapes chosen for 20px legibility: no detail
  * smaller than ~8px in 64px source → ~2.5px at 20px target (above retina-screen
@@ -61,8 +75,14 @@ function variantShape(variant: number, fill: string): string {
  */
 export function generateAvatar(slug: string, theme: Theme = "dark"): string {
   const bg = getRoleColorAccent(slug, theme);
-  const fg = getRoleColorText(slug, theme);
-  const variant = hashSlug(slug);
+  // user-canonical (#e1e8ed) is low-saturation; in light theme,
+  // mixToward(BLACK, 0.6) → #878b8e and the desaturated accent collapses to ~#8b8b8b.
+  // Result: bg ≈ fg, silhouette invisible (per dev-challenger:0 msg 4630 F-DC-AVATAR-USER-COLLAPSE).
+  // Force a dark fg for that combo to restore §3.3 silhouette-first contract.
+  const fg = (slug === "user" && theme === "light")
+    ? "#1f2937"
+    : getRoleColorText(slug, theme);
+  const variant = CANONICAL_VARIANT[slug] ?? hashSlug(slug);
   const shape = variantShape(variant, fg);
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img"><circle cx="32" cy="32" r="32" fill="${bg}" />${shape}</svg>`;
 }
