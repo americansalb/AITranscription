@@ -19,6 +19,10 @@ export interface RoleConfig {
    * spec-2026-05-17.md v6.9 §3.1 + §4 + privacy forward-flag in §4.1 (v6.10
    * pending). */
   avatar_url?: string;
+  /** Optional 6-axis character stats (TD/AR/CP/DO/PD/JA, each 1-10). Per
+   * character-stats-system-2026-05-16.md + cca848e Phase 1 schema; rendered
+   * by Phase 2.E stats radar in RoleBriefingModal expanded surface. */
+  stats?: { td: number; ar: number; cp: number; do: number; pd: number; ja: number };
 }
 
 export interface ProjectConfig {

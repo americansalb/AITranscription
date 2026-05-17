@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Avatar } from "./Avatar";
+import { StatsRadar } from "./StatsRadar";
 
 interface RoleBriefingModalProps {
   projectDir: string;
@@ -13,10 +14,15 @@ interface RoleBriefingModalProps {
    * omit (undefined) for role-definition/vacant-card surfaces per F-EA-VACANT-
    * SENTINEL-CLASS (Avatar.tsx JSDoc). */
   instance?: number;
+  /** Optional 6-axis stats (TD/AR/CP/DO/PD/JA, 1-10 each). Forwarded to
+   * <StatsRadar> per character-avatar-system-spec v6.9 §3.4 + Phase 2.E.
+   * Missing stats render mid-scale defaults at reduced opacity (defensive
+   * fallback per F-EA-VACANT-SENTINEL-CLASS discipline broadened). */
+  stats?: { td: number; ar: number; cp: number; do: number; pd: number; ja: number };
   onClose: () => void;
 }
 
-export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, avatarUrl, instance, onClose }: RoleBriefingModalProps) {
+export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, avatarUrl, instance, stats, onClose }: RoleBriefingModalProps) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +74,11 @@ export function RoleBriefingModal({ projectDir, roleSlug, roleTitle, roleColor, 
             <h2 className="briefing-title">{roleTitle}</h2>
             <span className="briefing-slug">{roleSlug}</span>
           </div>
+          {/* Phase 2.E per ui-architect:1 msg 4725 + spec §3.4 stats radar
+           * surface (120×120 hand-rolled SVG, 6-axis polygon). Displayed in
+           * the popover header alongside avatar + title for an at-a-glance
+           * character profile. Defensive fallback for missing stats. */}
+          <StatsRadar slug={roleSlug} stats={stats} sizePx={96} />
           <button className="briefing-close-btn" onClick={onClose}>
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>

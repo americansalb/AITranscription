@@ -4895,6 +4895,7 @@ When multiple instances of this role are active:
             roleTitle={selectedRole.title}
             roleColor={getRoleColor(selectedRole.slug)}
             avatarUrl={project?.config.roles[selectedRole.slug]?.avatar_url || null}
+            stats={project?.config.roles[selectedRole.slug]?.stats}
             // RoleStatus is role-level, not instance-specific — omit instance prop
             // so Avatar uses role-definition alt-text branch per F-EA-VACANT-SENTINEL-CLASS.
             onClose={() => setSelectedRole(null)}
