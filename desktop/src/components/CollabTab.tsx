@@ -855,6 +855,29 @@ export function CollabTab() {
     setRosterViewMode(mode);
     try { localStorage.setItem("vaak_roster_view_mode", mode); } catch { /* ignore */ }
   };
+
+  // Layout-density-v1 corrected per human msg 5125 ("I CANT ALLOW YOU TO LOSE
+  // FUNCTIONALITY") + ui-arch:1 msg 5128 revised spec: collapse-not-filter.
+  // The roster section folds to a one-line header showing status counts;
+  // click expands back to the full grid. Every role stays reachable — only
+  // the screen-space-when-not-looking is reclaimed. Default false
+  // (expanded) per ui-arch lean (A), preserving current discoverability.
+  //
+  // Persist with JSON.stringify/JSON.parse symmetric pattern per evil-arch
+  // F-EA-LAYOUT-LOCALSTORAGE-CLASS (msg 5123) — matches RolesTab Path A
+  // (4796f5f) so a future Path B shared helper folds cleanly.
+  const [rosterSectionCollapsed, setRosterSectionCollapsed] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem("vaak_collab_roster_collapsed");
+      if (stored === null) return false;
+      const parsed = JSON.parse(stored);
+      return typeof parsed === "boolean" ? parsed : false;
+    } catch { return false; }
+  });
+  const updateRosterSectionCollapsed = (next: boolean) => {
+    setRosterSectionCollapsed(next);
+    try { localStorage.setItem("vaak_collab_roster_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+  };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
@@ -4067,10 +4090,49 @@ When multiple instances of this role are active:
             return a.title.localeCompare(b.title);
           });
           const vacantCount = sortedCards.filter(c => c.status === "vacant").length;
+          // Layout-density-v1 corrected (collapse-not-filter per human msg 5125
+          // + ui-arch:1 msg 5128 revised spec): one-line section header always
+          // present + click to fold/unfold the full grid. NO filtering — every
+          // role stays reachable on expand.
+          const workingCount = sortedCards.filter(c => c.status === "working").length;
+          const readyCount = sortedCards.filter(c => c.status === "ready").length;
           return (
             <>
               {sortedCards.length > 0 && (
-                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                <div
+                  className={`roster-section-header${rosterSectionCollapsed ? " roster-section-collapsed" : ""}`}
+                  onClick={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      updateRosterSectionCollapsed(!rosterSectionCollapsed);
+                    }
+                  }}
+                  title={rosterSectionCollapsed ? "Expand team roster" : "Collapse team roster"}
+                  aria-expanded={!rosterSectionCollapsed}
+                  aria-controls="roster-section-body"
+                >
+                  <span className="roster-section-toggle">{rosterSectionCollapsed ? "▶" : "▼"}</span>
+                  <span className="roster-section-title">Team Roster</span>
+                  <span className="roster-section-counts">
+                    {workingCount > 0 && <span className="roster-count-active">{workingCount} working</span>}
+                    {readyCount > 0 && (
+                      <span className="roster-count-stale">
+                        {workingCount > 0 ? " · " : ""}{readyCount} ready
+                      </span>
+                    )}
+                    {vacantCount > 0 && (
+                      <span className="roster-count-vacant">
+                        {(workingCount + readyCount) > 0 ? " · " : ""}{vacantCount} vacant
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+              {sortedCards.length > 0 && !rosterSectionCollapsed && (
+                <div id="roster-section-body" className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
                   {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
@@ -4284,8 +4346,9 @@ When multiple instances of this role are active:
                 </div>
               )}
 
-              {/* Launch All Vacant button */}
-              {vacantCount > 1 && (
+              {/* Launch All Vacant button — also hidden when roster collapsed
+                  so the section is truly one-line in its folded state. */}
+              {vacantCount > 1 && !rosterSectionCollapsed && (
                 <button
                   className="launch-team-btn"
                   onClick={() => {
