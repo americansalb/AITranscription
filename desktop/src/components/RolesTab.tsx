@@ -8,19 +8,7 @@
 import { useEffect, useState } from "react";
 import type { ParsedProject, RoleConfig } from "../lib/collabTypes";
 import { Avatar } from "./Avatar";
-import { loadJSON, isString } from "../lib/persistedState";
-
-const PROJECT_DIR_STORAGE_KEY = "vaak_collab_project_dir";
-
-function loadPersistedDir(): string {
-  // Path B (shared helper) replaces the prior inline JSON.parse fix from
-  // 4796f5f. The architect:0 msg 5033 diagnosis remains the historical
-  // anchor: CollabTab writes JSON.stringify-wrapped, RolesTab must use
-  // the same encoding or validate_project_dir() fails with os error 123
-  // on Windows. Reading via loadJSON guarantees the encoding stays
-  // symmetric even if a future caller appears.
-  return loadJSON(PROJECT_DIR_STORAGE_KEY, "", isString);
-}
+import { useProjectDir } from "../contexts/ProjectDirContext";
 
 interface RoleCardData {
   slug: string;
@@ -30,7 +18,13 @@ interface RoleCardData {
 
 export function RolesTab() {
   const [project, setProject] = useState<ParsedProject | null>(null);
-  const [projectDir] = useState(loadPersistedDir);
+  // ProjectDirContext is the single source of truth — replaces the
+  // prior inline `loadPersistedDir` (Path B helper indirection). Closes
+  // the divergent-WRITER class (F-EA-CTR-A, evil-arch msg 5246) so
+  // CollabTab's writes propagate here synchronously via the shared
+  // useState in the provider, and vice versa once Change C (msg 5238)
+  // dual-mounts RolesTab inside CollabTab.
+  const { projectDir } = useProjectDir();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

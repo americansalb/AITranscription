@@ -7433,3 +7433,95 @@
 .stats-compare-current .stats-compare-name {
   color: var(--accent, #4caf50);
 }
+
+/* CollapsibleSection — Path B wrapper styles per CollabTab restructure spec
+   (architect msg 5238/5249/5259) and F-UIA-CTR-3 contract (ui-architect msg 5257):
+   - 200ms ease-out chevron rotation on toggle
+   - Border-bottom on header ONLY when expanded (collapsed cards merge into a
+     single strip; expanded cards declare their boundary)
+   - <h3> heading hierarchy (h1 = project name; h4 = within-card labels)
+   - Reuses the same accent/border/spacing tokens as the prior copy-pasted
+     roster-section + claims-section so the visual signature stays consistent
+*/
+.collapsible-section {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.collapsible-section-collapsed {
+  /* Slight padding reduction when collapsed so a stack of 5 collapsed
+     bands doesn't bloat vertical space. */
+  padding-bottom: 0;
+}
+
+.collapsible-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  /* Border-bottom only when expanded (F-UIA-CTR-3). The default rule sets
+     it; the .collapsible-section-collapsed override below removes it. */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background-color 0.15s ease-out;
+}
+
+.collapsible-section-collapsed .collapsible-section-header {
+  border-bottom: 1px solid transparent;
+}
+
+.collapsible-section-header:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.collapsible-section-header:focus-visible {
+  outline: 2px solid var(--collab-accent, #1d9bf0);
+  outline-offset: -2px;
+}
+
+.collapsible-section-chevron {
+  font-size: 9px;
+  color: var(--collab-text-secondary, #8899a6);
+  width: 10px;
+  display: inline-block;
+  /* F-UIA-CTR-3: 200ms ease-out rotation. The chevron renders as ▼
+     (expanded); rotation is applied when the collapsed class is present
+     to point ▶. Using transform: rotate avoids glyph swap so the
+     animation runs on a single element. */
+  transform: rotate(0deg);
+  transition: transform 0.2s ease-out;
+}
+
+.collapsible-section-collapsed .collapsible-section-chevron {
+  transform: rotate(-90deg);
+}
+
+.collapsible-section-title {
+  /* h3 element — visual size deliberately modest so multiple stacked
+     collapsible bands don't compete with the message timeline below
+     them. Same font-weight cadence as the prior roster-section-title. */
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--collab-text-primary, #e7eaef);
+  letter-spacing: 0.01em;
+  flex: 0 0 auto;
+}
+
+.collapsible-section-trailing {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--collab-text-secondary, #8899a6);
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapsible-section-body {
+  padding: 10px 12px 12px;
+}

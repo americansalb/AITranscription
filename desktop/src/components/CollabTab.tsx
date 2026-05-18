@@ -18,7 +18,9 @@ import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../li
 import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
 import { DecisionPanel } from "./DecisionPanel";
-import { loadJSON, saveJSON, isBoolean, isString } from "../lib/persistedState";
+import { CollapsibleSection } from "./CollapsibleSection";
+import { useProjectDir } from "../contexts/ProjectDirContext";
+import { loadJSON, saveJSON, isBoolean } from "../lib/persistedState";
 
 const STAT_AXES: Array<{ key: keyof RoleStats; label: string; short: string; hint: string }> = [
   { key: "td", label: "Technical Depth", short: "TD", hint: "Code, architecture, systems engagement" },
@@ -714,24 +716,14 @@ function buildDefaultConfig(dirPath: string) {
   };
 }
 
-const COLLAB_STORAGE_KEY = "vaak_collab_project_dir";
+// `vaak_collab_project_dir` ownership moved to ProjectDirContext per
+// architect msg 5249 + evil-arch F-EA-CTR-A (msg 5246): the standalone
+// RolesTab and the (forthcoming, Change C) embedded RolesTab inside this
+// CollabTab will both read/write this same key. Routing both mounts
+// through one provider's useState closes the divergent-WRITER class.
+// The empty-string remove-key semantics now live inside the provider's
+// setProjectDir; CollabTab is just a consumer.
 const SAVED_PROJECTS_KEY = "vaak_projects";
-
-function loadPersistedDir(): string {
-  return loadJSON(COLLAB_STORAGE_KEY, "", isString);
-}
-
-function persistDir(dir: string): void {
-  if (dir) {
-    saveJSON(COLLAB_STORAGE_KEY, dir);
-  } else {
-    // Empty-string semantics: caller wants to clear the key entirely so the
-    // next reader gets the fallback rather than an empty-string match. The
-    // shared helper doesn't expose a remove path (no other call site needs
-    // it), so keep the localStorage.removeItem inline here.
-    try { localStorage.removeItem(COLLAB_STORAGE_KEY); } catch { /* ignore */ }
-  }
-}
 
 interface SavedProject {
   name: string;
@@ -774,7 +766,12 @@ function removeSavedProject(path: string): void {
 export function CollabTab() {
   const { showToast } = useToast();
   const [project, setProject] = useState<ParsedProject | null>(null);
-  const [projectDir, setProjectDir] = useState(() => loadPersistedDir());
+  // ProjectDirContext consumption — replaces the prior local `useState(() => loadPersistedDir())`
+  // pattern. Calling `setProjectDir` from the hook both updates the
+  // in-memory value and persists to localStorage; the prior paired
+  // `setProjectDir(...) + persistDir(...)` call sites collapse to a single
+  // call (see startWatching / stopWatching below).
+  const { projectDir, setProjectDir } = useProjectDir();
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1736,8 +1733,9 @@ When multiple instances of this role are active:
           const effectiveDir = result.effective_dir && result.effective_dir !== projectDir
             ? result.effective_dir : projectDir;
           if (result.effective_dir && result.effective_dir !== projectDir) {
+            // Context setter persists to localStorage; the prior paired
+            // setProjectDir + persistDir call collapses to one.
             setProjectDir(result.effective_dir);
-            persistDir(result.effective_dir);
           }
           setWatching(true);
           setProject(result);
@@ -2736,12 +2734,11 @@ When multiple instances of this role are active:
           }
         }
 
-        // Update projectDir if the backend found a better subdirectory
+        // Update projectDir if the backend found a better subdirectory.
+        // Context setter persists to localStorage; collapses the prior
+        // paired setProjectDir + persistDir into one call.
         const finalDir = (result?.effective_dir && result.effective_dir !== dir) ? result.effective_dir : dir;
-        if (finalDir !== dir) {
-          setProjectDir(finalDir);
-        }
-        persistDir(finalDir);
+        setProjectDir(finalDir);
         addSavedProject(finalDir);
         setSavedProjects(loadSavedProjects());
 
@@ -2774,7 +2771,8 @@ When multiple instances of this role are active:
     } catch { /* ignore */ }
     setWatching(false);
     setProject(null);
-    persistDir("");
+    // Context setter's empty-string semantics remove the localStorage key.
+    setProjectDir("");
   };
 
   const sendMessage = async () => {
@@ -4149,24 +4147,11 @@ When multiple instances of this role are active:
           return (
             <>
               {sortedCards.length > 0 && (
-                <div
-                  className={`roster-section-header${rosterSectionCollapsed ? " roster-section-collapsed" : ""}`}
-                  onClick={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      updateRosterSectionCollapsed(!rosterSectionCollapsed);
-                    }
-                  }}
-                  title={rosterSectionCollapsed ? "Expand team roster" : "Collapse team roster"}
-                  aria-expanded={!rosterSectionCollapsed}
-                  aria-controls="roster-section-body"
-                >
-                  <span className="roster-section-toggle">{rosterSectionCollapsed ? "▶" : "▼"}</span>
-                  <span className="roster-section-title">Team Roster</span>
-                  <span className="roster-section-counts">
+              <CollapsibleSection
+                id="roster-section"
+                title="Team Roster"
+                trailing={
+                  <>
                     {workingCount > 0 && <span className="roster-count-active">{workingCount} working</span>}
                     {readyCount > 0 && (
                       <span className="roster-count-stale">
@@ -4178,11 +4163,14 @@ When multiple instances of this role are active:
                         {(workingCount + readyCount) > 0 ? " · " : ""}{vacantCount} vacant
                       </span>
                     )}
-                  </span>
-                </div>
-              )}
-              {sortedCards.length > 0 && !rosterSectionCollapsed && (
-                <div id="roster-section-body" className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                  </>
+                }
+                collapsed={rosterSectionCollapsed}
+                onToggle={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
+                className="roster-section"
+                headerTooltip={{ expand: "Expand team roster", collapse: "Collapse team roster" }}
+              >
+                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
                   {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
@@ -4415,11 +4403,12 @@ When multiple instances of this role are active:
 
                   {/* Audience card now rendered through normal roster loop above — click opens audience panel */}
                 </div>
-              )}
 
-              {/* Launch All Vacant button — also hidden when roster collapsed
-                  so the section is truly one-line in its folded state. */}
-              {vacantCount > 1 && !rosterSectionCollapsed && (
+              {/* Launch All Vacant button — collapse-gating now handled by
+                  the enclosing <CollapsibleSection> (children only render
+                  when expanded), so the explicit !rosterSectionCollapsed
+                  check is dropped. */}
+              {vacantCount > 1 && (
                 <button
                   className="launch-team-btn"
                   onClick={() => {
@@ -4455,6 +4444,8 @@ When multiple instances of this role are active:
                   {claudeInstalled === false ? "Claude CLI Not Found" : launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
                 </button>
               )}
+              </CollapsibleSection>
+              )}
             </>
           );
         })()}
@@ -4487,32 +4478,20 @@ When multiple instances of this role are active:
           const claimsCount = project.claims?.length ?? 0;
           const collapsedEffective = claimsCollapsed ?? (claimsCount === 0);
           return (
-          <div className={`claims-section${collapsedEffective ? " claims-collapsed" : ""}`}>
-            <div
-              className="claims-section-title"
-              onClick={() => updateClaimsCollapsed(!collapsedEffective)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  updateClaimsCollapsed(!collapsedEffective);
-                }
-              }}
-              aria-expanded={!collapsedEffective}
-              aria-controls="claims-section-body"
-              title={collapsedEffective ? "Expand active claims" : "Collapse active claims"}
-            >
-              <span className="claims-section-toggle">{collapsedEffective ? "▶" : "▼"}</span>
-              Active Claims <span className="claims-section-count">({claimsCount})</span>
-            </div>
-            {!collapsedEffective && claimsCount === 0 && (
-              <div id="claims-section-body" className="claims-section-body">
-                <div className="claims-section-empty">No active claims</div>
-              </div>
+          <CollapsibleSection
+            id="claims-section"
+            title="Active Claims"
+            trailing={<span className="claims-section-count">({claimsCount})</span>}
+            collapsed={collapsedEffective}
+            onToggle={() => updateClaimsCollapsed(!collapsedEffective)}
+            className="claims-section"
+            headerTooltip={{ expand: "Expand active claims", collapse: "Collapse active claims" }}
+          >
+            {claimsCount === 0 && (
+              <div className="claims-section-empty">No active claims</div>
             )}
-            {!collapsedEffective && claimsCount > 0 && (
-            <div id="claims-section-body" className="claims-section-body">
+            {claimsCount > 0 && (
+            <>
               {project.claims.map((claim: FileClaim) => {
                   const roleSlug = claim.role_instance.split(":")[0] || "";
                   const filesDisplay = claim.files.length > 2
@@ -4547,9 +4526,9 @@ When multiple instances of this role are active:
                     </div>
                   );
                 })}
-            </div>
+            </>
             )}
-          </div>
+          </CollapsibleSection>
           );
         })()}
 

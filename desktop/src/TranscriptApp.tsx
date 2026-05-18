@@ -12,6 +12,7 @@ import {
 import { transcriptListener } from "./lib/transcriptListener";
 import { CollabTab } from "./components/CollabTab";
 import { RolesTab } from "./components/RolesTab";
+import { ProjectDirProvider } from "./contexts/ProjectDirContext";
 import { useToast } from "./components/Toast";
 import { PreferencesTab } from "./components/PreferencesTab";
 import { SessionsPanel } from "./components/SessionsPanel";
@@ -296,6 +297,7 @@ export function TranscriptApp() {
   }, []); // Empty dependency array - only run once on mount
 
   return (
+    <ProjectDirProvider>
     <div className="transcript-app">
       {/* Main Tab Navigation */}
       <div className="main-tab-nav" role="tablist" aria-label="Main navigation">
@@ -394,5 +396,6 @@ export function TranscriptApp() {
         <SessionsPanel sessions={sessions} onSessionsChange={setSessions} />
       )}
     </div>
+    </ProjectDirProvider>
   );
 }
