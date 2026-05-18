@@ -4340,24 +4340,20 @@ When multiple instances of this role are active:
         )}
 
         {/* Active Claims Section — collapsible. Active-claims-v1 (architect
-            msg 5049 + ui-arch:1 msg 5048): always rendered with an empty-state
-            so the panel is a fixed scanning location (matches decision-panel
-            always-rendered pattern). Each card shows alive_state via a
-            compound role-dot — full-opacity for active, amber ring + reduced
-            opacity for stale, gray dashed for unknown — and stale claims get
-            a " (reconnecting…)" suffix on the role label to match the
-            keepalive v2 moderator-picker UX (SHA 9d1fde1). */}
-        {project && (
+            msg 5049 + ui-arch:1 msg 5048) shipped with always-rendered empty
+            state for a fixed scanning location. Per human msg 5108 + 5109
+            ("can't barely see messages") that traded too much screen space —
+            v1.2 reverts to conditional render. Compound role-dot + alive_state
+            indicators kept; only the empty-state-always-rendered behavior is
+            backed out. */}
+        {project && project.claims && project.claims.length > 0 && (
           <div className={`claims-section${claimsCollapsed ? " claims-collapsed" : ""}`}>
             <div className="claims-section-title" onClick={() => setClaimsCollapsed(!claimsCollapsed)}>
               <span className="claims-section-toggle">&#9660;</span>
-              Active Claims <span className="claims-section-count">({project.claims?.length ?? 0})</span>
+              Active Claims <span className="claims-section-count">({project.claims.length})</span>
             </div>
             <div className="claims-section-body">
-              {(!project.claims || project.claims.length === 0) ? (
-                <div className="claims-section-empty">No active claims</div>
-              ) : (
-                project.claims.map((claim: FileClaim) => {
+              {project.claims.map((claim: FileClaim) => {
                   const roleSlug = claim.role_instance.split(":")[0] || "";
                   const filesDisplay = claim.files.length > 2
                     ? `${claim.files[0]} (+${claim.files.length - 1} more)`
@@ -4390,8 +4386,7 @@ When multiple instances of this role are active:
                       <span className="claim-time">{formatRelativeTime(claim.claimed_at)}</span>
                     </div>
                   );
-                })
-              )}
+                })}
             </div>
           </div>
         )}

@@ -366,6 +366,16 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
     };
   }, []);
 
+  // v1.2 emergency layout fix per human msg 5108 + 5109 ("almost all UI space
+  // occupied" + "can't barely see messages"): hide the panel entirely when
+  // there are no pending decisions, instead of always-rendering an empty
+  // state. This reverts the "fixed scanning location" pattern from ui-arch
+  // craft brief msg 5048 — discoverability had been bought at the cost of
+  // screen space the human just said is too expensive. The window-title
+  // "(N) Vaak" badge still signals when decisions land, so the human doesn't
+  // lose the wake-me-up signal even when the panel is hidden.
+  if (groups.length === 0 && !error) return null;
+
   return (
     <div className="decision-panel" aria-label="Pending decisions">
       <div className="decision-panel-header">
@@ -379,9 +389,7 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
 
       {error && <div className="decision-panel-error" role="alert">{error}</div>}
 
-      {groups.length === 0 ? (
-        <div className="decision-panel-empty">No pending decisions</div>
-      ) : (
+      {groups.length > 0 && (
         <div className="decision-panel-cards">
           {groups.map((g) => {
             const choices = (g.primary.metadata?.choices || []) as QuestionChoice[];
