@@ -12,7 +12,16 @@ import { Avatar } from "./Avatar";
 const PROJECT_DIR_STORAGE_KEY = "vaak_collab_project_dir";
 
 function loadPersistedDir(): string {
-  try { return localStorage.getItem(PROJECT_DIR_STORAGE_KEY) || ""; } catch { return ""; }
+  // Must mirror CollabTab.tsx persistDir() which writes JSON.stringify(dir).
+  // Reading the raw value leaves the literal surrounding quotes in the string,
+  // which then fails validate_project_dir() with os error 123 on Windows
+  // (per architect:0 msg 5033 diagnosis from human msg 5029 repro).
+  try {
+    const stored = localStorage.getItem(PROJECT_DIR_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : "";
+  } catch {
+    return "";
+  }
 }
 
 interface RoleCardData {
