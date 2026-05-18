@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18 (post-active-claims-v1 + decision-panel-v1.1 + emergency-revert + layout-density-v1 corrected ratification cycle).
+Living document. Owned by: architect. Last updated: 2026-05-18 (post-keepalive-v3 ratification; the seat-liveness visibility-non-negotiable scope from human msg 4804 is now fully closed).
 
 ## Scope
 
@@ -201,11 +201,33 @@ The `cd6c4e8` failure recurrence of [[feedback_poll_board_between_multi_file_edi
 
 **Reinforcement.** Multi-minute autonomous code work MUST interleave `project_wait` between major-effect actions (post-edit, pre-build, pre-commit). The cost of one poll is a tool call; the cost of a missed STOP signal is a revert + rework + apology + memory-write. Developer:1 has self-corrected and adopted the discipline per their msg 5138 acknowledgment.
 
-## Cross-session handoff state (2026-05-18 session close, updated post-layout-density-v1 ratification)
+## Keepalive v3 RATIFIED (SHA `cd1b629`) — visibility-non-negotiable scope CLOSED
+
+The CollabTab roster ratification at `cd1b629` is the third and final visual surface in the seat-liveness keepalive series. Human directive id 4804 ("fix this active claims thing... make it non-negotiable") authorized the work ~11 hours ago; the 12-SHA chain this session built the full infrastructure from backend derivation through three visual surfaces:
+
+**Three-surface design-system coherence (architectural property worth preserving):**
+
+| Surface | SHA | Stale signal | Unknown signal | Suffix text |
+|---|---|---|---|---|
+| AssemblyControls moderator picker | `9d1fde1` | (dropdown text variant) | (dropdown text variant) | " (reconnecting…)" / " (joining…)" |
+| Active Claims panel cards | `c4e31c1` | amber `#d97706` ring + 60% opacity + pulse | gray dashed border + 40% opacity | " (reconnecting…)" / " (joining…)" |
+| CollabTab roster cards/chips | `cd1b629` | amber `#d97706` ring + 60% opacity + pulse | gray dashed border + 45% opacity | " (reconnecting…)" / " (joining…)" |
+
+Single source of truth (`list_active_seats_cmd` reading `last_alive_at_ms`). Single threshold (`ALIVE_STATE_STALE_MS = 120s`). Single visual language. Single suffix text across all three surfaces. Any seat that goes stale shows stale EVERYWHERE simultaneously — the design system is now coherent, not just consistent. This is the architectural property `feedback_hot_key_explicit_assign_cold_key_hash` aspires to applied to design tokens: one place owns the contract, all surfaces consume it.
+
+**Implementation specifics (`cd1b629`).** 30s polling via `setInterval` on `list_active_seats_cmd`, lifecycle-correct cleanup on unmount + `projectDir` change, backward-compat catch swallows pre-keepalive Tauri binary errors → empty map → no styling → roster renders identical to pre-v3. Both grid view + chip view get the treatment. Vacant cards skip the alive-lookup (no seat to be alive). Strict `=== "stale"` / `=== "unknown"` checks avoid sentinel-class antipattern. `prefers-reduced-motion` disables pulse animation. aria-label includes alive-state suffix for screen-reader parity. Three-gate closed (tester:0 msg 5154 + dev-challenger:0 msg 5153 + evil-architect:0 msg 5152 + ui-architect:1 msg 5155).
+
+**F-EA-CA-1 threshold-proliferation forward-flag CLOSED for the alive-state domain.** All three surfaces share the same `ALIVE_STATE_STALE_MS` constant via the same `list_active_seats_cmd` derivation. No surface introduces its own threshold. Evil-architect:0 msg 5043 originally flagged this as a class-of-bug; v3 ratification confirms the architectural close.
+
+**Process discipline note.** Developer:1 explicitly polled `project_wait` between `npm run build` and `git commit` (per their msg 5147 commitment + msg 5138 self-correction), following [[feedback_poll_board_between_multi_file_edits]] discipline that was reinforced after the `cd6c4e8` failure earlier this session. No STOP signals missed; clean execution. The discipline correction held under load.
+
+**Forward-flags queued for v3.1+** (none blocking): consolidate `45%` vs `40%` unknown-opacity divergence between active-claims and roster cards into one canonical token; consider Tauri event subscription instead of 30s polling to eliminate the worst-case 30s detection lag; explore avatar-overlay alive-state badge for higher-information-density surfaces. None of these change architecture; they're polish.
+
+## Cross-session handoff state (2026-05-18 session close, updated post-keepalive-v3 ratification)
 
 - Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human full activation chain.
 - Keepalive v2 frontend minimal (SHA `9d1fde1`) — ratified, same activation chain.
-- Keepalive v3 (CollabTab roster red-dot) — queued, Path A scope locked, ≈50-80 LOC TSX + ≈20 LOC CSS.
+- Keepalive v3 (CollabTab roster red-dot, SHA `cd1b629`) — **three-gate RATIFIED**; closes visibility-non-negotiable scope from human msg 4804 across three surfaces with coherent design system.
 - Decision-panel v1 (SHA `9272357` + sister-fix `470b9d2`) + v1.1 (SHA `d361a1d`) — three-gate RATIFIED, same activation chain. v1.1 widens the surface filter to free-form directives per human msg 5088.
 - Active-claims-v1 (SHA `c4e31c1` + sister-fix `d2b509f`) — three-gate RATIFIED, MCP-sidecar divergent-reader closed.
 - Emergency-revert (SHA `b086921`) — three-gate RATIFIED under emergency tempo. Hides empty DecisionPanel + active-claims to restore message-stream real estate.
