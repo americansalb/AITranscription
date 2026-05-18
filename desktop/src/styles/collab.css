@@ -4934,6 +4934,60 @@
   to { transform: rotate(360deg); }
 }
 
+/* Keepalive v3 (per architect msg 5143 queue + msg 4885 Path A spec): visual
+ * indicators on roster cards/chips when their seat's keepalive is stale
+ * (last_alive_at_ms >120s) or unknown (no keepalive file written yet). The
+ * status-dot itself decorates with a ring + opacity instead of replacing the
+ * existing class — same compound-dot pattern as the active-claims-v1 ring
+ * (collab.rs c4e31c1) so all three surfaces (moderator picker, claim cards,
+ * roster cards) speak the same liveness language. */
+.alive-stale {
+  opacity: 0.6;
+  box-shadow: 0 0 0 1px #d97706; /* amber-600 — matches keepalive v2 palette */
+  animation: roster-dot-stale-pulse 2.4s ease-in-out infinite;
+}
+
+.alive-unknown {
+  opacity: 0.45;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  background-clip: padding-box;
+}
+
+@keyframes roster-dot-stale-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 0.85; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .alive-stale {
+    animation: none;
+  }
+}
+
+/* Card-level treatment when seat is stale/unknown — subtle title-color
+ * desaturation + slight overall opacity drop. Keeps content readable while
+ * signaling "this seat may not be responding right now." */
+.role-card-alive-stale {
+  opacity: 0.85;
+}
+
+.role-card-alive-stale .role-card-title {
+  filter: grayscale(0.4);
+}
+
+.role-card-alive-unknown {
+  opacity: 0.7;
+}
+
+.role-chip-alive-stale {
+  opacity: 0.85;
+}
+
+.role-chip-alive-unknown {
+  opacity: 0.7;
+}
+
 /* Layout-density-v1 corrected: collapsible Team Roster section header per
  * human msg 5125 ("collapsable with tabs etc"). When collapsed the entire
  * roster grid + Launch-All-Vacant button hide, leaving just this one-line

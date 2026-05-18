@@ -911,6 +911,50 @@ export function CollabTab() {
   // typing. Everything reachable; tab bar stops scrolling past 4.
   const [sectionDropdownOpen, setSectionDropdownOpen] = useState(false);
   const [sectionFilterText, setSectionFilterText] = useState("");
+
+  // Keepalive v3 (per architect msg 5143 queue + msg 4885 Path A spec).
+  // Per-seat liveness map derived from `.vaak/sessions/<role>-<inst>.json:
+  // last_alive_at_ms` via main.rs:list_active_seats_cmd (SHA 533b458). Polled
+  // on a 30s interval; consumed by the roster card render to show an amber
+  // ring + "(reconnecting…)" suffix on stale seats and a gray-dashed dot on
+  // seats whose keepalive file is missing/unread.
+  //
+  // The map is keyed by "role:instance" so the roster card render does a
+  // straight lookup. Backend already filters bindings to status==="active"
+  // before returning seats, so we don't need to dedupe.
+  const [seatAliveMap, setSeatAliveMap] = useState<Map<string, "active" | "stale" | "unknown">>(new Map());
+  useEffect(() => {
+    if (!projectDir || !window.__TAURI__) return;
+    let cancelled = false;
+    const fetchAlive = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const resp = await invoke<{ seats: Array<{ label: string; alive_state?: string }> }>(
+          "list_active_seats_cmd",
+          { dir: projectDir }
+        );
+        if (cancelled) return;
+        const next = new Map<string, "active" | "stale" | "unknown">();
+        for (const seat of resp.seats || []) {
+          const state = seat.alive_state;
+          // "human" entry is the synthesized human:0 seat — skip it; never
+          // shown as a roster card. Anything else maps to the union we render.
+          if (state === "active" || state === "stale" || state === "unknown") {
+            next.set(seat.label, state);
+          }
+        }
+        setSeatAliveMap(next);
+      } catch {
+        // Backward-compat: pre-keepalive Tauri binary won't have this command
+        // OR an empty .vaak/sessions dir will return errors. Swallow + leave
+        // map empty → all roster cards render with no alive-state styling
+        // (matches pre-v3 behavior).
+      }
+    };
+    void fetchAlive();
+    const id = window.setInterval(fetchAlive, 30_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [projectDir]);
   const sectionDropdownRef = useRef<HTMLDivElement | null>(null);
   const [sectionLoading, setSectionLoading] = useState(false);
   const [savedProjects, setSavedProjects] = useState(() => loadSavedProjects());
@@ -4136,6 +4180,20 @@ When multiple instances of this role are active:
                   {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
+                    // Keepalive v3 — overlay alive_state from list_active_seats_cmd
+                    // on top of the existing card.status. Vacant cards have no
+                    // seat to be alive, so skip them. Stale → amber ring + suffix;
+                    // unknown → gray-dashed dot. "active" is the no-op default.
+                    const seatAliveState = card.status === "vacant"
+                      ? undefined
+                      : seatAliveMap.get(cardKey);
+                    const isSeatStale = seatAliveState === "stale";
+                    const isSeatUnknown = seatAliveState === "unknown";
+                    const aliveSuffix = isSeatStale
+                      ? " (reconnecting…)"
+                      : isSeatUnknown
+                        ? " (joining…)"
+                        : "";
                     const handleCardClick = () => {
                       if (card.slug === "audience") {
                         setAudiencePanelOpen(true);
@@ -4156,14 +4214,14 @@ When multiple instances of this role are active:
                       return (
                         <button
                           key={cardKey}
-                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}`}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${isSeatStale ? " role-chip-alive-stale" : ""}${isSeatUnknown ? " role-chip-alive-unknown" : ""}`}
                           style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
                           onClick={handleCardClick}
-                          title={`${card.title} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
-                          aria-label={`${card.title}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                          title={`${card.title}${aliveSuffix} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
+                          aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
                         >
-                          <span className={getStatusDotClass(card.status)} />
-                          <span className="role-chip-name">{card.title}</span>
+                          <span className={`${getStatusDotClass(card.status)}${isSeatStale ? " alive-stale" : ""}${isSeatUnknown ? " alive-unknown" : ""}`} />
+                          <span className="role-chip-name">{card.title}{aliveSuffix}</span>
                           <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
                         </button>
                       );
@@ -4172,11 +4230,11 @@ When multiple instances of this role are active:
                     return (
                       <div
                         key={cardKey}
-                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}`}
+                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${isSeatStale ? " role-card-alive-stale" : ""}${isSeatUnknown ? " role-card-alive-unknown" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}, status: ${getStatusLabel(card.status)}. Click to view details.`}
+                        aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}. Click to view details.`}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
@@ -4194,9 +4252,16 @@ When multiple instances of this role are active:
                             sizePx={28}
                             className="role-card-avatar-collab"
                           />
-                          <span className={getStatusDotClass(card.status)} />
+                          <span
+                            className={`${getStatusDotClass(card.status)}${isSeatStale ? " alive-stale" : ""}${isSeatUnknown ? " alive-unknown" : ""}`}
+                            title={isSeatStale
+                              ? `${cardKey} — last keepalive >120s stale; seat may be reconnecting or dead`
+                              : isSeatUnknown
+                                ? `${cardKey} — keepalive not yet observed; seat may be just-joined or pre-instrumentation`
+                                : undefined}
+                          />
                           <span className="role-card-title" style={{ color: card.roleColor }}>
-                            {card.title}
+                            {card.title}{aliveSuffix}
                           </span>
                           <button
                             className="role-card-kick-btn"
