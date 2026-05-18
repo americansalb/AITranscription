@@ -1210,7 +1210,22 @@ fn write_claims(project_dir: &str, claims: &serde_json::Value) -> Result<(), Str
 }
 
 /// Read claims, removing stale entries by cross-referencing with sessions.json heartbeats.
+///
+/// Sister-fix to active-claims-v1 c4e31c1 per evil-architect:0 msg 5068 F-EA-CA-3:
+/// SURVIVING claims now carry an `alive_state` field ("active" | "stale" | "unknown")
+/// derived from `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms` so MCP-side
+/// callers (agent claim queries, conflict-detection, claim-injection in handle_
+/// project_check) speak the same liveness language as the UI's read_claims_filtered
+/// in collab.rs:441. Threshold mirrors collab::staleness_thresholds::ALIVE_STATE_
+/// STALE_MS — duplicated here as a literal because the sidecar binary cannot
+/// reach into the desktop bin's crate. Future architectural close moves this
+/// into a shared lib module (forward-flag from evil-arch msg 5068 Path B).
 fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
+    /// Mirror of collab::staleness_thresholds::ALIVE_STATE_STALE_MS. MUST be
+    /// kept in sync — if you change one, change both. Future Path B refactor
+    /// puts both behind a shared module so this comment becomes obsolete.
+    const ALIVE_STATE_STALE_MS: u64 = 120_000;
+
     let claims = read_claims(project_dir);
     let claims_obj = match claims.as_object() {
         Some(o) => o,
@@ -1233,6 +1248,8 @@ fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let now_ms = now_secs.saturating_mul(1000);
+    let sessions_dir = std::path::Path::new(project_dir).join(".vaak").join("sessions");
 
     let mut clean = serde_json::Map::new();
     let mut any_removed = false;
@@ -1242,7 +1259,7 @@ fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
         let binding = bindings.iter().find(|b| {
             b.get("session_id").and_then(|s| s.as_str()) == Some(session_id)
         });
-        let is_stale = match binding {
+        let is_gone = match binding {
             None => true,
             Some(b) => {
                 let hb = b.get("last_heartbeat").and_then(|h| h.as_str()).unwrap_or("");
@@ -1252,16 +1269,55 @@ fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
                 age > gone_threshold
             }
         };
-        if is_stale {
+        if is_gone {
             any_removed = true;
-        } else {
-            clean.insert(key.clone(), val.clone());
+            continue;
         }
+
+        // Surviving claim — derive alive_state from per-seat keepalive file.
+        // Matches collab.rs:read_claims_filtered logic so MCP and UI agree.
+        let alive_state: String = (|| {
+            let (role, instance) = key.split_once(':')?;
+            let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+            let raw = std::fs::read_to_string(&seat_file).ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            let last_alive_at_ms = parsed.get("last_alive_at_ms").and_then(|m| m.as_u64()).unwrap_or(0);
+            if last_alive_at_ms == 0 {
+                return Some("unknown".to_string());
+            }
+            let stale_ms = now_ms.saturating_sub(last_alive_at_ms);
+            if stale_ms > ALIVE_STATE_STALE_MS {
+                Some("stale".to_string())
+            } else {
+                Some("active".to_string())
+            }
+        })().unwrap_or_else(|| "unknown".to_string());
+
+        // Inject alive_state into the cloned claim object. Additive-only —
+        // existing callers that iterate `files`/`description`/`claimed_at` ignore
+        // the new field, so back-compat is preserved.
+        let mut enriched = val.clone();
+        if let Some(obj) = enriched.as_object_mut() {
+            obj.insert("alive_state".to_string(), serde_json::Value::String(alive_state));
+        }
+        clean.insert(key.clone(), enriched);
     }
 
     let result = serde_json::Value::Object(clean);
     if any_removed {
-        let _ = write_claims(project_dir, &result);
+        // Persist the SOURCE claim payload (without the derived alive_state
+        // field) — alive_state is computed on every read, not stored.
+        let mut to_persist = serde_json::Map::new();
+        if let Some(obj) = result.as_object() {
+            for (k, v) in obj {
+                let mut stripped = v.clone();
+                if let Some(m) = stripped.as_object_mut() {
+                    m.remove("alive_state");
+                }
+                to_persist.insert(k.clone(), stripped);
+            }
+        }
+        let _ = write_claims(project_dir, &serde_json::Value::Object(to_persist));
     }
     result
 }
