@@ -249,6 +249,39 @@
   font-weight: 400;
 }
 
+/* v1.1 (human msg 5088): Acknowledge button for free-form directive cards.
+ * Primary-style weight signals "this is the main path" — but stays subdued
+ * relative to choice buttons because acknowledging is a "seen, no team-reply"
+ * action, not the same commitment as picking a structured option. */
+.decision-card-acknowledge {
+  display: flex;
+  margin-top: 4px;
+}
+
+.decision-card-ack-btn {
+  flex: 1;
+  background: #232629;
+  border: 1px solid #2f3336;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #e1e8ed;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.decision-card-ack-btn:hover:not(:disabled) {
+  background: #2a2e33;
+  border-color: #4a4f55;
+}
+
+.decision-card-ack-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .decision-card-other {
   display: flex;
   gap: 6px;

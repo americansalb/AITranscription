@@ -142,18 +142,28 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
     return () => { cancelled = true; };
   }, [projectDir, messages.length]);
 
-  // Derive pending groups: questions to human with choices, not yet resolved.
+  // Derive pending groups. v1.1 (per human msg 5088): widened from
+  // "type:question + metadata.choices" to ALSO surface type:directive AND
+  // type:question without choices — anything addressed `to:"human"` that may
+  // need a response. Closes the original buried-in-board-scroll pain at the
+  // same level for free-form asks as for structured-choice asks.
+  //
+  // Cards without metadata.choices render an Acknowledge + Reply pair instead
+  // of choice buttons. Acknowledge resolves silently (kind=resolve, option_id=
+  // "_acknowledged"); Reply uses the existing other_text path so the reply
+  // fires as type:directive with metadata.in_reply_to — same wire format that
+  // the original "Other" escape hatch on choice-cards already produces.
+  //
   // Auto-archive >24h stale (flag #4): we cancel them server-side on render so
   // they stop appearing. A board-state-resolved heuristic (subsequent
   // directive matching topic) is deferred to v2 — too easy to false-positive.
   const groups = useMemo(() => {
-    const candidates = messages.filter(
-      (m) =>
-        m.to === "human" &&
-        m.type === "question" &&
-        Array.isArray(m.metadata?.choices) &&
-        (m.metadata?.choices?.length ?? 0) > 0
-    );
+    const candidates = messages.filter((m) => {
+      if (m.to !== "human") return false;
+      if (m.type === "question") return true;
+      if (m.type === "directive") return true;
+      return false;
+    });
     const grouped = groupByHash(candidates);
     return grouped.filter((g) => !resolutions.has(g.primary.id));
   }, [messages, resolutions]);
@@ -213,6 +223,43 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
       });
     } catch (e) {
       setError(`Couldn't submit answer: ${e}`);
+    } finally {
+      setSubmitting((s) => ({ ...s, [g.primary.id]: false }));
+    }
+  }
+
+  /**
+   * v1.1 (human msg 5088): silent acknowledge for free-form directive cards.
+   * Resolves the decision with a sentinel option_id so the card disappears
+   * without firing a Reply directive to the team — used when the human has
+   * SEEN the directive but doesn't want to respond on the board (e.g. "I'll
+   * act on this myself, no team reply needed").
+   */
+  async function handleAcknowledge(g: DecisionGroup) {
+    if (submitting[g.primary.id]) return;
+    setSubmitting((s) => ({ ...s, [g.primary.id]: true }));
+    setError(null);
+    try {
+      await invoke("resolve_decision_cmd", {
+        dir: projectDir,
+        decisionId: g.primary.id,
+        optionId: "_acknowledged",
+        optionLabel: "Acknowledged",
+        otherText: null,
+      });
+      setResolutions((prev) => {
+        const next = new Map(prev);
+        next.set(g.primary.id, {
+          decision_id: g.primary.id,
+          kind: "resolve",
+          option_id: "_acknowledged",
+          at: new Date().toISOString(),
+          by: "human:0",
+        });
+        return next;
+      });
+    } catch (e) {
+      setError(`Couldn't acknowledge: ${e}`);
     } finally {
       setSubmitting((s) => ({ ...s, [g.primary.id]: false }));
     }
@@ -339,6 +386,12 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
           {groups.map((g) => {
             const choices = (g.primary.metadata?.choices || []) as QuestionChoice[];
             const allowOther = g.primary.metadata?.allow_other === true;
+            // v1.1 (human msg 5088): cards without structured choices represent
+            // free-form directives / open-ended questions. They render an
+            // Acknowledge button (resolves silently) AND a Reply input (uses
+            // the existing other_text → type:directive in_reply_to path).
+            const isFreeForm = choices.length === 0;
+            const showReplyInput = allowOther || isFreeForm;
             const askedCount = g.askers.length + 1;
             // Per-decision attribution (flag #6): merge all askers into one chip list
             const askerRoles = [g.primary, ...g.askers].map((m) => m.from);
@@ -385,31 +438,46 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
                   <span className="decision-card-id">#{g.primary.id}</span>
                   <span className="decision-card-time">{formatRelative(g.primary.timestamp)}</span>
                 </div>
-                <div className="decision-card-choices">
-                  {choices.map((c) => (
+                {!isFreeForm && (
+                  <div className="decision-card-choices">
+                    {choices.map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className={`decision-card-choice${c.recommended ? " recommended" : ""}`}
+                        onClick={() => handleAnswer(g, c)}
+                        disabled={isSubmitting}
+                      >
+                        <span className="decision-card-choice-label">{c.label}</span>
+                        {c.recommended && (
+                          <span className="decision-card-choice-rec" title="Recommended by asker">
+                            recommended
+                          </span>
+                        )}
+                        {c.desc && <span className="decision-card-choice-desc">{c.desc}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {isFreeForm && (
+                  <div className="decision-card-acknowledge">
                     <button
-                      key={c.id}
                       type="button"
-                      className={`decision-card-choice${c.recommended ? " recommended" : ""}`}
-                      onClick={() => handleAnswer(g, c)}
+                      className="decision-card-ack-btn"
+                      onClick={() => handleAcknowledge(g)}
                       disabled={isSubmitting}
+                      title="Mark this seen without sending a reply to the team"
                     >
-                      <span className="decision-card-choice-label">{c.label}</span>
-                      {c.recommended && (
-                        <span className="decision-card-choice-rec" title="Recommended by asker">
-                          recommended
-                        </span>
-                      )}
-                      {c.desc && <span className="decision-card-choice-desc">{c.desc}</span>}
+                      Acknowledge
                     </button>
-                  ))}
-                </div>
-                {allowOther && (
+                  </div>
+                )}
+                {showReplyInput && (
                   <div className="decision-card-other">
                     <input
                       type="text"
                       className="decision-card-other-input"
-                      placeholder="Other (free-form answer becomes a directive)..."
+                      placeholder={isFreeForm ? "Reply (fires as a directive to the team)..." : "Other (free-form answer becomes a directive)..."}
                       value={otherInputs[g.primary.id] || ""}
                       onChange={(e) =>
                         setOtherInputs((s) => ({ ...s, [g.primary.id]: e.target.value }))
@@ -421,7 +489,7 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
                         }
                       }}
                       disabled={isSubmitting}
-                      aria-label="Free-form Other answer"
+                      aria-label={isFreeForm ? "Reply to the team" : "Free-form Other answer"}
                     />
                     <button
                       type="button"
