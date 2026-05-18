@@ -855,32 +855,6 @@ export function CollabTab() {
     setRosterViewMode(mode);
     try { localStorage.setItem("vaak_roster_view_mode", mode); } catch { /* ignore */ }
   };
-
-  // Layout-density-v1 (per ui-arch:1 msg 5122 + human msg 5108/5109): roster
-  // default is ACTIVE-only with an inline "Show all roles (N vacant)" toggle.
-  // Default false → vacant cards hidden → message timeline gets ~70-80% of
-  // the previous roster real estate back. Persists user's preference so a
-  // power user who wants the full team-at-a-glance can toggle once.
-  //
-  // Per evil-arch:0 msg 5123 F-EA-LAYOUT-LOCALSTORAGE-CLASS: JSON.stringify
-  // on write + JSON.parse on read symmetric, matches the RolesTab Path A
-  // pattern (4796f5f) so a future Path B shared-helper refactor can fold
-  // every key cleanly without per-key migration.
-  //
-  // Fix 2 (assembly-banner condensed-by-default) + Fix 3-extension (collapse
-  // the whole roster) deferred to layout-density-v1.1 to keep v1 diff small.
-  const [rosterShowAll, setRosterShowAll] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem("vaak_collab_roster_show_all");
-      if (stored === null) return false;
-      const parsed = JSON.parse(stored);
-      return typeof parsed === "boolean" ? parsed : false;
-    } catch { return false; }
-  });
-  const updateRosterShowAll = (next: boolean) => {
-    setRosterShowAll(next);
-    try { localStorage.setItem("vaak_collab_roster_show_all", JSON.stringify(next)); } catch { /* ignore */ }
-  };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
@@ -4093,18 +4067,11 @@ When multiple instances of this role are active:
             return a.title.localeCompare(b.title);
           });
           const vacantCount = sortedCards.filter(c => c.status === "vacant").length;
-          // Layout-density-v1 (ui-arch:1 msg 5122 Fix 1): hide vacant cards
-          // by default. A power user with a wider screen can toggle via the
-          // "Show all roles (N vacant)" button below the grid to see the full
-          // team-at-a-glance. Active/working/stale always shown.
-          const displayCards = rosterShowAll
-            ? sortedCards
-            : sortedCards.filter(c => c.status !== "vacant");
           return (
             <>
-              {displayCards.length > 0 && (
+              {sortedCards.length > 0 && (
                 <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
-                  {displayCards.map((card) => {
+                  {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
                     const handleCardClick = () => {
@@ -4352,22 +4319,6 @@ When multiple instances of this role are active:
                 >
                   {launching && <span className="launch-team-spinner" />}
                   {claudeInstalled === false ? "Claude CLI Not Found" : launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
-                </button>
-              )}
-
-              {/* Layout-density-v1 (ui-arch:1 msg 5122 Fix 1): inline toggle
-                  to show/hide vacant cards. Default hides them; click reveals
-                  the full team-at-a-glance. Persists across reloads. */}
-              {vacantCount > 0 && (
-                <button
-                  type="button"
-                  className="roster-show-all-toggle"
-                  onClick={() => updateRosterShowAll(!rosterShowAll)}
-                  title={rosterShowAll ? "Hide vacant role cards" : "Show all roles including vacant"}
-                >
-                  {rosterShowAll
-                    ? `Hide vacant (${vacantCount})`
-                    : `Show all roles (${vacantCount} vacant)`}
                 </button>
               )}
             </>
