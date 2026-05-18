@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18.
+Living document. Owned by: architect. Last updated: 2026-05-18 (decision-panel v1 ratified + localStorage divergent-reader bug appended).
 
 ## Scope
 
@@ -107,23 +107,49 @@ Est. ≈50-80 LOC TSX + ≈20 LOC CSS. Path B (Rust-side `card.status` incorpora
 
 **Multi-writer audit note.** This work introduces a third liveness reader path alongside the two heartbeat trackers already flagged at §"Class of bug this branch only partially addresses" (2026-05-13 entry). v1's `list_active_seats_cmd` is read-only over `.vaak/sessions/*.json:last_alive_at_ms`, so it does not add write contention — but it does make the multi-source liveness question more visible. Path B (Rust-side card-status unification) is the architectural close on this; v3 ships Path A as a frontend-only adapter pending that refactor.
 
-## Decision-panel v1 deferred (queued for next session)
+## Decision-panel v1 RATIFIED (SHA 9272357 + sister-fix 470b9d2, three-gate close)
 
-Persistent UI panel surfacing pending-human decisions instead of burying them in the board feed. Six adversarial flags consolidated by ui-architect:1 msg 4811 are the locked contract:
-1. `.vaak/decisions.jsonl` persistence (append-only).
-2. Agent-side hash-dedup + UI-side fallback.
-3. "Other" → directive emission path.
-4. Cancellation triggers: 24h stale archive + board-state-resolved + author-cancel.
-5. Window-title + tab badge visibility.
-6. Per-decision attribution (posed-by + recommended-by).
+Persistent UI panel surfacing pending-human decisions instead of burying them in the board feed. Originally deferred mid-session per developer:1 msg 4877 unilateral context-budget call, then reseated after human msg 4975 executed the deferring dev:1 seat and msg 4978 directed onboarding of a fresh seat. The fresh dev:1 shipped full scope at SHA `9272357` then F-DC-1/2/3/4 sister-fix at SHA `470b9d2`. All three gates closed per Ruling 13.
 
-Est. ≈250-400 LOC. Single commit or sensible multi-part. Three-gate ratification per Ruling 13 on ship. Deferred this session per developer:1 msg 4877 context-budget — not failure, just sequencing. Next session opens with v3 + decision-panel as the locked priorities.
+**Six adversarial flags landed** (locked from ui-architect:1 msg 4811 + 4985):
+1. `.vaak/decisions.jsonl` append-only persistence — section-aware path matching `board.jsonl` convention; `DecisionResolution` struct (decision_id, kind, option_id, other_text, reason, at, by); read-side last-write-wins per id.
+2. Hash-dedup — `metadata.question_hash` agent-side hint + UI fallback `normalize(subject + "::" + body)`. **Excludes `posed_by` per locked spec** (evil-architect:0 msg 4987 + dev-challenger:0 concession 4989) — multi-asker same-question collapses to one card with merged attribution.
+3. "Other" → directive emission — `resolve_decision_cmd` atomically writes inline `type:answer` + `type:directive` with `metadata.in_reply_to: <decision_id>` inside one `with_board_lock` acquire.
+4. Cancellation triggers — author-cancel via two-step inline confirm (replaces `window.confirm` modal-stack per F-DC-2 sister-fix); 24h stale-archive auto-fires once per id via `staleArchiveFiredRef` Set (F-DC-4 sister-fix); **board-state-resolved deferred to v2** per dev:1 disclosure (false-positive risk).
+5. Visibility — `document.title = "(N) Vaak)"` via useEffect in `CollabTab.tsx`; panel always-rendered with empty-state "No pending decisions" (not toast).
+6. Attribution — colored asker chips per card with multi-asker merge; "Recommended" pill on options where `QuestionChoice.recommended:true`.
 
-## Cross-session handoff state (2026-05-18 session close)
+**Architectural call: no new MCP sidecar tools.** The fresh dev:1 deliberately extended existing `project_send + metadata.choices` schema with optional fields (`recommended`, `allow_other`, `question_hash`) instead of adding dedicated `decision_pose`/`decision_answer` MCP tools that tester:0 msg 4986 originally specified. This avoids the `npm run build-sidecar` + Claude Code window restart per [[project_sidecar_relaunch_requires_claude_code_restart]]; Tauri-only rebuild activates. Backward-compat is preserved because the new metadata fields are optional. Accepted by all four gates.
 
-- Keepalive v1 backend (SHA 533b458) — ratified, awaiting human `cd desktop && npm run build` + `cargo build --release` from `desktop/src-tauri/` + Vaak relaunch to activate.
-- Keepalive v2 frontend minimal (SHA 9d1fde1) — conditional-PASS, same activation chain (one rebuild covers both v1 + v2).
-- Keepalive v3 (CollabTab roster) — queued, Path A scope locked, ≈50-80 LOC TSX + ≈20 LOC CSS.
-- Decision-panel v1 — queued, 6-flag contract locked, ≈250-400 LOC.
+**Three-gate trail.** Gate-1 (tester:0) PASS on 9272357 with one partial-scope flag (board-state-resolved deferral), RE-PASS on 470b9d2 closing F-DC-1/2/3/4. Gate-2 dev-challenger:0 CONDITIONAL PASS on 9272357 surfacing six flags then CLEAR PASS on 470b9d2; gate-2 evil-architect:0 initial "PASS clean" stamp on 9272357 was self-corrected after dev-challenger:0 caught two spec-drift items the evil-arch verification missed (msg 5007 self-correction memory candidate `feedback_cross_reference_ui_arch_spec_before_pass_stamp`). Gate-3 (ui-architect:1) PASS on combined 9272357 + 470b9d2 after a ~70 min drift gap acknowledged + apologized in msg 5035.
+
+**Forward-flags queued for v2** (none blocking):
+- F-DC-5 — `messages.length` refresh-key misses cancel-only board updates (single-window optimistic-update covers); add an explicit `decisions.jsonl` watcher.
+- F-DC-6 — hash collision on identical-body questions from genuinely different intent (agent opt-out: explicit unique `metadata.question_hash`).
+- Hash function is a cheap JS string hash, not crypto.subtle; collision-resistant escalation to SHA-256 if observed.
+- `.vaak/decisions.jsonl` has no compaction; tombstone strategy for long-running projects is a v2 candidate.
+
+**Path-B board-state-resolved cancellation** is the deferred-from-v1 trigger that closes a decision when a subsequent directive's body matches keywords from the question. False-positive risk is real; v2 should pair it with explicit `metadata.resolves: <decision_id>` agent hint rather than pure heuristic.
+
+## LocalStorage divergent-reader bug (2026-05-18, multi-writer class instance #3)
+
+Human msg 5029 surfaced `Error loading roles: Invalid project directory '"C:\\Users\\..."' (os error 123)` after rebuilding + relaunching post-decision-panel. Three lanes (architect, dev-challenger, tester) independently diagnosed: `desktop/src/components/RolesTab.tsx:14-16` reads `vaak_collab_project_dir` from localStorage raw (no `JSON.parse`), while the writer `desktop/src/components/CollabTab.tsx:726-734` `JSON.stringify`'s on write and the symmetric `CollabTab.tsx:719-724` reader `JSON.parse`'s on read. RolesTab therefore receives a path with literal quote characters wrapping it; Windows path API rejects with ERROR_INVALID_NAME.
+
+**Class of bug.** This is the third concrete instance of the multi-writer / divergent-reader shared-state pattern flagged at §"Class of bug this branch only partially addresses" (2026-05-13 entry). Prior instances were the dual heartbeat trackers and the `.claude/hooks/turn-gate.py` raw board write. LocalStorage with no single deserialization owner is the third. The pattern is consistent: shared storage with no single read/write owner produces silent format drift the first time a second consumer joins.
+
+**Path A (immediate fix).** Add `JSON.parse` to RolesTab.tsx:15 to mirror CollabTab. ~4 LOC. Unblocks the human's Roles tab.
+
+**Path B (architectural close, follow-up).** Extract a shared `desktop/src/lib/projectDirStorage.ts` (or equivalent) module exporting `loadPersistedDir` + `persistDir` as the single source of truth. Both CollabTab.tsx and RolesTab.tsx (and any future reader) import from it. ~30 LOC including the new module + two import-site updates. Closes the divergent-reader path-of-least-resistance and prevents recurrence.
+
+Recommendation: ship Path A first to unblock; ship Path B as a follow-up sister-fix in the same session. Together they close the v1 bug instance and the architectural class instance.
+
+## Cross-session handoff state (2026-05-18 session close, updated post-decision-panel ratification)
+
+- Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human `cd desktop && npm run build` + `cargo build --release` from `desktop/src-tauri/` + Vaak relaunch to activate.
+- Keepalive v2 frontend minimal (SHA `9d1fde1`) — conditional-PASS, same activation chain.
+- Keepalive v3 (CollabTab roster red-dot) — queued, Path A scope locked, ≈50-80 LOC TSX + ≈20 LOC CSS.
+- Decision-panel v1 (SHA `9272357` + sister-fix `470b9d2`) — **three-gate RATIFIED this session**, same activation chain; ships in same Tauri rebuild as keepalive v1/v2. No MCP sidecar restart needed (deliberate architectural choice).
+- LocalStorage divergent-reader bug — Path A 4-LOC fix queued for fresh dev:1; Path B shared-storage helper extraction queued as architectural close.
 - Architect:0 seat — reseated fresh this session (2026-05-18 10:18Z); previous instance was 25h-stale (msg 4587); no kick performed since fresh window supersedes.
-- Multi-writer audit (2026-05-13 carryover) — still partially addressed; Path B (Rust card-status unification) is the architectural close on dual heartbeat trackers, scheduled after v3 production observation.
+- Developer:1 seat — original dev:1 executed by human msg 4975 for unilateral decision-panel deferral; fresh dev:1 seated via msg 4978 directive and shipped both decision-panel commits + the sister-fix without deferral.
+- Multi-writer audit (2026-05-13 carryover, now §"LocalStorage divergent-reader bug" 3rd instance) — class still partially addressed at the architectural level; Path B helper extraction for localStorage is the next concrete close before tackling the dual heartbeat trackers via card-status unification.
