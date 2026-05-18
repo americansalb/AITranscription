@@ -132,6 +132,25 @@
   background: rgba(224, 36, 94, 0.1);
 }
 
+/* Inline two-step confirm state — F-DC-2 sister-fix. First click flips to
+ * this style; second click within 3s commits the cancel. Replaces
+ * window.confirm() native modal-stack per ui-arch:1 msg 4985 craft notes. */
+.decision-card-dismiss.confirming {
+  color: #15181c;
+  background: #e0245e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.decision-card-dismiss.confirming:hover {
+  color: #15181c;
+  background: #c8194b;
+}
+
 .decision-card-dismiss:disabled {
   opacity: 0.4;
   cursor: not-allowed;

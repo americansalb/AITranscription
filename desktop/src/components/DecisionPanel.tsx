@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { BoardMessage, DecisionResolution, QuestionChoice } from "../lib/collabTypes";
 import "./DecisionPanel.css";
@@ -105,6 +105,17 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
   const [otherInputs, setOtherInputs] = useState<Record<number, string>>({});
   const [submitting, setSubmitting] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
+  /** Inline confirm-state per decision id (F-DC-2 sister-fix). First dismiss
+   * click sets to true; second click within the timeout commits; auto-resets
+   * after a few seconds so accidental first-clicks don't linger. Replaces
+   * the original window.confirm() native-modal stack call. */
+  const [confirmingDismiss, setConfirmingDismiss] = useState<Record<number, boolean>>({});
+  const confirmTimeoutsRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+  /** Track which stale-archive cancels have already fired so the effect
+   * doesn't write a new cancel-line on every render (F-DC-4 sister-fix).
+   * A Ref (not state) so we don't trigger re-renders just to remember which
+   * IDs are already in-flight or done. */
+  const staleArchiveFiredRef = useRef<Set<number>>(new Set());
 
   // Load resolutions on mount + whenever the message list grows (cheap — small file).
   // Using messages.length as the proxy is fine: any new resolution coming in
@@ -149,15 +160,22 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
 
   // Background stale-archive: cancel any group whose primary is >24h old.
   // Fire-and-forget; on next resolution refresh they'll filter out.
+  // F-DC-4 sister-fix: track fired IDs in a Ref so we don't re-fire
+  // cancel_decision_cmd on every render — server append-onlys each call,
+  // so the original implementation wrote a new cancel line per render-tick.
   useEffect(() => {
     for (const g of groups) {
-      if (isStale(g.primary)) {
-        invoke("cancel_decision_cmd", {
-          dir: projectDir,
-          decisionId: g.primary.id,
-          reason: "stale_archive",
-        }).catch(() => { /* ignore — best-effort */ });
-      }
+      if (!isStale(g.primary)) continue;
+      if (staleArchiveFiredRef.current.has(g.primary.id)) continue;
+      staleArchiveFiredRef.current.add(g.primary.id);
+      invoke("cancel_decision_cmd", {
+        dir: projectDir,
+        decisionId: g.primary.id,
+        reason: "stale_archive",
+      }).catch(() => {
+        // Failure → allow a future render to retry once.
+        staleArchiveFiredRef.current.delete(g.primary.id);
+      });
     }
   }, [groups, projectDir]);
 
@@ -232,9 +250,24 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
     }
   }
 
-  async function handleCancel(g: DecisionGroup) {
-    if (submitting[g.primary.id]) return;
-    if (!window.confirm(`Dismiss this decision (#${g.primary.id})? It will stay in board history but won't reappear in the panel.`)) return;
+  /**
+   * Two-step inline dismiss confirm — F-DC-2 sister-fix. First click on the
+   * × icon flips the card into "confirming" state for ~3 seconds; second
+   * click within that window actually fires the cancel. Click anywhere else
+   * (auto-timeout) resets without committing. Replaces native window.confirm()
+   * modal-stack which violated ui-arch:1 msg 4985 craft principle 3.
+   */
+  function clearDismissTimer(id: number) {
+    const t = confirmTimeoutsRef.current.get(id);
+    if (t !== undefined) {
+      clearTimeout(t);
+      confirmTimeoutsRef.current.delete(id);
+    }
+  }
+
+  async function commitCancel(g: DecisionGroup) {
+    clearDismissTimer(g.primary.id);
+    setConfirmingDismiss((s) => { const c = { ...s }; delete c[g.primary.id]; return c; });
     setSubmitting((s) => ({ ...s, [g.primary.id]: true }));
     setError(null);
     try {
@@ -260,6 +293,31 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
       setSubmitting((s) => ({ ...s, [g.primary.id]: false }));
     }
   }
+
+  function handleDismissClick(g: DecisionGroup) {
+    if (submitting[g.primary.id]) return;
+    if (confirmingDismiss[g.primary.id]) {
+      // Second click within the timeout window — commit
+      void commitCancel(g);
+      return;
+    }
+    // First click — flip to confirming state, auto-reset after 3s
+    setConfirmingDismiss((s) => ({ ...s, [g.primary.id]: true }));
+    clearDismissTimer(g.primary.id);
+    const timer = setTimeout(() => {
+      setConfirmingDismiss((s) => { const c = { ...s }; delete c[g.primary.id]; return c; });
+      confirmTimeoutsRef.current.delete(g.primary.id);
+    }, 3000);
+    confirmTimeoutsRef.current.set(g.primary.id, timer);
+  }
+
+  // Clean up any pending confirm timers on unmount.
+  useEffect(() => {
+    return () => {
+      for (const t of confirmTimeoutsRef.current.values()) clearTimeout(t);
+      confirmTimeoutsRef.current.clear();
+    };
+  }, []);
 
   return (
     <div className="decision-panel" aria-label="Pending decisions">
@@ -310,13 +368,13 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
                   </div>
                   <button
                     type="button"
-                    className="decision-card-dismiss"
-                    onClick={() => handleCancel(g)}
+                    className={`decision-card-dismiss${confirmingDismiss[g.primary.id] ? " confirming" : ""}`}
+                    onClick={() => handleDismissClick(g)}
                     disabled={isSubmitting}
-                    title="Dismiss this decision"
-                    aria-label="Dismiss this decision"
+                    title={confirmingDismiss[g.primary.id] ? "Click again to confirm dismiss" : "Dismiss this decision"}
+                    aria-label={confirmingDismiss[g.primary.id] ? "Click again to confirm dismiss" : "Dismiss this decision"}
                   >
-                    &times;
+                    {confirmingDismiss[g.primary.id] ? "Confirm?" : "×"}
                   </button>
                 </div>
                 {g.primary.subject && (

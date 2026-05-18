@@ -2919,17 +2919,13 @@ When multiple instances of this role are active:
   useEffect(() => {
     // Mutate window title so the "(N) Vaak" indicator is visible even when
     // the user is in another tab/app — per evil-arch flag #5 (msg 4789).
-    // Use a fallback of just "Vaak" so the title doesn't get stuck mid-state
-    // on unmount (cleanup runs after the effect's next run, not on every render).
-    const base = "Vaak";
-    if (pendingDecisionCount > 0) {
-      document.title = `(${pendingDecisionCount}) ${base}`;
-    } else {
-      document.title = base;
-    }
-    return () => {
-      document.title = base;
-    };
+    // No cleanup return — F-DC-3 sister-fix from dev-challenger:0 msg 5006:
+    // a cleanup that resets to "Vaak" caused a brief flicker on every
+    // count-change because cleanup runs BEFORE the next effect sets the
+    // new title. The next effect run already handles the count=0 case.
+    document.title = pendingDecisionCount > 0
+      ? `(${pendingDecisionCount}) Vaak`
+      : "Vaak";
   }, [pendingDecisionCount]);
 
   // Wave 1.5 partial B1+B2+B3 per architect Ruling 7 + human msg 4264:
@@ -4329,6 +4325,20 @@ When multiple instances of this role are active:
           );
         })()}
 
+        {/* Decision Panel v1 — persistent surface below team-status roster
+            (per ui-architect:1 msg 4985 + dev-challenger:0 F-DC-1 sister-fix
+            from gate #2 conditional pass on 9272357). Closes the gap where
+            pending human-decisions get buried in board scrollback (human
+            msg 4783; 6 adversarial flags from msgs 4784/4787/4789/4811). */}
+        {projectDir && project && (
+          <DecisionPanel
+            projectDir={projectDir}
+            messages={project.messages}
+            onPendingCountChange={setPendingDecisionCount}
+            getRoleColor={getRoleColor}
+          />
+        )}
+
         {/* Active Claims Section — collapsible */}
         {project && project.claims && project.claims.length > 0 && (
           <div className={`claims-section${claimsCollapsed ? " claims-collapsed" : ""}`}>
@@ -4390,20 +4400,6 @@ When multiple instances of this role are active:
               <br/>Then restart the app.
             </div>
           </div>
-        )}
-
-        {/* Decision Panel v1 — persistent surface so pending human-decisions
-            don't get buried in board scrollback (human msg 4783; 6 adversarial
-            flags from msgs 4784/4787/4789/4811). Sits directly above the
-            message timeline so it's the first thing the user sees when
-            scrolling to read team activity. */}
-        {projectDir && project && (
-          <DecisionPanel
-            projectDir={projectDir}
-            messages={project.messages}
-            onPendingCountChange={setPendingDecisionCount}
-            getRoleColor={getRoleColor}
-          />
         )}
 
         {/* Message Timeline */}
