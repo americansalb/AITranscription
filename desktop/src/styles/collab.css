@@ -1605,6 +1605,44 @@
   margin-top: 4px;
 }
 
+/* Active-claims v1 compound role-dot states per ui-architect:1 msg 5048 craft
+ * brief. Role color stays on the fill so the user still recognizes whose
+ * claim it is; the ring/opacity/border-style layer encodes alive_state. */
+.claim-role-dot.stale {
+  opacity: 0.6;
+  box-shadow: 0 0 0 1px #d97706; /* amber-600 — matches existing stale-state palette */
+  animation: claim-dot-stale-pulse 2.4s ease-in-out infinite;
+}
+
+.claim-role-dot.unknown {
+  opacity: 0.4;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+  border: 1px dashed rgba(255, 255, 255, 0.3);
+  background-clip: padding-box;
+}
+
+@keyframes claim-dot-stale-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 0.85; }
+}
+
+/* Reduced-motion respect per ui-arch msg 5048 — slow pulse only animates
+ * when the user hasn't opted out. */
+@media (prefers-reduced-motion: reduce) {
+  .claim-role-dot.stale {
+    animation: none;
+  }
+}
+
+/* Empty-state row matches decision-panel-empty visual treatment so the two
+ * always-rendered panels look consistent. */
+.claims-section-empty {
+  font-size: 12px;
+  color: var(--collab-text-secondary);
+  font-style: italic;
+  padding: 6px 12px 10px;
+}
+
 .claim-role-label {
   font-size: 12px;
   font-weight: 600;

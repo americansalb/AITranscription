@@ -115,6 +115,11 @@ export interface FileClaim {
   description: string;
   claimed_at: string;
   session_id: string;
+  /** Active-claims v1 (architect msg 5044 + ui-arch:1 msg 5048): per-claim
+   * liveness derived from `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms`.
+   * "active" | "stale" | "unknown". Optional — undefined means pre-keepalive
+   * Tauri binary or seat-file missing. */
+  alive_state?: "active" | "stale" | "unknown";
 }
 
 export interface ParsedProject {

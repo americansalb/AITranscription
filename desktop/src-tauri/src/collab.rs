@@ -29,6 +29,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// ==================== Staleness thresholds (single source of truth) ====================
+// Per evil-architect:0 msg 5043 F-EA-CA-1 + architect:0 msg 5046 const-extraction
+// directive: consolidate all liveness thresholds in one place so a future "tighten
+// timing" PR is a single-file change instead of a hunt across collab.rs / main.rs /
+// protocol.rs / vaak-mcp.rs. This is the active-claims-v1 first member; subsequent
+// thresholds (mic-rotation, claims_auto_release, decision_stale) migrate here as
+// each lane lands its own gate cycle.
+pub mod staleness_thresholds {
+    /// A seat is "alive_state=stale" when its `.vaak/sessions/<role>-<inst>.json:
+    /// last_alive_at_ms` is older than this. Mirrors the value already used by
+    /// `list_active_seats_cmd` in main.rs:3473 so the moderator picker and the
+    /// active-claims panel speak the same language. 120s = 4× the 30s heartbeat
+    /// cadence; conservative enough to not false-positive a legitimate long
+    /// thinking pause but tight enough that a dead sidecar surfaces within
+    /// ~2min on the UI.
+    pub const ALIVE_STATE_STALE_MS: u64 = 120_000;
+}
+
 /// Atomic file write: write to .tmp file, fsync, then rename over target.
 /// Protects against partial writes and advisory lock races on macOS.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
@@ -290,6 +308,13 @@ pub struct FileClaim {
     pub description: String,
     pub claimed_at: String,
     pub session_id: String,
+    /// Active-claims v1 (per architect msg 5044 + ui-arch:1 msg 5048 craft brief):
+    /// derived per-claim from `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms`
+    /// at read time. "active" | "stale" | "unknown". Optional for back-compat
+    /// with frontends that haven't been updated; old callers see the field
+    /// as undefined and fall through to the prior "no indicator" behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alive_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,7 +422,22 @@ pub fn parse_project_dir(dir: &str) -> Option<ParsedProject> {
     })
 }
 
-/// Read claims.json and filter out stale entries whose session is gone.
+/// Read claims.json and filter out claims whose session is fully gone (no
+/// binding at all OR binding is past `gone_threshold` on the legacy
+/// heartbeat). For SURVIVING claims, derive an `alive_state` per the
+/// keepalive-v1 `last_alive_at_ms` contract (SHA 533b458) so the UI can
+/// visually mark "alive but stale" without dropping the card.
+///
+/// active-claims-v1 (architect msg 5044/5046/5049 + ui-arch msg 5048):
+/// - `alive_state = "active"` when last_alive_at_ms within ALIVE_STATE_STALE_MS
+/// - `alive_state = "stale"`  when older
+/// - `alive_state = "unknown"` when seat session file is missing / unreadable
+///   (just-joined seat before first keepalive write, or pre-instrumentation
+///   project)
+///
+/// The legacy "session gone entirely" drop still applies — claims from a
+/// session that left the project disappear from the panel; only claims from
+/// seats still bound to the project survive with a possible "stale" flag.
 fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: u64, gone_threshold: u64) -> Vec<FileClaim> {
     let claims_path = vaak_dir.join("claims.json");
     let content = match std::fs::read_to_string(&claims_path) {
@@ -409,16 +449,19 @@ fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: 
         Err(_) => return vec![],
     };
 
+    let now_ms = now_secs.saturating_mul(1000);
+    let sessions_subdir = vaak_dir.join("sessions");
+
     let mut result = Vec::new();
     let mut any_removed = false;
     let mut clean_map = serde_json::Map::new();
 
     for (key, val) in &claims_map {
         let session_id = val.get("session_id").and_then(|s| s.as_str()).unwrap_or("");
-        // Check if this session is still active (not gone)
+        // Drop entirely-gone sessions (no binding OR legacy heartbeat past gone-threshold).
         let binding = bindings.iter().find(|b| b.session_id == session_id);
-        let is_stale = match binding {
-            None => true, // No binding at all
+        let is_gone = match binding {
+            None => true,
             Some(b) => {
                 let age = parse_iso_epoch(&b.last_heartbeat)
                     .map(|hb| now_secs.saturating_sub(hb))
@@ -427,10 +470,30 @@ fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: 
             }
         };
 
-        if is_stale {
+        if is_gone {
             any_removed = true;
             continue;
         }
+
+        // Surviving claim — derive alive_state from per-seat keepalive file.
+        // The role_instance key is "role:N" — split into the filename pattern
+        // the keepalive supervisor uses: "role-N.json" in .vaak/sessions/.
+        let alive_state: Option<String> = (|| {
+            let (role, instance) = key.split_once(':')?;
+            let seat_file = sessions_subdir.join(format!("{}-{}.json", role, instance));
+            let raw = std::fs::read_to_string(&seat_file).ok()?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            let last_alive_at_ms = parsed.get("last_alive_at_ms").and_then(|m| m.as_u64()).unwrap_or(0);
+            if last_alive_at_ms == 0 {
+                return Some("unknown".to_string());
+            }
+            let stale_ms = now_ms.saturating_sub(last_alive_at_ms);
+            if stale_ms > staleness_thresholds::ALIVE_STATE_STALE_MS {
+                Some("stale".to_string())
+            } else {
+                Some("active".to_string())
+            }
+        })().or_else(|| Some("unknown".to_string()));
 
         // Parse into FileClaim
         let files: Vec<String> = val.get("files")
@@ -446,6 +509,7 @@ fn read_claims_filtered(vaak_dir: &Path, bindings: &[SessionBinding], now_secs: 
             description,
             claimed_at,
             session_id: session_id.to_string(),
+            alive_state,
         });
         clean_map.insert(key.clone(), val.clone());
     }

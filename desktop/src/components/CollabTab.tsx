@@ -4339,33 +4339,59 @@ When multiple instances of this role are active:
           />
         )}
 
-        {/* Active Claims Section — collapsible */}
-        {project && project.claims && project.claims.length > 0 && (
+        {/* Active Claims Section — collapsible. Active-claims-v1 (architect
+            msg 5049 + ui-arch:1 msg 5048): always rendered with an empty-state
+            so the panel is a fixed scanning location (matches decision-panel
+            always-rendered pattern). Each card shows alive_state via a
+            compound role-dot — full-opacity for active, amber ring + reduced
+            opacity for stale, gray dashed for unknown — and stale claims get
+            a " (reconnecting…)" suffix on the role label to match the
+            keepalive v2 moderator-picker UX (SHA 9d1fde1). */}
+        {project && (
           <div className={`claims-section${claimsCollapsed ? " claims-collapsed" : ""}`}>
             <div className="claims-section-title" onClick={() => setClaimsCollapsed(!claimsCollapsed)}>
               <span className="claims-section-toggle">&#9660;</span>
-              Active Claims <span className="claims-section-count">({project.claims.length})</span>
+              Active Claims <span className="claims-section-count">({project.claims?.length ?? 0})</span>
             </div>
             <div className="claims-section-body">
-              {project.claims.map((claim: FileClaim) => {
-                const roleSlug = claim.role_instance.split(":")[0] || "";
-                const filesDisplay = claim.files.length > 2
-                  ? `${claim.files[0]} (+${claim.files.length - 1} more)`
-                  : claim.files.join(", ");
-                return (
-                  <div key={claim.role_instance} className="claim-card">
-                    <div className="claim-role-dot" style={{ background: getRoleColor(roleSlug) }} />
-                    <span className="claim-role-label" style={{ color: getRoleColor(roleSlug) }}>
-                      {claim.role_instance}
-                    </span>
-                    <div className="claim-info">
-                      <div className="claim-files">{filesDisplay}</div>
-                      <div className="claim-desc">{claim.description}</div>
+              {(!project.claims || project.claims.length === 0) ? (
+                <div className="claims-section-empty">No active claims</div>
+              ) : (
+                project.claims.map((claim: FileClaim) => {
+                  const roleSlug = claim.role_instance.split(":")[0] || "";
+                  const filesDisplay = claim.files.length > 2
+                    ? `${claim.files[0]} (+${claim.files.length - 1} more)`
+                    : claim.files.join(", ");
+                  const aliveState = claim.alive_state;
+                  const isStale = aliveState === "stale";
+                  const isUnknown = aliveState === "unknown";
+                  const dotClass = `claim-role-dot${isStale ? " stale" : ""}${isUnknown ? " unknown" : ""}`;
+                  const labelSuffix = isStale ? " (reconnecting…)" : "";
+                  const dotTitle = isStale
+                    ? `${claim.role_instance} — last heartbeat stale (>120s); seat may be reconnecting or dead`
+                    : isUnknown
+                      ? `${claim.role_instance} — keepalive not yet observed; seat may be just-joined or pre-instrumentation`
+                      : claim.role_instance;
+                  return (
+                    <div key={claim.role_instance} className="claim-card">
+                      <div
+                        className={dotClass}
+                        style={{ background: getRoleColor(roleSlug) }}
+                        title={dotTitle}
+                        aria-label={dotTitle}
+                      />
+                      <span className="claim-role-label" style={{ color: getRoleColor(roleSlug) }}>
+                        {claim.role_instance}{labelSuffix}
+                      </span>
+                      <div className="claim-info">
+                        <div className="claim-files">{filesDisplay}</div>
+                        <div className="claim-desc">{claim.description}</div>
+                      </div>
+                      <span className="claim-time">{formatRelativeTime(claim.claimed_at)}</span>
                     </div>
-                    <span className="claim-time">{formatRelativeTime(claim.claimed_at)}</span>
-                  </div>
-                );
-              })}
+                  );
+                })
+              )}
             </div>
           </div>
         )}
