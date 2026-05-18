@@ -1,0 +1,280 @@
+/* Decision Panel v1 — persistent surface for pending human-decisions.
+ * Per UI-arch craft notes msg 4811:
+ *   - dedicated pane (right-rail style; can also be docked above the message list)
+ *   - empty-state copy so panel doesn't look broken when idle
+ *   - dedup → one card with "asked Nx" badge
+ *   - "Other" → tertiary-style button, lower visual weight
+ *   - cancellation → ghost-style kill icon top-right of card
+ *   - panel persistent in DOM (no toast — fixed scanning location)
+ *   - attribution → existing agent-tag treatment (color from getRoleColor)
+ */
+
+.decision-panel {
+  background: #15181c;
+  border: 1px solid #2f3336;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decision-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #e1e8ed;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.decision-panel-title {
+  flex: 1;
+}
+
+.decision-panel-count {
+  background: #f5a623;
+  color: #15181c;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0;
+  min-width: 18px;
+  text-align: center;
+}
+
+.decision-panel-empty {
+  font-size: 12px;
+  color: #657786;
+  padding: 8px 4px;
+  font-style: italic;
+}
+
+.decision-panel-error {
+  font-size: 12px;
+  color: #e0245e;
+  background: #2a1620;
+  border: 1px solid #4a2030;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.decision-panel-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.decision-card {
+  background: #1c1f23;
+  border: 1px solid #2f3336;
+  border-left: 3px solid #f5a623;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.decision-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.decision-card-askers {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.decision-card-asker-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border: 1px solid;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.decision-card-asked-nx {
+  font-size: 10px;
+  color: #f5a623;
+  font-weight: 600;
+  padding: 2px 6px;
+  border: 1px solid #f5a62355;
+  border-radius: 10px;
+  background: #f5a62311;
+}
+
+.decision-card-dismiss {
+  background: transparent;
+  border: none;
+  color: #657786;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.decision-card-dismiss:hover {
+  color: #e0245e;
+  background: rgba(224, 36, 94, 0.1);
+}
+
+.decision-card-dismiss:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.decision-card-subject {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e1e8ed;
+}
+
+.decision-card-body {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #a8b2bd;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.decision-card-meta {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: #657786;
+  font-family: ui-monospace, monospace;
+}
+
+.decision-card-id {
+  letter-spacing: 0.02em;
+}
+
+.decision-card-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.decision-card-choice {
+  background: #232629;
+  border: 1px solid #2f3336;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #e1e8ed;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.decision-card-choice:hover:not(:disabled) {
+  background: #2a2e33;
+  border-color: #4a4f55;
+}
+
+.decision-card-choice:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.decision-card-choice.recommended {
+  border-color: #17bf63;
+  background: #17bf6311;
+}
+
+.decision-card-choice.recommended:hover:not(:disabled) {
+  background: #17bf6322;
+}
+
+.decision-card-choice-label {
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.decision-card-choice-rec {
+  font-size: 9px;
+  color: #17bf63;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: #17bf6322;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.decision-card-choice-desc {
+  font-size: 11px;
+  color: #8899a6;
+  font-weight: 400;
+}
+
+.decision-card-other {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  align-items: stretch;
+}
+
+.decision-card-other-input {
+  flex: 1;
+  background: #15181c;
+  border: 1px solid #2f3336;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: #e1e8ed;
+  font-size: 11px;
+  outline: none;
+}
+
+.decision-card-other-input:focus {
+  border-color: #1d9bf0;
+}
+
+.decision-card-other-input:disabled {
+  opacity: 0.5;
+}
+
+/* Tertiary visual weight per UI-arch craft notes — Other is an escape hatch, not an equal choice. */
+.decision-card-other-submit {
+  background: transparent;
+  border: 1px solid #2f3336;
+  border-radius: 6px;
+  padding: 0 10px;
+  color: #8899a6;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.decision-card-other-submit:hover:not(:disabled) {
+  color: #e1e8ed;
+  border-color: #4a4f55;
+}
+
+.decision-card-other-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

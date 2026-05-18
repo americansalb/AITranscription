@@ -17,6 +17,7 @@ import { MicToHint } from "./ProtocolPanel/composer/MicToHint";
 import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../lib/queueStore";
 import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
+import { DecisionPanel } from "./DecisionPanel";
 
 const STAT_AXES: Array<{ key: keyof RoleStats; label: string; short: string; hint: string }> = [
   { key: "td", label: "Technical Depth", short: "TD", hint: "Code, architecture, systems engagement" },
@@ -2911,6 +2912,26 @@ When multiple instances of this role are active:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messagesLength, lastMsgId, answerLookup]);
 
+  // Decision Panel v1 — pending count after dedup, used for window-title badge
+  // (flag #5). The DecisionPanel itself owns the grouping logic; it bubbles up
+  // the count via onPendingCountChange so the title updates in lockstep.
+  const [pendingDecisionCount, setPendingDecisionCount] = useState(0);
+  useEffect(() => {
+    // Mutate window title so the "(N) Vaak" indicator is visible even when
+    // the user is in another tab/app — per evil-arch flag #5 (msg 4789).
+    // Use a fallback of just "Vaak" so the title doesn't get stuck mid-state
+    // on unmount (cleanup runs after the effect's next run, not on every render).
+    const base = "Vaak";
+    if (pendingDecisionCount > 0) {
+      document.title = `(${pendingDecisionCount}) ${base}`;
+    } else {
+      document.title = base;
+    }
+    return () => {
+      document.title = base;
+    };
+  }, [pendingDecisionCount]);
+
   // Wave 1.5 partial B1+B2+B3 per architect Ruling 7 + human msg 4264:
   // cache the IIFE's derived data (activeCount, voteTallies, voteProposalIds,
   // voteResponseIds, allMessages, totalCount, hasHiddenMessages, visibleMessages)
@@ -4371,6 +4392,20 @@ When multiple instances of this role are active:
           </div>
         )}
 
+        {/* Decision Panel v1 — persistent surface so pending human-decisions
+            don't get buried in board scrollback (human msg 4783; 6 adversarial
+            flags from msgs 4784/4787/4789/4811). Sits directly above the
+            message timeline so it's the first thing the user sees when
+            scrolling to read team activity. */}
+        {projectDir && project && (
+          <DecisionPanel
+            projectDir={projectDir}
+            messages={project.messages}
+            onPendingCountChange={setPendingDecisionCount}
+            getRoleColor={getRoleColor}
+          />
+        )}
+
         {/* Message Timeline */}
         <div className="message-timeline" ref={messageTimelineRef}>
           {hasNoMessages ? (
@@ -4390,7 +4425,6 @@ When multiple instances of this role are active:
               const voteTallies = messageListDerivedCache.voteTallies;
               const voteProposalIds = messageListDerivedCache.voteProposalIds;
               const voteResponseIds = messageListDerivedCache.voteResponseIds;
-              const allMessages = messageListDerivedCache.allMessages;
               const totalCount = messageListDerivedCache.totalCount;
               const hasHiddenMessages = messageListDerivedCache.hasHiddenMessages;
               const visibleMessages = messageListDerivedCache.visibleMessages;

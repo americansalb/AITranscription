@@ -61,6 +61,8 @@ export interface QuestionChoice {
   id: string;
   label: string;
   desc?: string;
+  /** Decision-panel v1 flag #6: mark the option the asker recommends. */
+  recommended?: boolean;
 }
 
 export interface BoardMessage {
@@ -79,7 +81,24 @@ export interface BoardMessage {
     vote_type?: string;
     proposed_value?: string;
     vote?: string;
+    /** Decision-panel v1 flag #3: allow free-form "Other" answer that fires as a directive. */
+    allow_other?: boolean;
+    /** Decision-panel v1 flag #2: agent-side hash for dedup; UI computes fallback if absent. */
+    question_hash?: string;
   };
+}
+
+/** Decision-panel v1 — resolution log entry persisted in .vaak/decisions.jsonl. */
+export interface DecisionResolution {
+  decision_id: number;
+  /** "resolve" | "cancel" */
+  kind: string;
+  option_id?: string;
+  other_text?: string;
+  /** For cancel: "author_cancel" | "stale_archive" | "board_resolved" */
+  reason?: string;
+  at: string;
+  by: string;
 }
 
 export interface RoleStatus {

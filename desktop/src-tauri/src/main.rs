@@ -4472,6 +4472,155 @@ fn send_team_message(dir: String, to: String, subject: String, body: String, msg
     Ok(msg_id)
 }
 
+// ==================== Decision Panel v1 commands ====================
+//
+// See collab.rs `Decision Panel v1` section for the wire-format contract and
+// why these commands don't change the MCP sidecar or the project_send schema.
+
+/// Read all resolution entries for the active section. The frontend joins
+/// these against board.jsonl messages (filtered to type=question + to=human
+/// + metadata.choices) to derive the pending-decisions list. Returned as a
+/// flat Vec so the JS side can build whatever index it needs.
+#[tauri::command]
+fn list_decision_resolutions_cmd(dir: String) -> Result<Vec<collab::DecisionResolution>, String> {
+    let dir = validate_project_dir(&dir)?;
+    let map = collab::read_decision_resolutions(&dir);
+    Ok(map.into_values().collect())
+}
+
+/// Resolve a pending decision. If `option_id` is provided, a type:"answer"
+/// board message is appended (matches the existing inline QuestionCard
+/// flow so the board scrollback shows the choice). If `other_text` is
+/// provided, a type:"directive" board message ALSO fires with
+/// metadata.in_reply_to set — flag #3 from msg 4784: human's Other text
+/// becomes a new directive the team picks up on rotation.
+///
+/// Both message-appends and the decisions.jsonl resolution entry happen
+/// inside one with_board_lock() to keep observers atomic.
+#[tauri::command]
+fn resolve_decision_cmd(
+    dir: String,
+    decision_id: u64,
+    option_id: Option<String>,
+    option_label: Option<String>,
+    other_text: Option<String>,
+) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+
+    if option_id.is_none() && other_text.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        return Err("Either option_id or non-empty other_text must be provided.".to_string());
+    }
+
+    let board_path = collab::active_board_path(&dir);
+    let now = iso_now();
+
+    collab::with_board_lock(&dir, || {
+        // Determine next message id from current board state
+        let existing = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let mut next_id: u64 = existing.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|m| m.get("id").and_then(|i| i.as_u64()))
+            .max()
+            .unwrap_or(0) + 1;
+
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&board_path)
+            .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+
+        // 1. Inline answer message (preserves existing QuestionCard "answered" semantics)
+        if let Some(oid) = option_id.as_ref() {
+            let label = option_label.clone().unwrap_or_else(|| oid.clone());
+            let answer = serde_json::json!({
+                "id": next_id,
+                "from": "human:0",
+                "to": "all",
+                "type": "answer",
+                "timestamp": now,
+                "subject": format!("Re: #{}", decision_id),
+                "body": label,
+                "metadata": {
+                    "in_reply_to": decision_id,
+                    "choice_id": oid,
+                }
+            });
+            writeln!(file, "{}", answer.to_string())
+                .map_err(|e| format!("Failed to write answer message: {}", e))?;
+            next_id += 1;
+        }
+
+        // 2. Other → directive emission (flag #3)
+        if let Some(text) = other_text.as_ref() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let directive = serde_json::json!({
+                    "id": next_id,
+                    "from": "human:0",
+                    "to": "all",
+                    "type": "directive",
+                    "timestamp": now,
+                    "subject": format!("Re: #{}", decision_id),
+                    "body": trimmed,
+                    "metadata": {
+                        "in_reply_to": decision_id,
+                        "from_decision_panel_other": true,
+                    }
+                });
+                writeln!(file, "{}", directive.to_string())
+                    .map_err(|e| format!("Failed to write directive message: {}", e))?;
+            }
+        }
+
+        // 3. Persist resolution log entry (decisions.jsonl)
+        let r = collab::DecisionResolution {
+            decision_id,
+            kind: "resolve".to_string(),
+            option_id: option_id.clone(),
+            other_text: other_text.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            reason: None,
+            at: now.clone(),
+            by: "human:0".to_string(),
+        };
+        collab::append_decision_resolution(&dir, &r)?;
+
+        Ok(())
+    })?;
+
+    notify_collab_change();
+    Ok(())
+}
+
+/// Cancel a pending decision without firing a directive. Used by the panel's
+/// kill icon (flag #4: author-cancel surface). The reason field also accepts
+/// "stale_archive" for the 24h auto-archive path and "board_resolved" for the
+/// "subsequent directive matches topic" path — both invoked by the frontend
+/// when it detects the conditions.
+#[tauri::command]
+fn cancel_decision_cmd(
+    dir: String,
+    decision_id: u64,
+    reason: Option<String>,
+) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let r = collab::DecisionResolution {
+        decision_id,
+        kind: "cancel".to_string(),
+        option_id: None,
+        other_text: None,
+        reason: Some(reason.unwrap_or_else(|| "author_cancel".to_string())),
+        at: iso_now(),
+        by: "human:0".to_string(),
+    };
+    collab::with_board_lock(&dir, || {
+        collab::append_decision_resolution(&dir, &r)
+    })?;
+    notify_collab_change();
+    Ok(())
+}
+
 /// Commit D — DelegationEntry + parse_delegation_blocks helpers per
 /// collaborative-proposal-workflow-spec-2026-05-15.md §Delegation-block
 /// markup + §parse_delegation_blocks (lines 89-106 + 166).
@@ -6659,6 +6808,10 @@ fn main() {
             launcher::check_homebrew_installed,
             launcher::install_nodejs,
             launcher::install_claude_cli,
+            // Decision Panel v1 — per the 6 adversarial flags (msgs 4784/4787/4789/4811)
+            list_decision_resolutions_cmd,
+            resolve_decision_cmd,
+            cancel_decision_cmd,
             // Collaborate v2 commands (P1: standalone window + static roster)
             collab_v2::show_collaborate_v2_window,
             collab_v2::toggle_collaborate_v2_window,

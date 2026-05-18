@@ -2556,3 +2556,92 @@ pub fn remove_global_role_template(slug: &str) -> Result<(), String> {
 
     Ok(())
 }
+
+// ==================== Decision Panel v1 ====================
+//
+// Per the 6 adversarial flags (board msgs 4784/4787/4789/4811), pending
+// human-decisions get a dedicated UI surface so they stop getting buried in
+// board-scroll noise. The wire format reuses the existing project_send +
+// metadata.choices schema agents already produce — no MCP changes required.
+//
+// Pose:    project_send(to="human", type="question",
+//                       metadata={ choices:[{id,label,desc,recommended?}],
+//                                  allow_other?: bool,
+//                                  question_hash?: string })
+// Resolve: human picks an option in the panel → resolve_decision_cmd writes a
+//          type:"answer" board message (existing pattern) AND appends a
+//          resolution entry to decisions.jsonl for fast cross-session lookup.
+// Other:   human types free-form → ALSO emits a type:"directive" board
+//          message with metadata.in_reply_to:<decision_id> so the team picks
+//          it up on rotation (flag #3).
+// Cancel:  human dismisses → cancel-resolution entry; the question stays in
+//          board history but disappears from the pending panel.
+// Stale:   resolutions also auto-include a synthesized "stale_archive" entry
+//          when the original pose is >24h old, server-side at read time
+//          (flag #4 — no background job needed for v1).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionResolution {
+    pub decision_id: u64,
+    /// "resolve" | "cancel"
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_text: Option<String>,
+    /// For cancel: "author_cancel" | "stale_archive" | "board_resolved"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at: String,
+    pub by: String,
+}
+
+pub fn decisions_jsonl_path_for_section(dir: &str, section: &str) -> PathBuf {
+    let vaak_dir = Path::new(dir).join(".vaak");
+    if section == "default" {
+        vaak_dir.join("decisions.jsonl")
+    } else {
+        vaak_dir.join("sections").join(section).join("decisions.jsonl")
+    }
+}
+
+pub fn active_decisions_path(dir: &str) -> PathBuf {
+    decisions_jsonl_path_for_section(dir, &get_active_section(dir))
+}
+
+/// Read the resolution log. Last-write-wins per decision_id (a cancel after
+/// a resolve takes precedence — the human changed their mind).
+pub fn read_decision_resolutions(dir: &str) -> HashMap<u64, DecisionResolution> {
+    let path = active_decisions_path(dir);
+    let mut map: HashMap<u64, DecisionResolution> = HashMap::new();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return map,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if let Ok(r) = serde_json::from_str::<DecisionResolution>(line) {
+            map.insert(r.decision_id, r);
+        }
+    }
+    map
+}
+
+pub fn append_decision_resolution(dir: &str, r: &DecisionResolution) -> Result<(), String> {
+    let path = active_decisions_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = serde_json::to_string(r)
+        .map_err(|e| format!("Failed to serialize resolution: {}", e))?;
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open decisions.jsonl: {}", e))?;
+    writeln!(f, "{}", line)
+        .map_err(|e| format!("Failed to write resolution: {}", e))?;
+    Ok(())
+}
