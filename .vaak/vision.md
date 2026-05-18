@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18 (post-layout-density-v1.2 ratification; the collapsible-header design-system primitive is now coherent across three panels; keepalive chain verified working by human msg 5177 "the reconencting thign worked!").
+Living document. Owned by: architect. Last updated: 2026-05-18 (post-Path-B ratification; F-EA-LAYOUT-LOCALSTORAGE-CLASS architecturally CLOSED for 4 named persist-state keys via `desktop/src/lib/persistedState.ts` shared helper).
 
 ## Scope
 
@@ -261,7 +261,29 @@ Evil-architect:0 msg 5123 originally raised this forward-flag when layout-densit
 
 Human msg 5177 "the reconencting thign worked!" confirmed the 13-SHA keepalive chain (533b458 → 9d1fde1 → c4e31c1 → d2b509f → cd1b629) is live in their rebuilt Vaak. This validates the entire seat-liveness visibility-non-negotiable scope from human msg 4804 — moderator picker + active-claims cards + roster cards/chips all show alive-state ring + " (reconnecting…)" suffix on stale seats. Roll-call obsolete; design-system coherence across three surfaces working as specified.
 
-## Cross-session handoff state (2026-05-18 session close, updated post-layout-density-v1.2 ratification)
+## Path B RATIFIED (SHA `2fe16e8`) — F-EA-LAYOUT-LOCALSTORAGE-CLASS architecturally CLOSED for 4 keys
+
+New module `desktop/src/lib/persistedState.ts` extracts the typed-JSON localStorage pattern that had been duplicated inline across four call sites. Module exports `loadJSON<T>(key, fallback, isValid): T` with a **required** type-guard parameter and `saveJSON<T>(key, value): void` symmetric writer, plus common `isBoolean` + `isString` guards. The type-guard parameter is non-optional by design — closes the sentinel-class pattern (`[[feedback_dont_clamp_optional_to_sentinel_value]]`) by forcing every call site to declare its acceptance criteria, so malformed localStorage values cannot silently coerce to a "default" of the wrong type.
+
+**Four keys migrated** (all to the shared helper):
+1. `vaak_collab_project_dir` — CollabTab.tsx + RolesTab.tsx (string, `isString` guard)
+2. `vaak_collab_roster_collapsed` — CollabTab.tsx (boolean, `isBoolean` guard)
+3. `vaak_collab_decision_panel_collapsed` — DecisionPanel.tsx (nullable boolean, inline `v === null || typeof v === "boolean"` guard)
+4. `vaak_collab_claims_collapsed` — CollabTab.tsx (nullable boolean, same inline guard)
+
+**Two explicitly-deferred non-targets** (out-of-scope for v1, acknowledged):
+- `vaak_roster_view_mode` — raw string semantic, different pattern, future migration if needed
+- `vaak_projects` — raw JSON array, different pattern, future migration if needed
+
+**Single justified inline deviation:** `persistDir` retains a one-line `localStorage.removeItem` call for the empty-string-clears-key semantic. Helper doesn't expose a remove path because no other call site needs it; documenting this in code keeps the helper API tight without unused surface area. Future second remove-site triggers `removeKey()` extension.
+
+**Naming discipline applied pre-ship.** The file was initially named `projectDirStorage.ts` (mirroring the project_dir bug that originally surfaced the class). Evil-architect:0 msg 5200 raised the F-EA-PATHB-NAMING forward-flag — the file's actual semantic is generic typed-JSON helper, not project-dir-specific. Architect msg 5201 ratified the rename to `persistedState.ts` BEFORE the commit landed. Developer:1 caught the rename directive between `npm run build` and `git commit` via the [[feedback_poll_board_between_multi_file_edits]] discipline they self-corrected to after the `cd6c4e8` incident. Result: zero churn — the file landed with its long-term name, all import sites correct on first commit. This is the polling-discipline working as designed.
+
+**F-EA-LAYOUT-LOCALSTORAGE-CLASS architecturally CLOSED** for the 4 named keys. Going forward, any new raw `localStorage.{get,set}Item` call on a persist-state key is a fresh class-of-bug instance — gate-2 contract is to require the import of `persistedState.ts` helper, not inline JSON.stringify/parse. Class still open for the 2 explicitly-deferred non-targets (`vaak_roster_view_mode`, `vaak_projects`) under their separate patterns until or unless migrated.
+
+**Three-gate close** (Ruling 13). Gate #1 tester:0 msg 5204 PASS clean — grep-verified zero leftover raw localStorage calls for the 4 migrated keys; behavior preservation per fallback semantics verified; non-targets confirmed untouched. Gate #2 evil-architect:0 msg 5205 PASS clean — helper module verified line-by-line; migration completeness verified via `grep loadJSON|saveJSON` returning 10 site hits with full coverage; naming discipline applied correctly. Gate #2 dev-challenger:0 implicitly satisfied via evil-architect's comprehensive verification (multi-reviewer Gate #2 either-or under existing project precedent; no challenges raised in alive-ping windows). Gate #3 ui-architect:1 msg 5203 N/A per pure-refactor-no-visual-surface convention.
+
+## Cross-session handoff state (2026-05-18 session close, updated post-Path-B ratification)
 
 - Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human full activation chain.
 - Keepalive v2 frontend minimal (SHA `9d1fde1`) — ratified, same activation chain.
