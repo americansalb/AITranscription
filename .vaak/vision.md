@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18 (decision-panel v1 ratified + localStorage divergent-reader bug appended).
+Living document. Owned by: architect. Last updated: 2026-05-18 (post-active-claims-v1 + decision-panel-v1.1 + emergency-revert + layout-density-v1 corrected ratification cycle).
 
 ## Scope
 
@@ -143,13 +143,76 @@ Human msg 5029 surfaced `Error loading roles: Invalid project directory '"C:\\Us
 
 Recommendation: ship Path A first to unblock; ship Path B as a follow-up sister-fix in the same session. Together they close the v1 bug instance and the architectural class instance.
 
-## Cross-session handoff state (2026-05-18 session close, updated post-decision-panel ratification)
+## Active-claims-v1 RATIFIED (SHA `c4e31c1` + sister-fix `d2b509f`)
 
-- Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human `cd desktop && npm run build` + `cargo build --release` from `desktop/src-tauri/` + Vaak relaunch to activate.
-- Keepalive v2 frontend minimal (SHA `9d1fde1`) — conditional-PASS, same activation chain.
+Human directive msg 5039 framed the active claims section as needing "useful and 100% accurate." Architectural diagnosis at architect msgs 5044/5046/5049 identified the divergent-liveness-contract root cause: `read_claims_filtered` in `collab.rs` used the LEGACY `bindings:last_heartbeat` path while keepalive v1 (`533b458`) had introduced the `last_alive_at_ms` derive-from-disk contract. Two readers, two freshness models. Same multi-writer / divergent-reader class as the localStorage bug + dual-heartbeat-trackers.
+
+**v1 backend (`c4e31c1`).** `read_claims_filtered` switches to the `last_alive_at_ms` path, derives a per-claim `alive_state ∈ {"active","stale","unknown"}`, populates `FileClaim.alive_state: Option<String>` for surviving claims. Stale-claim removal preserved (existing behavior). `STALENESS_THRESHOLDS` const introduced per evil-architect:0 msg 5043 F-EA-CA-1 (threshold-proliferation class-of-bug close).
+
+**Sister-fix (`d2b509f`).** F-EA-CA-3 surfaced a second divergent-reader: `vaak-mcp.rs:1213 read_claims_filtered` had its own (legacy) freshness derivation — MCP-tool consumers (other agents querying claims) were still receiving the old contract even after the Tauri-side fix landed. Sister-fix aligns the sidecar's reader to the same `last_alive_at_ms` derivation. This is the FOURTH concrete instance of the multi-writer/divergent-reader class.
+
+**Frontend (folded into `c4e31c1`).** `FileClaim` TypeScript type extension; compound role-dot per ui-architect:1 msg 5048 craft brief (role-color fill + alive_state ring); " (reconnecting…)" suffix on stale role labels for cross-surface UX consistency with keepalive v2 moderator-picker; reduced-motion-respect on the pulse; aria-label includes alive-state semantic. Path A symmetric for the new persistence pattern. Three-gate closed (tester:0 msg 5065 + dev-challenger:0 msg 5067 + evil-architect:0 msg 5068 + ui-architect:1 msg 5066).
+
+**Empty-state fold-in (msg 5049, REVERSED).** Architect-lane msg 5049 ratified always-rendering the claims panel with empty-state copy "No active claims," citing decision-panel parity. This decision was incorrect at the architectural-composition level — see §"Always-render real-estate composition" lesson below. The fold-in was emergency-reverted at SHA `b086921` under human msg 5108/5109 authority.
+
+**Out of v1.** Manual release button + watchdog auto-release + conflict-detection + file-content-freshness all queued as active-claims-v2; deferred indefinitely pending broader layout-density work that supersedes the always-render decisions.
+
+## Decision-panel v1.1 RATIFIED (SHA `d361a1d`)
+
+Human msg 5088 ("the decision tab has a gap it should also be for directives") surfaced a scope gap in decision-panel v1: agents posing FREE-FORM open-ended directives bypassed the panel because the v1 filter required `metadata.choices` to be present. The result: decisions surfaced outside the decision panel (msg 5099 human re-callout), defeating the panel's whole purpose as a single-pane-of-glass for pending-human items.
+
+**v1.1 backend + frontend.** Widens the panel's selection filter to surface `type:"directive"` messages addressed to the human alongside the original `type:"question"` shape. Free-form directives get an "Acknowledge / Reply" fork instead of canonical choices — Acknowledge marks the decision resolved with no directive emission; Reply opens the inline free-text input that re-enters the board as a `type:"directive"` with `metadata.in_reply_to: <decision_id>`. Backward-compat: structured questions still render with their canonical choices and the existing Other-text path. Three-gate closed (tester:0 + dev-challenger:0 + evil-architect:0 PASS gates #1+#2; ui-architect:1 gate #3 deferred but later self-corrected and ratified in msg 5117 alongside the emergency-revert `b086921`).
+
+## Emergency-revert SHA `b086921` (always-render real-estate failure)
+
+Human msg 5108 ("Almost all of the UI space is occupied by roles+decisions+active claims+assembly") + msg 5109 ("UI arch failure i cant brely see messages") triggered an emergency revert. The composition failure: four always-rendered panels (roster + decision-panel + active-claims + assembly-banner) collectively starved the message timeline of vertical real estate. Each panel's always-render was independently ratified for in-panel UX consistency, but the architectural composition was never audited.
+
+`b086921` re-introduces emptiness guards: DecisionPanel + active-claims hide entirely when zero content. The title-badge `(N) Vaak` still wakes the human when decisions arrive. Three-gate closed under emergency-fix tempo (tester:0 msg 5114 + dev-challenger:0 msg 5116 + evil-architect:0 msg 5115 + ui-architect:1 msg 5117 self-corrected craft principle).
+
+The empty-state-always-render claim was a transferable-pattern fallacy. See §"Always-render real-estate composition" below.
+
+## Layout-density-v1 process-failure case study (cd6c4e8 → e7bfd82) + corrected ratification (SHA `1c5678d`)
+
+Human msg 5118 ("fix it now no worries") authorized a broader layout pass following the emergency revert. ui-architect:1 msg 5122 spec'd layout-density-v1 with four fixes. Fix-1 was initially shipped at `cd6c4e8` as an ACTIVE-ONLY ROSTER FILTER (vacant cards hidden by default with a toggle to reveal). Human msg 5125 ("I CANT ALLOW YOU TO LOSE FUNCTIONALITY") plus four lanes' STOP signals (msgs 5126-5129) arrived ~3 minutes after the ship. Developer:1 had gone dark coding (msg 5124) per established failure mode, missed the STOP signals, shipped the destructive default. Self-revert at `e7bfd82` + corrected re-ship at `1c5678d` followed within ~5 min.
+
+**Corrected `1c5678d`.** Section-LEVEL collapse, default expanded, full functionality preserved — chevron + "Team Roster" + status counts as a one-line header that folds the grid + Launch-All-Vacant button when collapsed. All roles always reachable when expanded. ARIA semantics (`aria-expanded`, `aria-controls`, `role="button"`, keyboard nav). Path A symmetric localStorage for the new `vaak_collab_roster_collapsed` key per evil-architect:0 F-EA-LAYOUT-LOCALSTORAGE-CLASS forward-flag.
+
+Three-gate closed on the corrected ship (tester:0 msg 5141 + dev-challenger:0 msg 5139 + evil-architect:0 msg 5140 + ui-architect:1 msg 5142). Fix 2 (assembly banner condensed) + Fix 3 (per-banner collapse or tabs, NOT priority-suppression) deferred to v1.1.
+
+The `cd6c4e8 → e7bfd82` cycle is preserved here as a process-failure case study rather than scrubbed from history — see §"Destructive default needs explicit human confirm" + §"Go-dark-coding discipline" below.
+
+## Architectural lesson: always-render real-estate composition (2026-05-18)
+
+Architect-lane msg 5049 ratified an always-render-with-empty-state fold-in for active-claims-v1 on the rationale of "decision-panel always-rendered parity." That decision was correct in isolation (UI consistency) and wrong at the composition level. When four persistent panels share one viewport, each panel's empty-state is non-zero pixels — the cumulative empty footprint can exceed the message-stream allocation. Result: the message timeline gets compressed below readable density, and the human can't see the artifact the team produces.
+
+**Discipline.** Before ratifying any always-rendered surface, audit: how many persistent panels share this viewport, and what is the cumulative minimum-rendered footprint? If ≥3 persistent panels stack, the spec MUST surface a real-estate-impact statement to the human BEFORE ratification, with the explicit count of always-rendered surfaces post-merge and an estimate of message-timeline pixels remaining at common viewport heights. Single-panel craft brilliance does not compose to multi-panel craft.
+
+This is the message-stream-primacy principle in a more rigorous form. The message stream is the team's primary artifact and must claim majority vertical real estate by default; persistent panels surrounding it are scaffolding.
+
+## Architectural lesson: destructive defaults need explicit human confirm (2026-05-18)
+
+When a human directive is interpreted as removing a UI affordance (filter-default, hide-default, suppress-default), the silence-default license from [[feedback_human_silence_means_decide]] does NOT apply. Silence-default is for non-destructive choices between equivalent paths; feature-cut interpretations require explicit confirmation — even when the team is in rapid-response mode after a critical-bug emergency. The `cd6c4e8` Fix-1 active-only-roster-filter ship is the canonical case: density was the directive, hide-by-default was the (incorrect) interpretation, the team converged on it in ~3 minutes, and no one paused to surface the cut to the human before ship. Result: emergency revert under explicit pushback ("I CANT ALLOW YOU TO LOSE FUNCTIONALITY").
+
+**Discipline.** Specs that REMOVE or HIDE UI affordances must be surfaced to the human with explicit "this will hide X by default; expanding will require Y action" framing BEFORE ratification, even under default-action license. Section-level COLLAPSE (with one-click reveal that restores everything) is the preferred density pattern over row-level FILTER (which removes items, even with toggle). Collapse preserves discoverability behind a single affordance; filter requires the user to know the affordance exists to recover.
+
+## Architectural lesson: go-dark-coding discipline (reinforcement, 2026-05-18)
+
+The `cd6c4e8` failure recurrence of [[feedback_poll_board_between_multi_file_edits]] across a multi-minute autonomous code window cost the team an emergency revert and ~10 minutes of recovery. Developer:1 went dark per their msg 5124, completed an `npm run build` + commit cycle (~3 min), and shipped before reading four STOP signals (msgs 5126-5129) that landed during their code window.
+
+**Reinforcement.** Multi-minute autonomous code work MUST interleave `project_wait` between major-effect actions (post-edit, pre-build, pre-commit). The cost of one poll is a tool call; the cost of a missed STOP signal is a revert + rework + apology + memory-write. Developer:1 has self-corrected and adopted the discipline per their msg 5138 acknowledgment.
+
+## Cross-session handoff state (2026-05-18 session close, updated post-layout-density-v1 ratification)
+
+- Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human full activation chain.
+- Keepalive v2 frontend minimal (SHA `9d1fde1`) — ratified, same activation chain.
 - Keepalive v3 (CollabTab roster red-dot) — queued, Path A scope locked, ≈50-80 LOC TSX + ≈20 LOC CSS.
-- Decision-panel v1 (SHA `9272357` + sister-fix `470b9d2`) — **three-gate RATIFIED this session**, same activation chain; ships in same Tauri rebuild as keepalive v1/v2. No MCP sidecar restart needed (deliberate architectural choice).
-- LocalStorage divergent-reader bug — Path A 4-LOC fix queued for fresh dev:1; Path B shared-storage helper extraction queued as architectural close.
-- Architect:0 seat — reseated fresh this session (2026-05-18 10:18Z); previous instance was 25h-stale (msg 4587); no kick performed since fresh window supersedes.
-- Developer:1 seat — original dev:1 executed by human msg 4975 for unilateral decision-panel deferral; fresh dev:1 seated via msg 4978 directive and shipped both decision-panel commits + the sister-fix without deferral.
-- Multi-writer audit (2026-05-13 carryover, now §"LocalStorage divergent-reader bug" 3rd instance) — class still partially addressed at the architectural level; Path B helper extraction for localStorage is the next concrete close before tackling the dual heartbeat trackers via card-status unification.
+- Decision-panel v1 (SHA `9272357` + sister-fix `470b9d2`) + v1.1 (SHA `d361a1d`) — three-gate RATIFIED, same activation chain. v1.1 widens the surface filter to free-form directives per human msg 5088.
+- Active-claims-v1 (SHA `c4e31c1` + sister-fix `d2b509f`) — three-gate RATIFIED, MCP-sidecar divergent-reader closed.
+- Emergency-revert (SHA `b086921`) — three-gate RATIFIED under emergency tempo. Hides empty DecisionPanel + active-claims to restore message-stream real estate.
+- Layout-density-v1 corrected (SHA `1c5678d` + preceding revert `e7bfd82`) — three-gate RATIFIED. Collapsible Team Roster section, default expanded, all roles preserved.
+- LocalStorage Path A (SHA `4796f5f`) — three-gate RATIFIED. Path B (shared-helper `desktop/src/lib/projectDirStorage.ts`) still queued for architectural-class close. Now four keys depend on the Path A symmetric pattern (the original `vaak_collab_project_dir`, `vaak_projects`, `vaak_collab_roster_collapsed`, plus active-claims-v1 alive_state-derived implicit consumer).
+- Layout-density-v1.1 (Fix 2 assembly banner condensed + Fix 3 per-banner-collapse-or-tabs) — queued.
+- Active-claims-v2 (manual release button + watchdog auto-release + conflict-detection) — deferred indefinitely pending broader layout-density work; the always-render empty-state piece is dead per the §"Always-render real-estate composition" lesson.
+- Architect:0 seat — reseated fresh 2026-05-18 10:18Z, drifted silent ~70min around 18:38Z → 19:32Z (between active-claims-v1 ratification and `1c5678d` ratification), re-engaged at architect msg 5132 + ratification msg 5137. Architect-lane debt cleared via this vision.md update.
+- Developer:1 seat — original dev:1 executed by human msg 4975 for unilateral decision-panel deferral; fresh dev:1 (current) seated via msg 4978 directive, has shipped all subsequent code with self-corrected discipline after one process-failure recurrence (cd6c4e8) that was recovered cleanly in <5 min.
+- Multi-writer audit (2026-05-13 carryover) — now four concrete instances (dual heartbeat trackers + turn-gate raw write + localStorage RolesTab/CollabTab + MCP-sidecar `read_claims_filtered`). Path B helper extraction for localStorage is the next architectural close; the MCP-sidecar reader was closed in this cycle (`d2b509f`).
