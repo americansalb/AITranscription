@@ -841,7 +841,21 @@ export function CollabTab() {
   // surfaced without an extra click. User can still collapse via the title.
   // Layout-density-v1.2: nullable so first render auto-derives (collapsed when
   // claims.length === 0, expanded when > 0) until human explicitly toggles.
-  const [claimsCollapsed, setClaimsCollapsed] = useState<boolean | null>(null);
+  // F-TESTER-LD12-1 sister-fix: persist explicit toggle via Path A symmetric
+  // pattern so the user's choice survives reload — matches DecisionPanel +
+  // Team Roster persistence behavior.
+  const [claimsCollapsed, setClaimsCollapsed] = useState<boolean | null>(() => {
+    try {
+      const stored = localStorage.getItem("vaak_collab_claims_collapsed");
+      if (stored === null) return null;
+      const parsed = JSON.parse(stored);
+      return typeof parsed === "boolean" ? parsed : null;
+    } catch { return null; }
+  });
+  const updateClaimsCollapsed = (next: boolean) => {
+    setClaimsCollapsed(next);
+    try { localStorage.setItem("vaak_collab_claims_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+  };
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
@@ -4484,17 +4498,31 @@ When multiple instances of this role are active:
           const collapsedEffective = claimsCollapsed ?? (claimsCount === 0);
           return (
           <div className={`claims-section${collapsedEffective ? " claims-collapsed" : ""}`}>
-            <div className="claims-section-title" onClick={() => setClaimsCollapsed(!collapsedEffective)}>
+            <div
+              className="claims-section-title"
+              onClick={() => updateClaimsCollapsed(!collapsedEffective)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  updateClaimsCollapsed(!collapsedEffective);
+                }
+              }}
+              aria-expanded={!collapsedEffective}
+              aria-controls="claims-section-body"
+              title={collapsedEffective ? "Expand active claims" : "Collapse active claims"}
+            >
               <span className="claims-section-toggle">{collapsedEffective ? "▶" : "▼"}</span>
               Active Claims <span className="claims-section-count">({claimsCount})</span>
             </div>
             {!collapsedEffective && claimsCount === 0 && (
-              <div className="claims-section-body">
+              <div id="claims-section-body" className="claims-section-body">
                 <div className="claims-section-empty">No active claims</div>
               </div>
             )}
             {!collapsedEffective && claimsCount > 0 && (
-            <div className="claims-section-body">
+            <div id="claims-section-body" className="claims-section-body">
               {project.claims.map((claim: FileClaim) => {
                   const roleSlug = claim.role_instance.split(":")[0] || "";
                   const filesDisplay = claim.files.length > 2
