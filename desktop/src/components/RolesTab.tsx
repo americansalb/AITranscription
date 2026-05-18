@@ -8,20 +8,18 @@
 import { useEffect, useState } from "react";
 import type { ParsedProject, RoleConfig } from "../lib/collabTypes";
 import { Avatar } from "./Avatar";
+import { loadJSON, isString } from "../lib/persistedState";
 
 const PROJECT_DIR_STORAGE_KEY = "vaak_collab_project_dir";
 
 function loadPersistedDir(): string {
-  // Must mirror CollabTab.tsx persistDir() which writes JSON.stringify(dir).
-  // Reading the raw value leaves the literal surrounding quotes in the string,
-  // which then fails validate_project_dir() with os error 123 on Windows
-  // (per architect:0 msg 5033 diagnosis from human msg 5029 repro).
-  try {
-    const stored = localStorage.getItem(PROJECT_DIR_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : "";
-  } catch {
-    return "";
-  }
+  // Path B (shared helper) replaces the prior inline JSON.parse fix from
+  // 4796f5f. The architect:0 msg 5033 diagnosis remains the historical
+  // anchor: CollabTab writes JSON.stringify-wrapped, RolesTab must use
+  // the same encoding or validate_project_dir() fails with os error 123
+  // on Windows. Reading via loadJSON guarantees the encoding stays
+  // symmetric even if a future caller appears.
+  return loadJSON(PROJECT_DIR_STORAGE_KEY, "", isString);
 }
 
 interface RoleCardData {

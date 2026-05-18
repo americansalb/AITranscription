@@ -18,6 +18,7 @@ import { getAvailableVoices, fetchAvailableVoices, getDefaultVoice } from "../li
 import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
 import { DecisionPanel } from "./DecisionPanel";
+import { loadJSON, saveJSON, isBoolean, isString } from "../lib/persistedState";
 
 const STAT_AXES: Array<{ key: keyof RoleStats; label: string; short: string; hint: string }> = [
   { key: "td", label: "Technical Depth", short: "TD", hint: "Code, architecture, systems engagement" },
@@ -717,20 +718,19 @@ const COLLAB_STORAGE_KEY = "vaak_collab_project_dir";
 const SAVED_PROJECTS_KEY = "vaak_projects";
 
 function loadPersistedDir(): string {
-  try {
-    const stored = localStorage.getItem(COLLAB_STORAGE_KEY);
-    return stored ? JSON.parse(stored) : "";
-  } catch { return ""; }
+  return loadJSON(COLLAB_STORAGE_KEY, "", isString);
 }
 
 function persistDir(dir: string): void {
-  try {
-    if (dir) {
-      localStorage.setItem(COLLAB_STORAGE_KEY, JSON.stringify(dir));
-    } else {
-      localStorage.removeItem(COLLAB_STORAGE_KEY);
-    }
-  } catch { /* ignore */ }
+  if (dir) {
+    saveJSON(COLLAB_STORAGE_KEY, dir);
+  } else {
+    // Empty-string semantics: caller wants to clear the key entirely so the
+    // next reader gets the fallback rather than an empty-string match. The
+    // shared helper doesn't expose a remove path (no other call site needs
+    // it), so keep the localStorage.removeItem inline here.
+    try { localStorage.removeItem(COLLAB_STORAGE_KEY); } catch { /* ignore */ }
+  }
 }
 
 interface SavedProject {
@@ -844,17 +844,12 @@ export function CollabTab() {
   // F-TESTER-LD12-1 sister-fix: persist explicit toggle via Path A symmetric
   // pattern so the user's choice survives reload — matches DecisionPanel +
   // Team Roster persistence behavior.
-  const [claimsCollapsed, setClaimsCollapsed] = useState<boolean | null>(() => {
-    try {
-      const stored = localStorage.getItem("vaak_collab_claims_collapsed");
-      if (stored === null) return null;
-      const parsed = JSON.parse(stored);
-      return typeof parsed === "boolean" ? parsed : null;
-    } catch { return null; }
-  });
+  const [claimsCollapsed, setClaimsCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>("vaak_collab_claims_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
+  );
   const updateClaimsCollapsed = (next: boolean) => {
     setClaimsCollapsed(next);
-    try { localStorage.setItem("vaak_collab_claims_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+    saveJSON("vaak_collab_claims_collapsed", next);
   };
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
@@ -882,17 +877,12 @@ export function CollabTab() {
   // Persist with JSON.stringify/JSON.parse symmetric pattern per evil-arch
   // F-EA-LAYOUT-LOCALSTORAGE-CLASS (msg 5123) — matches RolesTab Path A
   // (4796f5f) so a future Path B shared helper folds cleanly.
-  const [rosterSectionCollapsed, setRosterSectionCollapsed] = useState<boolean>(() => {
-    try {
-      const stored = localStorage.getItem("vaak_collab_roster_collapsed");
-      if (stored === null) return false;
-      const parsed = JSON.parse(stored);
-      return typeof parsed === "boolean" ? parsed : false;
-    } catch { return false; }
-  });
+  const [rosterSectionCollapsed, setRosterSectionCollapsed] = useState<boolean>(
+    () => loadJSON("vaak_collab_roster_collapsed", false, isBoolean),
+  );
   const updateRosterSectionCollapsed = (next: boolean) => {
     setRosterSectionCollapsed(next);
-    try { localStorage.setItem("vaak_collab_roster_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+    saveJSON("vaak_collab_roster_collapsed", next);
   };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);

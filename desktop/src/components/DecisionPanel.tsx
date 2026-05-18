@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { BoardMessage, DecisionResolution, QuestionChoice } from "../lib/collabTypes";
+import { loadJSON, saveJSON } from "../lib/persistedState";
 import "./DecisionPanel.css";
 
 /**
@@ -113,19 +114,14 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
   //
   // Default state: collapsed when zero pending decisions (smallest footprint),
   // expanded when non-empty (auto-surface the work). Manual toggle persists.
-  const [panelCollapsed, setPanelCollapsed] = useState<boolean | null>(() => {
-    // null = "auto" — caller hasn't toggled yet; we'll pick collapsed-when-empty
-    // / expanded-when-non-empty per groups.length below.
-    try {
-      const stored = localStorage.getItem("vaak_collab_decision_panel_collapsed");
-      if (stored === null) return null;
-      const parsed = JSON.parse(stored);
-      return typeof parsed === "boolean" ? parsed : null;
-    } catch { return null; }
-  });
+  // null = "auto" — caller hasn't toggled yet; we'll pick collapsed-when-empty
+  // / expanded-when-non-empty per groups.length below.
+  const [panelCollapsed, setPanelCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>("vaak_collab_decision_panel_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
+  );
   const updatePanelCollapsed = (next: boolean) => {
     setPanelCollapsed(next);
-    try { localStorage.setItem("vaak_collab_decision_panel_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+    saveJSON("vaak_collab_decision_panel_collapsed", next);
   };
   /** Inline confirm-state per decision id (F-DC-2 sister-fix). First dismiss
    * click sets to true; second click within the timeout commits; auto-resets
