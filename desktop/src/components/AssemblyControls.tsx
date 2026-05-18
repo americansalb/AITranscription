@@ -34,11 +34,20 @@ type Mutate = (action: string, args?: object) => Promise<Protocol | null>;
 // active-seats response shape from main.rs's list_active_seats_cmd at
 // commit 7abef44 (developer:0). The `label` field is the canonical
 // "role:instance" seat id used by set_moderator's args.seat.
+// Phase keepalive-v2 per ui-architect:1 msg 4839 + human msg 4804 directive.
+// Backend SHA 533b458 added the alive_state derivation; frontend now consumes it.
+export type AliveState = "active" | "stale" | "unknown" | "human";
 type ActiveSeat = {
   role: string;
   instance: number;
   label: string;
   last_heartbeat: string;
+  /** Per-seat liveness fields added by main.rs list_active_seats_cmd at SHA 533b458.
+   * Optional for backward-compat with pre-keepalive Tauri binaries; consumers
+   * fall back to alive_state="unknown" when absent. */
+  last_alive_at_ms?: number;
+  alive_state?: AliveState;
+  stale_ms?: number;
 };
 type ActiveSeatsResponse = { seats: ActiveSeat[] };
 
@@ -643,9 +652,20 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
               title="Pick a moderator. Required before switching mic-passing mode to Moderator."
             >
               <option value="">— none —</option>
-              {activeSeats.map((seat) => (
-                <option key={seat.label} value={seat.label}>{seat.label}</option>
-              ))}
+              {activeSeats.map((seat) => {
+                // Keepalive v2 per ui-architect:1 msg 4839: surface stale/unknown
+                // alive_state derived by main.rs list_active_seats_cmd at SHA 533b458.
+                // Suffix the option label so the human can see which seats are
+                // functionally dead before picking moderator.
+                const aliveSuffix = seat.alive_state === "stale"
+                  ? " (reconnecting…)"
+                  : seat.alive_state === "unknown"
+                    ? " (joining…)"
+                    : "";
+                return (
+                  <option key={seat.label} value={seat.label}>{seat.label}{aliveSuffix}</option>
+                );
+              })}
             </select>
           </label>
         )}
