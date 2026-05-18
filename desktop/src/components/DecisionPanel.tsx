@@ -105,6 +105,28 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
   const [otherInputs, setOtherInputs] = useState<Record<number, string>>({});
   const [submitting, setSubmitting] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
+  // Layout-density-v1.2 (per ui-arch msg 5175 + dev-challenger msg 5176 + tester
+  // msg 5177 + human msg 5174 "where IS the panel"): collapsible-header always
+  // visible; body collapses behind it. Reverts b086921 hide-when-empty (which
+  // lost discoverability of the panel's EXISTENCE) while still claiming back
+  // screen space the human flagged in msg 5108/5109.
+  //
+  // Default state: collapsed when zero pending decisions (smallest footprint),
+  // expanded when non-empty (auto-surface the work). Manual toggle persists.
+  const [panelCollapsed, setPanelCollapsed] = useState<boolean | null>(() => {
+    // null = "auto" — caller hasn't toggled yet; we'll pick collapsed-when-empty
+    // / expanded-when-non-empty per groups.length below.
+    try {
+      const stored = localStorage.getItem("vaak_collab_decision_panel_collapsed");
+      if (stored === null) return null;
+      const parsed = JSON.parse(stored);
+      return typeof parsed === "boolean" ? parsed : null;
+    } catch { return null; }
+  });
+  const updatePanelCollapsed = (next: boolean) => {
+    setPanelCollapsed(next);
+    try { localStorage.setItem("vaak_collab_decision_panel_collapsed", JSON.stringify(next)); } catch { /* ignore */ }
+  };
   /** Inline confirm-state per decision id (F-DC-2 sister-fix). First dismiss
    * click sets to true; second click within the timeout commits; auto-resets
    * after a few seconds so accidental first-clicks don't linger. Replaces
@@ -366,19 +388,29 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
     };
   }, []);
 
-  // v1.2 emergency layout fix per human msg 5108 + 5109 ("almost all UI space
-  // occupied" + "can't barely see messages"): hide the panel entirely when
-  // there are no pending decisions, instead of always-rendering an empty
-  // state. This reverts the "fixed scanning location" pattern from ui-arch
-  // craft brief msg 5048 — discoverability had been bought at the cost of
-  // screen space the human just said is too expensive. The window-title
-  // "(N) Vaak" badge still signals when decisions land, so the human doesn't
-  // lose the wake-me-up signal even when the panel is hidden.
-  if (groups.length === 0 && !error) return null;
+  // v1.2 unified collapsible-header pattern (per spec converge msg 5175-5177).
+  // Resolved state: when caller has explicitly toggled, honor that; otherwise
+  // auto-collapse on empty + auto-expand on non-empty.
+  const isCollapsed = panelCollapsed === null ? groups.length === 0 : panelCollapsed;
 
   return (
-    <div className="decision-panel" aria-label="Pending decisions">
-      <div className="decision-panel-header">
+    <div className={`decision-panel${isCollapsed ? " decision-panel-collapsed" : ""}`} aria-label="Pending decisions">
+      <div
+        className="decision-panel-header"
+        onClick={() => updatePanelCollapsed(!isCollapsed)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            updatePanelCollapsed(!isCollapsed);
+          }
+        }}
+        aria-expanded={!isCollapsed}
+        aria-controls="decision-panel-body"
+        title={isCollapsed ? "Expand decisions panel" : "Collapse decisions panel"}
+      >
+        <span className="decision-panel-chevron">{isCollapsed ? "▶" : "▼"}</span>
         <span className="decision-panel-title">Decisions</span>
         {groups.length > 0 && (
           <span className="decision-panel-count" aria-label={`${groups.length} pending`}>
@@ -387,10 +419,14 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
         )}
       </div>
 
-      {error && <div className="decision-panel-error" role="alert">{error}</div>}
+      {!isCollapsed && error && <div className="decision-panel-error" role="alert">{error}</div>}
 
-      {groups.length > 0 && (
-        <div className="decision-panel-cards">
+      {!isCollapsed && groups.length === 0 && (
+        <div id="decision-panel-body" className="decision-panel-empty">No pending decisions</div>
+      )}
+
+      {!isCollapsed && groups.length > 0 && (
+        <div id="decision-panel-body" className="decision-panel-cards">
           {groups.map((g) => {
             const choices = (g.primary.metadata?.choices || []) as QuestionChoice[];
             const allowOther = g.primary.metadata?.allow_other === true;

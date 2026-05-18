@@ -839,7 +839,9 @@ export function CollabTab() {
   // human #1280: claims used to be visible always; collapsed-by-default
   // hid them. Default expanded so the team's "who's working on what" is
   // surfaced without an extra click. User can still collapse via the title.
-  const [claimsCollapsed, setClaimsCollapsed] = useState(false);
+  // Layout-density-v1.2: nullable so first render auto-derives (collapsed when
+  // claims.length === 0, expanded when > 0) until human explicitly toggles.
+  const [claimsCollapsed, setClaimsCollapsed] = useState<boolean | null>(null);
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
@@ -4453,11 +4455,12 @@ When multiple instances of this role are active:
           );
         })()}
 
-        {/* Decision Panel v1 — persistent surface below team-status roster
-            (per ui-architect:1 msg 4985 + dev-challenger:0 F-DC-1 sister-fix
-            from gate #2 conditional pass on 9272357). Closes the gap where
-            pending human-decisions get buried in board scrollback (human
-            msg 4783; 6 adversarial flags from msgs 4784/4787/4789/4811). */}
+        {/* Decision Panel — collapsible-header pattern per layout-density-v1.2
+            (human msg 5174 "where IS the panel" + ui-arch msg 5175 + dev-
+            challenger msg 5176 + tester msg 5177 unified convergence). Panel
+            self-renders always with a one-line header so the human can find
+            it regardless of pending-count; body collapses behind the header
+            when empty or when manually toggled. */}
         {projectDir && project && (
           <DecisionPanel
             projectDir={projectDir}
@@ -4467,19 +4470,30 @@ When multiple instances of this role are active:
           />
         )}
 
-        {/* Active Claims Section — collapsible. Active-claims-v1 (architect
-            msg 5049 + ui-arch:1 msg 5048) shipped with always-rendered empty
-            state for a fixed scanning location. Per human msg 5108 + 5109
-            ("can't barely see messages") that traded too much screen space —
-            v1.2 reverts to conditional render. Compound role-dot + alive_state
-            indicators kept; only the empty-state-always-rendered behavior is
-            backed out. */}
-        {project && project.claims && project.claims.length > 0 && (
-          <div className={`claims-section${claimsCollapsed ? " claims-collapsed" : ""}`}>
-            <div className="claims-section-title" onClick={() => setClaimsCollapsed(!claimsCollapsed)}>
-              <span className="claims-section-toggle">&#9660;</span>
-              Active Claims <span className="claims-section-count">({project.claims.length})</span>
+        {/* Active Claims Section — collapsible-header pattern per layout-
+            density-v1.2 (human msg 5174 + team converge msg 5175-5177). Header
+            ALWAYS rendered so the human can find the section; body collapses
+            behind it when empty or manually toggled. Reverts the b086921
+            conditional-render-when-empty that lost discoverability. The
+            existing `claimsCollapsed` state is preserved as the toggle source
+            of truth; default state derives from claims.length so the section
+            auto-collapses on empty and auto-expands on non-empty (unless the
+            human has toggled it, which the state remembers). */}
+        {project && (() => {
+          const claimsCount = project.claims?.length ?? 0;
+          const collapsedEffective = claimsCollapsed ?? (claimsCount === 0);
+          return (
+          <div className={`claims-section${collapsedEffective ? " claims-collapsed" : ""}`}>
+            <div className="claims-section-title" onClick={() => setClaimsCollapsed(!collapsedEffective)}>
+              <span className="claims-section-toggle">{collapsedEffective ? "▶" : "▼"}</span>
+              Active Claims <span className="claims-section-count">({claimsCount})</span>
             </div>
+            {!collapsedEffective && claimsCount === 0 && (
+              <div className="claims-section-body">
+                <div className="claims-section-empty">No active claims</div>
+              </div>
+            )}
+            {!collapsedEffective && claimsCount > 0 && (
             <div className="claims-section-body">
               {project.claims.map((claim: FileClaim) => {
                   const roleSlug = claim.role_instance.split(":")[0] || "";
@@ -4516,8 +4530,10 @@ When multiple instances of this role are active:
                   );
                 })}
             </div>
+            )}
           </div>
-        )}
+          );
+        })()}
 
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
 
