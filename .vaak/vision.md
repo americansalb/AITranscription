@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18 (post-keepalive-v3 ratification; the seat-liveness visibility-non-negotiable scope from human msg 4804 is now fully closed).
+Living document. Owned by: architect. Last updated: 2026-05-18 (post-layout-density-v1.2 ratification; the collapsible-header design-system primitive is now coherent across three panels; keepalive chain verified working by human msg 5177 "the reconencting thign worked!").
 
 ## Scope
 
@@ -223,7 +223,45 @@ Single source of truth (`list_active_seats_cmd` reading `last_alive_at_ms`). Sin
 
 **Forward-flags queued for v3.1+** (none blocking): consolidate `45%` vs `40%` unknown-opacity divergence between active-claims and roster cards into one canonical token; consider Tauri event subscription instead of 30s polling to eliminate the worst-case 30s detection lag; explore avatar-overlay alive-state badge for higher-information-density surfaces. None of these change architecture; they're polish.
 
-## Cross-session handoff state (2026-05-18 session close, updated post-keepalive-v3 ratification)
+## Layout-density-v1.2 RATIFIED (SHA `c115441` + sister-fix `795db42`) — collapsible-header design-system primitive
+
+Human msg 5174 ("where is the active claim and human speaking decison spection") surfaced the discoverability failure of the `b086921` emergency-revert: hiding panels when empty made them unfindable. Three lanes (architect, ui-architect:1, dev-challenger:0) converged independently on the synthesis: **uniform collapsible-header pattern** that puts a one-line header always-rendered with a chevron, count, and click-to-expand body. Mirrors the Team Roster `1c5678d` precedent that the human had explicitly endorsed via msg 5125 "I CANT ALLOW YOU TO LOSE FUNCTIONALITY".
+
+**v1.2 backend + frontend (`c115441`).** DecisionPanel.tsx + CollabTab.tsx claims-section. Reverts `b086921`'s `return null` on empty. Replaces with always-rendered ~30px collapsible header that mirrors the Team Roster (`1c5678d`) pattern. Default state auto-derives from content presence (collapsed when empty, expanded when populated); manual toggle overrides and persists across reloads via `vaak_collab_decision_panel_collapsed` + `vaak_collab_claims_collapsed` localStorage keys using Path A symmetric JSON.stringify/parse pattern.
+
+**Sister-fix (`795db42`).** Initial Active-Claims half of `c115441` had two cross-surface-parity gaps caught at gate-1 by tester:0 msg 5187 + concurrent independent verification by evil-architect:0 msg 5190: (1) `vaak_collab_claims_collapsed` persistence was missing (toggle died on reload); (2) keyboard/ARIA attributes (`role="button"`, `tabIndex`, `aria-expanded`, `aria-controls`, `onKeyDown` for Enter/Space) were missing on the claims-section header. UI-architect:1 msg 5188 self-corrected their own initial gate-3 PASS msg 5186 ("Active Claims uses existing claims-section pattern" — unverified prose claim) and added the discipline `feedback_gate_3_must_grep_cross_surface_parity_explicitly` as a memory candidate. `795db42` closes both findings in 32 LOC mirroring the DecisionPanel header pattern exactly. Three-gate re-closed: tester:0 msg 5192 + evil-architect:0 msg 5193 + ui-architect:1 msg 5191 + dev-challenger:0 implicit.
+
+## Architectural lesson reframed: always-render COLLAPSED-HEADER is the right pattern for stack-competing panels
+
+The prior §"Always-render real-estate composition" lesson (recorded after the `b086921` emergency-revert) framed the failure mode as "always-render" being incorrect when ≥3 panels share a viewport. **That framing was over-broad.** The actual failure mode was "always-render-FULL-PANEL-with-empty-state-body" — i.e. each panel claiming ~120px even when empty. Always-rendering a ONE-LINE COLLAPSED HEADER (~30px) is the right synthesis: it preserves findability (the human always knows the panel exists and where) while reducing chrome to a near-zero cost.
+
+**Discipline reframed.** Before ratifying any persistent panel that will stack with others, the audit isn't "should this be always-rendered?" — it's "what's the minimum-footprint always-rendered form that preserves findability?" The canonical answer for stack-competing panels is collapsed-header with auto-derive-from-content default state (collapsed when empty, expanded when populated, persistent manual override). This was already the pattern Team Roster (`1c5678d`) used; layout-density-v1.2 makes it uniform across three panels.
+
+## Design-system primitive emergence (rule-of-three: extract on third instance)
+
+Three persistent panels in CollabTab.tsx now share the collapsible-header pattern:
+
+| Panel | SHA | localStorage key |
+|---|---|---|
+| Team Roster | `1c5678d` | `vaak_collab_roster_collapsed` |
+| Decision Panel | `c115441` | `vaak_collab_decision_panel_collapsed` |
+| Active Claims | `c115441` + `795db42` | `vaak_collab_claims_collapsed` |
+
+Each uses the same chevron characters (`▶`/`▼`), the same focus-visible outline (`2px solid #1d9bf0 + 1px offset`), the same `role="button"` + `tabIndex={0}` + `aria-expanded` + `aria-controls` + `onKeyDown` (Enter/Space) interaction model, the same Path A symmetric JSON.stringify/parse persistence pattern, and the same auto-derive-from-content default-state rule.
+
+**Architect-lane next-cycle candidate:** extract this duplication into a shared `<CollapsibleSection>` component in `desktop/src/components/CollapsibleSection.tsx` (or similar). Three concrete instances meets the rule-of-three threshold — copy-paste is no longer the right tool. Multi-lane memory candidate `feedback_extract_pattern_after_third_instance` queued for session-end. Scope estimate: ≈40-60 LOC for the wrapper + ≈80-120 LOC migration across the three call sites + design-token consolidation for the focus-outline + hover-bg values. Not in v1.2 scope; queued as v1.3.
+
+## F-EA-LAYOUT-LOCALSTORAGE-CLASS forward-flag — scope for v1.2 CLOSED
+
+Evil-architect:0 msg 5123 originally raised this forward-flag when layout-density-v1 added the first new localStorage key. Each subsequent collapsible-header instance added another key (`c115441` added 1, `795db42` added 1) without divergent-format drift because each disciplined contributor used the Path A symmetric template. After v1.2: four keys (`vaak_collab_project_dir`, `vaak_collab_roster_collapsed`, `vaak_collab_decision_panel_collapsed`, `vaak_collab_claims_collapsed`) plus the SAVED_PROJECTS_KEY single-consumer = five active localStorage surfaces under the Path A template. Forward-flag scope for v1.2 work is closed.
+
+**Class still open architecturally** until Path B (shared `desktop/src/lib/projectDirStorage.ts` helper extraction) lands. Path B sequenced AFTER v1.2 per architect msg 5183: invisible refactors don't pre-empt visible-pain fixes; batching all 4+ keys at one boundary minimizes migration steps from 3 to 2.
+
+## Human-verified working: keepalive chain in production (msg 5177)
+
+Human msg 5177 "the reconencting thign worked!" confirmed the 13-SHA keepalive chain (533b458 → 9d1fde1 → c4e31c1 → d2b509f → cd1b629) is live in their rebuilt Vaak. This validates the entire seat-liveness visibility-non-negotiable scope from human msg 4804 — moderator picker + active-claims cards + roster cards/chips all show alive-state ring + " (reconnecting…)" suffix on stale seats. Roll-call obsolete; design-system coherence across three surfaces working as specified.
+
+## Cross-session handoff state (2026-05-18 session close, updated post-layout-density-v1.2 ratification)
 
 - Keepalive v1 backend (SHA `533b458`) — ratified, awaiting human full activation chain.
 - Keepalive v2 frontend minimal (SHA `9d1fde1`) — ratified, same activation chain.
