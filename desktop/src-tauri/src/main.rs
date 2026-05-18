@@ -3463,6 +3463,19 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
         Ok(s) => serde_json::from_str(&s).map_err(|e| format!("Failed to parse sessions.json: {}", e))?,
         Err(_) => serde_json::json!({"bindings": []}),
     };
+    // Per human msg 4804 ("fix this active claims thing... make it non-negotiable") +
+    // dev-challenger:0 msg 4778 two-class diagnosis: sessions.json:bindings:status
+    // is a stored claim that doesn't reflect MCP-sidecar-death. Derive liveness from
+    // per-seat .vaak/sessions/<role>-<inst>.json:last_alive_at_ms (written every
+    // project_wait/project_send tick per vaak-mcp.rs:365 update_seat_alive_at_ms).
+    // Threshold 120s = 4× the 30s heartbeat cadence; conservative to avoid
+    // false-positive stale during legitimate long thinking.
+    const STALE_THRESHOLD_MS: u64 = 120_000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let sessions_dir = std::path::Path::new(&dir).join(".vaak").join("sessions");
     let mut seats: Vec<serde_json::Value> = Vec::new();
     if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
         for b in bindings {
@@ -3477,11 +3490,31 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
             }
             let label = format!("{}:{}", role, instance);
             let last_heartbeat = b.get("last_heartbeat").cloned().unwrap_or(serde_json::Value::Null);
+            // Read per-seat liveness file and derive alive_state.
+            let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+            let last_alive_at_ms: u64 = std::fs::read_to_string(&seat_file)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("last_alive_at_ms").and_then(|m| m.as_u64()))
+                .unwrap_or(0);
+            let stale_ms = now_ms.saturating_sub(last_alive_at_ms);
+            // alive_state: "active" if heartbeat <120s ago; "stale" if older;
+            // "unknown" if last_alive_at_ms missing (just joined or pre-instrumentation).
+            let alive_state = if last_alive_at_ms == 0 {
+                "unknown"
+            } else if stale_ms > STALE_THRESHOLD_MS {
+                "stale"
+            } else {
+                "active"
+            };
             seats.push(serde_json::json!({
                 "role": role,
                 "instance": instance,
                 "label": label,
                 "last_heartbeat": last_heartbeat,
+                "last_alive_at_ms": last_alive_at_ms,
+                "alive_state": alive_state,
+                "stale_ms": stale_ms,
             }));
         }
     }
@@ -3502,6 +3535,9 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
         "instance": 0,
         "label": "human:0",
         "last_heartbeat": serde_json::Value::Null,
+        "last_alive_at_ms": 0,
+        "alive_state": "human",
+        "stale_ms": 0,
     })];
     with_human.extend(seats.into_iter());
     Ok(serde_json::json!({"seats": with_human}))
