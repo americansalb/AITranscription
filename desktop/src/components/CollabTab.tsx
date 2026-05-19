@@ -822,6 +822,15 @@ export function CollabTab() {
   // the deleted discussion-status-panel; ConsensusRow in ProtocolPanel will
   // surface equivalent state in a follow-on commit. Suppress TS6133 inline.
   void closingRound; void continuousTimeout;
+  // Change D (human msg 5538 / msg 5237 directive 5): autoCollab + humanInLoop
+  // read sites removed (header checkboxes deleted). Setters still run from
+  // watch_project_dir effect to keep state in sync; suppress TS6133 inline
+  // since the values aren't currently displayed anywhere.
+  void autoCollab; void humanInLoop;
+  // discussionState was read in the deleted "{!discussionState?.active && Discuss}"
+  // header gate. setDiscussionState still runs from multiple Tauri callbacks;
+  // suppress the read-side warning the same way.
+  void discussionState;
   const [startDiscussionOpen, setStartDiscussionOpen] = useState(false);
   const [sdFormat, setSdFormat] = useState<"delphi" | "oxford" | "red_team" | "continuous">("delphi");
   const [sdTopic, setSdTopic] = useState("");
@@ -2229,33 +2238,12 @@ When multiple instances of this role are active:
     });
   };
 
-  const toggleAutoCollab = async () => {
-    try {
-      if (window.__TAURI__) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const newVal = !autoCollab;
-        await invoke("set_auto_collab", { enabled: newVal });
-        setAutoCollab(newVal);
-      }
-    } catch (e) {
-      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-      showToast(`Couldn't toggle auto-collab — ${msg}`, "error");
-    }
-  };
-
-  const toggleHumanInLoop = async () => {
-    try {
-      if (window.__TAURI__) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const newVal = !humanInLoop;
-        await invoke("set_human_in_loop", { enabled: newVal });
-        setHumanInLoop(newVal);
-      }
-    } catch (e) {
-      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-      showToast(`Couldn't toggle human-in-loop — ${msg}`, "error");
-    }
-  };
+  // Change D (human msg 5538 / msg 5237 directive 5): toggleAutoCollab +
+  // toggleHumanInLoop handler functions removed alongside the deleted
+  // header checkboxes. The setAutoCollab + setHumanInLoop setters still
+  // run from the watch_project_dir effect (line ~1756) so the
+  // autoCollab/humanInLoop state remains in sync with backend; just no
+  // longer toggleable from the header.
 
   const handleSetWorkflow = async (type: string | null) => {
     try {
@@ -2352,16 +2340,11 @@ When multiple instances of this role are active:
     }
   };
 
-  const handleOpenStartDiscussion = () => {
-    const activeSessions = project?.sessions?.filter(s => s.status === "active") || [];
-    const participantMap: Record<string, boolean> = {};
-    activeSessions.forEach(s => { participantMap[`${s.role}:${s.instance}`] = true; });
-    setSdParticipants(participantMap);
-    setSdFormat("delphi");
-    setSdTopic("");
-    setSdStarting(false);
-    setStartDiscussionOpen(true);
-  };
+  // Change D: handleOpenStartDiscussion (header "Discuss" button trigger)
+  // removed. The start-discussion modal (lines ~6055+) is preserved —
+  // it remains reachable via the existing structured-discussion flow
+  // (settings panel + future moderator-tab affordance per architect
+  // forward-flag in commit msg).
 
   const handleStartDiscussion = async () => {
     if (!sdTopic.trim() && sdFormat !== "continuous") return;
@@ -3303,22 +3286,12 @@ When multiple instances of this role are active:
               </button>
             )}
           </div>
-          <label className="auto-collab-toggle" title="When enabled, agents autonomously check messages, act on directives, and communicate without manual prompting">
-            <input
-              type="checkbox"
-              checked={autoCollab}
-              onChange={toggleAutoCollab}
-            />
-            <span className="auto-collab-label">Auto</span>
-          </label>
-          <label className="auto-collab-toggle human-in-loop-toggle" title="When enabled, you become a checkpoint in the review chain — agents ask for your approval at key stages">
-            <input
-              type="checkbox"
-              checked={humanInLoop}
-              onChange={toggleHumanInLoop}
-            />
-            <span className="auto-collab-label">Review</span>
-          </label>
+          {/* Change D (msg 5237 directive 5 + human msg 5538 choice A):
+              Auto / Review checkboxes + Discuss button removed as
+              "useless controls" per human direction. Auto-collab + human-
+              in-loop modes can return as settings-panel toggles in a
+              future commit if needed; the header strip is the wrong
+              place for them per density-first framing in msg 5237. */}
           {/* Visibility Mode Selector */}
           {(() => {
             const currentMode = project?.config?.settings?.discussion_mode || "directed";
@@ -3361,16 +3334,9 @@ When multiple instances of this role are active:
               </div>
             );
           })()}
-          {!discussionState?.active && (
-            <button
-              className="start-discussion-btn"
-              onClick={handleOpenStartDiscussion}
-              title="Start a structured discussion (Delphi, Oxford, Red Team, or Continuous)"
-              aria-label="Start discussion"
-            >
-              &#9998; Discuss
-            </button>
-          )}
+          {/* Change D: "Discuss" button removed per human msg 5538 choice A
+              + msg 5237 directive 5. Discussion-format start can return as
+              a settings-panel action or moderator-tab affordance if needed. */}
           {/* Assembly Line toggle — legacy v1.5.1 one-speaker-at-a-time mic
               control. B.3 Item 1 (per spec §16-37): hide when the new
               AssemblyControls card is rendering (twoControlsProtocol loaded).
