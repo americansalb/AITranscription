@@ -881,6 +881,21 @@ export function CollabTab() {
     setRosterSectionCollapsed(next);
     saveJSON("vaak_collab_roster_collapsed", next);
   };
+  // Change B (CollabTab restructure spec, architect msg 5238/5249/5259):
+  // Discussion Mode card collapse-state. Wraps AssemblyControls in a
+  // CollapsibleSection so the human can fold away the ~quarter-screen
+  // assembly UI when they're not actively managing rotation/mic state.
+  // Default expanded — when a section has assembly-mode protocol fields
+  // (`twoControlsProtocol` non-null), the user is likely actively in a
+  // run and wants the controls visible. They can collapse if they want
+  // more message-timeline real estate; the state persists.
+  const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean>(
+    () => loadJSON("vaak_collab_discussion_mode_collapsed", false, isBoolean),
+  );
+  const updateDiscussionModeCollapsed = (next: boolean) => {
+    setDiscussionModeCollapsed(next);
+    saveJSON("vaak_collab_discussion_mode_collapsed", next);
+  };
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
@@ -3243,18 +3258,42 @@ When multiple instances of this role are active:
           </button>
         </div>
 
-        {/* Two-controls UI surface — commit B per .vaak/design-notes/
-            two-controls-spec-2026-05-14.md. Renders only when commit-A
-            protocol fields are present; v1.5.1 sections see nothing here
-            and continue with ProtocolPanel alone below. */}
+        {/* Discussion Mode card — Change B per CollabTab-restructure-v1
+            spec (architect msg 5238/5249/5259). Wraps the AssemblyControls
+            two-controls surface in a CollapsibleSection so the human can
+            fold the ~quarter-screen assembly UI for message-timeline
+            real estate (human msg 5237 directive 4 "the assembly line
+            thing right now takes up like one fourth of the screen").
+
+            F-UIA-CTR-1: NO mode dropdown in v1 — title reads literally
+            "Discussion Mode: Assembly Line" until a second mode (Oxford,
+            etc.) actually ships. Avoids shipping a single-item dropdown
+            that reads as broken UI.
+
+            F-UIA-CTR-4 Path A (empty state when twoControlsProtocol is
+            null) is queued as a follow-up; this commit handles the
+            populated-state collapse-affordance which is the immediate
+            human msg 5237 ask. */}
         {twoControlsProtocol && (
-          <AssemblyControls
-            protocol={twoControlsProtocol}
-            mutate={twoControlsMutate}
-            lastError={twoControlsLastError}
-            selfRole={null /* human view in CollabTab */}
-            projectDir={projectDir}
-          />
+          <CollapsibleSection
+            id="discussion-mode-section"
+            title="Discussion Mode: Assembly Line"
+            collapsed={discussionModeCollapsed}
+            onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsed)}
+            className="discussion-mode-section"
+            headerTooltip={{
+              expand: "Expand discussion mode controls",
+              collapse: "Collapse discussion mode controls",
+            }}
+          >
+            <AssemblyControls
+              protocol={twoControlsProtocol}
+              mutate={twoControlsMutate}
+              lastError={twoControlsLastError}
+              selfRole={null /* human view in CollabTab */}
+              projectDir={projectDir}
+            />
+          </CollapsibleSection>
         )}
 
         {/* Protocol panel — unified floor + consensus state (Slice 3+4).

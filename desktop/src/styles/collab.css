@@ -7525,3 +7525,11 @@
 .collapsible-section-body {
   padding: 10px 12px 12px;
 }
+
+/* Change B per CollabTab-restructure-v1 spec — discussion mode card
+   wraps AssemblyControls which has its own internal padding (6px 10px
+   per AssemblyControls.css). Removing the wrapper body padding for this
+   specific section avoids double-padding around the assembly UI. */
+.discussion-mode-section .collapsible-section-body {
+  padding: 0;
+}
