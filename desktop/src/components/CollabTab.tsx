@@ -4339,29 +4339,6 @@ When multiple instances of this role are active:
                       : isSeatUnknown
                         ? " (joining…)"
                         : "";
-                    // msg 5450 chain Commit 2: roster card decoration per
-                    // architect spec df90be3 + ui-arch msg 5460
-                    // F-UIA-CTR-V2-VIS1/3. Surface assembly runtime state ON
-                    // the role cards instead of inside a separate Discussion
-                    // Mode panel. Mic-holder gets a strong accent border
-                    // (scannable at 10+ agents per human msg 5567), moderator
-                    // gets a gold star top-left. Sourced from the existing
-                    // `twoControlsProtocol` already read at line ~964 — no
-                    // prop drilling needed since the card render is
-                    // co-located with the protocol hook call.
-                    const isMicHolder = !!(
-                      twoControlsProtocol?.floor?.current_speaker &&
-                      twoControlsProtocol.floor.current_speaker === cardKey
-                    );
-                    const isModerator = !!(
-                      twoControlsProtocol?.floor?.moderator &&
-                      twoControlsProtocol.floor.moderator === cardKey
-                    );
-                    const micModeratorSuffix = isMicHolder
-                      ? " · holding mic"
-                      : isModerator
-                        ? " · moderator"
-                        : "";
                     const handleCardClick = () => {
                       if (card.slug === "audience") {
                         setAudiencePanelOpen(true);
@@ -4382,16 +4359,14 @@ When multiple instances of this role are active:
                       return (
                         <button
                           key={cardKey}
-                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${isSeatStale ? " role-chip-alive-stale" : ""}${isSeatUnknown ? " role-chip-alive-unknown" : ""}${isMicHolder ? " role-chip-mic-holder" : ""}${isModerator ? " role-chip-moderator" : ""}`}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${isSeatStale ? " role-chip-alive-stale" : ""}${isSeatUnknown ? " role-chip-alive-unknown" : ""}`}
                           style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
                           onClick={handleCardClick}
-                          title={`${card.title}${aliveSuffix}${micModeratorSuffix} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
-                          aria-label={`${card.title}${aliveSuffix}${micModeratorSuffix}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                          title={`${card.title}${aliveSuffix} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
+                          aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
                         >
-                          {isModerator && <span className="role-card-moderator-badge" aria-hidden="true">★</span>}
                           <span className={`${getStatusDotClass(card.status)}${isSeatStale ? " alive-stale" : ""}${isSeatUnknown ? " alive-unknown" : ""}`} />
                           <span className="role-chip-name">{card.title}{aliveSuffix}</span>
-                          {isMicHolder && <span className="role-card-mic-glyph" aria-hidden="true" title="Holds the mic">🎙</span>}
                           <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
                         </button>
                       );
@@ -4400,11 +4375,11 @@ When multiple instances of this role are active:
                     return (
                       <div
                         key={cardKey}
-                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${isSeatStale ? " role-card-alive-stale" : ""}${isSeatUnknown ? " role-card-alive-unknown" : ""}${isMicHolder ? " role-card-mic-holder" : ""}${isModerator ? " role-card-moderator" : ""}`}
+                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${isSeatStale ? " role-card-alive-stale" : ""}${isSeatUnknown ? " role-card-alive-unknown" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}${aliveSuffix}${micModeratorSuffix}, status: ${getStatusLabel(card.status)}. Click to view details.`}
+                        aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}. Click to view details.`}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
@@ -4430,15 +4405,9 @@ When multiple instances of this role are active:
                                 ? `${cardKey} — keepalive not yet observed; seat may be just-joined or pre-instrumentation`
                                 : undefined}
                           />
-                          {isModerator && (
-                            <span className="role-card-moderator-badge" aria-hidden="true" title={`${cardKey} — moderator`}>★</span>
-                          )}
                           <span className="role-card-title" style={{ color: card.roleColor }}>
                             {card.title}{aliveSuffix}
                           </span>
-                          {isMicHolder && (
-                            <span className="role-card-mic-glyph" aria-hidden="true" title={`${cardKey} — holds the mic`}>🎙</span>
-                          )}
                           <button
                             className="role-card-kick-btn"
                             onClick={(e) => { e.stopPropagation(); handleRemoveRosterSlot(card.slug, card.instance >= 0 ? card.instance : 0); }}

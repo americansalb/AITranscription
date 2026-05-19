@@ -7110,50 +7110,6 @@
   color: var(--accent, #4caf50);
 }
 
-/* msg 5450 chain Commit 2 — runtime assembly state on role cards per
-   architect spec df90be3 + ui-arch F-UIA-CTR-V2-VIS1/3 (msg 5460).
-   Mic-holder gets a strong 2-3px accent border + small mic glyph;
-   moderator gets a gold star top-left. Both overlay the existing card
-   chrome; designed to be scannable at 10+ agents per human msg 5567.
-   Animation cadence matches F-UIA-CTR-3 (200ms ease-out) for cross-
-   affordance motion parity with the collapsible-section chevron. */
-
-.role-card-mic-holder {
-  outline: 2px solid var(--collab-accent, #1d9bf0);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 1px rgba(29, 155, 240, 0.15), 0 4px 12px rgba(29, 155, 240, 0.18);
-  transition: outline-color 0.2s ease-out, box-shadow 0.2s ease-out;
-}
-
-.role-chip-mic-holder {
-  outline: 2px solid var(--collab-accent, #1d9bf0);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 1px rgba(29, 155, 240, 0.15);
-  transition: outline-color 0.2s ease-out, box-shadow 0.2s ease-out;
-}
-
-.role-card-mic-glyph {
-  font-size: 14px;
-  margin-left: auto;
-  margin-right: 4px;
-  user-select: none;
-  line-height: 1;
-}
-
-.role-card-moderator-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  font-size: 14px;
-  color: #ffd700;
-  text-shadow: 0 0 4px rgba(255, 215, 0, 0.6);
-  user-select: none;
-  line-height: 1;
-  flex-shrink: 0;
-}
-
 /* CollapsibleSection — Path B wrapper styles per CollabTab restructure spec
    (architect msg 5238/5249/5259) and F-UIA-CTR-3 contract (ui-architect msg 5257):
    - 200ms ease-out chevron rotation on toggle
