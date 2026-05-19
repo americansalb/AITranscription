@@ -4323,26 +4323,7 @@ When multiple instances of this role are active:
                         {consensusRound?.topic || "Round in progress"}
                       </span>
                       {consensusPhase && (
-                        // sister-fix-C6-1 (F-EA-COMMIT6-1, evil-arch msg
-                        // 5610): the "Close round" UI affordance lived in
-                        // ProtocolPanel/ConsensusRow which Commit 6 deleted.
-                        // Surface it here as a button when the consensus is
-                        // in `submitting` phase — that's the actionable
-                        // state. Other phases render the same pill as
-                        // before (static span; nothing to action).
-                        consensusPhase === "submitting" ? (
-                          <button
-                            type="button"
-                            className="phase-topic-strip-consensus-phase phase-topic-strip-close-btn"
-                            onClick={() => { void twoControlsMutate("close_round", {}); }}
-                            title="Close this consensus round"
-                            aria-label="Close consensus round"
-                          >
-                            {consensusPhase} · close
-                          </button>
-                        ) : (
-                          <span className="phase-topic-strip-consensus-phase">{consensusPhase}</span>
-                        )
+                        <span className="phase-topic-strip-consensus-phase">{consensusPhase}</span>
                       )}
                     </>
                   )}

@@ -7224,30 +7224,6 @@
   text-transform: lowercase;
 }
 
-/* sister-fix-C6-1 (F-EA-COMMIT6-1) — `Close round` button variant. The
-   pill becomes interactive ONLY when the consensus phase is `submitting`;
-   in other phases the static-span styling above applies. Inherits all
-   layout (margin, padding, font) from the base class; layers in border
-   reset, cursor affordance, and hover/focus states matching cross-band
-   button conventions. Replaces the affordance previously rendered by
-   ProtocolPanel/ConsensusRow (deleted in Commit 6). */
-button.phase-topic-strip-close-btn {
-  border: 1px solid rgba(29, 155, 240, 0.4);
-  cursor: pointer;
-  font-family: inherit;
-  line-height: inherit;
-}
-
-button.phase-topic-strip-close-btn:hover {
-  background: rgba(29, 155, 240, 0.22);
-  border-color: var(--collab-accent, #1d9bf0);
-}
-
-button.phase-topic-strip-close-btn:focus-visible {
-  outline: 2px solid var(--collab-accent, #1d9bf0);
-  outline-offset: 1px;
-}
-
 /* msg 5450 chain Commit 5 — settings popover per F-UIA-CTR-V2-VIS5.
    Gear ⚙ icon anchored to Team band header trailing slot opens a
    popover containing AssemblyControls. Replaces the Discussion Mode
