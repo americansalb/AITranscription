@@ -68,6 +68,22 @@ class WebUser(Base):
     )
 
 
+class ProjectMode(str, enum.Enum):
+    """Vaaklite v1: project intent.
+
+    * `coding` — original AI coding-collaboration projects (default for
+      backwards compatibility with existing rows).
+    * `discussion` — Vaaklite discussion + document drafting projects.
+      Per human msg 5730: roles + assembly-mode-style rotation + role
+      creation sessions + user-account-scoped session persistence, with
+      a clean intuitive UI focused on document creation rather than
+      code editing.
+    """
+
+    CODING = "coding"
+    DISCUSSION = "discussion"
+
+
 class Project(Base):
     """A collaboration project owned by a user."""
 
@@ -77,6 +93,16 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     owner_id: Mapped[int] = mapped_column(ForeignKey("web_users.id"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Vaaklite v1 (per architect msg 5738 spec lock): mode discriminator.
+    # Existing rows default to `coding` so no migration of legacy state is
+    # required. Discussion mode unlocks document drafting + section-rotation.
+    mode: Mapped[ProjectMode] = mapped_column(
+        Enum(ProjectMode), default=ProjectMode.CODING, nullable=False, server_default="coding"
+    )
+    # Vaaklite v1: optional template slug applied at create-time to
+    # auto-seed the role roster (e.g., `simple-rotation`, `delphi-debate`,
+    # `oxford-review`). Coding-mode projects leave it null.
+    template: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -88,6 +114,9 @@ class Project(Base):
     )
     messages: Mapped[list["Message"]] = relationship(
         back_populates="project", lazy="noload", cascade="all, delete-orphan"
+    )
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="project", lazy="selectin", cascade="all, delete-orphan"
     )
 
 
@@ -260,3 +289,161 @@ class DiscussionSubmission(Base):
     )
 
     round: Mapped["DiscussionRound"] = relationship(back_populates="submissions")
+
+
+# ==================== Vaaklite v1: discussion-mode document drafting ====================
+# Schema additions per architect msg 5738 spec lock (human msg 5730 directive).
+#
+# Vaaklite turns a Project (mode=discussion) into a section-rotated document
+# drafting session: agents take turns drafting sections of a markdown
+# document, with phases (drafting → review → revision → final). The schema
+# mirrors the existing Discussion / DiscussionRound / DiscussionSubmission
+# triad but is document-centric rather than message-centric — output is the
+# rendered markdown doc, not a structured-question tally.
+
+
+class DocumentPhase(str, enum.Enum):
+    """Lifecycle of a Vaaklite drafting document.
+
+    Mirrors the floor.phase progression in the desktop app but document-
+    scoped: the document moves through drafting (sections being authored
+    one-by-one), review (peers comment), revision (assigned roles refine
+    flagged sections), and final (locked, downloadable).
+    """
+
+    DRAFTING = "drafting"
+    REVIEW = "review"
+    REVISION = "revision"
+    FINAL = "final"
+
+
+class DocumentSectionStatus(str, enum.Enum):
+    """Per-section status inside a Vaaklite document.
+
+    Tracks which sections have been authored, are queued for the assigned
+    role's drafting turn, are awaiting peer review, or have been accepted
+    into the final draft.
+    """
+
+    PENDING = "pending"
+    DRAFTING = "drafting"
+    REVIEW_PENDING = "review_pending"
+    ACCEPTED = "accepted"
+
+
+class Document(Base):
+    """A Vaaklite document being drafted by the team.
+
+    One Project (mode=discussion) can host multiple Documents. Each Document
+    has an ordered list of DocumentSections; the `current_section_idx` field
+    is the "mic" — the section currently being drafted by `current_role`.
+    Markdown is materialized in `rendered_markdown` after sections accept
+    so the human + agents can read the full doc at any time.
+    """
+
+    __tablename__ = "web_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("web_projects.id"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    topic: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    phase: Mapped[DocumentPhase] = mapped_column(
+        Enum(DocumentPhase), default=DocumentPhase.DRAFTING, nullable=False
+    )
+    # The current "mic" — index into DocumentSection.idx of the section
+    # currently being drafted. NULL when no section is active (e.g., between
+    # phases or after FINAL).
+    current_section_idx: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Rendered markdown — concatenated accepted sections + drafting-in-progress
+    # preview. Maintained by the section-accept path so reads are fast.
+    rendered_markdown: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Final downloadable artifact — set when phase transitions to FINAL.
+    final_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    project: Mapped["Project"] = relationship(back_populates="documents")
+    sections: Mapped[list["DocumentSection"]] = relationship(
+        back_populates="document",
+        lazy="selectin",
+        order_by="DocumentSection.idx",
+        cascade="all, delete-orphan",
+    )
+    turns: Mapped[list["DraftingTurn"]] = relationship(
+        back_populates="document",
+        lazy="noload",
+        order_by="DraftingTurn.started_at",
+        cascade="all, delete-orphan",
+    )
+
+
+class DocumentSection(Base):
+    """A single section in a Vaaklite document.
+
+    Sections are ordered by `idx`. `assigned_role` is the role slug expected
+    to draft this section (rotation order). `status` flows pending →
+    drafting → review_pending → accepted as the team works through the doc.
+    """
+
+    __tablename__ = "web_document_sections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("web_documents.id"), nullable=False, index=True
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Role slug expected to draft this section. Filled at template apply.
+    assigned_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    status: Mapped[DocumentSectionStatus] = mapped_column(
+        Enum(DocumentSectionStatus),
+        default=DocumentSectionStatus.PENDING,
+        nullable=False,
+    )
+    # Optional reviewer-supplied notes attached when status flips to
+    # review_pending. Cleared on accept.
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    document: Mapped["Document"] = relationship(back_populates="sections")
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "idx", name="uq_document_section_idx"),
+    )
+
+
+class DraftingTurn(Base):
+    """Audit log: one row per agent-drafts-a-section turn.
+
+    Captures the rotation history so the UI can show "Section 3 was
+    drafted by writer:0 from 14:02 to 14:09" and the team can see who
+    contributed what. `output_diff` stores the body the role wrote
+    during the turn (or a structured patch — v1 stores raw body).
+    """
+
+    __tablename__ = "web_drafting_turns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("web_documents.id"), nullable=False, index=True
+    )
+    section_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    role_seat: Mapped[str] = mapped_column(String(100), nullable=False)
+    output_body: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    document: Mapped["Document"] = relationship(back_populates="turns")
