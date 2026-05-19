@@ -885,12 +885,18 @@ export function CollabTab() {
   // Discussion Mode card collapse-state. Wraps AssemblyControls in a
   // CollapsibleSection so the human can fold away the ~quarter-screen
   // assembly UI when they're not actively managing rotation/mic state.
-  // Default expanded — when a section has assembly-mode protocol fields
-  // (`twoControlsProtocol` non-null), the user is likely actively in a
-  // run and wants the controls visible. They can collapse if they want
-  // more message-timeline real estate; the state persists.
+  //
+  // Sister-fix-CB1 (architect msg 5341): default COLLAPSED. The original
+  // default-expanded choice (Change B msg 5325) meant first-load users
+  // still saw the 1/4-screen assembly UI from human msg 5237 — the very
+  // pain the directive was meant to fix — until they manually toggled.
+  // Default-collapsed surfaces the title + chevron always (discoverable),
+  // and users who actively want controls click once; the toggle then
+  // persists across reloads. Matches the Active-Claims default-collapse-
+  // when-no-work pattern: collapsed signals "no active engagement" and
+  // expanded signals "you're working with it now."
   const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean>(
-    () => loadJSON("vaak_collab_discussion_mode_collapsed", false, isBoolean),
+    () => loadJSON("vaak_collab_discussion_mode_collapsed", true, isBoolean),
   );
   const updateDiscussionModeCollapsed = (next: boolean) => {
     setDiscussionModeCollapsed(next);
