@@ -4208,9 +4208,37 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
+          // msg 5450 chain Commit 3: rotation-sort per architect spec df90be3
+          // + ui-arch F-UIA-CTR-V2-VIS2 ("rotation = card ordering, not
+          // per-card badge"). When assembly is ACTIVE and rotation_order
+          // is populated, sort cards by their position in rotation_order
+          // so card position = whose turn is next. Agents NOT in
+          // rotation sort after, preserving the existing status/role/alpha
+          // ordering. Visual order IS the answer; no per-card ordinal
+          // badge needed.
+          const rotationOrder: string[] =
+            twoControlsProtocol?.floor?.assembly_active === true &&
+            Array.isArray(twoControlsProtocol?.floor?.rotation_order) &&
+            twoControlsProtocol.floor.rotation_order.length > 0
+              ? twoControlsProtocol.floor.rotation_order
+              : [];
+          const rotationIndex = new Map<string, number>();
+          rotationOrder.forEach((seat, i) => rotationIndex.set(seat, i));
           // Sort: active/working first, then stale, then vacant. Alphabetical within each group.
           const statusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
           const sortedCards = [...filteredCards].sort((a, b) => {
+            // When in rotation, sort by rotation position (whose turn is
+            // next is visually next). Non-rotation cards fall back to the
+            // existing status/role/alpha ordering below the rotation set.
+            if (rotationOrder.length > 0) {
+              const aKey = `${a.slug}:${a.instance}`;
+              const bKey = `${b.slug}:${b.instance}`;
+              const aRot = rotationIndex.get(aKey);
+              const bRot = rotationIndex.get(bKey);
+              if (aRot !== undefined && bRot !== undefined) return aRot - bRot;
+              if (aRot !== undefined) return -1;
+              if (bRot !== undefined) return 1;
+            }
             const sa = statusOrder[a.status] ?? 2;
             const sb = statusOrder[b.status] ?? 2;
             if (sa !== sb) return sa - sb;
