@@ -3322,20 +3322,6 @@ fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, 
                 proto.floor.rotation_order = active_seats.clone();
                 proto.floor.current_speaker = active_seats.first().cloned();
                 proto.floor.started_at = Some(collab::iso_now());
-                // sister-fix-EPG-2 (F-DC-EPG-PARTIAL-ACTIVATION, dev-challenger
-                // msg 5634): the MCP-side `protocol_mutate.set_assembly` already
-                // writes this field, but set_assembly_state (the Tauri path the
-                // CollabTab UI uses) was silently leaving it None. The msg 5450
-                // chain's rotation card-sort (Commit 3) + phase/topic strip
-                // (Commit 4) are both gated on `floor.assembly_active === true`
-                // — so without writing it here, the bootstrap "Start Assembly
-                // Mode" CTA (sister-fix-EPG 7617cf6) AND the legacy assembly-
-                // line-toggle button both produced PARTIAL activation: mic-
-                // holder badge lit but rotation/phase surfaces stayed dark.
-                // This closes the divergence and honors the post-44a7123
-                // "single source of truth is protocol.json" intent stated in
-                // the comment above the command.
-                proto.floor.assembly_active = Some(true);
             }
             "disable" => {
                 proto.preset = "Default chat".to_string();
@@ -3343,8 +3329,6 @@ fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, 
                 proto.floor.rotation_order = vec![];
                 // current_speaker preserved per spec §2.2 normalize() — the
                 // none-mode HOLDING semantics keep the speaker informational.
-                // sister-fix-EPG-2 — see enable arm above for context.
-                proto.floor.assembly_active = Some(false);
             }
             "get_state" => {
                 // Read-only — return the current state without mutation.
