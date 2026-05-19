@@ -3428,22 +3428,30 @@ When multiple instances of this role are active:
             etc.) actually ships. Avoids shipping a single-item dropdown
             that reads as broken UI.
 
-            F-UIA-CTR-4 Path A (empty state when twoControlsProtocol is
-            null) is queued as a follow-up; this commit handles the
-            populated-state collapse-affordance which is the immediate
-            human msg 5237 ask. */}
-        {twoControlsProtocol && (
-          <CollapsibleSection
-            id="discussion-mode-section"
-            title="Discussion Mode: Assembly Line"
-            collapsed={discussionModeCollapsed}
-            onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsed)}
-            className="discussion-mode-section"
-            headerTooltip={{
-              expand: "Expand discussion mode controls",
-              collapse: "Collapse discussion mode controls",
-            }}
-          >
+            Sister-fix-CB2 (human msg 5447 "assembly line is still not
+            collapsible"): the original Change B (6bbb2b9) wrapped only
+            AssemblyControls — but ProtocolPanel renders the floor +
+            consensus + assembly-state UI ALSO, and that was always
+            visible. From the human's POV "assembly line" is the whole
+            visible discussion-mode surface (AssemblyControls + ProtocolPanel
+            combined). Sister-fix-CB2 extends the CollapsibleSection to
+            wrap BOTH so the entire surface folds together. Also drops
+            the outer `{twoControlsProtocol && ...}` gate so the band
+            is ALWAYS visible (matches the F-UIA-CTR-4 Path A intent —
+            band discoverable even when no mode is active; ProtocolPanel
+            inside still handles its own no-protocol render). */}
+        <CollapsibleSection
+          id="discussion-mode-section"
+          title="Discussion Mode: Assembly Line"
+          collapsed={discussionModeCollapsed}
+          onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsed)}
+          className="discussion-mode-section"
+          headerTooltip={{
+            expand: "Expand discussion mode controls",
+            collapse: "Collapse discussion mode controls",
+          }}
+        >
+          {twoControlsProtocol && (
             <AssemblyControls
               protocol={twoControlsProtocol}
               mutate={twoControlsMutate}
@@ -3451,19 +3459,18 @@ When multiple instances of this role are active:
               selfRole={null /* human view in CollabTab */}
               projectDir={projectDir}
             />
-          </CollapsibleSection>
-        )}
-
-        {/* Protocol panel — unified floor + consensus state (Slice 3+4).
-            Replaces AssemblyBanner per spec §11 step 3 — banner deletion
-            cleared #954 vote-3 gate (R1 6/6 + R2 9/9 + R5 18/18 tests pass). */}
-        <ProtocolPanel
-          projectDir={projectDir}
-          section={activeSection || "default"}
-          selfSeat={null /* this is the human's view; selfSeat = null */}
-          rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
-          rolesConfig={project?.config?.roles}
-        />
+          )}
+          {/* Protocol panel — unified floor + consensus state (Slice 3+4).
+              Now nested inside the Discussion Mode CollapsibleSection so
+              it collapses together with AssemblyControls. */}
+          <ProtocolPanel
+            projectDir={projectDir}
+            section={activeSection || "default"}
+            selfSeat={null /* this is the human's view; selfSeat = null */}
+            rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+            rolesConfig={project?.config?.roles}
+          />
+        </CollapsibleSection>
 
         {/* Settings Panel */}
         {settingsOpen && (
