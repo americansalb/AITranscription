@@ -19,6 +19,7 @@ import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
 import { DecisionPanel } from "./DecisionPanel";
 import { CollapsibleSection } from "./CollapsibleSection";
+import { RolesTab } from "./RolesTab";
 import { useProjectDir } from "../contexts/ProjectDirContext";
 import { loadJSON, saveJSON, isBoolean } from "../lib/persistedState";
 
@@ -881,6 +882,25 @@ export function CollabTab() {
     setRosterSectionCollapsed(next);
     saveJSON("vaak_collab_roster_collapsed", next);
   };
+  // Change C (CollabTab restructure spec, architect msg 5238/5249/5259):
+  // Team Section tab state — inside the existing roster-section
+  // CollapsibleSection band, toggle between the role-cards grid
+  // ("roster") and the embedded RolesTab edit surface ("roles").
+  // F-UIA-CTR-2: default "roster" (read first, edit second). Persisted
+  // across reloads.
+  // F-DC-CTR-2: standalone RolesTab top-level Tauri tab REMAINS active
+  // — this is the embedded dual-mount path. Both mounts consume
+  // ProjectDirContext (closes F-EA-CTR-A divergent-WRITER class).
+  type TeamTab = "roster" | "roles";
+  const isTeamTab = (v: unknown): v is TeamTab => v === "roster" || v === "roles";
+  const [activeTeamTab, setActiveTeamTab] = useState<TeamTab>(
+    () => loadJSON<TeamTab>("vaak_collab_team_section_active_tab", "roster", isTeamTab),
+  );
+  const updateActiveTeamTab = (next: TeamTab) => {
+    setActiveTeamTab(next);
+    saveJSON("vaak_collab_team_section_active_tab", next);
+  };
+
   // Change B (CollabTab restructure spec, architect msg 5238/5249/5259):
   // Discussion Mode card collapse-state. Wraps AssemblyControls in a
   // CollapsibleSection so the human can fold away the ~quarter-screen
@@ -4194,7 +4214,7 @@ When multiple instances of this role are active:
               {sortedCards.length > 0 && (
               <CollapsibleSection
                 id="roster-section"
-                title="Team Roster"
+                title="Team"
                 trailing={
                   <>
                     {workingCount > 0 && <span className="roster-count-active">{workingCount} working</span>}
@@ -4213,9 +4233,78 @@ When multiple instances of this role are active:
                 collapsed={rosterSectionCollapsed}
                 onToggle={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
                 className="roster-section"
-                headerTooltip={{ expand: "Expand team roster", collapse: "Collapse team roster" }}
+                headerTooltip={{ expand: "Expand team section", collapse: "Collapse team section" }}
               >
-                <div className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                {/* Change C: Team Section tab strip per architect msg 5238/5249/5259
+                    F-UIA-CTR-2 (Team Roster first / default-active; Manage Roles
+                    second). Manage Roles tab embeds the standalone RolesTab
+                    component for in-collab role editing without leaving the
+                    Collab tab; the top-level Tauri RolesTab tab REMAINS available
+                    per F-DC-CTR-2 (dual-path preserved; no removal). Both mounts
+                    share `useProjectDir()` from pre-req 8162d3f so the
+                    divergent-WRITER class on `vaak_collab_project_dir` (F-EA-CTR-A)
+                    stays closed. */}
+                <div
+                  className="team-section-tabs"
+                  role="tablist"
+                  aria-label="Team section view"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    id="team-tab-roster"
+                    aria-controls="team-pane-roster"
+                    aria-selected={activeTeamTab === "roster"}
+                    tabIndex={activeTeamTab === "roster" ? 0 : -1}
+                    className={`team-section-tab${activeTeamTab === "roster" ? " team-section-tab-active" : ""}`}
+                    onClick={() => updateActiveTeamTab("roster")}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+                        e.preventDefault();
+                        updateActiveTeamTab("roles");
+                        document.getElementById("team-tab-roles")?.focus();
+                      }
+                    }}
+                  >
+                    Team Roster
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    id="team-tab-roles"
+                    aria-controls="team-pane-roles"
+                    aria-selected={activeTeamTab === "roles"}
+                    tabIndex={activeTeamTab === "roles" ? 0 : -1}
+                    className={`team-section-tab${activeTeamTab === "roles" ? " team-section-tab-active" : ""}`}
+                    onClick={() => updateActiveTeamTab("roles")}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        updateActiveTeamTab("roster");
+                        document.getElementById("team-tab-roster")?.focus();
+                      }
+                    }}
+                  >
+                    Manage Roles
+                  </button>
+                </div>
+                {activeTeamTab === "roles" && (
+                  <div
+                    id="team-pane-roles"
+                    role="tabpanel"
+                    aria-labelledby="team-tab-roles"
+                    className="team-section-roles-pane"
+                  >
+                    <RolesTab />
+                  </div>
+                )}
+                {activeTeamTab === "roster" && (
+                <>
+                <div
+                  id="team-pane-roster"
+                  role="tabpanel"
+                  aria-labelledby="team-tab-roster"
+                  className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
                   {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
@@ -4488,6 +4577,8 @@ When multiple instances of this role are active:
                   {launching && <span className="launch-team-spinner" />}
                   {claudeInstalled === false ? "Claude CLI Not Found" : launching ? "Launching..." : `Launch All Vacant (${vacantCount})`}
                 </button>
+              )}
+              </>
               )}
               </CollapsibleSection>
               )}

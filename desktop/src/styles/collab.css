@@ -7454,3 +7454,49 @@
 .discussion-mode-section .collapsible-section-body {
   padding: 0;
 }
+
+/* Change C per CollabTab-restructure-v1 spec (architect msg 5238/5249/5259
+   + ui-arch F-UIA-CTR-2 tab order) — Team Section tabs:
+   [Team Roster | Manage Roles]. Tabs sit inside the existing roster-section
+   CollapsibleSection band, giving the human in-collab access to role editing
+   without leaving the tab AND without losing the standalone top-level
+   RolesTab Tauri tab (F-DC-CTR-2 dual-path preserved). */
+.team-section-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 8px;
+}
+
+.team-section-tab {
+  background: transparent;
+  border: none;
+  color: var(--collab-text-secondary, #8899a6);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+}
+
+.team-section-tab:hover {
+  color: var(--collab-text-primary, #e7eaef);
+}
+
+.team-section-tab:focus-visible {
+  outline: 2px solid var(--collab-accent, #1d9bf0);
+  outline-offset: -2px;
+}
+
+.team-section-tab-active {
+  color: var(--collab-text-primary, #e7eaef);
+  border-bottom-color: var(--collab-accent, #1d9bf0);
+}
+
+.team-section-roles-pane {
+  /* RolesTab carries its own internal layout (roles-tab class + grid);
+     no extra padding needed here. The CollapsibleSection body already
+     provides outer padding for the band. */
+}
