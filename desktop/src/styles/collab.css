@@ -1531,59 +1531,20 @@
 
 /* ==================== Active Claims ==================== */
 
-.claims-section {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
-  padding: 10px 14px;
-}
-
-.claims-section.claims-collapsed {
-  padding: 8px 14px;
-}
-
-.claims-section-title {
-  /* human #1280: was 10px muted — invisible. Bump to 12px secondary so the
-     "who's working on what" label is actually readable at a glance. */
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--collab-text-secondary);
-  margin-bottom: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  user-select: none;
-}
-
-.claims-section.claims-collapsed .claims-section-title {
-  margin-bottom: 0;
-}
-
-.claims-section-toggle {
-  font-size: 8px;
-  transition: transform 0.15s;
-}
-
-.claims-collapsed .claims-section-toggle {
-  transform: rotate(-90deg);
-}
+/* Sister-fix-1 (ui-architect msg 5297 F-UIA-GATE3-1): the pre-migration
+   .claims-section / .claims-section-title / .claims-section-toggle /
+   .claims-collapsed .claims-section-* / .claims-section-body rules are
+   gone — pre-req commit 8162d3f migrated the claims band to
+   <CollapsibleSection className="claims-section">, so the body+header
+   chrome now flows from .collapsible-section / .collapsible-section-header
+   / .collapsible-section-body in the wrapper styles below the layout-
+   density block. Only the trailing-slot count badge (.claims-section-count)
+   + the empty-state message (.claims-section-empty further down) remain
+   in use as inner-content classes. */
 
 .claims-section-count {
   font-weight: 400;
   color: #556677;
-}
-
-.claims-section-body {
-  overflow: hidden;
-  transition: max-height 0.2s ease;
-}
-
-.claims-collapsed .claims-section-body {
-  max-height: 0;
-  overflow: hidden;
 }
 
 .claim-card {
@@ -4988,54 +4949,14 @@
   opacity: 0.7;
 }
 
-/* Layout-density-v1 corrected: collapsible Team Roster section header per
- * human msg 5125 ("collapsable with tabs etc"). When collapsed the entire
- * roster grid + Launch-All-Vacant button hide, leaving just this one-line
- * header with status counts. Click anywhere on the header to toggle.
- * Functionality preserved — every role one click away. */
-.roster-section-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  margin-bottom: 6px;
-  border: 1px solid var(--collab-border, #2f3336);
-  border-radius: 6px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.02);
-  font-size: 12px;
-  color: var(--collab-text-secondary, #8899a6);
-  transition: background 0.15s, border-color 0.15s;
-  user-select: none;
-}
-
-.roster-section-header:hover {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: #4a4f55;
-}
-
-.roster-section-header:focus-visible {
-  outline: 2px solid var(--collab-accent, #1d9bf0);
-  outline-offset: 1px;
-}
-
-.roster-section-toggle {
-  font-size: 10px;
-  color: var(--collab-text-secondary, #8899a6);
-  width: 10px;
-  display: inline-block;
-}
-
-.roster-section-title {
-  font-weight: 600;
-  color: #e1e8ed;
-  flex-shrink: 0;
-}
-
-.roster-section-counts {
-  font-size: 11px;
-  color: var(--collab-text-secondary, #8899a6);
-}
+/* Sister-fix-1 (ui-architect msg 5297 F-UIA-GATE3-1): the
+   .roster-section-header / -header:hover / -header:focus-visible /
+   -toggle / -title / -counts rules are gone — pre-req commit 8162d3f
+   migrated the roster band to <CollapsibleSection className="roster-section">,
+   so the header chrome now flows from .collapsible-section* in the
+   wrapper styles. Only the inline status-count badges
+   (.roster-count-active / -stale / -vacant) remain in use as
+   trailing-slot inner-content classes. */
 
 .roster-count-active {
   color: #17bf63;
