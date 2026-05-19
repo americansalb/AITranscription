@@ -915,17 +915,25 @@ export function CollabTab() {
   // CollapsibleSection so the human can fold away the ~quarter-screen
   // assembly UI when they're not actively managing rotation/mic state.
   //
-  // Sister-fix-CB1 (architect msg 5341): default COLLAPSED. The original
-  // default-expanded choice (Change B msg 5325) meant first-load users
-  // still saw the 1/4-screen assembly UI from human msg 5237 — the very
-  // pain the directive was meant to fix — until they manually toggled.
-  // Default-collapsed surfaces the title + chevron always (discoverable),
-  // and users who actively want controls click once; the toggle then
-  // persists across reloads. Matches the Active-Claims default-collapse-
-  // when-no-work pattern: collapsed signals "no active engagement" and
-  // expanded signals "you're working with it now."
-  const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean>(
-    () => loadJSON("vaak_collab_discussion_mode_collapsed", true, isBoolean),
+  // Sister-fix-CB1 (architect msg 5341) made the default COLLAPSED to
+  // free first-load screen space per msg 5237 directive 4.
+  //
+  // Sister-fix-CB3 (human msg 5567 "i don't see the same UI mic passing
+  // and arrows and stuff as before very important to assembly mode"):
+  // tristate (null | true | false) — `null` derives default from
+  // twoControlsProtocol presence at render time. When assembly IS active
+  // (twoControlsProtocol non-null), card default-expands so the mic-
+  // passing controls are immediately visible — the case where the
+  // controls ARE active engagement. When no assembly is running, card
+  // stays collapsed per the screen-space-reclamation intent. User's
+  // explicit toggle (true/false) still overrides the derivation and
+  // persists across reloads. Same tristate pattern as `claimsCollapsed`.
+  const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>(
+      "vaak_collab_discussion_mode_collapsed",
+      null,
+      (v): v is boolean | null => v === null || typeof v === "boolean",
+    ),
   );
   const updateDiscussionModeCollapsed = (next: boolean) => {
     setDiscussionModeCollapsed(next);
@@ -3406,11 +3414,21 @@ When multiple instances of this role are active:
             is ALWAYS visible (matches the F-UIA-CTR-4 Path A intent —
             band discoverable even when no mode is active; ProtocolPanel
             inside still handles its own no-protocol render). */}
+        {(() => {
+          // Sister-fix-CB3 tristate derivation: null = auto-derive from
+          // assembly-active-ness; explicit boolean = user override.
+          // When twoControlsProtocol is present (assembly running), default
+          // is EXPANDED so the mic-passing controls are visible without
+          // hunting per human msg 5567. When no assembly is running, default
+          // is COLLAPSED per sister-fix-CB1 screen-space intent.
+          const discussionModeCollapsedEffective =
+            discussionModeCollapsed ?? !twoControlsProtocol;
+          return (
         <CollapsibleSection
           id="discussion-mode-section"
           title="Discussion Mode: Assembly Line"
-          collapsed={discussionModeCollapsed}
-          onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsed)}
+          collapsed={discussionModeCollapsedEffective}
+          onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsedEffective)}
           className="discussion-mode-section"
           headerTooltip={{
             expand: "Expand discussion mode controls",
@@ -3437,6 +3455,8 @@ When multiple instances of this role are active:
             rolesConfig={project?.config?.roles}
           />
         </CollapsibleSection>
+          );
+        })()}
 
         {/* Settings Panel */}
         {settingsOpen && (
