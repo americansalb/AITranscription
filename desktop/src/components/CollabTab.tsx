@@ -4254,8 +4254,56 @@ When multiple instances of this role are active:
           // role stays reachable on expand.
           const workingCount = sortedCards.filter(c => c.status === "working").length;
           const readyCount = sortedCards.filter(c => c.status === "ready").length;
+          // msg 5450 chain Commit 4: phase/topic strip per architect spec
+          // df90be3 + ui-arch F-UIA-CTR-V2-VIS4 (msg 5460). Renders ONLY
+          // when assembly is active and at least one of {phase, topic} is
+          // meaningful. Position: above the Team band so the collective
+          // state reads as a thin context-bar over the per-card detail.
+          // Empty/idle case = renders nothing (zero vertical cost in
+          // idle mode per the screen-space-first discipline from msg 5237).
+          const floorPhase = twoControlsProtocol?.floor?.phase;
+          const consensusRound = twoControlsProtocol?.consensus?.round as
+            | { topic?: string; opened_at?: string; opened_by?: string }
+            | null
+            | undefined;
+          const consensusPhase = twoControlsProtocol?.consensus?.phase;
+          const consensusActive =
+            !!consensusRound && !!consensusPhase && consensusPhase !== "closed";
+          const showPhaseStrip =
+            twoControlsProtocol?.floor?.assembly_active === true &&
+            (floorPhase !== undefined || consensusActive);
           return (
             <>
+              {showPhaseStrip && (
+                <div
+                  className="phase-topic-strip"
+                  role="status"
+                  aria-live="polite"
+                  aria-label={
+                    consensusActive
+                      ? `Discussion phase: ${floorPhase || "—"} · Topic: ${consensusRound?.topic || "Round in progress"}`
+                      : `Discussion phase: ${floorPhase || "—"}`
+                  }
+                >
+                  {floorPhase && (
+                    <span className={`phase-topic-strip-phase phase-topic-strip-phase-${floorPhase}`}>
+                      {floorPhase === "planning" ? "Planning" : "Execution"}
+                    </span>
+                  )}
+                  {consensusActive && (
+                    <>
+                      <span className="phase-topic-strip-sep" aria-hidden="true">·</span>
+                      <span className="phase-topic-strip-topic-label">Topic:</span>
+                      <span className="phase-topic-strip-topic">
+                        {consensusRound?.topic || "Round in progress"}
+                      </span>
+                      {consensusPhase && (
+                        <span className="phase-topic-strip-consensus-phase">{consensusPhase}</span>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
               {sortedCards.length > 0 && (
               <CollapsibleSection
                 id="roster-section"
