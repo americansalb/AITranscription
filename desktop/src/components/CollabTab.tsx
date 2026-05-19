@@ -4367,55 +4367,44 @@ When multiple instances of this role are active:
                     )}
                     {/* msg 5450 Commit 5 — settings gear ⚙ per F-UIA-CTR-V2-VIS5.
                         Anchored to the Team band header; click opens a popover
-                        with Discussion-Mode controls.
-
-                        Sister-fix-EPG (F-EA-MSG5450-ENTRY-POINT-GAP, evil-arch
-                        msg 5624, architect ratify msg 5629, human msg 5620/5623):
-                        the gear is ALWAYS rendered. Previous Commit 5 gated the
-                        whole wrapper on `twoControlsProtocol !== null`, which
-                        meant idle sections (no protocol.json yet) showed no
-                        gear at all — and since msg 5450 Commit 6 deleted the
-                        Discussion Mode band, idle-state had zero discoverable
-                        entry point for Assembly Mode. The popover BODY
-                        branches: if protocol exists → AssemblyControls (full
-                        surface); if not → a bootstrap CTA that calls the
-                        legacy `handleToggleAssembly` (set_assembly_state) so
-                        the human can start Assembly Mode from this surface
-                        even on a fresh section. */}
-                    <div
-                      className="team-section-settings-wrap"
-                      ref={settingsPopoverRef}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button
-                        type="button"
-                        className={`team-section-settings-trigger${settingsPopoverOpen ? " team-section-settings-trigger-open" : ""}`}
-                        onClick={() => setSettingsPopoverOpen((v) => !v)}
-                        aria-label="Discussion mode settings"
-                        aria-haspopup="dialog"
-                        aria-expanded={settingsPopoverOpen}
-                        title="Discussion mode settings"
+                        containing AssemblyControls (mode toggle / rotation edit
+                        / phase advance / plan path). Renders only when there's
+                        protocol state to control (twoControlsProtocol non-null);
+                        otherwise the gear would open an empty popover. */}
+                    {twoControlsProtocol && (
+                      <div
+                        className="team-section-settings-wrap"
+                        ref={settingsPopoverRef}
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        {"⚙"}
-                      </button>
-                      {settingsPopoverOpen && (
-                        <div
-                          className="team-section-settings-popover"
-                          role="dialog"
+                        <button
+                          type="button"
+                          className={`team-section-settings-trigger${settingsPopoverOpen ? " team-section-settings-trigger-open" : ""}`}
+                          onClick={() => setSettingsPopoverOpen((v) => !v)}
                           aria-label="Discussion mode settings"
+                          aria-haspopup="dialog"
+                          aria-expanded={settingsPopoverOpen}
+                          title="Discussion mode settings"
                         >
-                          <div className="team-section-settings-popover-header">
-                            <span>Discussion Mode</span>
-                            <button
-                              type="button"
-                              className="team-section-settings-popover-close"
-                              onClick={() => setSettingsPopoverOpen(false)}
-                              aria-label="Close settings"
-                            >
-                              {"×"}
-                            </button>
-                          </div>
-                          {twoControlsProtocol ? (
+                          {"⚙"}
+                        </button>
+                        {settingsPopoverOpen && (
+                          <div
+                            className="team-section-settings-popover"
+                            role="dialog"
+                            aria-label="Discussion mode settings"
+                          >
+                            <div className="team-section-settings-popover-header">
+                              <span>Discussion Mode</span>
+                              <button
+                                type="button"
+                                className="team-section-settings-popover-close"
+                                onClick={() => setSettingsPopoverOpen(false)}
+                                aria-label="Close settings"
+                              >
+                                {"×"}
+                              </button>
+                            </div>
                             <AssemblyControls
                               protocol={twoControlsProtocol}
                               mutate={twoControlsMutate}
@@ -4423,30 +4412,10 @@ When multiple instances of this role are active:
                               selfRole={null /* human view in popover */}
                               projectDir={projectDir}
                             />
-                          ) : (
-                            <div className="team-section-settings-bootstrap">
-                              <p className="team-section-settings-bootstrap-blurb">
-                                Assembly Mode isn't running in this section yet.
-                                Start it to enable one-speaker-at-a-time
-                                discussion with mic-passing and rotation order.
-                              </p>
-                              <button
-                                type="button"
-                                className="team-section-settings-bootstrap-cta"
-                                onClick={handleToggleAssembly}
-                                disabled={assemblyToggling}
-                              >
-                                {assemblyToggling
-                                  ? "Starting…"
-                                  : (assemblyState?.active
-                                      ? `🎙 Assembly: ${assemblyState.current_speaker ?? "—"} · click to disable`
-                                      : "Start Assembly Mode")}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </>
                 }
                 collapsed={rosterSectionCollapsed}

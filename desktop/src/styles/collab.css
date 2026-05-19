@@ -7248,55 +7248,6 @@ button.phase-topic-strip-close-btn:focus-visible {
   outline-offset: 1px;
 }
 
-/* Sister-fix-EPG (F-EA-MSG5450-ENTRY-POINT-GAP) — popover bootstrap CTA when
-   `twoControlsProtocol` is null. The gear stays visible, but the popover
-   body swaps from full AssemblyControls to a brief blurb + Start button so
-   the human has a discoverable entry point for Assembly Mode even in idle
-   sections (where no protocol.json exists yet). Matches popover header
-   conventions: 12px label + 13px CTA body, accent color on the action. */
-.team-section-settings-bootstrap {
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 280px;
-}
-
-.team-section-settings-bootstrap-blurb {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--collab-text-secondary, #8899a6);
-}
-
-button.team-section-settings-bootstrap-cta {
-  background: var(--collab-accent, #1d9bf0);
-  color: #fff;
-  border: 1px solid var(--collab-accent, #1d9bf0);
-  border-radius: 6px;
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  font-family: inherit;
-  line-height: 1.4;
-}
-
-button.team-section-settings-bootstrap-cta:hover:not(:disabled) {
-  background: #1a8cd8;
-  border-color: #1a8cd8;
-}
-
-button.team-section-settings-bootstrap-cta:focus-visible {
-  outline: 2px solid var(--collab-accent, #1d9bf0);
-  outline-offset: 2px;
-}
-
-button.team-section-settings-bootstrap-cta:disabled {
-  opacity: 0.6;
-  cursor: wait;
-}
-
 /* msg 5450 chain Commit 5 — settings popover per F-UIA-CTR-V2-VIS5.
    Gear ⚙ icon anchored to Team band header trailing slot opens a
    popover containing AssemblyControls. Replaces the Discussion Mode
