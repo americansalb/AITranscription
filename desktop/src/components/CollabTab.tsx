@@ -3101,6 +3101,138 @@ When multiple instances of this role are active:
             <span className="project-header-name">
               {project?.config?.name || "Project"}
             </span>
+            {/* Change A (CollabTab restructure spec, architect msg 5238/5249/5259):
+                Section selector relocated to header strip — placed adjacent to
+                project name per human msg 5237 directive 2 ("section card of
+                course should be probably at the top, near where the name of
+                the project is"). Compact pill shows the active section name +
+                chevron; click opens a dropdown listing all sections with
+                filter input + "+ New section" affordance. Replaces the
+                wider section-tabs strip that previously lived below the
+                header — reclaims vertical space the human flagged as
+                "way too much space." */}
+            {project && (() => {
+              const activeSec = sections.find(s => s.slug === activeSection);
+              const activeName = activeSec?.name || activeSection || "default";
+              const sortedSections = [...sections].sort((a, b) => {
+                if (a.slug === activeSection) return -1;
+                if (b.slug === activeSection) return 1;
+                const aLA = a.last_activity ?? "";
+                const bLA = b.last_activity ?? "";
+                if (aLA && bLA) return bLA.localeCompare(aLA);
+                if (aLA) return -1;
+                if (bLA) return 1;
+                return (b.created_at || "").localeCompare(a.created_at || "");
+              });
+              const filteredSections = sectionFilterText.trim()
+                ? sortedSections.filter(s => s.name.toLowerCase().includes(sectionFilterText.toLowerCase()))
+                : sortedSections;
+              return (
+                <div className="header-section-selector-wrap" ref={sectionDropdownRef}>
+                  <button
+                    type="button"
+                    className={`header-section-selector${sectionDropdownOpen ? " header-section-selector-open" : ""}`}
+                    onClick={() => setSectionDropdownOpen(v => !v)}
+                    aria-haspopup="listbox"
+                    aria-expanded={sectionDropdownOpen}
+                    title={`Active section: #${activeName}. Click to switch.`}
+                    disabled={sectionLoading}
+                  >
+                    <span className="header-section-selector-label">Section:</span>
+                    <span className="header-section-selector-hash">#</span>
+                    <span className="header-section-selector-name">{activeName}</span>
+                    <span className="header-section-selector-caret" aria-hidden="true">{'▾'}</span>
+                  </button>
+                  {sectionDropdownOpen && (
+                    <div className="header-section-dropdown" role="listbox">
+                      <input
+                        className="header-section-dropdown-filter"
+                        type="text"
+                        placeholder="Filter sections…"
+                        value={sectionFilterText}
+                        onChange={e => setSectionFilterText(e.target.value)}
+                        autoFocus
+                      />
+                      <div className="header-section-dropdown-list">
+                        {filteredSections.length === 0 ? (
+                          <div className="header-section-dropdown-empty">No matching sections</div>
+                        ) : filteredSections.map(s => (
+                          <button
+                            key={s.slug}
+                            type="button"
+                            className={`header-section-dropdown-item${s.slug === activeSection ? " header-section-dropdown-item-active" : ""}`}
+                            role="option"
+                            aria-selected={s.slug === activeSection}
+                            onClick={() => {
+                              handleSwitchSection(s.slug);
+                              setSectionDropdownOpen(false);
+                              setSectionFilterText("");
+                            }}
+                          >
+                            <span className="header-section-dropdown-item-name">#{s.name}</span>
+                            {s.message_count > 0 && (
+                              <span className="header-section-dropdown-item-count">{s.message_count}</span>
+                            )}
+                            {s.last_activity && (
+                              <span className="header-section-dropdown-item-time" title={s.last_activity}>
+                                {formatRelativeTime(s.last_activity)}
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                      {creatingSectionMode ? (
+                        <div className="header-section-dropdown-create">
+                          <input
+                            className="header-section-dropdown-create-input"
+                            type="text"
+                            placeholder="Name…"
+                            value={newSectionName}
+                            onChange={e => setNewSectionName(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter") {
+                                handleCreateSection();
+                                setSectionDropdownOpen(false);
+                              }
+                              if (e.key === "Escape") {
+                                setCreatingSectionMode(false);
+                                setNewSectionName("");
+                              }
+                            }}
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            className="header-section-dropdown-create-ok"
+                            onClick={() => {
+                              handleCreateSection();
+                              setSectionDropdownOpen(false);
+                            }}
+                            disabled={!newSectionName.trim() || sectionLoading}
+                          >
+                            {sectionLoading ? "…" : "+"}
+                          </button>
+                          <button
+                            type="button"
+                            className="header-section-dropdown-create-cancel"
+                            onClick={() => {
+                              setCreatingSectionMode(false);
+                              setNewSectionName("");
+                            }}
+                          >&times;</button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="header-section-dropdown-new"
+                          onClick={() => setCreatingSectionMode(true)}
+                        >+ New section</button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {pendingQuestionCount > 0 && (
               <span
                 className="pending-questions-badge"
@@ -3376,121 +3508,13 @@ When multiple instances of this role are active:
             folder icon. Click copies path to clipboard; hover shows full path
             in tooltip. Same data, ~24px footprint vs the prior ~600px row. */}
 
-        {/* Section Tabs \u2014 human msg 3191: max 4 visible (active + 3 most
-            recently active), rest behind "All sections" dropdown with
-            name-filter typing. "+ New" stays accent-colored, visually
-            separate from tabs. Every section reachable via dropdown. */}
-        {(() => {
-          const activeSec = sections.find(s => s.slug === activeSection);
-          const nonActive = sections.filter(s => s.slug !== activeSection);
-          // Sort non-active sections by last_activity desc (most-recent first);
-          // null/missing last_activity sorts to bottom by created_at desc.
-          const sortedNonActive = [...nonActive].sort((a, b) => {
-            const aLA = a.last_activity ?? "";
-            const bLA = b.last_activity ?? "";
-            if (aLA && bLA) return bLA.localeCompare(aLA);
-            if (aLA) return -1;
-            if (bLA) return 1;
-            return (b.created_at || "").localeCompare(a.created_at || "");
-          });
-          const recentNonActive = sortedNonActive.slice(0, 3);
-          const visibleTabs = activeSec ? [activeSec, ...recentNonActive] : recentNonActive.slice(0, 4);
-          const hiddenSections = sortedNonActive.slice(3);
-          const filteredHidden = sectionFilterText.trim()
-            ? hiddenSections.filter(s => s.name.toLowerCase().includes(sectionFilterText.toLowerCase()))
-            : hiddenSections;
-          return (
-            <div className="section-tabs">
-              {visibleTabs.map(s => (
-                <button
-                  key={s.slug}
-                  className={`section-tab${s.slug === activeSection ? " section-tab-active" : ""}${sectionLoading ? " section-tab-loading" : ""}`}
-                  onClick={() => handleSwitchSection(s.slug)}
-                  disabled={sectionLoading}
-                >
-                  <span className="section-tab-hash">#</span>
-                  <span className="section-tab-name">{s.name}</span>
-                  {s.message_count > 0 && (
-                    <span className="section-tab-count">{s.message_count}</span>
-                  )}
-                </button>
-              ))}
-              {hiddenSections.length > 0 && (
-                <div className="section-tab-dropdown-wrap" ref={sectionDropdownRef}>
-                  <button
-                    className={`section-tab section-tab-overflow${sectionDropdownOpen ? " section-tab-overflow-open" : ""}`}
-                    onClick={() => setSectionDropdownOpen(v => !v)}
-                    aria-haspopup="listbox"
-                    aria-expanded={sectionDropdownOpen}
-                  >
-                    All sections ({hiddenSections.length}) <span className="section-tab-overflow-caret" aria-hidden="true">{'\u25be'}</span>
-                  </button>
-                  {sectionDropdownOpen && (
-                    <div className="section-tab-dropdown" role="listbox">
-                      <input
-                        className="section-tab-dropdown-filter"
-                        type="text"
-                        placeholder="Filter sections\u2026"
-                        value={sectionFilterText}
-                        onChange={e => setSectionFilterText(e.target.value)}
-                        autoFocus
-                      />
-                      <div className="section-tab-dropdown-list">
-                        {filteredHidden.length === 0 ? (
-                          <div className="section-tab-dropdown-empty">No matching sections</div>
-                        ) : filteredHidden.map(s => (
-                          <button
-                            key={s.slug}
-                            className="section-tab-dropdown-item"
-                            role="option"
-                            aria-selected={s.slug === activeSection}
-                            onClick={() => {
-                              handleSwitchSection(s.slug);
-                              setSectionDropdownOpen(false);
-                              setSectionFilterText("");
-                            }}
-                          >
-                            <span className="section-tab-dropdown-item-name">#{s.name}</span>
-                            {s.message_count > 0 && (
-                              <span className="section-tab-dropdown-item-count">{s.message_count}</span>
-                            )}
-                            {s.last_activity && (
-                              <span className="section-tab-dropdown-item-time" title={s.last_activity}>
-                                {formatRelativeTime(s.last_activity)}
-                              </span>
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              {creatingSectionMode ? (
-                <div className="section-tab-create">
-                  <input
-                    className="section-tab-create-input"
-                    type="text"
-                    placeholder="Name..."
-                    value={newSectionName}
-                    onChange={e => setNewSectionName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter") handleCreateSection();
-                      if (e.key === "Escape") { setCreatingSectionMode(false); setNewSectionName(""); }
-                    }}
-                    autoFocus
-                  />
-                  <button className="section-tab-create-ok" onClick={handleCreateSection} disabled={!newSectionName.trim() || sectionLoading}>{sectionLoading ? "\u2026" : "+"}</button>
-                  <button className="section-tab-create-cancel" onClick={() => { setCreatingSectionMode(false); setNewSectionName(""); }}>&times;</button>
-                </div>
-              ) : (
-                <button className="section-tab section-tab-new" onClick={() => setCreatingSectionMode(true)}>
-                  + New
-                </button>
-              )}
-            </div>
-          );
-        })()}
+        {/* Section Tabs strip removed per Change A (architect msg 5238/5249/5259):
+            section selector relocated to header strip near project name.
+            See `.header-section-selector*` block above for the replacement
+            UI. State + handlers (sectionDropdownOpen, sectionFilterText,
+            handleSwitchSection, creatingSectionMode, newSectionName,
+            handleCreateSection) are unchanged \u2014 only the render location
+            and visual surface moved. */}
 
         {/* Section join hint removed per human msg 3069 — "Tell agents: join as
             [role], section X" was a noisy permanent line for info almost never
