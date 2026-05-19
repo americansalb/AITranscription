@@ -5200,9 +5200,18 @@ When multiple instances of this role are active:
                 return instances;
               })}
           </select>
-          <input
-            className="compose-input"
-            type="text"
+          {/* Change E (CollabTab restructure spec, architect msg 5238/5249/5259):
+              human msg 5237 "we need to make the text box slightly bigger and
+              that's only possible if we clean up a bunch of the UI consolidating
+              things into tabs etc" — converted from single-line <input> to
+              multi-line <textarea rows=3> so 3 lines of message text fit before
+              scrolling. Enter still sends; Shift+Enter inserts a newline for
+              multi-paragraph messages. Padding bumped 6px → 8px and font-size
+              13px → 14px for the slightly-bigger feel without dominating the
+              vertical space. */}
+          <textarea
+            className="compose-input compose-input-textarea"
+            rows={3}
             value={msgBody}
             onChange={(e) => {
               setMsgBody(e.target.value);
@@ -5211,8 +5220,13 @@ When multiple instances of this role are active:
               if (micToConfirmed) setMicToConfirmed(null);
               if (micToHintDismissed) setMicToHintDismissed(false);
             }}
-            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-            placeholder={`Message${activeSection ? ` in #${sections.find(s => s.slug === activeSection)?.name || activeSection}` : ""}... (/debate delphi [topic])`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+            placeholder={`Message${activeSection ? ` in #${sections.find(s => s.slug === activeSection)?.name || activeSection}` : ""}... (Enter to send · Shift+Enter for newline · /debate delphi [topic])`}
             disabled={sending}
           />
           <button
