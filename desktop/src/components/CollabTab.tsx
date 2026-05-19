@@ -910,6 +910,31 @@ export function CollabTab() {
     saveJSON("vaak_collab_team_section_active_tab", next);
   };
 
+  // msg 5450 chain Commit 5: assembly-settings popover. New
+  // component-local state for the gear-icon-anchored popover that
+  // contains AssemblyControls. Replaces the Discussion Mode band's
+  // collapsible-body affordance with a quicker-access popover per
+  // ui-arch F-UIA-CTR-V2-VIS5 (msg 5460). Not persisted — ephemeral UI
+  // state per F-UIA-CTR-V2-VIS6 (context owns persistence; mounts own
+  // ephemeral state).
+  const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
+  const settingsPopoverRef = useRef<HTMLDivElement | null>(null);
+  // Click-outside handler to close the popover (matches existing
+  // sectionDropdown / workflowDropdown patterns in this component).
+  useEffect(() => {
+    if (!settingsPopoverOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (
+        settingsPopoverRef.current &&
+        !settingsPopoverRef.current.contains(e.target as Node)
+      ) {
+        setSettingsPopoverOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [settingsPopoverOpen]);
+
   // Change B (CollabTab restructure spec, architect msg 5238/5249/5259):
   // Discussion Mode card collapse-state. Wraps AssemblyControls in a
   // CollapsibleSection so the human can fold away the ~quarter-screen
@@ -4320,6 +4345,57 @@ When multiple instances of this role are active:
                       <span className="roster-count-vacant">
                         {(workingCount + readyCount) > 0 ? " · " : ""}{vacantCount} vacant
                       </span>
+                    )}
+                    {/* msg 5450 Commit 5 — settings gear ⚙ per F-UIA-CTR-V2-VIS5.
+                        Anchored to the Team band header; click opens a popover
+                        containing AssemblyControls (mode toggle / rotation edit
+                        / phase advance / plan path). Renders only when there's
+                        protocol state to control (twoControlsProtocol non-null);
+                        otherwise the gear would open an empty popover. */}
+                    {twoControlsProtocol && (
+                      <div
+                        className="team-section-settings-wrap"
+                        ref={settingsPopoverRef}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          className={`team-section-settings-trigger${settingsPopoverOpen ? " team-section-settings-trigger-open" : ""}`}
+                          onClick={() => setSettingsPopoverOpen((v) => !v)}
+                          aria-label="Discussion mode settings"
+                          aria-haspopup="dialog"
+                          aria-expanded={settingsPopoverOpen}
+                          title="Discussion mode settings"
+                        >
+                          {"⚙"}
+                        </button>
+                        {settingsPopoverOpen && (
+                          <div
+                            className="team-section-settings-popover"
+                            role="dialog"
+                            aria-label="Discussion mode settings"
+                          >
+                            <div className="team-section-settings-popover-header">
+                              <span>Discussion Mode</span>
+                              <button
+                                type="button"
+                                className="team-section-settings-popover-close"
+                                onClick={() => setSettingsPopoverOpen(false)}
+                                aria-label="Close settings"
+                              >
+                                {"×"}
+                              </button>
+                            </div>
+                            <AssemblyControls
+                              protocol={twoControlsProtocol}
+                              mutate={twoControlsMutate}
+                              lastError={twoControlsLastError}
+                              selfRole={null /* human view in popover */}
+                              projectDir={projectDir}
+                            />
+                          </div>
+                        )}
+                      </div>
                     )}
                   </>
                 }
