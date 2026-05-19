@@ -5,10 +5,12 @@ import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
-// R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
-// section-pinned widget. Legacy `assembly_line` MCP tool still alive
-// (Slice 6 owns that decom) but the UI surface is unified.
-import { ProtocolPanel } from "./ProtocolPanel";
+// R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel itself was
+// retired from CollabTab in msg 5450 redesign Commit 6 (architect spec
+// df90be3 §7) — its sub-surfaces (mic / phase / topic / consensus) are
+// now distributed across roster card decorations (Commits 2-3) + phase/
+// topic strip (Commit 4) + settings popover (Commit 5). ProtocolPanel
+// component still exists for other mount sites (Avatar StatsRadar tests).
 import { AssemblyControls } from "./AssemblyControls";
 import { Avatar, parseSeatInstance } from "./Avatar";
 import { useProtocolState } from "../hooks/useProtocolState";
@@ -935,35 +937,13 @@ export function CollabTab() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [settingsPopoverOpen]);
 
-  // Change B (CollabTab restructure spec, architect msg 5238/5249/5259):
-  // Discussion Mode card collapse-state. Wraps AssemblyControls in a
-  // CollapsibleSection so the human can fold away the ~quarter-screen
-  // assembly UI when they're not actively managing rotation/mic state.
-  //
-  // Sister-fix-CB1 (architect msg 5341) made the default COLLAPSED to
-  // free first-load screen space per msg 5237 directive 4.
-  //
-  // Sister-fix-CB3 (human msg 5567 "i don't see the same UI mic passing
-  // and arrows and stuff as before very important to assembly mode"):
-  // tristate (null | true | false) — `null` derives default from
-  // twoControlsProtocol presence at render time. When assembly IS active
-  // (twoControlsProtocol non-null), card default-expands so the mic-
-  // passing controls are immediately visible — the case where the
-  // controls ARE active engagement. When no assembly is running, card
-  // stays collapsed per the screen-space-reclamation intent. User's
-  // explicit toggle (true/false) still overrides the derivation and
-  // persists across reloads. Same tristate pattern as `claimsCollapsed`.
-  const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean | null>(
-    () => loadJSON<boolean | null>(
-      "vaak_collab_discussion_mode_collapsed",
-      null,
-      (v): v is boolean | null => v === null || typeof v === "boolean",
-    ),
-  );
-  const updateDiscussionModeCollapsed = (next: boolean) => {
-    setDiscussionModeCollapsed(next);
-    saveJSON("vaak_collab_discussion_mode_collapsed", next);
-  };
+  // Discussion Mode `discussionModeCollapsed` state retired in msg 5450
+  // redesign Commit 6 (architect spec df90be3 §7). The CollapsibleSection
+  // that consumed this state was deleted; its responsibilities moved to
+  // card decorations (Commits 2-3), phase/topic strip (Commit 4), and
+  // settings popover (Commit 5). The localStorage key
+  // `vaak_collab_discussion_mode_collapsed` is now orphaned — leaving
+  // pre-existing user-saved values in place is harmless (read path gone).
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
@@ -3415,73 +3395,24 @@ When multiple instances of this role are active:
           </button>
         </div>
 
-        {/* Discussion Mode card — Change B per CollabTab-restructure-v1
-            spec (architect msg 5238/5249/5259). Wraps the AssemblyControls
-            two-controls surface in a CollapsibleSection so the human can
-            fold the ~quarter-screen assembly UI for message-timeline
-            real estate (human msg 5237 directive 4 "the assembly line
-            thing right now takes up like one fourth of the screen").
+        {/* Discussion Mode band DELETED — msg 5450 redesign Commit 6 per
+            architect spec df90be3 §7 + F-UIA-CTR-V2-VIS5 (ui-arch msg 5460).
 
-            F-UIA-CTR-1: NO mode dropdown in v1 — title reads literally
-            "Discussion Mode: Assembly Line" until a second mode (Oxford,
-            etc.) actually ships. Avoids shipping a single-item dropdown
-            that reads as broken UI.
+            The band previously wrapped <AssemblyControls> + <ProtocolPanel>
+            in a CollapsibleSection. Its responsibilities are now distributed:
 
-            Sister-fix-CB2 (human msg 5447 "assembly line is still not
-            collapsible"): the original Change B (6bbb2b9) wrapped only
-            AssemblyControls — but ProtocolPanel renders the floor +
-            consensus + assembly-state UI ALSO, and that was always
-            visible. From the human's POV "assembly line" is the whole
-            visible discussion-mode surface (AssemblyControls + ProtocolPanel
-            combined). Sister-fix-CB2 extends the CollapsibleSection to
-            wrap BOTH so the entire surface folds together. Also drops
-            the outer `{twoControlsProtocol && ...}` gate so the band
-            is ALWAYS visible (matches the F-UIA-CTR-4 Path A intent —
-            band discoverable even when no mode is active; ProtocolPanel
-            inside still handles its own no-protocol render). */}
-        {(() => {
-          // Sister-fix-CB3 tristate derivation: null = auto-derive from
-          // assembly-active-ness; explicit boolean = user override.
-          // When twoControlsProtocol is present (assembly running), default
-          // is EXPANDED so the mic-passing controls are visible without
-          // hunting per human msg 5567. When no assembly is running, default
-          // is COLLAPSED per sister-fix-CB1 screen-space intent.
-          const discussionModeCollapsedEffective =
-            discussionModeCollapsed ?? !twoControlsProtocol;
-          return (
-        <CollapsibleSection
-          id="discussion-mode-section"
-          title="Discussion Mode: Assembly Line"
-          collapsed={discussionModeCollapsedEffective}
-          onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsedEffective)}
-          className="discussion-mode-section"
-          headerTooltip={{
-            expand: "Expand discussion mode controls",
-            collapse: "Collapse discussion mode controls",
-          }}
-        >
-          {twoControlsProtocol && (
-            <AssemblyControls
-              protocol={twoControlsProtocol}
-              mutate={twoControlsMutate}
-              lastError={twoControlsLastError}
-              selfRole={null /* human view in CollabTab */}
-              projectDir={projectDir}
-            />
-          )}
-          {/* Protocol panel — unified floor + consensus state (Slice 3+4).
-              Now nested inside the Discussion Mode CollapsibleSection so
-              it collapses together with AssemblyControls. */}
-          <ProtocolPanel
-            projectDir={projectDir}
-            section={activeSection || "default"}
-            selfSeat={null /* this is the human's view; selfSeat = null */}
-            rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
-            rolesConfig={project?.config?.roles}
-          />
-        </CollapsibleSection>
-          );
-        })()}
+              • Mic holder — accent border on roster card (Commit 2)
+              • Moderator — gold star badge on roster card (Commit 2)
+              • Rotation order — card sort order when assembly active (Commit 3)
+              • Phase + topic + round — strip above Team band (Commit 4)
+              • Settings (mode toggle, rotation edit, plan path, phase
+                advance) — gear-icon popover in Team band header (Commit 5)
+
+            ConsensusRow data from ProtocolPanel is covered by the phase/topic
+            strip from Commit 4. AssemblyControls relocated to the gear popover
+            from Commit 5. The band itself, plus the ProtocolPanel mount, plus
+            the `discussionModeCollapsed` tristate state + persistedState key
+            (vaak_collab_discussion_mode_collapsed) are all retired together. */}
 
         {/* Settings Panel */}
         {settingsOpen && (

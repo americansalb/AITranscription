@@ -7399,13 +7399,12 @@
   padding: 10px 12px 12px;
 }
 
-/* Change B per CollabTab-restructure-v1 spec — discussion mode card
-   wraps AssemblyControls which has its own internal padding (6px 10px
-   per AssemblyControls.css). Removing the wrapper body padding for this
-   specific section avoids double-padding around the assembly UI. */
-.discussion-mode-section .collapsible-section-body {
-  padding: 0;
-}
+/* `.discussion-mode-section` override removed in msg 5450 redesign
+   Commit 6 (architect spec df90be3 §7). The Discussion Mode band that
+   carried this class was deleted from CollabTab.tsx; the AssemblyControls
+   surface it housed moved to the gear-icon settings popover (Commit 5),
+   which has its own padding contract (see `.team-section-settings-popover`
+   block above). No callers remain for this selector. */
 
 /* Change C per CollabTab-restructure-v1 spec (architect msg 5238/5249/5259
    + ui-arch F-UIA-CTR-2 tab order) — Team Section tabs:
