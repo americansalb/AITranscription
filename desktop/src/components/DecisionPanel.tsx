@@ -421,9 +421,18 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
         <div id="decision-panel-body" className="decision-panel-empty">No pending decisions</div>
       )}
 
+      {/* decision-panel-v1.2 (human msg 5546 + architect msg 5551 lock):
+          render ONE question at a time (FIFO by primary.id ascending —
+          oldest first since `groups` derives from a sorted message list).
+          When multiple agents fire structured questions concurrently, the
+          earlier-stacked-all-at-once render would eat compose-textarea
+          real estate; now the panel renders a single card + "(+ N more
+          pending)" tail indicator. Auto-advances when current resolves
+          (no extra logic — the resolutions Set filters answered groups
+          out, so the NEW groups[0] becomes the next-oldest). */}
       {!isCollapsed && groups.length > 0 && (
         <div id="decision-panel-body" className="decision-panel-cards">
-          {groups.map((g) => {
+          {[groups[0]].map((g) => {
             const choices = (g.primary.metadata?.choices || []) as QuestionChoice[];
             const allowOther = g.primary.metadata?.allow_other === true;
             // v1.1 (human msg 5088): cards without structured choices represent
@@ -544,6 +553,14 @@ export function DecisionPanel({ projectDir, messages, onPendingCountChange, getR
               </div>
             );
           })}
+          {groups.length > 1 && (
+            <div
+              className="decision-panel-queue-tail"
+              title={`${groups.length - 1} more decision${groups.length - 1 === 1 ? "" : "s"} queued — they'll appear here after this one resolves`}
+            >
+              + {groups.length - 1} more pending — queued behind this one
+            </div>
+          )}
         </div>
       )}
     </div>

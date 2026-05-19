@@ -363,3 +363,28 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* decision-panel-v1.2 (human msg 5546 + architect msg 5551 lock):
+   Bound the panel body's vertical space so even one rendered card +
+   the queue tail can't push the compose textarea off-screen. Internal
+   scroll if the rendered card grows tall (e.g. many choices). */
+.decision-panel-cards {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* Queue-tail indicator — shown only when groups.length > 1. Visually
+   subordinate to the rendered card (muted text, dashed border, no
+   click affordance). Communicates "more behind this one" without
+   competing for attention. */
+.decision-panel-queue-tail {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #8899a6;
+  font-size: 11px;
+  font-style: italic;
+  text-align: center;
+  user-select: none;
+}
