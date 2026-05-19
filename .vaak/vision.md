@@ -1,6 +1,6 @@
 # Vaak Architecture Vision — feature/al-vision-slice-1 branch
 
-Living document. Owned by: architect. Last updated: 2026-05-18 (post-Path-B ratification; F-EA-LAYOUT-LOCALSTORAGE-CLASS architecturally CLOSED for 4 named persist-state keys via `desktop/src/lib/persistedState.ts` shared helper).
+Living document. Owned by: architect. Last updated: 2026-05-19 (post-msg-5450-redesign-chain ratification; assembly state relocated from a Discussion Mode band onto Team Roster cards via 6-commit chain + 1 sister-fix).
 
 ## Scope
 
@@ -298,3 +298,83 @@ New module `desktop/src/lib/persistedState.ts` extracts the typed-JSON localStor
 - Architect:0 seat — reseated fresh 2026-05-18 10:18Z, drifted silent ~70min around 18:38Z → 19:32Z (between active-claims-v1 ratification and `1c5678d` ratification), re-engaged at architect msg 5132 + ratification msg 5137. Architect-lane debt cleared via this vision.md update.
 - Developer:1 seat — original dev:1 executed by human msg 4975 for unilateral decision-panel deferral; fresh dev:1 (current) seated via msg 4978 directive, has shipped all subsequent code with self-corrected discipline after one process-failure recurrence (cd6c4e8) that was recovered cleanly in <5 min.
 - Multi-writer audit (2026-05-13 carryover) — now four concrete instances (dual heartbeat trackers + turn-gate raw write + localStorage RolesTab/CollabTab + MCP-sidecar `read_claims_filtered`). Path B helper extraction for localStorage is the next architectural close; the MCP-sidecar reader was closed in this cycle (`d2b509f`).
+
+## msg 5450 redesign chain RATIFIED (2026-05-19, 6 commits + 1 sister-fix)
+
+Human msg 5450 + reinforced by msgs 5567/5568 framed assembly **operational state** (mic-holder, rotation order, moderator) as a property of the AGENTS, requiring relocation from a Discussion Mode band onto the agent cards themselves. Plus an explicit "loss of function" regression complaint when the prior v1 chain (Change A-E + sister-fixes) collapsed but didn't restructure the band.
+
+Spec doc at `.vaak/design-notes/collabtab-restructure-v2-spec-2026-05-19.md` (SHA `df90be3`) materialized the locked plan with 11 amendment flags folded (F-EA-MSG5450-1/2/3/4 + F-UIA-CTR-V2-VIS1-7).
+
+**Six-commit chain + 1 sister-fix shipped:**
+
+| Commit | SHA | LOC | What |
+|---|---|---|---|
+| 1 | `d9dac22` | +67 | `desktop/src/contexts/ProtocolStateContext.tsx` pre-req (mirrors ProjectDirContext pattern from `8162d3f`) |
+| 2 | `1ef6201` | +80/-5 | Mic-holder accent border + 🎙 glyph + moderator gold ★ badge on roster cards |
+| 3 | `08930a1` | +28 | Rotation = card sort order when assembly active |
+| 4 | `19c3f48` | +118 | Phase/topic strip above Team band (conditional render; zero vertical cost in idle) |
+| 5 | `1668c02` | +159 | Settings ⚙ gear popover replaces Discussion Mode band BODY |
+| 6 | `939b3a3` | +37/-107 | Discussion Mode band DELETED — runtime state now lives on cards + strip + popover |
+| C6-1 | `62b098a` | +44/-1 | Sister-fix: Close-round button restored in phase strip (F-EA-COMMIT6-1 omission-path closure) |
+
+Total ~650 LOC across 7 commits. All four-gate ratified per Ruling 13 (gate verbosity proportional to commit size per F-DC-KRL2 discipline locked earlier in session).
+
+**Final visible-UI architecture:**
+
+```
+┌──────────────────────────────────────────────┐
+│ [Planning] · Round 1/5 · Topic · submitting·close │  ← Commit 4 strip + C6-1 button
+├──────────────────────────────────────────────┤
+│ ▼ Team  3 working · 2 ready          ⚙ ↑    │  ← Commit 5 gear popover trigger
+│ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐ ┌──┐               │
+│ │🎙│ │  │ │★ │ │  │ │  │ │  │               │  ← Commits 2+3 (cards = rotation)
+│ └──┘ └──┘ └──┘ └──┘ └──┘ └──┘               │
+└──────────────────────────────────────────────┘
+```
+
+No more Discussion Mode collapsible band. Mic-passing visible directly on cards; settings one click away.
+
+### Architectural lesson: Context-extraction as canonical multi-consumer-state pattern (third instance)
+
+This session locked the pattern: when 2+ components need access to the same persisted-or-shared state, extract a React Context with a stable memoized value + throw-if-no-provider hook. Three instances now exist:
+1. `ProjectDirContext` (pre-req `8162d3f`) — single in-memory state for `vaak_collab_project_dir`
+2. `CollapsibleSection` wrapper (also pre-req `8162d3f`) — single component for the 5 collapsible bands
+3. `ProtocolStateContext` (pre-req `d9dac22`) — single subscription site for protocol state
+
+Per [[feedback_extract_pattern_after_third_instance]] — the pattern is now habituated. Future shared-state surfaces should default to this shape rather than prop-drill or per-mount re-subscription.
+
+### Architectural lesson: Pre-req extraction without consumer migration = preparation, not closure
+
+Evil-architect:0 msg 5586 declared F-EA-MSG5450-3 "architecturally CLOSED" at Commit 1; later self-corrected in msg 5590 to "DORMANT-PREPARED" since the Context wasn't yet consumed. The decoration commit (Commit 2) still used the existing `useProtocolState` hook directly. Closure happens at the MIGRATION step, not the EXTRACTION step.
+
+**Discipline:** when sequencing pre-req → feature commits, the architectural class-of-bug closure is FUTURE-PROOFED at extraction but only ACTUALIZED at consumer migration. State the distinction explicitly in gate verdicts. Memory candidate `feedback_dont_declare_architectural_close_until_consumers_migrate`.
+
+### Architectural lesson: Deletion audits must grep for action handlers, not just state
+
+F-EA-COMMIT6-1 caught a regression: the Commit 6 deletion audit checked write-side cleanup (state removal, CSS cleanup, import removal) but missed the read-side affordance — a "Close round" button inside the deleted `ProtocolPanel`'s `ConsensusRow` subcomponent. Sister-fix-C6-1 (`62b098a`) restored the button on the new phase/topic strip surface in ~30 LOC.
+
+**Discipline:** deletion audits must grep for ALL handler call-sites unique to the deleted component, not just the obvious wrapper state. Specifically:
+- `onClick` / `onChange` handlers
+- MCP tool / Tauri invoke call sites only the deleted component called
+- Backend mutation paths whose only UI entry-point was inside the deletion
+
+Memory candidate `feedback_deletion_audits_must_grep_for_action_handlers_not_just_state`. Same audit class as `feedback_audit_omission_paths` from prior sessions.
+
+### Token-burn architectural lessons (also closed this session)
+
+**F-DC-KRL1 — alive-ping discipline killed.** Per dev-challenger:0 msg 5475: the keepalive series we shipped earlier in the session (533b458 + 9d1fde1 + cd1b629) already provides liveness via `last_alive_at_ms` updated on every MCP tool call. Every "X alive — silent standby" broadcast since was redundant LLM-token burn against a backend that already knew. **~50% session token reduction** by killing alive-ping discipline. Locked in `.vaak/roles/*.md` briefings at SHA `468e092` for all active + future seats.
+
+**F-DC-KRL2 — gate-review proportional to commit scope.** Locked discipline: 1-5 LOC = 1-2 line verdict; 5-50 LOC = 1 paragraph; 50+ LOC = full multi-section. Applied successfully across the msg 5450 chain's 7 commits with disciplined gate-review verbosity.
+
+### Cross-session handoff state (2026-05-19, post-msg-5450 chain)
+
+- All msg 5237 directives (1-6) addressed via Change A/B/C/D-partial/E + sister-fixes earlier in session.
+- msg 5450 redesign chain (this section) closes the runtime-state-relocation directive.
+- msg 5567/5568 regression complaint closed by Commits 2-5 + sister-fix-CB3 (`24c2667`) bridge.
+- msg 5546 (decision-panel input-blocking) closed by decision-panel-v1.2 SHA `1e2f0be`.
+- F-DC-KRL1 alive-ping kill (`468e092`) ratified; F-DC-KRL2 proportional-review discipline locked.
+- Q1b (4th "open" useless-control disambiguation) still pending human direct answer.
+- Q-touch (claims-as-mathematical-requirement modify-only vs all-access) still pending human direct answer.
+- Screenshot upload (human msg 5350) eligible to pull; deferred per human msg 5355 "after you fiish all of this" until queue clears.
+- ux-engineer seat vacant; F-UIA-COMMIT3-1 (rotation/non-rotation hairline divider) + F-UIA-COMMIT5-1/3/4/5 (popover polish: viewport-overflow, focus-trap, Escape, useClickOutside hook extraction) queued.
+- Spec doc at `.vaak/design-notes/collabtab-restructure-v2-spec-2026-05-19.md` (SHA `df90be3`) preserved as architect-lane artifact for cross-session continuity.
