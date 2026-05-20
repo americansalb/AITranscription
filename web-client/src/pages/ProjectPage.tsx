@@ -9,6 +9,7 @@ import { RoleBriefingModal } from "../components/RoleBriefingModal";
 import { FileClaimsPanel } from "../components/FileClaimsPanel";
 import { AddRoleModal } from "../components/AddRoleModal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { DocumentWorkspace } from "../components/DocumentWorkspace";
 
 const ROLE_COLORS: Record<string, string> = {
   manager: "var(--role-manager)",
@@ -363,6 +364,14 @@ export function ProjectPage() {
         <div className="empty-state-desc">This project may have been deleted or you don't have access.</div>
       </div>
     );
+  }
+
+  // Vaaklite: discussion-mode projects use the document-drafting workspace
+  // instead of the coding-collab message board. Branch after all hooks so
+  // the Rules of Hooks are honored (the coding hooks above run but their
+  // side effects — an unused message board / WS — are harmless for v1).
+  if (project.mode === "discussion") {
+    return <DocumentWorkspace projectId={projectId!} project={project} />;
   }
 
   const roles = Object.entries(project.roles);

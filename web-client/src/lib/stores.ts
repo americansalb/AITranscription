@@ -6,7 +6,14 @@
 
 import { create } from "zustand";
 import * as api from "./api";
-import type { BoardMessage, DiscussionResponse, ProjectResponse, UserResponse } from "./api";
+import type {
+  BoardMessage,
+  DiscussionResponse,
+  DocumentResponse,
+  ProjectResponse,
+  SectionOutlineEntry,
+  UserResponse,
+} from "./api";
 
 // --- Auth Store ---
 
@@ -78,7 +85,11 @@ interface ProjectState {
   error: string | null;
   loadProjects: () => Promise<void>;
   selectProject: (id: string) => Promise<void>;
-  createProject: (name: string, template?: string) => Promise<void>;
+  createProject: (
+    name: string,
+    template?: string,
+    mode?: "coding" | "discussion",
+  ) => Promise<ProjectResponse>;
   deleteProject: (id: string) => Promise<void>;
   updateRoleProvider: (roleSlug: string, provider: string, model: string) => Promise<void>;
   startAgent: (roleSlug: string) => Promise<void>;
@@ -113,14 +124,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  createProject: async (name, template) => {
+  createProject: async (name, template, mode = "coding") => {
     set({ loading: true, error: null });
     try {
-      const project = await api.createProject(name, template);
+      const project = await api.createProject(name, template, mode);
       set((s) => ({ projects: [project, ...s.projects], activeProject: project, loading: false }));
+      return project;
     } catch (e) {
       const msg = e instanceof api.ApiError ? e.userMessage : "Failed to create project";
       set({ error: msg, loading: false });
+      throw e;
     }
   },
 
@@ -454,4 +467,136 @@ export const useUIStore = create<UIState>((set) => ({
   },
 
   removeToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
+}));
+
+// --- Document Store (Vaaklite discussion-mode document drafting) ---
+
+interface DocumentState {
+  documents: DocumentResponse[];
+  activeDocument: DocumentResponse | null;
+  loading: boolean;
+  /** True while a draft/accept/finalize action is in flight. */
+  busy: boolean;
+  error: string | null;
+  loadDocuments: (projectId: string) => Promise<void>;
+  createDocument: (
+    projectId: string,
+    title: string,
+    topic: string,
+    sections?: SectionOutlineEntry[],
+  ) => Promise<DocumentResponse | null>;
+  selectDocument: (projectId: string, documentId: number) => Promise<void>;
+  draftCurrent: (projectId: string) => Promise<void>;
+  acceptSection: (projectId: string, sectionIdx: number) => Promise<void>;
+  finalize: (projectId: string) => Promise<void>;
+  clear: () => void;
+}
+
+/** Merge an updated document into the list (replace by id, keep order). */
+function mergeDoc(list: DocumentResponse[], doc: DocumentResponse): DocumentResponse[] {
+  const idx = list.findIndex((d) => d.id === doc.id);
+  if (idx === -1) return [doc, ...list];
+  const next = [...list];
+  next[idx] = doc;
+  return next;
+}
+
+export const useDocumentStore = create<DocumentState>((set, get) => ({
+  documents: [],
+  activeDocument: null,
+  loading: false,
+  busy: false,
+  error: null,
+
+  loadDocuments: async (projectId) => {
+    set({ loading: true, error: null });
+    try {
+      const documents = await api.listDocuments(projectId);
+      set({ documents, loading: false });
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to load documents";
+      set({ error: msg, loading: false });
+    }
+  },
+
+  createDocument: async (projectId, title, topic, sections) => {
+    set({ busy: true, error: null });
+    try {
+      const doc = await api.createDocument(projectId, title, topic, sections);
+      set((s) => ({
+        documents: mergeDoc(s.documents, doc),
+        activeDocument: doc,
+        busy: false,
+      }));
+      return doc;
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to create document";
+      set({ error: msg, busy: false });
+      return null;
+    }
+  },
+
+  selectDocument: async (projectId, documentId) => {
+    set({ loading: true, error: null });
+    try {
+      const doc = await api.getDocument(projectId, documentId);
+      set((s) => ({ activeDocument: doc, documents: mergeDoc(s.documents, doc), loading: false }));
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to load document";
+      set({ error: msg, loading: false });
+    }
+  },
+
+  draftCurrent: async (projectId) => {
+    const doc = get().activeDocument;
+    if (!doc) return;
+    set({ busy: true, error: null });
+    try {
+      const updated = await api.draftCurrentSection(projectId, doc.id);
+      set((s) => ({
+        activeDocument: updated,
+        documents: mergeDoc(s.documents, updated),
+        busy: false,
+      }));
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Agent drafting failed";
+      set({ error: msg, busy: false });
+    }
+  },
+
+  acceptSection: async (projectId, sectionIdx) => {
+    const doc = get().activeDocument;
+    if (!doc) return;
+    set({ busy: true, error: null });
+    try {
+      const updated = await api.acceptSection(projectId, doc.id, sectionIdx);
+      set((s) => ({
+        activeDocument: updated,
+        documents: mergeDoc(s.documents, updated),
+        busy: false,
+      }));
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to accept section";
+      set({ error: msg, busy: false });
+    }
+  },
+
+  finalize: async (projectId) => {
+    const doc = get().activeDocument;
+    if (!doc) return;
+    set({ busy: true, error: null });
+    try {
+      const updated = await api.finalizeDocument(projectId, doc.id);
+      set((s) => ({
+        activeDocument: updated,
+        documents: mergeDoc(s.documents, updated),
+        busy: false,
+      }));
+    } catch (e) {
+      const msg = e instanceof api.ApiError ? e.userMessage : "Failed to finalize document";
+      set({ error: msg, busy: false });
+    }
+  },
+
+  clear: () => set({ documents: [], activeDocument: null, loading: false, busy: false, error: null }),
 }));

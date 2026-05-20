@@ -10,6 +10,15 @@ const PROJECT_TEMPLATES = [
   { id: "debate", name: "Structured Debate", desc: "Moderator, Debaters, Audience — Oxford/Delphi discussions", icon: "\uD83C\uDFDB\uFE0F" },
 ];
 
+// Vaaklite discussion-mode templates — each maps to a VAAKLITE_TEMPLATES
+// roster on the backend. The slug drives the role roster a discussion-mode
+// project is seeded with.
+const DISCUSSION_TEMPLATES = [
+  { id: "simple-rotation", name: "Simple Rotation", desc: "Moderator, Writer, Reviewer — section-by-section drafting", icon: "📝" },
+  { id: "delphi-debate", name: "Delphi Debate", desc: "Moderator, Experts, Synthesizer — structured expert consensus", icon: "🧠" },
+  { id: "oxford-review", name: "Oxford Review", desc: "Moderator, Proponent, Opponent, Judge — adversarial review", icon: "⚖️" },
+];
+
 export function DashboardPage() {
   const projects = useProjectStore((s) => s.projects);
   const loading = useProjectStore((s) => s.loading);
@@ -20,6 +29,7 @@ export function DashboardPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
+  const [mode, setMode] = useState<"coding" | "discussion">("coding");
   const [creating, setCreating] = useState(false);
   const closeModal = useCallback(() => setShowCreate(false), []);
   const modalRef = useFocusTrap(showCreate, closeModal);
@@ -28,11 +38,22 @@ export function DashboardPage() {
     if (!newName.trim()) return;
     setCreating(true);
     try {
-      await createProject(newName.trim(), selectedTemplate || undefined);
+      // Discussion-mode projects need a Vaaklite template — default to
+      // simple-rotation. Coding-mode template is cosmetic (legacy roster).
+      const template =
+        mode === "discussion"
+          ? selectedTemplate || "simple-rotation"
+          : selectedTemplate || undefined;
+      const project = await createProject(newName.trim(), template, mode);
       addToast(`Project "${newName}" created`, "success");
       setShowCreate(false);
       setNewName("");
       setSelectedTemplate(null);
+      setMode("coding");
+      // Discussion projects open straight into the document workspace.
+      if (mode === "discussion") {
+        navigate(`/project/${project.id}`);
+      }
     } catch {
       addToast("Failed to create project", "error");
     } finally {
@@ -138,10 +159,45 @@ export function DashboardPage() {
 
               <div>
                 <div className="field-label" style={{ marginBottom: "var(--space-2)" }}>
-                  Template (optional)
+                  Project Type
+                </div>
+                <div style={{ display: "flex", gap: "var(--space-2)" }}>
+                  {([
+                    { id: "coding", name: "Coding Team", desc: "AI team that writes and reviews code" },
+                    { id: "discussion", name: "Discussion Document", desc: "AI team that drafts a document together" },
+                  ] as const).map((m) => (
+                    <button
+                      key={m.id}
+                      className={`card ${mode === m.id ? "" : "card-hover"}`}
+                      onClick={() => {
+                        setMode(m.id);
+                        setSelectedTemplate(null);
+                      }}
+                      style={{
+                        flex: 1,
+                        cursor: "pointer",
+                        textAlign: "left",
+                        borderColor: mode === m.id ? "var(--accent)" : "var(--border)",
+                        background: mode === m.id ? "var(--accent-muted)" : undefined,
+                        padding: "var(--space-3)",
+                      }}
+                      aria-pressed={mode === m.id}
+                    >
+                      <div style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-medium)" }}>{m.name}</div>
+                      <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginTop: "var(--space-1)" }}>
+                        {m.desc}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div className="field-label" style={{ marginBottom: "var(--space-2)" }}>
+                  {mode === "discussion" ? "Discussion Format" : "Template (optional)"}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)" }}>
-                  {PROJECT_TEMPLATES.map((t) => (
+                  {(mode === "discussion" ? DISCUSSION_TEMPLATES : PROJECT_TEMPLATES).map((t) => (
                     <button
                       key={t.id}
                       className={`card ${selectedTemplate === t.id ? "" : "card-hover"}`}
@@ -163,6 +219,11 @@ export function DashboardPage() {
                     </button>
                   ))}
                 </div>
+                {mode === "discussion" && (
+                  <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginTop: "var(--space-2)" }}>
+                    Defaults to Simple Rotation if none selected.
+                  </div>
+                )}
               </div>
 
               <button

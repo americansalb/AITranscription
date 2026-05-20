@@ -159,6 +159,10 @@ export interface ProjectResponse {
   roles: Record<string, RoleConfig>;
   owner_id: number;
   created_at: string;
+  /** Vaaklite v1: "coding" (legacy collab) or "discussion" (document drafting). */
+  mode: "coding" | "discussion";
+  /** Discussion-mode template slug (simple-rotation / delphi-debate / oxford-review). */
+  template: string | null;
 }
 
 export interface RoleConfig {
@@ -170,10 +174,14 @@ export interface RoleConfig {
   provider: { provider: string; model: string };
 }
 
-export async function createProject(name: string, template?: string): Promise<ProjectResponse> {
+export async function createProject(
+  name: string,
+  template?: string,
+  mode: "coding" | "discussion" = "coding",
+): Promise<ProjectResponse> {
   return request("/projects/", {
     method: "POST",
-    body: JSON.stringify({ name, template }),
+    body: JSON.stringify({ name, template, mode }),
   });
 }
 
@@ -465,4 +473,118 @@ export async function setDiscussionTimeout(
     method: "POST",
     body: JSON.stringify({ timeout_seconds: timeoutSeconds }),
   });
+}
+
+// --- Vaaklite Documents ---
+
+export type DocumentPhase = "drafting" | "review" | "revision" | "final";
+export type SectionStatus = "pending" | "drafting" | "review_pending" | "accepted";
+
+export interface DocumentSectionInfo {
+  id: number;
+  idx: number;
+  title: string;
+  assigned_role: string | null;
+  body: string | null;
+  status: SectionStatus;
+  review_notes: string | null;
+  updated_at: string;
+}
+
+export interface DocumentResponse {
+  id: number;
+  project_id: number;
+  title: string;
+  topic: string;
+  phase: DocumentPhase;
+  current_section_idx: number | null;
+  current_role: string | null;
+  rendered_markdown: string | null;
+  final_markdown: string | null;
+  finalized_at: string | null;
+  created_at: string;
+  updated_at: string;
+  sections: DocumentSectionInfo[];
+}
+
+export interface SectionOutlineEntry {
+  title: string;
+  assigned_role?: string | null;
+}
+
+export async function createDocument(
+  projectId: string,
+  title: string,
+  topic: string,
+  sections?: SectionOutlineEntry[],
+): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents`, {
+    method: "POST",
+    body: JSON.stringify({ title, topic, sections: sections ?? null }),
+  });
+}
+
+export async function listDocuments(projectId: string): Promise<DocumentResponse[]> {
+  return request(`/projects/${projectId}/documents`);
+}
+
+export async function getDocument(projectId: string, documentId: number): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents/${documentId}`);
+}
+
+export async function submitSection(
+  projectId: string,
+  documentId: number,
+  sectionIdx: number,
+  roleSeat: string,
+  body: string,
+): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents/${documentId}/submit`, {
+    method: "POST",
+    body: JSON.stringify({ section_idx: sectionIdx, role_seat: roleSeat, body }),
+  });
+}
+
+/** Have the current section's assigned role draft it via a real LLM call. */
+export async function draftCurrentSection(
+  projectId: string,
+  documentId: number,
+): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents/${documentId}/draft-current`, {
+    method: "POST",
+  });
+}
+
+export async function acceptSection(
+  projectId: string,
+  documentId: number,
+  sectionIdx: number,
+): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents/${documentId}/accept`, {
+    method: "POST",
+    body: JSON.stringify({ section_idx: sectionIdx }),
+  });
+}
+
+export async function finalizeDocument(
+  projectId: string,
+  documentId: number,
+): Promise<DocumentResponse> {
+  return request(`/projects/${projectId}/documents/${documentId}/finalize`, {
+    method: "POST",
+  });
+}
+
+export interface DocumentMarkdown {
+  document_id: number;
+  title: string;
+  phase: DocumentPhase;
+  markdown: string;
+}
+
+export async function getDocumentMarkdown(
+  projectId: string,
+  documentId: number,
+): Promise<DocumentMarkdown> {
+  return request(`/projects/${projectId}/documents/${documentId}/markdown`);
 }
