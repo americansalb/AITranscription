@@ -263,6 +263,151 @@ async def finalize_document(db: AsyncSession, *, document_id: int) -> Document:
     return document
 
 
+def _build_drafting_prompt(
+    document: Document,
+    section: DocumentSection,
+    all_sections: list[DocumentSection],
+    role_title: str,
+) -> tuple[str, str]:
+    """Build the (system, user) prompt pair for an LLM drafting turn.
+
+    The system prompt establishes the role identity; the user prompt
+    carries the document context — title, topic, the full outline (so the
+    agent knows where its section sits), and the text of already-accepted
+    sections so the new section reads coherently with what came before.
+    """
+    system = (
+        f"You are the {role_title} on an AI team collaboratively drafting a "
+        "document, one section at a time. Write focused, clear, well-structured "
+        "markdown prose. Stay strictly within the scope of the section you are "
+        "assigned — other team members own the other sections."
+    )
+
+    lines: list[str] = [f"Document title: {document.title}"]
+    if document.topic:
+        lines.append(f"Topic / brief: {document.topic}")
+    lines.append("")
+    lines.append("Full outline:")
+    for s in sorted(all_sections, key=lambda x: x.idx):
+        if s.idx == section.idx:
+            marker = "  <-- YOUR SECTION"
+        elif s.status is DocumentSectionStatus.ACCEPTED:
+            marker = " (done)"
+        else:
+            marker = ""
+        lines.append(f"  {s.idx + 1}. {s.title}{marker}")
+    lines.append("")
+
+    accepted = [
+        s
+        for s in sorted(all_sections, key=lambda x: x.idx)
+        if s.status is DocumentSectionStatus.ACCEPTED and s.body
+    ]
+    if accepted:
+        lines.append("Sections already written (for continuity — do not repeat them):")
+        lines.append("")
+        for s in accepted:
+            lines.append(f"### {s.title}")
+            lines.append(s.body)
+            lines.append("")
+
+    lines.append(f'Your task: draft the section titled "{section.title}".')
+    lines.append(
+        "Write 2-4 paragraphs of clear markdown prose. Output ONLY the section "
+        "body — do not repeat the section heading, and do not write any other "
+        "section."
+    )
+    return system, "\n".join(lines)
+
+
+async def draft_current_section(
+    db: AsyncSession,
+    *,
+    document_id: int,
+    completion_fn,
+) -> Document:
+    """Have the current section's assigned role draft it via an LLM call.
+
+    `completion_fn` is an async callable `(model, system, prompt) -> str`.
+    Production passes a wrapper around the metered provider proxy; tests
+    inject a deterministic fake. This keeps the service layer pure and
+    fully testable while the v1 ship path uses a real LLM (architect
+    ruling msg 5793 — no mock LLM as the v1 ship target).
+
+    Drafting only applies in the DRAFTING phase to the section the mic
+    currently points at. The generated body is persisted via
+    `submit_section_draft`, which flips the section to review_pending and
+    logs a DraftingTurn.
+    """
+    document = await db.get(Document, document_id)
+    if document is None:
+        raise ValueError(f"Document {document_id} not found")
+    if document.phase is not DocumentPhase.DRAFTING:
+        raise ValueError(
+            f"Document {document_id} phase={document.phase.value}; "
+            "agent drafting requires the DRAFTING phase"
+        )
+    if document.current_section_idx is None:
+        raise ValueError(f"Document {document_id} has no current section to draft")
+
+    section_result = await db.execute(
+        select(DocumentSection)
+        .where(DocumentSection.document_id == document_id)
+        .where(DocumentSection.idx == document.current_section_idx)
+    )
+    section = section_result.scalar_one_or_none()
+    if section is None:
+        raise ValueError(
+            f"Current section idx={document.current_section_idx} missing from "
+            f"document {document_id}"
+        )
+    if section.status is not DocumentSectionStatus.DRAFTING:
+        raise ValueError(
+            f"Section idx={section.idx} status={section.status.value}; "
+            "only a section in DRAFTING status can be agent-drafted"
+        )
+
+    role_slug = section.assigned_role
+    role_title = role_slug or "Writer"
+    model = "claude-sonnet-4-6"
+    if role_slug:
+        role_result = await db.execute(
+            select(ProjectRole)
+            .where(ProjectRole.project_id == document.project_id)
+            .where(ProjectRole.slug == role_slug)
+        )
+        role = role_result.scalar_one_or_none()
+        if role is not None:
+            model = role.model or model
+            role_title = role.title or role_slug
+
+    all_sections_result = await db.execute(
+        select(DocumentSection).where(DocumentSection.document_id == document_id)
+    )
+    all_sections = list(all_sections_result.scalars().all())
+
+    system, prompt = _build_drafting_prompt(document, section, all_sections, role_title)
+    body = await completion_fn(model, system, prompt)
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("LLM returned an empty draft")
+
+    logger.info(
+        "Vaaklite agent draft: doc=%d section=%d role=%s model=%s chars=%d",
+        document_id,
+        section.idx,
+        role_slug,
+        model,
+        len(body),
+    )
+    return await submit_section_draft(
+        db,
+        document_id=document_id,
+        section_idx=section.idx,
+        role_seat=role_slug or "writer",
+        body=body.strip(),
+    )
+
+
 def section_outline_from_template(template_slug: str | None, roles: list[ProjectRole]) -> list[dict]:
     """Generate a default section outline based on the template + roster.
 

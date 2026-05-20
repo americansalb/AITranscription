@@ -7,10 +7,35 @@ plus core service-layer happy + edge paths.
 
 import pytest
 
+from app.api.documents import get_completion_fn
+from app.main import app
 from tests.conftest import auth_headers, create_test_user
 
 
 SECRET = "testpass123"
+
+
+@pytest.fixture
+def fake_llm():
+    """Override the LLM completion dependency with a deterministic fake.
+
+    Yields a dict capturing the (model, system, prompt) of the last call
+    so tests can assert what the agent was asked to draft. No network
+    call is ever made — architect ruling msg 5793 keeps the real LLM as
+    the v1 ship path but tests inject this fake for CI determinism.
+    """
+    captured: dict = {"calls": 0}
+
+    async def _fake(model: str, system: str, prompt: str) -> str:
+        captured["calls"] += 1
+        captured["model"] = model
+        captured["system"] = system
+        captured["prompt"] = prompt
+        return "AI-generated draft, first paragraph.\n\nSecond paragraph of the draft."
+
+    app.dependency_overrides[get_completion_fn] = lambda: _fake
+    yield captured
+    app.dependency_overrides.pop(get_completion_fn, None)
 
 
 @pytest.fixture
@@ -414,3 +439,149 @@ async def test_get_single_document_includes_sections(client, signed_in_user, dis
     doc = resp.json()
     assert doc["title"] == "X"
     assert doc["sections"][0]["title"] == "Alpha"
+
+
+# ---------- Agent drafting (LLM wire-up) ----------
+
+
+async def test_draft_current_generates_and_submits(
+    client, signed_in_user, discussion_project, fake_llm
+):
+    """draft-current invokes the LLM, persists the body, flips to review_pending."""
+    pid = discussion_project["id"]
+    create_resp = await client.post(
+        f"/api/v1/projects/{pid}/documents",
+        json={
+            "title": "Vision",
+            "topic": "Where the product goes",
+            "sections": [{"title": "Opening", "assigned_role": "writer"}],
+        },
+        headers=auth_headers(signed_in_user),
+    )
+    doc_id = create_resp.json()["id"]
+
+    resp = await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/draft-current",
+        headers=auth_headers(signed_in_user),
+    )
+    assert resp.status_code == 200, resp.text
+    doc = resp.json()
+    s0 = next(s for s in doc["sections"] if s["idx"] == 0)
+    assert s0["status"] == "review_pending"
+    assert "AI-generated draft" in s0["body"]
+    assert fake_llm["calls"] == 1
+    # The agent prompt carries the section title it was asked to draft
+    assert "Opening" in fake_llm["prompt"]
+
+
+async def test_draft_current_uses_assigned_role_model(
+    client, signed_in_user, discussion_project, fake_llm
+):
+    """The drafting call uses the assigned role's configured model."""
+    pid = discussion_project["id"]
+    create_resp = await client.post(
+        f"/api/v1/projects/{pid}/documents",
+        json={
+            "title": "Doc",
+            "topic": "",
+            "sections": [{"title": "S", "assigned_role": "writer"}],
+        },
+        headers=auth_headers(signed_in_user),
+    )
+    doc_id = create_resp.json()["id"]
+    await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/draft-current",
+        headers=auth_headers(signed_in_user),
+    )
+    # simple-rotation seeds writer with claude-sonnet-4-6
+    assert fake_llm["model"] == "claude-sonnet-4-6"
+
+
+async def test_draft_current_full_rotation_to_review(
+    client, signed_in_user, discussion_project, fake_llm
+):
+    """Draft + accept each section in turn → document reaches REVIEW phase."""
+    pid = discussion_project["id"]
+    create_resp = await client.post(
+        f"/api/v1/projects/{pid}/documents",
+        json={
+            "title": "Rotation",
+            "topic": "",
+            "sections": [
+                {"title": "First", "assigned_role": "writer"},
+                {"title": "Second", "assigned_role": "reviewer"},
+            ],
+        },
+        headers=auth_headers(signed_in_user),
+    )
+    doc_id = create_resp.json()["id"]
+
+    for idx in (0, 1):
+        draft = await client.post(
+            f"/api/v1/projects/{pid}/documents/{doc_id}/draft-current",
+            headers=auth_headers(signed_in_user),
+        )
+        assert draft.status_code == 200, draft.text
+        accept = await client.post(
+            f"/api/v1/projects/{pid}/documents/{doc_id}/accept",
+            json={"section_idx": idx},
+            headers=auth_headers(signed_in_user),
+        )
+        assert accept.status_code == 200, accept.text
+
+    doc = accept.json()
+    assert doc["phase"] == "review"
+    assert all(s["status"] == "accepted" for s in doc["sections"])
+    assert fake_llm["calls"] == 2
+
+
+async def test_draft_current_rejects_coding_project(
+    client, signed_in_user, coding_project, fake_llm
+):
+    """draft-current is a discussion-mode-only capability."""
+    pid = coding_project["id"]
+    resp = await client.post(
+        f"/api/v1/projects/{pid}/documents/999/draft-current",
+        headers=auth_headers(signed_in_user),
+    )
+    assert resp.status_code == 400
+    assert "discussion" in resp.json()["detail"]
+    assert fake_llm["calls"] == 0
+
+
+async def test_draft_current_rejects_after_finalize(
+    client, signed_in_user, discussion_project, fake_llm
+):
+    """Once a document is FINAL, agent drafting is rejected (cross-phase guard)."""
+    pid = discussion_project["id"]
+    create_resp = await client.post(
+        f"/api/v1/projects/{pid}/documents",
+        json={
+            "title": "Done",
+            "topic": "",
+            "sections": [{"title": "Only", "assigned_role": "writer"}],
+        },
+        headers=auth_headers(signed_in_user),
+    )
+    doc_id = create_resp.json()["id"]
+    await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/draft-current",
+        headers=auth_headers(signed_in_user),
+    )
+    await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/accept",
+        json={"section_idx": 0},
+        headers=auth_headers(signed_in_user),
+    )
+    await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/finalize",
+        headers=auth_headers(signed_in_user),
+    )
+    calls_before = fake_llm["calls"]
+    resp = await client.post(
+        f"/api/v1/projects/{pid}/documents/{doc_id}/draft-current",
+        headers=auth_headers(signed_in_user),
+    )
+    assert resp.status_code == 400
+    assert "DRAFTING" in resp.json()["detail"]
+    assert fake_llm["calls"] == calls_before

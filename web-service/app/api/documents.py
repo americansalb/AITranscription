@@ -25,9 +25,11 @@ from app.models import (
     ProjectRole,
     WebUser,
 )
+from app.services.provider_proxy import proxy_completion
 from app.services.vaaklite_documents import (
     accept_section,
     create_document,
+    draft_current_section,
     finalize_document,
     section_outline_from_template,
     submit_section_draft,
@@ -61,6 +63,31 @@ class SubmitSectionRequest(BaseModel):
 
 class AcceptSectionRequest(BaseModel):
     section_idx: int = Field(ge=0)
+
+
+# --- Completion dependency ---
+
+
+async def get_completion_fn(user: WebUser = Depends(get_current_user)):
+    """Provide the LLM completion callable used for agent drafting.
+
+    Production wires this to the metered provider proxy (real LLM via
+    LiteLLM) per architect ruling msg 5793. Tests override this FastAPI
+    dependency with a deterministic fake so CI never makes a network call.
+    """
+
+    async def _completion(model: str, system: str, prompt: str) -> str:
+        result = await proxy_completion(
+            user_id=user.id,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            system=system,
+            max_tokens=2000,
+            timeout=120.0,
+        )
+        return result.content
+
+    return _completion
 
 
 # --- Endpoints ---
@@ -172,6 +199,40 @@ async def submit_section(
             section_idx=request.section_idx,
             role_seat=request.role_seat,
             body=request.body,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return await _document_response(db, updated)
+
+
+@router.post("/{project_id}/documents/{document_id}/draft-current")
+async def draft_current_section_endpoint(
+    project_id: int,
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: WebUser = Depends(get_current_user),
+    completion_fn=Depends(get_completion_fn),
+):
+    """Have the current section's assigned role draft it via a real LLM call.
+
+    This is the "agents take turns drafting sections" capability (spec
+    smoke item 6). The mic's current section is drafted by its assigned
+    role's configured model, then submitted — flipping it to
+    review_pending. The caller advances the rotation with /accept.
+    """
+    project = await _get_owned_project(db, project_id, user.id)
+    if project.mode is not ProjectMode.DISCUSSION:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Project {project_id} is in {project.mode.value} mode; "
+            "Vaaklite documents require mode=discussion",
+        )
+    document = await db.get(Document, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    try:
+        updated = await draft_current_section(
+            db, document_id=document_id, completion_fn=completion_fn
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
