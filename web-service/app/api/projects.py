@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.models import Project, ProjectRole, WebUser
+from app.models import Project, ProjectMode, ProjectRole, WebUser
 from app.services.agent_runtime import get_active_agents, start_agent, stop_agent
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,42 @@ DEFAULT_ROLES = [
     {"slug": "tester", "title": "Tester", "provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
 ]
 
+# Vaaklite v1 (per architect msg 5738 spec lock): discussion-mode role
+# templates. Each template is a (slug, list-of-role-defs) pair that the
+# create_project endpoint can apply when the project is created with
+# `mode=discussion` + a `template` slug. Keeping the table inline here
+# rather than in a separate module so the surface stays discoverable
+# alongside the existing DEFAULT_ROLES table.
+VAAKLITE_TEMPLATES: dict[str, list[dict]] = {
+    "simple-rotation": [
+        {"slug": "moderator", "title": "Moderator", "provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+        {"slug": "writer", "title": "Writer", "provider": "anthropic", "model": "claude-sonnet-4-6", "max_instances": 2},
+        {"slug": "reviewer", "title": "Reviewer", "provider": "anthropic", "model": "claude-sonnet-4-6"},
+    ],
+    "delphi-debate": [
+        {"slug": "moderator", "title": "Moderator", "provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+        {"slug": "expert", "title": "Domain Expert", "provider": "anthropic", "model": "claude-sonnet-4-6", "max_instances": 3},
+        {"slug": "synthesizer", "title": "Clinical Synthesizer", "provider": "anthropic", "model": "claude-sonnet-4-6"},
+    ],
+    "oxford-review": [
+        {"slug": "moderator", "title": "Moderator", "provider": "anthropic", "model": "claude-haiku-4-5-20251001"},
+        {"slug": "proponent", "title": "Proponent", "provider": "anthropic", "model": "claude-sonnet-4-6"},
+        {"slug": "opponent", "title": "Opponent", "provider": "anthropic", "model": "claude-sonnet-4-6"},
+        {"slug": "judge", "title": "Judge", "provider": "anthropic", "model": "claude-sonnet-4-6"},
+    ],
+}
+
 
 # --- Schemas ---
 
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    # Vaaklite v1: optional mode discriminator. Defaults to "coding" so
+    # existing clients that don't know about Vaaklite continue to get
+    # the legacy DEFAULT_ROLES roster. "discussion" + a template slug
+    # creates a Vaaklite project with the template's role roster.
+    mode: str = Field(default="coding", pattern=r"^(coding|discussion)$")
+    template: str | None = Field(default=None, max_length=64)
 
 
 class UpdateRoleProviderRequest(BaseModel):
@@ -68,13 +99,37 @@ async def create_project(
     db: AsyncSession = Depends(get_db),
     user: WebUser = Depends(get_current_user),
 ):
-    """Create a new collaboration project with default roles."""
-    project = Project(name=request.name, owner_id=user.id)
+    """Create a new collaboration project with default roles.
+
+    Vaaklite v1: `mode="discussion"` + `template=<slug>` creates a
+    discussion-mode project pre-seeded from VAAKLITE_TEMPLATES. Missing
+    or unknown template falls back to the simple-rotation preset.
+    `mode="coding"` (default) preserves the legacy DEFAULT_ROLES path.
+    """
+    project_mode = ProjectMode(request.mode)
+    project = Project(
+        name=request.name,
+        owner_id=user.id,
+        mode=project_mode,
+        template=request.template,
+    )
     db.add(project)
     await db.flush()
 
-    # Create default roles
-    for role_def in DEFAULT_ROLES:
+    # Pick the role roster based on mode + template
+    if project_mode is ProjectMode.DISCUSSION:
+        template_slug = request.template or "simple-rotation"
+        role_defs = VAAKLITE_TEMPLATES.get(template_slug)
+        if role_defs is None:
+            # Unknown template — fall back to simple-rotation so we don't
+            # leave the project roster-less. The frontend can re-apply a
+            # different template later.
+            role_defs = VAAKLITE_TEMPLATES["simple-rotation"]
+            project.template = "simple-rotation"
+    else:
+        role_defs = DEFAULT_ROLES
+
+    for role_def in role_defs:
         role = ProjectRole(
             project_id=project.id,
             slug=role_def["slug"],
@@ -88,7 +143,10 @@ async def create_project(
     await db.commit()
     await db.refresh(project)
 
-    logger.info("Project created: %d '%s' by user %d", project.id, project.name, user.id)
+    logger.info(
+        "Project created: %d '%s' mode=%s template=%s by user %d",
+        project.id, project.name, project.mode.value, project.template, user.id,
+    )
     return _project_response(project)
 
 
@@ -460,6 +518,10 @@ def _project_response(project: Project) -> dict:
         "id": str(project.id),
         "name": project.name,
         "owner_id": project.owner_id,
+        # Vaaklite v1 (architect msg 5738): expose mode + template so the
+        # frontend can branch UI between coding and discussion shells.
+        "mode": project.mode.value,
+        "template": project.template,
         "roles": roles_dict,
         "created_at": project.created_at.isoformat(),
     }

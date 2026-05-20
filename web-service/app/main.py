@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
-from app.api import auth, projects, messages, billing, providers, discussions
+from app.api import auth, projects, messages, billing, providers, discussions, documents
 from app.database import init_db
 from app.middleware.rate_limiter import RateLimitMiddleware
 
@@ -107,6 +107,10 @@ app.include_router(messages.router, prefix="/api/v1/messages", tags=["messages"]
 app.include_router(billing.router, prefix="/api/v1/billing", tags=["billing"])
 app.include_router(providers.router, prefix="/api/v1/providers", tags=["providers"])
 app.include_router(discussions.router, prefix="/api/v1/projects", tags=["discussions"])
+# Vaaklite v1 (per architect msg 5738): document drafting endpoints scoped
+# under /api/v1/projects/{project_id}/documents/*. Honors mode=discussion
+# enforcement inside the route handlers.
+app.include_router(documents.router, prefix="/api/v1/projects", tags=["documents"])
 
 
 @app.get("/health")
