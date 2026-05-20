@@ -10,6 +10,7 @@ dist/
 build/
 target/
 *.egg-info/
+web-service/app/static/
 
 # Environment
 .env

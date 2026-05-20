@@ -1,4 +1,5 @@
-# Render Blueprint - deploys backend automatically
+# Render Blueprint — deploys the Vaak web app as ONE combined service:
+# the FastAPI web-service serves both the /api/v1 API and the web-client SPA.
 # See: https://render.com/docs/blueprint-spec
 
 services:
@@ -6,21 +7,35 @@ services:
     name: vaak-api
     plan: free
     runtime: python
-    rootDir: backend
-    buildCommand: pip install -e . && alembic upgrade head && python -m scripts.seed_admin --force
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    rootDir: web-service
+    # 1. install the shared package, then the web-service (which depends on it)
+    # 2. build the web-client SPA and copy its dist/ into app/static, where
+    #    app/main.py serves it from the same origin as the API
+    buildCommand: pip install -e ../shared && pip install -e . && cd ../web-client && npm ci && npm run build && rm -rf ../web-service/app/static && cp -r dist ../web-service/app/static
+    # --workers 1 is required: the agent runtime keeps per-process in-memory state
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
     envVars:
-      - key: GROQ_API_KEY
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: SECRET_KEY
+      - key: VAAK_WEB_SECRET_KEY
         generateValue: true
-      - key: DATABASE_URL
+      - key: VAAK_WEB_DATABASE_URL
         fromDatabase:
           name: vaak-db
           property: connectionString
-    healthCheckPath: /api/v1/health
+      # Optional — set these in the Render dashboard if/when needed.
+      # Without VAAK_WEB_FERNET_KEY, BYOK API keys are stored unencrypted.
+      - key: VAAK_WEB_FERNET_KEY
+        sync: false
+      - key: VAAK_WEB_ANTHROPIC_API_KEY
+        sync: false
+      - key: VAAK_WEB_OPENAI_API_KEY
+        sync: false
+      - key: VAAK_WEB_GOOGLE_AI_API_KEY
+        sync: false
+      - key: VAAK_WEB_STRIPE_SECRET_KEY
+        sync: false
+      - key: VAAK_WEB_STRIPE_WEBHOOK_SECRET
+        sync: false
 
 databases:
   - name: vaak-db

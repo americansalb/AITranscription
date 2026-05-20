@@ -5,6 +5,7 @@ Run with --workers 1 to avoid state desync between processes.
 For horizontal scaling, a DB-backed agent state table or Redis is needed.
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -64,6 +65,20 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     model_config = {"env_file": ".env", "env_prefix": "VAAK_WEB_"}
+
+    @field_validator("database_url")
+    @classmethod
+    def _use_asyncpg_driver(cls, v: str) -> str:
+        """Render's managed Postgres hands out a ``postgres://`` / ``postgresql://``
+        URL, but SQLAlchemy's async engine needs the asyncpg driver named in the
+        scheme. Rewrite the prefix so the connection string works as-is."""
+        if v.startswith("postgresql+asyncpg://"):
+            return v
+        if v.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + v[len("postgresql://"):]
+        if v.startswith("postgres://"):
+            return "postgresql+asyncpg://" + v[len("postgres://"):]
+        return v
 
 
 settings = Settings()
