@@ -1,0 +1,53 @@
+name: Vaaklite CI
+
+# Scoped CI for the Vaaklite web stack (architect ruling msg 5810).
+# Path-filtered so it only runs when the web stack changes — it does NOT
+# exercise the desktop app (that is build.yml's job).
+
+on:
+  push:
+    branches: [feature/vaaklite-v1, main]
+    paths:
+      - 'shared/**'
+      - 'web-service/**'
+      - 'web-client/**'
+      - '.github/workflows/vaaklite-ci.yml'
+  pull_request:
+    paths:
+      - 'shared/**'
+      - 'web-service/**'
+      - 'web-client/**'
+      - '.github/workflows/vaaklite-ci.yml'
+
+jobs:
+  web-service:
+    name: web-service tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shared + web-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ./shared
+          pip install -e "./web-service[dev]"
+      - name: Run web-service test suite
+        working-directory: web-service
+        run: pytest -q
+
+  web-client:
+    name: web-client build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        working-directory: web-client
+        run: npm ci
+      - name: Type-check + production build
+        working-directory: web-client
+        run: npm run build
