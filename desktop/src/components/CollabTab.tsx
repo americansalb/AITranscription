@@ -4208,9 +4208,33 @@ When multiple instances of this role are active:
             });
             return parentActive;
           });
-          // Sort: active/working first, then stale, then vacant. Alphabetical within each group.
+          // Track D v1 (per human msg 88) — assembly state from the section
+          // protocol drives roster visuals + sort. When assembly_active is true,
+          // cards in rotation_order are pinned to the front in rotation order;
+          // remaining cards fall through to the existing status+role+title sort
+          // beneath them. This is the visible-merge half of Track D — drag-
+          // rearrange (Track D v2) requires the typed set_rotation_order
+          // backend action which is still architect/dev lane.
+          const assemblyActiveForRoster = twoControlsProtocol?.floor?.assembly_active === true;
+          const rotationOrderArr: string[] = Array.isArray(twoControlsProtocol?.floor?.rotation_order)
+            ? (twoControlsProtocol!.floor!.rotation_order as string[])
+            : [];
+          const currentSpeakerSeat: string | null = twoControlsProtocol?.floor?.current_speaker ?? null;
+          const moderatorSeat: string | null = twoControlsProtocol?.floor?.moderator ?? null;
+          const rotationIndexMap = new Map<string, number>();
+          rotationOrderArr.forEach((seat, idx) => rotationIndexMap.set(seat, idx));
+          // Sort: when assembly active, rotation_order entries pin to the front
+          // in rotation order; otherwise the historical sort (status + role
+          // priority + title alphabetic) is preserved unchanged.
           const statusOrder: Record<string, number> = { working: 0, active: 0, stale: 1, vacant: 2 };
           const sortedCards = [...filteredCards].sort((a, b) => {
+            if (assemblyActiveForRoster) {
+              const ai = rotationIndexMap.get(`${a.slug}:${a.instance}`);
+              const bi = rotationIndexMap.get(`${b.slug}:${b.instance}`);
+              if (ai !== undefined && bi !== undefined) return ai - bi;
+              if (ai !== undefined) return -1;
+              if (bi !== undefined) return 1;
+            }
             const sa = statusOrder[a.status] ?? 2;
             const sb = statusOrder[b.status] ?? 2;
             if (sa !== sb) return sa - sb;
@@ -4339,6 +4363,20 @@ When multiple instances of this role are active:
                       : isSeatUnknown
                         ? " (joining…)"
                         : "";
+                    // Track D v1 (per human msg 88) — assembly-mode visuals.
+                    // Mic-holder gets an accent border + 🎙 glyph; moderator gets
+                    // a gold ★. Rotation index (1)(2)(3)… on cards in
+                    // rotation_order. All three are no-ops when assembly is
+                    // inactive — the card renders identical to pre-Track-D.
+                    const isMicHolder = assemblyActiveForRoster
+                      && currentSpeakerSeat !== null
+                      && cardKey === currentSpeakerSeat;
+                    const isModeratorCard = assemblyActiveForRoster
+                      && moderatorSeat !== null
+                      && cardKey === moderatorSeat;
+                    const rotationIdx = assemblyActiveForRoster
+                      ? rotationIndexMap.get(cardKey) ?? -1
+                      : -1;
                     const handleCardClick = () => {
                       if (card.slug === "audience") {
                         setAudiencePanelOpen(true);
@@ -4359,14 +4397,22 @@ When multiple instances of this role are active:
                       return (
                         <button
                           key={cardKey}
-                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${isSeatStale ? " role-chip-alive-stale" : ""}${isSeatUnknown ? " role-chip-alive-unknown" : ""}`}
-                          style={{ borderColor: card.roleColor + "40", color: card.roleColor }}
+                          className={`role-chip${card.status === "working" ? " role-chip-working" : ""}${card.status === "ready" ? " role-chip-ready" : ""}${card.status === "vacant" ? " role-chip-vacant" : ""}${isSeatStale ? " role-chip-alive-stale" : ""}${isSeatUnknown ? " role-chip-alive-unknown" : ""}${isMicHolder ? " role-chip-mic-holder" : ""}${isModeratorCard ? " role-chip-moderator" : ""}`}
+                          style={{ borderColor: isMicHolder ? card.roleColor : card.roleColor + "40", color: card.roleColor }}
                           onClick={handleCardClick}
-                          title={`${card.title}${aliveSuffix} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}. Click for details.`}
-                          aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}. Press Enter for details and actions.`}
+                          title={`${isMicHolder ? "🎙 has the floor — " : ""}${isModeratorCard ? "★ moderator — " : ""}${card.title}${aliveSuffix} — ${getStatusLabel(card.status)}${card.instance > 0 ? ` (instance ${card.instance})` : ""}${rotationIdx >= 0 ? ` (rotation ${rotationIdx + 1})` : ""}. Click for details.`}
+                          aria-label={`${isMicHolder ? "Has the floor. " : ""}${isModeratorCard ? "Moderator. " : ""}${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}${card.instance > 0 ? `, instance ${card.instance}` : ""}${rotationIdx >= 0 ? `, rotation position ${rotationIdx + 1}` : ""}. Press Enter for details and actions.`}
+                          data-mic-holder={isMicHolder ? "true" : undefined}
+                          data-moderator={isModeratorCard ? "true" : undefined}
+                          data-rotation-idx={rotationIdx >= 0 ? rotationIdx : undefined}
                         >
+                          {isMicHolder && <span className="role-chip-mic-glyph" aria-hidden="true">🎙</span>}
+                          {isModeratorCard && <span className="role-chip-moderator-glyph" aria-hidden="true">★</span>}
                           <span className={`${getStatusDotClass(card.status)}${isSeatStale ? " alive-stale" : ""}${isSeatUnknown ? " alive-unknown" : ""}`} />
                           <span className="role-chip-name">{card.title}{aliveSuffix}</span>
+                          {rotationIdx >= 0 && !isMicHolder && !isModeratorCard && (
+                            <span className="role-chip-rotation-idx" aria-hidden="true">{rotationIdx + 1}</span>
+                          )}
                           <span className={`role-chip-status role-card-status-${card.status}`}>{getStatusLabel(card.status)}</span>
                         </button>
                       );
@@ -4375,14 +4421,31 @@ When multiple instances of this role are active:
                     return (
                       <div
                         key={cardKey}
-                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${isSeatStale ? " role-card-alive-stale" : ""}${isSeatUnknown ? " role-card-alive-unknown" : ""}`}
+                        className={`role-card role-card-clickable ${card.status === "working" ? "role-card-working" : ""} ${card.status === "vacant" ? "role-card-vacant" : ""}${isSeatStale ? " role-card-alive-stale" : ""}${isSeatUnknown ? " role-card-alive-unknown" : ""}${isMicHolder ? " role-card-mic-holder" : ""}${isModeratorCard ? " role-card-moderator" : ""}`}
                         style={{ borderLeftColor: card.roleColor }}
                         role="button"
                         tabIndex={0}
-                        aria-label={`${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}. Click to view details.`}
+                        aria-label={`${isMicHolder ? "Has the floor. " : ""}${isModeratorCard ? "Moderator. " : ""}${card.title}${aliveSuffix}, status: ${getStatusLabel(card.status)}${rotationIdx >= 0 ? `, rotation position ${rotationIdx + 1}` : ""}. Click to view details.`}
+                        data-mic-holder={isMicHolder ? "true" : undefined}
+                        data-moderator={isModeratorCard ? "true" : undefined}
+                        data-rotation-idx={rotationIdx >= 0 ? rotationIdx : undefined}
                         onClick={handleCardClick}
                         onKeyDown={handleCardKeyDown}
                       >
+                        {/* Track D v1 — mic-holder + moderator glyphs in top-
+                            right corner. Absolute-positioned via CSS so they
+                            don't disrupt the existing header layout. Rotation
+                            index uses the existing roleColor for visual link
+                            to the rest of the card. */}
+                        {isMicHolder && (
+                          <span className="role-card-mic-glyph" aria-hidden="true" title={`${card.title} has the floor`}>🎙</span>
+                        )}
+                        {isModeratorCard && (
+                          <span className="role-card-moderator-glyph" aria-hidden="true" title={`${card.title} is moderator`}>★</span>
+                        )}
+                        {rotationIdx >= 0 && !isMicHolder && !isModeratorCard && (
+                          <span className="role-card-rotation-idx" aria-hidden="true" title={`Rotation position ${rotationIdx + 1}`} style={{ color: card.roleColor }}>{rotationIdx + 1}</span>
+                        )}
                         <div className="role-card-header">
                           <Avatar
                             slug={card.slug}
