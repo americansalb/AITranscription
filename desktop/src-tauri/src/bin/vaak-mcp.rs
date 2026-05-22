@@ -5862,31 +5862,17 @@ mod protocol_slice2_tests {
     // ===================================================================
 
     /// Build a temp dir with `.vaak/sessions.json` containing the named
-    /// active bindings. Returns the dir path so the caller can pass it to
-    /// apply_set_rotation_order. Matches the temp-dir pattern already used
-    /// at line ~6252 (test_name uniqueness avoids cross-test interference);
-    /// callers are responsible for not collision-naming. Cleanup is best-
-    /// effort on drop via a Drop guard.
-    struct TempProjectDir(std::path::PathBuf);
-
-    impl TempProjectDir {
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempProjectDir {
-        fn drop(&mut self) {
-            // Best-effort cleanup; ignore errors.
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn temp_project_with_seats(test_name: &str, seats: &[(&str, u64)]) -> TempProjectDir {
-        let dir = std::env::temp_dir().join(format!("vaak-mcp-fix-a2-{}", test_name));
-        // Clean up any previous leftover so tests are deterministic.
-        let _ = std::fs::remove_dir_all(&dir);
-        let vaak = dir.join(".vaak");
+    /// active bindings. Returns the `tempfile::TempDir` guard so the caller
+    /// can pass it to apply_set_rotation_order; drop cleans up.
+    ///
+    /// Per evil-arch msg 164 Flag 2 + tech-leader msg 183 ruling: migrated
+    /// off the prior `std::env::temp_dir() + per-test-name-suffix` pattern
+    /// (which had no compile-time guard against name collisions across
+    /// parallel `cargo test` workers). `tempfile::tempdir()` guarantees a
+    /// unique per-call directory with RAII cleanup.
+    fn temp_project_with_seats(seats: &[(&str, u64)]) -> tempfile::TempDir {
+        let td = tempfile::tempdir().expect("tempdir");
+        let vaak = td.path().join(".vaak");
         std::fs::create_dir_all(&vaak).unwrap();
         let bindings: Vec<serde_json::Value> = seats
             .iter()
@@ -5906,14 +5892,11 @@ mod protocol_slice2_tests {
             serde_json::to_string_pretty(&sessions).unwrap(),
         )
         .unwrap();
-        TempProjectDir(dir)
+        td
     }
 
-    fn three_seat_fixture(test_name: &str) -> TempProjectDir {
-        temp_project_with_seats(
-            test_name,
-            &[("architect", 0), ("developer", 1), ("tester", 0)],
-        )
+    fn three_seat_fixture() -> tempfile::TempDir {
+        temp_project_with_seats(&[("architect", 0), ("developer", 1), ("tester", 0)])
     }
 
     fn assembly_state_with_moderator(moderator: &str, rotation: Vec<&str>) -> serde_json::Value {
@@ -5936,7 +5919,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_replaces_array_under_cas() {
-        let td = three_seat_fixture("replaces_array_under_cas");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -5962,7 +5945,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_unauthorized_caller() {
-        let td = three_seat_fixture("rejects_unauthorized_caller");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -5983,7 +5966,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_accepts_human_caller() {
-        let td = three_seat_fixture("accepts_human_caller");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -5999,7 +5982,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_accepts_tech_leader_caller() {
-        let td = three_seat_fixture("accepts_tech_leader_caller");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "architect:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6020,7 +6003,7 @@ mod protocol_slice2_tests {
     /// bypass authorization path.
     #[test]
     fn set_rotation_order_accepts_caller_matching_floor_moderator() {
-        let td = three_seat_fixture("accepts_caller_matching_floor_moderator");
+        let td = three_seat_fixture();
         // Set floor.moderator = developer:1 (NOT in the privileged role slugs
         // human/manager/tech-leader). Authorization must still accept this
         // caller via the moderator-equality branch.
@@ -6046,7 +6029,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_duplicates_in_args() {
-        let td = three_seat_fixture("rejects_duplicates_in_args");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6064,7 +6047,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_invalid_seat_format() {
-        let td = three_seat_fixture("rejects_invalid_seat_format");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6086,7 +6069,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_non_active_seat() {
-        let td = three_seat_fixture("rejects_non_active_seat");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6104,7 +6087,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_empty_array() {
-        let td = three_seat_fixture("rejects_empty_array");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6125,7 +6108,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_proper_subset() {
-        let td = three_seat_fixture("rejects_proper_subset");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
@@ -6151,7 +6134,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn set_rotation_order_rejects_missing_args() {
-        let td = three_seat_fixture("rejects_missing_args");
+        let td = three_seat_fixture();
         let mut s = assembly_state_with_moderator(
             "tech-leader:0",
             vec!["architect:0", "developer:1", "tester:0"],
