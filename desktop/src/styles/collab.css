@@ -7631,3 +7631,71 @@
 .project-roles-grid.project-roles-compact {
   gap: 6px;
 }
+
+/* ==========================================================================
+ * Fresh-layout v1 — per architect msg 389 spec
+ * `.vaak/design-notes/collabtab-fresh-layout-2026-05-22.md`
+ *
+ * Organizing principle (LOCKED): message timeline ≥60% of viewport.
+ * Implementation strategy: keep existing JSX tree (refactoring 6,400-LOC
+ * CollabTab risks regressions in 90-min budget); use CSS-only repositioning
+ * to float Decisions + Active Claims into a right rail. Message stream
+ * naturally fills remaining vertical space.
+ *
+ * Activation: applies only on wide viewports (≥1200px). Narrow viewports
+ * keep the existing stacked layout (which already collapses well).
+ * ========================================================================== */
+
+@media (min-width: 1200px) {
+  /* Right rail container: Decision Panel + Active Claims floated right as
+   * a fixed-width column. Both sections are existing CollapsibleSection
+   * components so no JSX restructure is required — they keep their headers,
+   * keyboard nav, ARIA, and persisted-collapse state.
+   */
+  .project-tab .decision-panel-section,
+  .project-tab .claims-section {
+    float: right;
+    clear: right;
+    width: 320px;
+    margin-left: 16px;
+    margin-bottom: 12px;
+    /* Z-index so they sit above the message stream's overflow but below
+     * modals (modals are higher z-index by convention). */
+    position: relative;
+    z-index: 2;
+  }
+
+  .project-tab .decision-panel-section {
+    margin-top: 0;
+  }
+
+  /* Message stream grows when right rail is in play. The existing message
+   * stream container takes remaining width naturally because it's a flow
+   * child after the floated rail siblings. */
+  .project-tab {
+    /* No grid/flex restructure — float-right is enough to create the
+     * two-column visual without breaking the existing tree. */
+  }
+
+  /* Discussion Mode band: when at wide viewport, shrink the always-visible
+   * surface so it doesn't fight the message stream for vertical space.
+   * The band's CollapsibleSection header is 30px; this caps the EXPANDED
+   * body to a max-height with internal scroll if the controls overflow.
+   * Preserves access (all controls reachable) while honoring the ≥60%
+   * timeline constraint.
+   */
+  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
+  .project-tab .discussion-mode-section > .collapsible-section-body {
+    max-height: 180px;
+    overflow-y: auto;
+  }
+}
+
+/* Always: Discussion Mode band default-collapse when assembly is OFF. The
+ * existing tristate logic in CollabTab.tsx handles this; this is the
+ * fresh-layout CSS reinforcement — make the collapsed state visually
+ * compact regardless of viewport width.
+ */
+.discussion-mode-section.collapsed > .collapsible-section-header {
+  padding: 4px 8px;
+}
