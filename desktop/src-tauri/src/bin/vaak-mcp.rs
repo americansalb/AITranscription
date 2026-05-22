@@ -4019,8 +4019,42 @@ fn apply_set_preset(
     if let Some(obj) = state.as_object_mut() {
         obj.insert("preset".to_string(), serde_json::json!(preset.as_wire_str()));
     }
+    // Sync the two-controls v1 derived fields when crossing the assembly
+    // boundary (bug fix — human msg 261 on 2026-05-22: "you turned off
+    // assembly mode but i still see it as on... If assembly mode is not on
+    // why would review intesnity be relevant"). Tech-leader msg 244 had
+    // called protocol_mutate(set_preset, "Default chat") directly — that
+    // wrote preset/mode/consensus but left floor.assembly_active=true,
+    // floor.current_speaker, and floor.moderator pointing at the prior
+    // assembly state. UI renders off assembly_active and showed AL as
+    // still on. Same shape as the rotation_order seed bug Fix-B1 closed:
+    // apply_set_preset historically wrote a partial subset of derived
+    // fields. apply_set_assembly already does this sync — preserve that
+    // contract here so the direct set_preset path is symmetric.
+    //
+    // Refactor-drift class: any caller wrapping apply_set_preset (e.g.
+    // apply_set_assembly at line 4949 + the dispatcher arm) now gets
+    // consistent floor state without duplicating sync code.
+    let is_assembly_preset = matches!(preset, Preset::AssemblyLine);
     if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
         floor.insert("mode".to_string(), serde_json::json!(floor_mode));
+        floor.insert(
+            "assembly_active".to_string(),
+            serde_json::json!(is_assembly_preset),
+        );
+        if !is_assembly_preset {
+            // Leaving the assembly family — clear stale speaker + moderator
+            // so the UI doesn't render mic-holder / ★ on cards whose
+            // authority just evaporated. Rotation_order is preserved (it's
+            // just data; a future enable can reseed via the dispatcher
+            // hook, and an explicit set_rotation_order can pre-populate
+            // before re-enable).
+            floor.insert(
+                "current_speaker".to_string(),
+                serde_json::Value::Null,
+            );
+            floor.insert("moderator".to_string(), serde_json::Value::Null);
+        }
     }
     if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
         cons.insert("mode".to_string(), serde_json::json!(consensus_mode));
@@ -5744,6 +5778,50 @@ mod protocol_slice2_tests {
         let mut s = fresh_state();
         let err = apply_set_preset(&mut s, &serde_json::json!({})).unwrap_err();
         assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// Regression — human msg 261 on 2026-05-22 ("you turned off assembly
+    /// mode but i still see it as on... If assembly mode is not on why
+    /// would review intesnity be relevant"). Tech-leader msg 244 had
+    /// disabled assembly via `protocol_mutate(set_preset, "Default chat")`
+    /// directly — that wrote preset/mode/consensus but left
+    /// floor.assembly_active=true, floor.current_speaker stale, and
+    /// floor.moderator stale. UI rendered as "AL on" because it reads
+    /// assembly_active. apply_set_preset now syncs assembly_active to the
+    /// new preset's family + clears current_speaker + moderator when
+    /// leaving the assembly family.
+    #[test]
+    fn apply_set_preset_default_chat_from_assembly_clears_derived_fields() {
+        let mut s = fresh_state_at_default_chat();
+        // Bring state to an assembly-active configuration first.
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        if let Some(floor) = s.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            floor.insert("current_speaker".to_string(), serde_json::json!("architect:0"));
+            floor.insert("moderator".to_string(), serde_json::json!("tech-leader:0"));
+        }
+        assert_eq!(s["floor"]["assembly_active"], true);
+        assert_eq!(s["floor"]["current_speaker"], "architect:0");
+        assert_eq!(s["floor"]["moderator"], "tech-leader:0");
+
+        // Now disable via direct set_preset, not set_assembly.
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Default chat"})).unwrap();
+
+        assert_eq!(s["preset"], "Default chat");
+        assert_eq!(s["floor"]["mode"], "none");
+        assert_eq!(s["floor"]["assembly_active"], false);
+        assert!(s["floor"]["current_speaker"].is_null());
+        assert!(s["floor"]["moderator"].is_null());
+        // rotation_order preserved (just data; a future enable can reseed).
+    }
+
+    /// Sibling — entering the assembly family via set_preset sets
+    /// assembly_active=true so apply_set_assembly's overwrite is consistent
+    /// (apply_set_assembly calls apply_set_preset internally).
+    #[test]
+    fn apply_set_preset_assembly_line_sets_assembly_active_true() {
+        let mut s = fresh_state_at_default_chat();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        assert_eq!(s["floor"]["assembly_active"], true);
     }
 
     /// Regression — human msg 23 on 2026-05-22: enabling Assembly Line via
