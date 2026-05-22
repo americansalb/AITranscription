@@ -13,11 +13,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useProtocolState } from '../../hooks/useProtocolState';
 import type { Heartbeats, Protocol } from '../../hooks/useProtocolState';
 import { SeatChip } from './SeatChip';
-import { getRoleColor } from '../../utils/roleColors';
 import { PhasePlanEditor } from './PhasePlanEditor';
 import { HealthPill } from './HealthPill';
-import { Avatar } from '../Avatar';
-import { StatsRadar } from '../StatsRadar';
 import type { RoleConfig } from '../../lib/collabTypes';
 import './ProtocolPanel.css';
 
@@ -38,7 +35,7 @@ export function ProtocolPanel({
   section,
   selfSeat,
   rosterRoles: _rosterRoles,
-  rolesConfig,
+  rolesConfig: _rolesConfig,
   defaultExpanded = false,
 }: ProtocolPanelProps) {
   // _rosterRoles is intentionally unused after the human #1100 collapse —
@@ -120,7 +117,6 @@ export function ProtocolPanel({
           selfSeat={selfSeat}
           now={now}
           mutate={mutate}
-          rolesConfig={rolesConfig}
         />
         <HealthPill projectDir={projectDir} />
       </div>
@@ -292,60 +288,21 @@ function CompactMicLine({
   selfSeat,
   now,
   mutate,
-  rolesConfig,
 }: {
   protocol: Protocol;
   heartbeats: Heartbeats;
   selfSeat: string | null;
   now: number;
   mutate: (action: string, args?: object) => Promise<unknown>;
-  rolesConfig?: Record<string, RoleConfig>;
 }) {
-  // Phase 2.F per ui-architect:1 msg 4731 + spec §3.6.5 + human msg 4347:
-  // hover/focus rotation-strip avatar → popover with 80px StatsRadar.
-  // Hovered seat string ("slug:instance") drives tooltip render; null = no hover.
-  const [hoveredSeat, setHoveredSeat] = useState<string | null>(null);
+  // Chip-strip and hover-tooltip state REMOVED per human msg 237 — duplicate
+  // surface. Team roster band now owns rotation viz; this component only
+  // renders the compact mic-line (speaker + age + yield/force-release).
   const speaker = protocol.floor.current_speaker;
   const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
   const hb = speaker ? heartbeats[speaker] : undefined;
   const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
-
-  // ui-architect 2026-04-29 (human #1269): rotation strip used to be a
-  // 0.78rem inline-flex inside the mic line — invisible at default sizes.
-  // Restructured as two stacked rows: (1) the small mic/state line on top,
-  // (2) a dedicated horizontal pill row underneath that only renders when
-  // AL is on. Each seat gets a real pill (not text). Three named states:
-  // current speaker (filled), next-up (outlined), idle (muted).
   const isAssemblyLine = protocol.floor.mode === 'round-robin';
-  // Moderator-authority fix (per human msg 1713 + UI-arch msg 1714 ack):
-  // when mic_passing_mode === 'moderator' AND a moderator is set, that seat
-  // is functionally OUT of the rotation per main.rs's next_assembly_speaker
-  // filter (commit 9ae070d). The rotation strip MUST mirror that — otherwise
-  // the human looks at the strip and sees the moderator IN rotation,
-  // contradicting the "moderator is out of pipeline" promise. Same filter
-  // pattern as AssemblyControls.tsx renderStatusLine in d74b021. Class-of-bug
-  // per `feedback_audit_class_not_just_symbol.md` — sibling render-site
-  // missed in the original filter pass.
-  const moderatorExempt = protocol.floor.mic_passing_mode === 'moderator'
-    && protocol.floor.moderator !== null
-    && protocol.floor.moderator !== undefined
-    ? protocol.floor.moderator
-    : null;
-  const rawRotation = protocol.floor.rotation_order;
-  // Zombie-seat filter (human msg 2747): rotation_order may contain seats
-  // that were kicked / left without a project_leave but the protocol mutation
-  // never cleared them out of rotation. Filter against live heartbeats so
-  // disconnected/vacant seats don't render as pills. If heartbeats hasn't
-  // populated yet (initial load), fall back to the unfiltered list so the UI
-  // works during the boot window.
-  const heartbeatsLoaded = Object.keys(heartbeats).length > 0;
-  const rotation = rawRotation
-    .filter((seat) => !moderatorExempt || seat !== moderatorExempt)
-    .filter((seat) => !heartbeatsLoaded || heartbeats[seat]?.connected === true);
-  const speakerIdx = speaker ? rotation.indexOf(speaker) : -1;
-  const nextUp = isAssemblyLine && rotation.length > 0 && speakerIdx >= 0
-    ? rotation[(speakerIdx + 1) % rotation.length]
-    : null;
 
   return (
     <div className="protocol-mic-stack">
@@ -391,109 +348,14 @@ function CompactMicLine({
           </button>
         )}
       </div>
-      {/* Second line (AL only): horizontal pill row, one pill per seat.
-          If the current speaker is NOT in rotation_order (mid-assembly join
-          before v1.0.3's read_assembly_state migration took effect, or any
-          future drift between active_assembly_seats and rotation_order),
-          render a distinct "guest" pill so the human sees who's actually
-          speaking instead of an unexplained empty current-speaker label.
-          Defensive UI per architect msg 412 path A. */}
-      {isAssemblyLine && rotation.length > 0 && (
-        <div
-          className="protocol-al-rotation"
-          role="list"
-          aria-label="Assembly line rotation order"
-        >
-          {speaker && speakerIdx === -1 && (
-            <span className="protocol-al-rotation-item" role="listitem">
-              <span
-                className="protocol-al-seat-pill is-guest"
-                title={`${speaker} is the current speaker but is not in rotation_order — likely joined mid-assembly. Rotation may not advance to them again.`}
-              >
-                {speaker} <span className="protocol-al-guest-marker" aria-hidden="true">(guest)</span>
-              </span>
-              <span className="protocol-al-arrow" aria-hidden="true">·</span>
-            </span>
-          )}
-          {rotation.map((seat, i) => {
-            const isCurrent = seat === speaker;
-            const isNext = nextUp === seat;
-            const stateClass = isCurrent
-              ? 'is-current'
-              : isNext
-                ? 'is-next'
-                : 'is-idle';
-            // Human msg 3079: pills carry role identity color (canonical from
-            // roleColors.ts — same source as message left-borders + role-card
-            // titles). State (current/next/idle) is expressed via background
-            // opacity + animation, not by color hue. Sets --role-color CSS
-            // variable; CSS uses color-mix() to derive per-state fills.
-            const [seatRole, seatInstanceStr] = seat.split(':');
-            // Defensive degenerate-input guard per evil-architect:0 msg 4707
-            // F-EA-EMPTY-ROLE-CLAMP — seat like ":0" produces empty seatRole;
-            // skip rendering rather than emit Avatar with slug="" + falsely-
-            // hashing-to-variant-0 silhouette + degenerate alt text " (:0)".
-            if (!seatRole) return null;
-            // Truthy + Number.isInteger guards cover three F-EA/F-DC sentinel-
-            // class failure modes (see Phase 2.B Part 2 sister-fix 8763927 +
-            // Phase 2.C sister-fix b8ac702 + evil-architect:0 msg 4707):
-            //   (a) undefined  ("human", no colon)              → Number(undefined)=NaN → !isInteger → undefined ✓
-            //   (b) empty-str  ("developer:", trailing colon)   → Number("")=0 → IS integer but seatInstanceStr is falsy → undefined ✓
-            //   (c) non-numeric("developer:abc", corruption)    → Number("abc")=NaN → !isInteger → undefined ✓
-            //   (d) "0", "1", etc. (legitimate instance)        → Number(...)=int → IS integer → instance ✓
-            // Either case-a/b/c routes to Avatar's role-definition alt-text
-            // branch (no false ":0" or ":NaN" announced to screen readers).
-            const seatInstanceNum = seatInstanceStr ? Number(seatInstanceStr) : NaN;
-            const seatInstance = Number.isInteger(seatInstanceNum) ? seatInstanceNum : undefined;
-            const seatColor = getRoleColor(seatRole);
-            // Phase 2.C per ui-arch:1 msg 4687 + spec §3.3.1: 24px avatar + speaker-
-            // glow ring (CSS box-shadow handled via is-current state class). Rotation
-            // pills are instance-runtime surface → pass instance for proper alt text.
-            const seatAvatarUrl = rolesConfig?.[seatRole]?.avatar_url || null;
-            const seatTitle = rolesConfig?.[seatRole]?.title || seatRole;
-            // Phase 2.F: hover/focus on the pill → mini stats radar popover.
-            // Tooltip positioning is relative to the pill (CSS handles absolute
-            // placement above the pill); pointer-events:none on tooltip prevents
-            // re-entering hover loop when crossing between pill and tooltip.
-            const isHovered = hoveredSeat === seat;
-            const seatStats = rolesConfig?.[seatRole]?.stats;
-            return (
-              <span key={seat} className="protocol-al-rotation-item" role="listitem">
-                {i > 0 && <span className="protocol-al-arrow" aria-hidden="true">→</span>}
-                <span
-                  className={`protocol-al-seat-pill ${stateClass}`}
-                  style={{ ['--role-color' as string]: seatColor } as React.CSSProperties}
-                  onMouseEnter={() => setHoveredSeat(seat)}
-                  onMouseLeave={() => setHoveredSeat(prev => prev === seat ? null : prev)}
-                  onFocus={() => setHoveredSeat(seat)}
-                  onBlur={() => setHoveredSeat(prev => prev === seat ? null : prev)}
-                  tabIndex={0}
-                >
-                  <Avatar
-                    slug={seatRole}
-                    title={seatTitle}
-                    instance={seatInstance}
-                    avatarUrl={seatAvatarUrl}
-                    sizePx={24}
-                    className="protocol-al-seat-avatar"
-                  />
-                  <span className="protocol-al-seat-label">{seat}</span>
-                  {isHovered && (
-                    <span
-                      className="protocol-al-seat-tooltip"
-                      role="tooltip"
-                      aria-label={`${seatTitle} stats profile`}
-                    >
-                      <StatsRadar slug={seatRole} stats={seatStats} sizePx={80} />
-                      <span className="protocol-al-seat-tooltip-name">{seatTitle}</span>
-                    </span>
-                  )}
-                </span>
-              </span>
-            );
-          })}
-        </div>
-      )}
+      {/* Rotation chip-strip REMOVED per human msg 237 — duplicate surface.
+          The Team roster band (CollabTab.tsx Track D v1+v1.1+v1.2) is now
+          the canonical rotation viz: cards reorder by rotation_order with
+          mic-holder accent + 🎙, moderator ★, rotation-index numbers. The
+          chip-strip here was rendering the same data immediately above the
+          band — 500+px of duplicate chrome before the message timeline.
+          Mic-line above (current speaker + age + force-release) preserved
+          as the compact authoritative signal. */}
     </div>
   );
 }

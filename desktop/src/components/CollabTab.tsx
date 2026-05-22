@@ -3677,6 +3677,9 @@ When multiple instances of this role are active:
                   <button
                     className="manage-roles-trigger"
                     onClick={() => setTeamSectionOpen(true)}
+                    style={{ display: 'none' }}
+                    /* HIDDEN per human msg 237: duplicate of Team band's
+                       "Manage Roles" tab; created layout-hierarchy inversion. */
                     aria-label={`Manage Roles & Groups. ${allRoleSlugs.length} roles in ${topLevel.length} groups. Click to open.`}
                   >
                     <span className="manage-roles-trigger-icon">{"\u2699\uFE0F"}</span>
@@ -4370,7 +4373,7 @@ When multiple instances of this role are active:
                   id="team-pane-roster"
                   role="tabpanel"
                   aria-labelledby="team-tab-roster"
-                  className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}`}>
+                  className={`project-roles-grid${rosterViewMode === "list" ? " project-roles-list" : ""}${rosterViewMode === "chip" ? " project-roles-chips" : ""}${assemblyActiveForRoster ? " project-roles-compact" : ""}`}>
                   {sortedCards.map((card) => {
                     const cardKey = `${card.slug}:${card.instance}`;
                     const matchingRole = project.role_statuses.find((r) => r.slug === card.slug);
