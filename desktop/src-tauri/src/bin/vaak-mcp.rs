@@ -6013,6 +6013,37 @@ mod protocol_slice2_tests {
         .unwrap();
     }
 
+    /// Per evil-architect:0 msg 148 Flag 4 + msg 164 Flag 1 — Fix-A2
+    /// §Authorization gates on `floor.moderator == actor` independent of role
+    /// slug. A non-privileged role (e.g. developer) that has been set as
+    /// floor.moderator must pass the gate. Regression bar for the moderator-
+    /// bypass authorization path.
+    #[test]
+    fn set_rotation_order_accepts_caller_matching_floor_moderator() {
+        let td = three_seat_fixture("accepts_caller_matching_floor_moderator");
+        // Set floor.moderator = developer:1 (NOT in the privileged role slugs
+        // human/manager/tech-leader). Authorization must still accept this
+        // caller via the moderator-equality branch.
+        let mut s = assembly_state_with_moderator(
+            "developer:1",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["tester:0", "architect:0", "developer:1"]}),
+            "developer:1",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let order: Vec<String> = s["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["tester:0", "architect:0", "developer:1"]);
+    }
+
     #[test]
     fn set_rotation_order_rejects_duplicates_in_args() {
         let td = three_seat_fixture("rejects_duplicates_in_args");
