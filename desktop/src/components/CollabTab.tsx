@@ -891,6 +891,12 @@ export function CollabTab() {
     setRosterSectionCollapsed(next);
     saveJSON("vaak_collab_roster_collapsed", next);
   };
+  // Track D v1.2 (per human msg 163 "i cant uncollapse team tab") — v1.1's
+  // per-render force-expand trapped the user. Replace with a one-time
+  // auto-expand on the assembly-OFF → ON edge only; once expanded the user
+  // can collapse freely and stays collapsed. autoExpandedForAssemblyRef
+  // resets when assembly turns off, so a future enable triggers expand again.
+  const autoExpandedForAssemblyRef = useRef<boolean>(false);
   // Change C (CollabTab restructure spec, architect msg 5238/5249/5259):
   // Team Section tab state — inside the existing roster-section
   // CollapsibleSection band, toggle between the role-cards grid
@@ -965,6 +971,20 @@ export function CollabTab() {
     mutate: twoControlsMutate,
     lastError: twoControlsLastError,
   } = useProtocolState(projectDir, activeSection || "default");
+  // Track D v1.2 — one-time auto-expand of the Team band on the assembly
+  // OFF → ON edge. Replaces v1.1's per-render force-override which trapped
+  // the user (human msg 163). Once the band auto-expands, user's manual
+  // collapse is respected absolutely. Ref resets when assembly turns off
+  // so a future enable triggers another auto-expand.
+  useEffect(() => {
+    const isAssemblyActive = twoControlsProtocol?.floor?.assembly_active === true;
+    if (isAssemblyActive && !autoExpandedForAssemblyRef.current) {
+      setRosterSectionCollapsed(false);
+      autoExpandedForAssemblyRef.current = true;
+    } else if (!isAssemblyActive && autoExpandedForAssemblyRef.current) {
+      autoExpandedForAssemblyRef.current = false;
+    }
+  }, [twoControlsProtocol?.floor?.assembly_active]);
   const [newSectionName, setNewSectionName] = useState("");
   const [creatingSectionMode, setCreatingSectionMode] = useState(false);
   // Human msg 3191: max 4 visible tabs (active + 3 most recently active);
@@ -4252,17 +4272,7 @@ When multiple instances of this role are active:
           const readyCount = sortedCards.filter(c => c.status === "ready").length;
           return (
             <>
-              {sortedCards.length > 0 && (() => {
-                // Track D v1.1 (per human msg 116 + photo) — when assembly is
-                // active the Team band IS the rotation surface; auto-expand it
-                // so the mic-holder + rotation visuals are visible. Override
-                // is per-render only — user's persisted collapse preference is
-                // unchanged. When assembly turns off, their preference applies
-                // again immediately.
-                const effectiveRosterCollapsed = assemblyActiveForRoster
-                  ? false
-                  : rosterSectionCollapsed;
-                return (
+              {sortedCards.length > 0 && (
               <CollapsibleSection
                 id="roster-section"
                 title="Team"
@@ -4286,7 +4296,7 @@ When multiple instances of this role are active:
                     )}
                   </>
                 }
-                collapsed={effectiveRosterCollapsed}
+                collapsed={rosterSectionCollapsed}
                 onToggle={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
                 className="roster-section"
                 headerTooltip={{ expand: "Expand team section", collapse: "Collapse team section" }}
@@ -4676,8 +4686,7 @@ When multiple instances of this role are active:
               </>
               )}
               </CollapsibleSection>
-              );
-              })()}
+              )}
             </>
           );
         })()}
