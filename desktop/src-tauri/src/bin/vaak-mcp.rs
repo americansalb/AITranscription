@@ -3882,7 +3882,15 @@ fn do_protocol_mutate(
             // render. Restore the contract here, BEFORE normalize so the freshly
             // seeded current_speaker isn't orphan-cleared on the same call.
             // Multi-writer/refactor-drift class.
-            if action == "set_preset" {
+            //
+            // set_assembly is included because apply_set_assembly internally
+            // calls apply_set_preset (vaak-mcp.rs:4941) and would otherwise
+            // hit the same un-seeded rotation_order outcome — found during
+            // Fix-A1 audit, human msg 88. Any future arm that wraps
+            // apply_set_preset must be added here (or, better, the seed
+            // helper should move into apply_set_preset's body via a project_dir
+            // parameter — deferred to Fix-A2's typed-action refactor).
+            if action == "set_preset" || action == "set_assembly" {
                 seed_rotation_order_if_empty(&mut current, &active_seats);
             }
             protocol_normalize_in_place(&mut current, &active_seats);
@@ -5549,6 +5557,18 @@ mod protocol_slice2_tests {
         protocol_fresh_value()
     }
 
+    /// fresh_state() returns preset="Debate" by default. The v1.0.7 cross-
+    /// transition gate (vaak-mcp.rs:3974) blocks Debate → any-non-default
+    /// preset in a single apply_set_preset call. Tests that need to land at
+    /// AssemblyLine / Brainstorm / Delphi etc. must first transition through
+    /// "Default chat". This helper does that in one step, mirroring how
+    /// real callers (do_protocol_mutate) sequence the two-step transition.
+    fn fresh_state_at_default_chat() -> serde_json::Value {
+        let mut s = protocol_fresh_value();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Default chat"})).unwrap();
+        s
+    }
+
     /// (a) CAS — apply layer accepts and bumps. (Full rev gate is exercised
     /// in handle_protocol_mutate; here we assert apply_set_preset is idempotent
     /// in input shape and writes the matrix-mapped modes.)
@@ -5591,7 +5611,7 @@ mod protocol_slice2_tests {
     /// behavior the Slice 6 deprecation refactor dropped.
     #[test]
     fn seed_rotation_order_seeds_when_empty_and_round_robin() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
         let seats: std::collections::HashSet<String> = [
             "architect:0".to_string(),
@@ -5615,7 +5635,7 @@ mod protocol_slice2_tests {
     /// Moderator-set order survives a subsequent set_preset re-invocation.
     #[test]
     fn seed_rotation_order_preserves_explicit_order() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
         s["floor"]["rotation_order"] = serde_json::json!(["existing:0", "other:0"]);
         s["floor"]["current_speaker"] = serde_json::json!("existing:0");
@@ -5637,7 +5657,7 @@ mod protocol_slice2_tests {
     /// semantically. Brainstorm (free-grab) must not get seeded with stale seats.
     #[test]
     fn seed_rotation_order_skips_non_round_robin_floors() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Brainstorm"})).unwrap();
         let seats: std::collections::HashSet<String> = ["a:0".to_string()].into_iter().collect();
         seed_rotation_order_if_empty(&mut s, &seats);
@@ -5650,9 +5670,62 @@ mod protocol_slice2_tests {
     /// normalize calls — keep this branch silent).
     #[test]
     fn seed_rotation_order_no_op_on_empty_active_seats() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
         let seats: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        assert!(s["floor"]["rotation_order"].as_array().unwrap().is_empty());
+    }
+
+    /// Fix-A1 audit follow-up — `apply_set_assembly(active=true)` wraps
+    /// `apply_set_preset(AssemblyLine)` internally (vaak-mcp.rs:4941). The
+    /// dispatch hook in `do_protocol_mutate` must therefore fire the seeder
+    /// for `action == "set_assembly"` too, not just `"set_preset"`. This
+    /// test asserts the helper produces the correct outcome on the state
+    /// `apply_set_assembly` leaves behind — and stands as the unit-level
+    /// witness that the dispatch hook's guard is broad enough.
+    #[test]
+    fn seed_rotation_order_seeds_after_apply_set_assembly_active() {
+        let mut s = fresh_state_at_default_chat();
+        apply_set_assembly(&mut s, &serde_json::json!({"active": true})).unwrap();
+        assert_eq!(s["preset"], "Assembly Line");
+        assert_eq!(s["floor"]["mode"], "round-robin");
+        assert_eq!(s["floor"]["assembly_active"], true);
+        let seats: std::collections::HashSet<String> = [
+            "architect:0".to_string(),
+            "developer:1".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        let order: Vec<String> = s["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["architect:0", "developer:1"]);
+        assert_eq!(s["floor"]["current_speaker"], "architect:0");
+    }
+
+    /// Sibling — `apply_set_assembly(active=false)` routes through
+    /// `apply_set_preset(DefaultChat)` → mode=none. The seeder must be a
+    /// no-op on the resulting state regardless of whether the dispatcher
+    /// invokes it (defensive: the guard fires; the helper short-circuits
+    /// on non-round-robin floor).
+    #[test]
+    fn seed_rotation_order_no_op_after_apply_set_assembly_inactive() {
+        let mut s = fresh_state();
+        apply_set_assembly(&mut s, &serde_json::json!({"active": false})).unwrap();
+        assert_eq!(s["preset"], "Default chat");
+        assert_eq!(s["floor"]["mode"], "none");
+        assert_eq!(s["floor"]["assembly_active"], false);
+        let seats: std::collections::HashSet<String> = [
+            "architect:0".to_string(),
+            "developer:1".to_string(),
+        ]
+        .into_iter()
+        .collect();
         seed_rotation_order_if_empty(&mut s, &seats);
         assert!(s["floor"]["rotation_order"].as_array().unwrap().is_empty());
     }
