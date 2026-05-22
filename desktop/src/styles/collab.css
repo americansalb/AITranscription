@@ -7638,6 +7638,147 @@
   gap: 6px;
 }
 
+/* ============================================================
+ * Phase 1b — Discussion Mode strip + popover
+ * Per architect msg 484 push for full Phase 1b restructure.
+ * Replaces the inline-expand CollapsibleSection with:
+ *   (a) always-visible ~30px strip in CollabTab (preset name + Configure)
+ *   (b) portal-mounted popover (DiscussionSettingsPopover.tsx)
+ *       hosting AssemblyControls + ProtocolPanel
+ * ============================================================ */
+.discussion-mode-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  min-height: 30px;
+}
+
+.discussion-mode-strip-key {
+  color: #8899a6;
+  font-weight: 500;
+}
+
+.discussion-mode-strip-preset {
+  color: #e7eaef;
+  font-weight: 600;
+}
+
+.discussion-mode-strip-meta {
+  color: #8899a6;
+}
+
+.discussion-mode-strip-spacer {
+  flex: 1;
+}
+
+.discussion-mode-strip-configure {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e7eaef;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.discussion-mode-strip-configure:hover {
+  border-color: #1d9bf0;
+  color: #1d9bf0;
+}
+
+.discussion-mode-strip-configure:focus-visible {
+  outline: 2px solid #1d9bf0;
+  outline-offset: 1px;
+}
+
+/* Popover backdrop + modal */
+.discussion-settings-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  /* Lightweight fade-in. Reduced-motion respected below. */
+  animation: discussion-popover-fade-in 0.12s ease-out;
+}
+
+@keyframes discussion-popover-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discussion-settings-popover-backdrop { animation: none; }
+}
+
+.discussion-settings-popover {
+  background: #1d2a37;
+  border: 1px solid #38444d;
+  border-radius: 12px;
+  width: min(640px, 92vw);
+  max-height: 85vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+.discussion-settings-popover-header {
+  display: flex;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.discussion-settings-popover-title {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e7eaef;
+}
+
+.discussion-settings-popover-close {
+  background: transparent;
+  border: none;
+  color: #8899a6;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+}
+
+.discussion-settings-popover-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #e7eaef;
+}
+
+.discussion-settings-popover-body {
+  padding: 14px 18px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.discussion-settings-popover-footer {
+  padding: 10px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  gap: 8px;
+}
+
 /* ==========================================================================
  * Fresh-layout v1 — per architect msg 389 spec
  * `.vaak/design-notes/collabtab-fresh-layout-2026-05-22.md`

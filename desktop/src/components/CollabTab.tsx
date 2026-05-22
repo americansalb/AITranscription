@@ -19,6 +19,7 @@ import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
 import { DecisionPanel } from "./DecisionPanel";
 import { CollapsibleSection } from "./CollapsibleSection";
+import { DiscussionSettingsPopover } from "./DiscussionSettingsPopover";
 import { RolesTab } from "./RolesTab";
 import { useProjectDir } from "../contexts/ProjectDirContext";
 import { loadJSON, saveJSON, isBoolean } from "../lib/persistedState";
@@ -837,6 +838,11 @@ export function CollabTab() {
   const [sdParticipants, setSdParticipants] = useState<Record<string, boolean>>({});
   const [sdStarting, setSdStarting] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Phase 1b (architect msg 484): real ⚙ popover hosting AssemblyControls
+  // + ProtocolPanel. Replaces the always-rendered Discussion Mode band
+  // expansion. Closes msg-5450 risk via always-visible thin strip above
+  // (preset name + Configure ⚙ button); controls live in the popover.
+  const [discussionPopoverOpen, setDiscussionPopoverOpen] = useState(false);
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
@@ -934,17 +940,10 @@ export function CollabTab() {
   // stays collapsed per the screen-space-reclamation intent. User's
   // explicit toggle (true/false) still overrides the derivation and
   // persists across reloads. Same tristate pattern as `claimsCollapsed`.
-  const [discussionModeCollapsed, setDiscussionModeCollapsed] = useState<boolean | null>(
-    () => loadJSON<boolean | null>(
-      "vaak_collab_discussion_mode_collapsed",
-      null,
-      (v): v is boolean | null => v === null || typeof v === "boolean",
-    ),
-  );
-  const updateDiscussionModeCollapsed = (next: boolean) => {
-    setDiscussionModeCollapsed(next);
-    saveJSON("vaak_collab_discussion_mode_collapsed", next);
-  };
+  // Phase 1b (architect msg 484) replaced inline Discussion Mode
+  // CollapsibleSection with the always-visible strip + ⚙ popover.
+  // The localStorage key remains preserved for back-compat with prior-
+  // session state; not read by the new strip+popover flow.
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
@@ -3435,21 +3434,13 @@ When multiple instances of this role are active:
             band discoverable even when no mode is active; ProtocolPanel
             inside still handles its own no-protocol render). */}
         {(() => {
-          // Phase 1b (architect msg 460/468 + human msg 457 "clean"):
-          // Discussion Mode band defaults to COLLAPSED so the strip is just
-          // its always-visible header (one row of dynamic-title state) until
-          // the user clicks Configure ⚙ to expand. Closes the human's
-          // "500px of chrome" complaint at msg 237. Prior tristate derive-
-          // from-AL-active logic produced a ~150px expanded band on every
-          // AL-on session; the new default keeps the surface to ~30px until
-          // user wants to configure. Manual user toggle still persisted.
-          const discussionModeCollapsedEffective =
-            discussionModeCollapsed ?? true;
-          // Fresh-layout v2 (per architect msg 391 + evil-arch msg 390):
-          // dynamic title showing the live preset name + phase + plan label
-          // when relevant. Always-rendered surface preserves discoverability
-          // when AL is off (closes the msg-5450 controls-hidden-in-popover
-          // failure mode that the original spec at msg 389 had risked).
+          // Phase 1b PROPER (architect msg 484 push for full restructure):
+          // Discussion Mode band → thin always-visible STRIP + ⚙ popover.
+          // The strip shows live preset/phase/plan in ~30px; Configure ⚙
+          // opens the popover hosting AssemblyControls + ProtocolPanel.
+          // Closes the msg-5450 discoverability lesson AND the human's
+          // "500px of chrome" complaint simultaneously: state visible
+          // always, controls reachable on demand.
           const livePreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
           const livePhase = twoControlsProtocol?.floor?.phase as string | undefined;
           const livePlanPath = twoControlsProtocol?.floor?.plan_path as string | undefined;
@@ -3463,39 +3454,57 @@ When multiple instances of this role are active:
           const planLabel = livePlanPath
             ? ` · Plan: ${livePlanPath.replace(/^.*[\\/]/, "")}`
             : "";
-          const dynamicTitle = `Discussion Mode: ${livePreset}${phaseLabel}${planLabel}`;
           return (
-        <CollapsibleSection
-          id="discussion-mode-section"
-          title={dynamicTitle}
-          collapsed={discussionModeCollapsedEffective}
-          onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsedEffective)}
-          className="discussion-mode-section"
-          headerTooltip={{
-            expand: "Expand discussion mode controls (Configure)",
-            collapse: "Collapse discussion mode controls",
-          }}
-        >
-          {twoControlsProtocol && (
-            <AssemblyControls
-              protocol={twoControlsProtocol}
-              mutate={twoControlsMutate}
-              lastError={twoControlsLastError}
-              selfRole={null /* human view in CollabTab */}
-              projectDir={projectDir}
-            />
-          )}
-          {/* Protocol panel — unified floor + consensus state (Slice 3+4).
-              Now nested inside the Discussion Mode CollapsibleSection so
-              it collapses together with AssemblyControls. */}
-          <ProtocolPanel
-            projectDir={projectDir}
-            section={activeSection || "default"}
-            selfSeat={null /* this is the human's view; selfSeat = null */}
-            rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
-            rolesConfig={project?.config?.roles}
-          />
-        </CollapsibleSection>
+          <>
+            {/* Always-visible Discussion Mode strip — single row, ~30px.
+                Preserves the msg-5450 discoverability surface (preset name
+                is always visible even when AL is off). Configure button is
+                the gear-equivalent affordance opening the popover. */}
+            <div className="discussion-mode-strip" role="region" aria-label="Discussion mode state">
+              <span className="discussion-mode-strip-key">Discussion Mode:</span>
+              <span className="discussion-mode-strip-preset">{livePreset}</span>
+              {phaseLabel && <span className="discussion-mode-strip-meta">{phaseLabel}</span>}
+              {planLabel && <span className="discussion-mode-strip-meta">{planLabel}</span>}
+              <span className="discussion-mode-strip-spacer" />
+              <button
+                type="button"
+                className="discussion-mode-strip-configure"
+                onClick={() => setDiscussionPopoverOpen(true)}
+                title="Configure Discussion Mode (preset, mic-passing, moderator, review intensity, plan)"
+              >
+                Configure ⚙
+              </button>
+            </div>
+
+            {/* Popover-mounted controls. Renders via createPortal so the
+                modal can layer above the rest of the CollabTab without
+                z-index/overflow gotchas. Closes on Escape, click-outside,
+                or the × button. AssemblyControls + ProtocolPanel are
+                rendered inside; same components, same state, just
+                relocated UX surface. */}
+            <DiscussionSettingsPopover
+              open={discussionPopoverOpen}
+              onClose={() => setDiscussionPopoverOpen(false)}
+              title="Discussion Mode Settings"
+            >
+              {twoControlsProtocol && (
+                <AssemblyControls
+                  protocol={twoControlsProtocol}
+                  mutate={twoControlsMutate}
+                  lastError={twoControlsLastError}
+                  selfRole={null /* human view in CollabTab */}
+                  projectDir={projectDir}
+                />
+              )}
+              <ProtocolPanel
+                projectDir={projectDir}
+                section={activeSection || "default"}
+                selfSeat={null /* this is the human's view; selfSeat = null */}
+                rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+                rolesConfig={project?.config?.roles}
+              />
+            </DiscussionSettingsPopover>
+          </>
           );
         })()}
 
