@@ -3435,14 +3435,16 @@ When multiple instances of this role are active:
             band discoverable even when no mode is active; ProtocolPanel
             inside still handles its own no-protocol render). */}
         {(() => {
-          // Sister-fix-CB3 tristate derivation: null = auto-derive from
-          // assembly-active-ness; explicit boolean = user override.
-          // When twoControlsProtocol is present (assembly running), default
-          // is EXPANDED so the mic-passing controls are visible without
-          // hunting per human msg 5567. When no assembly is running, default
-          // is COLLAPSED per sister-fix-CB1 screen-space intent.
+          // Phase 1b (architect msg 460/468 + human msg 457 "clean"):
+          // Discussion Mode band defaults to COLLAPSED so the strip is just
+          // its always-visible header (one row of dynamic-title state) until
+          // the user clicks Configure ⚙ to expand. Closes the human's
+          // "500px of chrome" complaint at msg 237. Prior tristate derive-
+          // from-AL-active logic produced a ~150px expanded band on every
+          // AL-on session; the new default keeps the surface to ~30px until
+          // user wants to configure. Manual user toggle still persisted.
           const discussionModeCollapsedEffective =
-            discussionModeCollapsed ?? !twoControlsProtocol;
+            discussionModeCollapsed ?? true;
           // Fresh-layout v2 (per architect msg 391 + evil-arch msg 390):
           // dynamic title showing the live preset name + phase + plan label
           // when relevant. Always-rendered surface preserves discoverability
