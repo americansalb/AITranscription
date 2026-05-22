@@ -3840,6 +3840,14 @@ fn do_protocol_mutate(
                 "raise_hand" => apply_raise_hand(&mut current, actor),
                 "grant_mic" => apply_grant_mic(&mut current, &args, actor),
                 "set_moderator" => apply_set_moderator(&mut current, &args, actor),
+                // Fix-A2 — typed reorder-only mutation per
+                // .vaak/design-notes/fix-a2-set-rotation-order-spec-2026-05-22.md.
+                // Pre-normalize ordering doesn't matter for this arm since the
+                // mutation produces a permutation of active_seats — normalize's
+                // rule #2 (orphan current_speaker) can never trip.
+                "set_rotation_order" => {
+                    apply_set_rotation_order(&mut current, &args, actor, pd)
+                }
                 // Collaborative-proposal-workflow v1 (spec 2026-05-15, Commit P + P.B).
                 // ts injection: production caller passes None per spec v6 line 29;
                 // tests call apply_propose_replanning directly with Some(...).
@@ -5218,6 +5226,140 @@ fn apply_grant_mic(
     Ok(())
 }
 
+/// set_rotation_order — Fix-A2 typed mutation per spec at
+/// `.vaak/design-notes/fix-a2-set-rotation-order-spec-2026-05-22.md`.
+///
+/// REORDER-ONLY contract: `args.rotation_order` must be a permutation of
+/// `active_seats - kicked` (= the active-seat set returned by
+/// `protocol_active_seats_set`). Membership is fixed; only order may change.
+/// Removals route through the existing typed `project_kick` mutation —
+/// allowing omission here would reopen the v1.0-corrected structural-
+/// exclusion bug class (commits 453228c / e582e6e / 1c26267 / 7895a03,
+/// 2026-05-13).
+///
+/// Authorization: `moderator | human | manager:* | tech-leader:*`.
+/// tech-leader is included per `[[project_tech_leader_is_manager_consultant]]`
+/// + Instance #11 inline close (evil-arch msg 119 + tech-leader msg 121 +
+/// architect msg 141 ruling — no defer-to-follow-up plan).
+///
+/// `active_seats` is read inside this function (under the dispatcher's
+/// `with_file_lock`) per dev-challenger:0 msg 129 flag #6 — reading
+/// pre-lock and passing in can yield a stale list.
+///
+/// CAS + rev bump + audit stamps + atomic_write + board event are handled
+/// by the dispatcher wrapper, consistent with every other apply_* arm.
+fn apply_set_rotation_order(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+    actor: &str,
+    project_dir: &str,
+) -> Result<(), String> {
+    // 1. Auth gate. moderator field on floor, OR special human seat string,
+    //    OR caller role is manager/tech-leader. Per dev-challenger:0 msg 129
+    //    flag #4: actor is always `role:instance`, so the bare "manager"
+    //    branch never matches; use prefix checks. The `actor == "human"`
+    //    branch DOES match because the human seat string is literally
+    //    "human" (no instance suffix).
+    let moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str());
+    let is_moderator = moderator.map(|m| m == actor).unwrap_or(false);
+    let is_authorized = actor == "human"
+        || actor.starts_with("manager:")
+        || actor.starts_with("tech-leader:")
+        || is_moderator;
+    if !is_authorized {
+        return Err(format!(
+            "[Unauthorized] set_rotation_order requires moderator | human | manager | tech-leader; caller={}",
+            actor
+        ));
+    }
+
+    // 2. Args present + array shape.
+    let arr = args
+        .get("rotation_order")
+        .and_then(|v| v.as_array())
+        .ok_or("[InvalidArgs] set_rotation_order requires args.rotation_order (array of role:instance strings)")?;
+
+    // 3. Per-entry validation: shape, duplicate, active-membership.
+    //    Shape regex `^[a-z0-9-]+:[0-9]+$` validated inline (no `regex`
+    //    crate dependency). Acceptable chars: ASCII lowercase letter,
+    //    ASCII digit, hyphen — split on FIRST ':' into role + instance;
+    //    instance must be all digits and non-empty.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let active_seats = protocol_active_seats_set(project_dir);
+    for v in arr {
+        let s = v
+            .as_str()
+            .ok_or("[InvalidArgs] every rotation_order entry must be a string")?;
+        if !is_valid_seat_label(s) {
+            return Err(format!(
+                "[InvalidArgs] '{}' not in role:instance form (expected lowercase-letters/digits/hyphens, ':', digits)",
+                s
+            ));
+        }
+        if !seen.insert(s.to_string()) {
+            return Err(format!("[InvalidArgs] duplicate entry '{}' in rotation_order", s));
+        }
+        if !active_seats.contains(s) {
+            return Err(format!("[InvalidArgs] '{}' not an active seat", s));
+        }
+    }
+
+    // 4. REORDER-ONLY membership check: every active seat must appear in
+    //    args.rotation_order. Subset-only would reopen the exclusion class.
+    let mut missing: Vec<&String> = active_seats
+        .iter()
+        .filter(|a| !seen.contains(a.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        missing.sort();
+        return Err(format!(
+            "[InvalidArgs] set_rotation_order must include every active seat (reorder-only). Missing: {:?}. Use project_kick to remove a seat first.",
+            missing
+        ));
+    }
+
+    // 5. Whole-field replacement preserving siblings.
+    let new_arr: Vec<serde_json::Value> = arr.iter().cloned().collect();
+    if let Some(floor) = state
+        .get_mut("floor")
+        .and_then(|f| f.as_object_mut())
+    {
+        floor.insert(
+            "rotation_order".to_string(),
+            serde_json::Value::Array(new_arr),
+        );
+    }
+    Ok(())
+}
+
+/// Inline check for `^[a-z0-9-]+:[0-9]+$` without pulling in the `regex`
+/// crate. Used by `apply_set_rotation_order` arg validation; could fold
+/// into a shared helper if/when other arms validate seat labels.
+fn is_valid_seat_label(s: &str) -> bool {
+    let mut parts = s.splitn(2, ':');
+    let role = match parts.next() {
+        Some(r) if !r.is_empty() => r,
+        _ => return false,
+    };
+    let instance = match parts.next() {
+        Some(i) if !i.is_empty() => i,
+        _ => return false,
+    };
+    if !role
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return false;
+    }
+    if !instance.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    true
+}
+
 /// set_moderator — gated to architect/manager/human per dev-challenger msg 1115
 /// F2 + evil-arch msg 1117 CRITICAL upgrade. Same structural-floor parity as
 /// apply_revise_plan: without the gate, any agent can self-elect moderator and
@@ -5706,6 +5848,315 @@ mod protocol_slice2_tests {
             .collect();
         assert_eq!(order, vec!["architect:0", "developer:1"]);
         assert_eq!(s["floor"]["current_speaker"], "architect:0");
+    }
+
+    // ===================================================================
+    // Fix-A2 — apply_set_rotation_order tests per spec at
+    // .vaak/design-notes/fix-a2-set-rotation-order-spec-2026-05-22.md
+    // §Test surface. Tests use a temporary project directory so the
+    // active_seats read (under-lock per dev-challenger:0 msg 129 flag #6)
+    // resolves against a controlled sessions.json fixture, NOT the live
+    // .vaak/sessions.json. The fixture writes 3 seats: architect:0,
+    // developer:1, tester:0 — same shape as today's roster but small
+    // enough to make assertions readable.
+    // ===================================================================
+
+    /// Build a temp dir with `.vaak/sessions.json` containing the named
+    /// active bindings. Returns the dir path so the caller can pass it to
+    /// apply_set_rotation_order. Matches the temp-dir pattern already used
+    /// at line ~6252 (test_name uniqueness avoids cross-test interference);
+    /// callers are responsible for not collision-naming. Cleanup is best-
+    /// effort on drop via a Drop guard.
+    struct TempProjectDir(std::path::PathBuf);
+
+    impl TempProjectDir {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempProjectDir {
+        fn drop(&mut self) {
+            // Best-effort cleanup; ignore errors.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_project_with_seats(test_name: &str, seats: &[(&str, u64)]) -> TempProjectDir {
+        let dir = std::env::temp_dir().join(format!("vaak-mcp-fix-a2-{}", test_name));
+        // Clean up any previous leftover so tests are deterministic.
+        let _ = std::fs::remove_dir_all(&dir);
+        let vaak = dir.join(".vaak");
+        std::fs::create_dir_all(&vaak).unwrap();
+        let bindings: Vec<serde_json::Value> = seats
+            .iter()
+            .map(|(role, inst)| {
+                serde_json::json!({
+                    "role": role,
+                    "instance": inst,
+                    "session_id": format!("test-{}-{}", role, inst),
+                    "status": "active",
+                    "last_heartbeat": "2026-05-22T17:00:00Z"
+                })
+            })
+            .collect();
+        let sessions = serde_json::json!({ "bindings": bindings });
+        std::fs::write(
+            vaak.join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        )
+        .unwrap();
+        TempProjectDir(dir)
+    }
+
+    fn three_seat_fixture(test_name: &str) -> TempProjectDir {
+        temp_project_with_seats(
+            test_name,
+            &[("architect", 0), ("developer", 1), ("tester", 0)],
+        )
+    }
+
+    fn assembly_state_with_moderator(moderator: &str, rotation: Vec<&str>) -> serde_json::Value {
+        let mut s = fresh_state_at_default_chat();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        if let Some(floor) = s.get_mut("floor").and_then(|f| f.as_object_mut()) {
+            floor.insert(
+                "moderator".to_string(),
+                serde_json::json!(moderator),
+            );
+            let rot: Vec<serde_json::Value> =
+                rotation.iter().map(|x| serde_json::json!(x)).collect();
+            floor.insert(
+                "rotation_order".to_string(),
+                serde_json::Value::Array(rot),
+            );
+        }
+        s
+    }
+
+    #[test]
+    fn set_rotation_order_replaces_array_under_cas() {
+        let td = three_seat_fixture("replaces_array_under_cas");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["tester:0", "architect:0", "developer:1"]}),
+            "tech-leader:0",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap();
+        let order: Vec<String> = s["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["tester:0", "architect:0", "developer:1"]);
+        // Sibling fields preserved
+        assert_eq!(s["floor"]["moderator"], "tech-leader:0");
+        assert_eq!(s["floor"]["mode"], "round-robin");
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_unauthorized_caller() {
+        let td = three_seat_fixture("rejects_unauthorized_caller");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["tester:0", "architect:0", "developer:1"]}),
+            "developer:1",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("[Unauthorized]"),
+            "expected [Unauthorized], got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn set_rotation_order_accepts_human_caller() {
+        let td = three_seat_fixture("accepts_human_caller");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["tester:0", "architect:0", "developer:1"]}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn set_rotation_order_accepts_tech_leader_caller() {
+        let td = three_seat_fixture("accepts_tech_leader_caller");
+        let mut s = assembly_state_with_moderator(
+            "architect:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["tester:0", "architect:0", "developer:1"]}),
+            "tech-leader:0",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_duplicates_in_args() {
+        let td = three_seat_fixture("rejects_duplicates_in_args");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["architect:0", "developer:1", "architect:0"]}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(err.contains("duplicate"), "got: {}", err);
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_invalid_seat_format() {
+        let td = three_seat_fixture("rejects_invalid_seat_format");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["Architect:0", "developer:1", "tester:0"]}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(
+            err.contains("role:instance form"),
+            "expected shape error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_non_active_seat() {
+        let td = three_seat_fixture("rejects_non_active_seat");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["architect:0", "developer:1", "ghost:99"]}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(err.contains("not an active seat"), "got: {}", err);
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_empty_array() {
+        let td = three_seat_fixture("rejects_empty_array");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        // Per spec §5 reorder-only ruling + rejection case #1 (corrected from
+        // prior false-permit test name per dev-challenger:0 msg 129 flag #2):
+        // empty array with active seats present must reject as proper-subset.
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": []}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(err.contains("reorder-only"), "got: {}", err);
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_proper_subset() {
+        let td = three_seat_fixture("rejects_proper_subset");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        // Missing tester:0 from the array → proper subset → reject + name the
+        // missing seats. Per dev-challenger:0 msg 129 flag #3 + tester:0
+        // msg 123 explicit rejection case #4.
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({"rotation_order": ["architect:0", "developer:1"]}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(err.contains("reorder-only"), "got: {}", err);
+        assert!(
+            err.contains("tester:0"),
+            "expected missing seat name in error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn set_rotation_order_rejects_missing_args() {
+        let td = three_seat_fixture("rejects_missing_args");
+        let mut s = assembly_state_with_moderator(
+            "tech-leader:0",
+            vec!["architect:0", "developer:1", "tester:0"],
+        );
+        let err = apply_set_rotation_order(
+            &mut s,
+            &serde_json::json!({}),
+            "human",
+            td.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+        assert!(err.contains("requires args.rotation_order"), "got: {}", err);
+    }
+
+    #[test]
+    fn is_valid_seat_label_accepts_canonical_forms() {
+        assert!(is_valid_seat_label("architect:0"));
+        assert!(is_valid_seat_label("developer:1"));
+        assert!(is_valid_seat_label("ui-architect:1"));
+        assert!(is_valid_seat_label("dev-challenger:0"));
+        assert!(is_valid_seat_label("med-presenter:42"));
+    }
+
+    #[test]
+    fn is_valid_seat_label_rejects_malformed() {
+        assert!(!is_valid_seat_label(""));
+        assert!(!is_valid_seat_label("architect"));
+        assert!(!is_valid_seat_label(":0"));
+        assert!(!is_valid_seat_label("architect:"));
+        assert!(!is_valid_seat_label("Architect:0"));         // uppercase
+        assert!(!is_valid_seat_label("architect:abc"));       // non-digit instance
+        assert!(!is_valid_seat_label("architect:0:extra"));   // extra colon — splitn(2) keeps it in instance, which fails digit check
+        assert!(!is_valid_seat_label("arch_itect:0"));        // underscore not allowed
+        assert!(!is_valid_seat_label("arch itect:0"));        // space not allowed
+        assert!(!is_valid_seat_label("human"));               // human seat is its own special case, not a role:instance form
     }
 
     /// Sibling — `apply_set_assembly(active=false)` routes through
