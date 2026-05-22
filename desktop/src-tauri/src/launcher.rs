@@ -65,8 +65,23 @@ pub fn check_claude_installed() -> Result<bool, String> {
     }
 }
 
-/// Check if an ANTHROPIC_API_KEY (or CLAUDE_API_KEY) environment variable is set.
-/// Returns a struct with `has_key` bool and `key_source` string (which env var was found).
+/// Check if an ANTHROPIC_API_KEY (or CLAUDE_API_KEY) environment variable is set,
+/// OR if Claude Code OAuth credentials exist at `~/.claude/.credentials.json`.
+/// Returns a struct with `has_key` bool and `key_source` string (which auth path was found).
+///
+/// OAuth fallback per evil-arch msg 343 + human msg 341 (2026-05-22): the setup
+/// wizard's "recheck" was reporting "no key" even after the human completed
+/// Claude Code OAuth via the browser, because the OAuth path stores credentials
+/// in `~/.claude/.credentials.json` (a separate file Claude Code reads) instead
+/// of an env var. Vaak's wizard was looking at the wrong place. Adding the
+/// file-existence check unblocks OAuth-authenticated users from the wizard.
+///
+/// Reads the file's existence + size > 0, not its contents. We don't validate
+/// the OAuth token here — Claude Code itself does that when it spawns; if the
+/// token is expired/invalid the child process will surface the error via its
+/// usual auth flow. This check only confirms "the user has SOME auth path that
+/// Claude Code knows how to use," which is the same signal the env-var check
+/// provides.
 #[tauri::command]
 pub fn check_anthropic_key() -> Result<serde_json::Value, String> {
     // Check the two common env var names Claude Code looks for
@@ -84,6 +99,19 @@ pub fn check_anthropic_key() -> Result<serde_json::Value, String> {
                 "has_key": true,
                 "key_source": "CLAUDE_API_KEY"
             }));
+        }
+    }
+    // Claude Code OAuth credentials fallback.
+    // Resolve home dir via USERPROFILE on Windows or HOME on Unix.
+    if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+        let creds_path = Path::new(&home).join(".claude").join(".credentials.json");
+        if let Ok(meta) = std::fs::metadata(&creds_path) {
+            if meta.is_file() && meta.len() > 0 {
+                return Ok(serde_json::json!({
+                    "has_key": true,
+                    "key_source": "claude_code_oauth"
+                }));
+            }
         }
     }
     Ok(serde_json::json!({
@@ -2171,13 +2199,19 @@ pub fn open_terminal_in_dir(dir: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // Use cmd /c start with .current_dir() to avoid interpolating the path
-        // into a PowerShell string, which would allow injection via $(), backticks, etc.
-        Command::new("cmd")
-            .args(["/c", "start", "powershell", "-NoExit"])
+        // CREATE_NEW_CONSOLE forces a visible new console window. Auto-runs
+        // `claude` so the user doesn't have to type the command (per human
+        // msg 337 — they expected us to do it for them). -NoExit keeps the
+        // terminal open after claude exits so any OAuth output stays visible.
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+        Command::new("powershell")
+            .args([
+                "-NoExit",
+                "-Command",
+                "Write-Host 'Launching Claude CLI for login...' -ForegroundColor Cyan; claude",
+            ])
             .current_dir(&dir)
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
             .map_err(|e| format!("Failed to open PowerShell: {}", e))?;
     }
