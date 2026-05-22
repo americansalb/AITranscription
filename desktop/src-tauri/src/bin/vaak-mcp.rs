@@ -8389,13 +8389,29 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 
     // Re-seed assembly rotation_order so a seat that joins after the gate was
     // enabled can still take the mic. Skip if already present (re-joiner).
+    //
+    // Fix-A1 sibling (tech-leader msg 104 greenlight, developer:1 msg 48
+    // caveat, evil-arch msg 102 endorsement, human msg 88): gate on
+    // `floor.mode == "round-robin"` instead of `asm.active == true`
+    // (which projects `preset == "Assembly Line"`). The narrower gate
+    // missed Delphi late-joiners — Delphi also round-robin per the
+    // preset matrix in apply_set_preset, so it owns rotation_order
+    // semantically too. Same string-rot class as the Track B1 dispatcher
+    // hook expansion at do_protocol_mutate.
     {
         let seat = format!("{}:{}", role, instance);
+        let section = get_active_section(&normalized);
         let _ = with_file_lock(&normalized, || -> Result<(), String> {
-            let mut asm = read_assembly_state(&normalized);
-            if asm.get("active").and_then(|v| v.as_bool()) != Some(true) {
+            let proto = read_protocol_for_section_value(&normalized, &section);
+            let floor_mode = proto
+                .get("floor")
+                .and_then(|f| f.get("mode"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            if floor_mode != "round-robin" {
                 return Ok(());
             }
+            let mut asm = read_assembly_state(&normalized);
             let arr = match asm.get_mut("rotation_order").and_then(|v| v.as_array_mut()) {
                 Some(a) => a,
                 None => return Ok(()),
