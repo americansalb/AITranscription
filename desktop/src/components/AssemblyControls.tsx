@@ -472,10 +472,18 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     micMode === 'moderator' && moderator !== null && seat === moderator;
 
   // Per-mechanism status strip second line (UI-arch msg 969 fold).
+  // Track D v1.1 (per human msg 116) — when assembly is active in rotation
+  // mode, the Team roster band (in CollabTab.tsx) is the canonical rotation
+  // surface. Suppress the duplicate "Next: A → B → C" text here to reduce
+  // surface duplication. Hand-raise + moderator modes still render their
+  // status lines (they don't duplicate the roster band visuals).
   const renderStatusLine = () => {
     if (micMode === 'rotation') {
       if (rotationOrder.length === 0) {
         return <span className="assembly-status-empty">No rotation set</span>;
+      }
+      if (assemblyActive) {
+        return null;
       }
       // Zombie-seat filter (human msg 2747): rotation_order may carry seats
       // kicked / disconnected without a corresponding rotation mutation.

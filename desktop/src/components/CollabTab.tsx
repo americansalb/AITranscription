@@ -4252,7 +4252,17 @@ When multiple instances of this role are active:
           const readyCount = sortedCards.filter(c => c.status === "ready").length;
           return (
             <>
-              {sortedCards.length > 0 && (
+              {sortedCards.length > 0 && (() => {
+                // Track D v1.1 (per human msg 116 + photo) — when assembly is
+                // active the Team band IS the rotation surface; auto-expand it
+                // so the mic-holder + rotation visuals are visible. Override
+                // is per-render only — user's persisted collapse preference is
+                // unchanged. When assembly turns off, their preference applies
+                // again immediately.
+                const effectiveRosterCollapsed = assemblyActiveForRoster
+                  ? false
+                  : rosterSectionCollapsed;
+                return (
               <CollapsibleSection
                 id="roster-section"
                 title="Team"
@@ -4269,9 +4279,14 @@ When multiple instances of this role are active:
                         {(workingCount + readyCount) > 0 ? " · " : ""}{vacantCount} vacant
                       </span>
                     )}
+                    {assemblyActiveForRoster && (
+                      <span className="roster-assembly-indicator" aria-hidden="true">
+                        {" · 🎙 assembly"}
+                      </span>
+                    )}
                   </>
                 }
-                collapsed={rosterSectionCollapsed}
+                collapsed={effectiveRosterCollapsed}
                 onToggle={() => updateRosterSectionCollapsed(!rosterSectionCollapsed)}
                 className="roster-section"
                 headerTooltip={{ expand: "Expand team section", collapse: "Collapse team section" }}
@@ -4661,7 +4676,8 @@ When multiple instances of this role are active:
               </>
               )}
               </CollapsibleSection>
-              )}
+              );
+              })()}
             </>
           );
         })()}
