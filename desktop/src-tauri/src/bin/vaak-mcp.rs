@@ -3538,6 +3538,71 @@ fn protocol_active_seats_set(project_dir: &str) -> std::collections::HashSet<Str
     set
 }
 
+/// Seed `floor.rotation_order` from `active_seats` when the floor is
+/// rotation-driven (`mode == "round-robin"`) AND the existing rotation_order
+/// is empty. Also seeds `floor.current_speaker` to `rotation_order[0]` when
+/// currently null/empty so the freshly-enabled assembly has a first speaker.
+///
+/// Idempotent and conservative: never overwrites a non-empty rotation_order
+/// (an explicit moderator-set order survives a subsequent set_preset
+/// re-invocation), and never touches non-round-robin floors (queue / free-grab
+/// / reactive / none use other authorities). Empty `active_seats` → no-op.
+///
+/// Bug fix — human msg 23, 2026-05-22 ("I turned on assembly line but i dont
+/// see structure thats a UI issue"). Root cause: Slice 6 thin-wrapped
+/// `handle_assembly_line` through `protocol_mutate(set_preset)` and lost the
+/// legacy seed-on-enable behavior; `apply_set_preset` writes preset / mode /
+/// consensus but never seeded rotation_order, so the UI rotation strip had
+/// nothing to render and `al_auto_grab` ran without a canonical order.
+/// Multi-writer / refactor-drift class.
+fn seed_rotation_order_if_empty(
+    state: &mut serde_json::Value,
+    active_seats: &std::collections::HashSet<String>,
+) {
+    let floor_mode = state
+        .get("floor")
+        .and_then(|f| f.get("mode"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    if floor_mode != "round-robin" {
+        return;
+    }
+    if active_seats.is_empty() {
+        return;
+    }
+    let floor = match state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        Some(f) => f,
+        None => return,
+    };
+    let rot_empty = floor
+        .get("rotation_order")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    if !rot_empty {
+        return;
+    }
+    let mut seats: Vec<String> = active_seats.iter().cloned().collect();
+    seats.sort();
+    let arr: Vec<serde_json::Value> = seats
+        .iter()
+        .map(|s| serde_json::Value::String(s.clone()))
+        .collect();
+    floor.insert(
+        "rotation_order".to_string(),
+        serde_json::Value::Array(arr.clone()),
+    );
+    let cs_empty = floor
+        .get("current_speaker")
+        .map(|v| v.is_null() || v.as_str().map(|s| s.is_empty()).unwrap_or(false))
+        .unwrap_or(true);
+    if cs_empty {
+        if let Some(first) = arr.first() {
+            floor.insert("current_speaker".to_string(), first.clone());
+        }
+    }
+}
+
 /// JSON-Value mirror of `protocol::Protocol::normalize` from protocol.rs.
 /// Three ratified rules per spec §2.2 + evil-arch #923 + #954:
 ///   1. floor.mode == "free-grab" → clear floor.queue
@@ -3808,6 +3873,18 @@ fn do_protocol_mutate(
             // active_seats sourced from sessions.json under our lock so the
             // pruning is consistent with whatever the supervisor saw last.
             let active_seats = protocol_active_seats_set(pd);
+            // Post-set_preset seeding (bug fix, human msg 23 on 2026-05-22:
+            // "I turned on assembly line but i dont see structure thats a UI
+            // issue"). The Slice 6 deprecation thin-wrapped handle_assembly_line
+            // through set_preset and lost the legacy seed-on-enable behavior —
+            // apply_set_preset writes preset/mode/consensus but never seeds
+            // floor.rotation_order, so the UI rotation strip has nothing to
+            // render. Restore the contract here, BEFORE normalize so the freshly
+            // seeded current_speaker isn't orphan-cleared on the same call.
+            // Multi-writer/refactor-drift class.
+            if action == "set_preset" {
+                seed_rotation_order_if_empty(&mut current, &active_seats);
+            }
             protocol_normalize_in_place(&mut current, &active_seats);
 
             // CAS bump + audit — only after successful apply + normalize.
@@ -5505,6 +5582,79 @@ mod protocol_slice2_tests {
         let mut s = fresh_state();
         let err = apply_set_preset(&mut s, &serde_json::json!({})).unwrap_err();
         assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
+    }
+
+    /// Regression — human msg 23 on 2026-05-22: enabling Assembly Line via
+    /// `set_preset` left `floor.rotation_order = []`, so the UI had no
+    /// structure to render and `al_auto_grab` chose seats without a canonical
+    /// order. seed_rotation_order_if_empty restores the lost seed-on-enable
+    /// behavior the Slice 6 deprecation refactor dropped.
+    #[test]
+    fn seed_rotation_order_seeds_when_empty_and_round_robin() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        let seats: std::collections::HashSet<String> = [
+            "architect:0".to_string(),
+            "developer:1".to_string(),
+            "tester:0".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        let order: Vec<String> = s["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["architect:0", "developer:1", "tester:0"]);
+        assert_eq!(s["floor"]["current_speaker"], "architect:0");
+    }
+
+    /// Conservative — never overwrite an explicit non-empty rotation_order.
+    /// Moderator-set order survives a subsequent set_preset re-invocation.
+    #[test]
+    fn seed_rotation_order_preserves_explicit_order() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        s["floor"]["rotation_order"] = serde_json::json!(["existing:0", "other:0"]);
+        s["floor"]["current_speaker"] = serde_json::json!("existing:0");
+        let seats: std::collections::HashSet<String> = ["unrelated:0".to_string()]
+            .into_iter()
+            .collect();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        let order: Vec<String> = s["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["existing:0", "other:0"]);
+        assert_eq!(s["floor"]["current_speaker"], "existing:0");
+    }
+
+    /// Scoped — only round-robin floors (AssemblyLine, Delphi) own rotation_order
+    /// semantically. Brainstorm (free-grab) must not get seeded with stale seats.
+    #[test]
+    fn seed_rotation_order_skips_non_round_robin_floors() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Brainstorm"})).unwrap();
+        let seats: std::collections::HashSet<String> = ["a:0".to_string()].into_iter().collect();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        assert!(s["floor"]["rotation_order"].as_array().unwrap().is_empty());
+        assert!(s["floor"]["current_speaker"].is_null());
+    }
+
+    /// Empty active_seats is a no-op (degenerate seeding would write `[]`
+    /// over `[]` and could orphan-clear current_speaker on subsequent
+    /// normalize calls — keep this branch silent).
+    #[test]
+    fn seed_rotation_order_no_op_on_empty_active_seats() {
+        let mut s = fresh_state();
+        apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        let seats: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seed_rotation_order_if_empty(&mut s, &seats);
+        assert!(s["floor"]["rotation_order"].as_array().unwrap().is_empty());
     }
 
     /// (b) yield — non-speaker fails NotPermitted; speaker yielding to None
