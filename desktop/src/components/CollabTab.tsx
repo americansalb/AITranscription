@@ -3443,15 +3443,34 @@ When multiple instances of this role are active:
           // is COLLAPSED per sister-fix-CB1 screen-space intent.
           const discussionModeCollapsedEffective =
             discussionModeCollapsed ?? !twoControlsProtocol;
+          // Fresh-layout v2 (per architect msg 391 + evil-arch msg 390):
+          // dynamic title showing the live preset name + phase + plan label
+          // when relevant. Always-rendered surface preserves discoverability
+          // when AL is off (closes the msg-5450 controls-hidden-in-popover
+          // failure mode that the original spec at msg 389 had risked).
+          const livePreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
+          const livePhase = twoControlsProtocol?.floor?.phase as string | undefined;
+          const livePlanPath = twoControlsProtocol?.floor?.plan_path as string | undefined;
+          const phaseLabel = livePhase
+            ? livePhase === "execution"
+              ? " · Executing"
+              : livePhase === "planning"
+                ? " · Planning"
+                : ""
+            : "";
+          const planLabel = livePlanPath
+            ? ` · Plan: ${livePlanPath.replace(/^.*[\\/]/, "")}`
+            : "";
+          const dynamicTitle = `Discussion Mode: ${livePreset}${phaseLabel}${planLabel}`;
           return (
         <CollapsibleSection
           id="discussion-mode-section"
-          title="Discussion Mode: Assembly Line"
+          title={dynamicTitle}
           collapsed={discussionModeCollapsedEffective}
           onToggle={() => updateDiscussionModeCollapsed(!discussionModeCollapsedEffective)}
           className="discussion-mode-section"
           headerTooltip={{
-            expand: "Expand discussion mode controls",
+            expand: "Expand discussion mode controls (Configure)",
             collapse: "Collapse discussion mode controls",
           }}
         >
