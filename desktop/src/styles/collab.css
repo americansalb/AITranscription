@@ -7646,6 +7646,40 @@
  * keep the existing stacked layout (which already collapses well).
  * ========================================================================== */
 
+/* Right rail: Decision Panel + Active Claims floated to a side column.
+ * Width scales with viewport per V1 invariant (msg-388: timeline ≥60%
+ * at ≥900px viewport, ≥50% at ≥720px). Three breakpoints:
+ *   <1000px → stacked (existing behavior; V1 partially honored via
+ *             Discussion Mode max-height cap and panel collapsible defaults)
+ *   1000-1199px → 260px rail (narrow but useful)
+ *   ≥1200px → 320px rail (default wide)
+ * Per architect msg 404 + tech-leader msg 402: lowering breakpoint to
+ * 1000px closes V1 invariant for typical laptop viewports (1366×768) too.
+ */
+@media (min-width: 1000px) and (max-width: 1199.98px) {
+  .project-tab .decision-panel-section,
+  .project-tab .claims-section {
+    float: right;
+    clear: right;
+    width: 260px;
+    margin-left: 12px;
+    margin-bottom: 12px;
+    position: relative;
+    z-index: 2;
+  }
+
+  .project-tab .decision-panel-section {
+    margin-top: 0;
+  }
+
+  /* Slightly tighter Discussion Mode cap at narrow wide-screens. */
+  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
+  .project-tab .discussion-mode-section > .collapsible-section-body {
+    max-height: 160px;
+    overflow-y: auto;
+  }
+}
+
 @media (min-width: 1200px) {
   /* Right rail container: Decision Panel + Active Claims floated right as
    * a fixed-width column. Both sections are existing CollapsibleSection
@@ -7669,14 +7703,6 @@
     margin-top: 0;
   }
 
-  /* Message stream grows when right rail is in play. The existing message
-   * stream container takes remaining width naturally because it's a flow
-   * child after the floated rail siblings. */
-  .project-tab {
-    /* No grid/flex restructure — float-right is enough to create the
-     * two-column visual without breaking the existing tree. */
-  }
-
   /* Discussion Mode band: when at wide viewport, shrink the always-visible
    * surface so it doesn't fight the message stream for vertical space.
    * The band's CollapsibleSection header is 30px; this caps the EXPANDED
@@ -7687,6 +7713,19 @@
   .project-tab .discussion-mode-section[open] > .collapsible-section-body,
   .project-tab .discussion-mode-section > .collapsible-section-body {
     max-height: 180px;
+    overflow-y: auto;
+  }
+}
+
+/* Narrow viewports (<1000px): Discussion Mode capped tighter still + the
+ * existing CollapsibleSection auto-derive-from-content default keeps the
+ * panel collapsed when empty. Net effect: V1 invariant partially honored
+ * even at narrow widths through aggressive vertical compression.
+ */
+@media (max-width: 999.98px) {
+  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
+  .project-tab .discussion-mode-section > .collapsible-section-body {
+    max-height: 140px;
     overflow-y: auto;
   }
 }
