@@ -1092,3 +1092,45 @@
   color: #5b6478;
   font-size: 11px;
 }
+
+/* Empty-rotation warning — UI-arch fix per human msg 27. Visible amber
+ * banner above the status strip when Assembly Line is ON in rotation mode
+ * but rotation_order is empty. Matches the .assembly-delegation-banner
+ * amber pattern for warning-coherence; uses a slightly stronger left rail
+ * to read as "action needed" not "FYI delegation note". */
+.assembly-empty-rotation-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 6px 0;
+  background: rgba(251, 191, 36, 0.10);
+  border-left: 4px solid #fbbf24;
+  border-radius: 4px;
+  color: #fbbf24;
+  font-size: 12px;
+}
+
+.assembly-empty-rotation-icon {
+  font-size: 16px;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+
+.assembly-empty-rotation-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.assembly-empty-rotation-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  margin-bottom: 2px;
+  letter-spacing: 0.01em;
+}
+
+.assembly-empty-rotation-detail {
+  color: #d4d4d4;
+  font-size: 11.5px;
+  line-height: 1.45;
+}

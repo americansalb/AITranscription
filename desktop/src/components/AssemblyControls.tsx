@@ -977,6 +977,34 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
         </div>
       )}
 
+      {/* Empty-rotation warning — UI-arch fix per human msg 27 "fix it".
+          When Assembly Line is ON in rotation mode but rotation_order is
+          empty, no seat can hold the mic in a structured way and the team
+          sees no visible structure (this is the failure mode the human
+          reported in msg 23). The "No rotation set" hint inside the status
+          strip below is too small to be discoverable. Surface it
+          prominently with a clear explanation. Backend fix (seeding
+          rotation_order on set_assembly enable) is architect/developer
+          lane — this is the defensive UI that replaces silent failure
+          with a discoverable message. */}
+      {assemblyActive && micMode === 'rotation' && rotationOrder.length === 0 && (
+        <div className="assembly-empty-rotation-warning" role="alert">
+          <span className="assembly-empty-rotation-icon" aria-hidden="true">⚠</span>
+          <div className="assembly-empty-rotation-body">
+            <div className="assembly-empty-rotation-title">
+              Rotation order is empty
+            </div>
+            <div className="assembly-empty-rotation-detail">
+              Assembly Line is ON{currentSpeaker ? ` and ${currentSpeaker} holds the mic` : ''},
+              but no seats are in rotation. The mic can't structurally pass to anyone next.
+              {activeSeats.length > 0 && (
+                <> {activeSeats.length} active {activeSeats.length === 1 ? 'seat is' : 'seats are'} present and could be rotated.</>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Per-mechanism status strip — UI-arch msg 969 fold. "Currently:"
           segment dropped in B.3 Item 5 (per UX-eng spec §131): the current
           speaker is now embedded in the assembly button's label, making the
