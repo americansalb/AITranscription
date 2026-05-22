@@ -3476,12 +3476,26 @@ When multiple instances of this role are active:
               </button>
             </div>
 
-            {/* Popover-mounted controls. Renders via createPortal so the
+            {/* ProtocolPanel inline below the strip — Phase 1b polish E2
+                (evil-arch msg 509 + tech-leader msg 511): force-release /
+                yield are destructive actions that should be 1-click, not
+                buried two clicks deep behind Configure ⚙. AssemblyControls
+                (settings: preset / mic mode / moderator / review-intensity
+                / plan) stays in the popover because those are NOT urgent
+                quick-access controls. */}
+            <ProtocolPanel
+              projectDir={projectDir}
+              section={activeSection || "default"}
+              selfSeat={null /* this is the human's view; selfSeat = null */}
+              rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+              rolesConfig={project?.config?.roles}
+            />
+
+            {/* Popover-mounted SETTINGS only. Renders via createPortal so the
                 modal can layer above the rest of the CollabTab without
                 z-index/overflow gotchas. Closes on Escape, click-outside,
-                or the × button. AssemblyControls + ProtocolPanel are
-                rendered inside; same components, same state, just
-                relocated UX surface. */}
+                or the × button. AssemblyControls is the only child now
+                per E2 split — ProtocolPanel moved inline above. */}
             <DiscussionSettingsPopover
               open={discussionPopoverOpen}
               onClose={() => setDiscussionPopoverOpen(false)}
@@ -3496,13 +3510,6 @@ When multiple instances of this role are active:
                   projectDir={projectDir}
                 />
               )}
-              <ProtocolPanel
-                projectDir={projectDir}
-                section={activeSection || "default"}
-                selfSeat={null /* this is the human's view; selfSeat = null */}
-                rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
-                rolesConfig={project?.config?.roles}
-              />
             </DiscussionSettingsPopover>
           </>
           );

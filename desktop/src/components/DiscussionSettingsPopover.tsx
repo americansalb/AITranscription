@@ -1,9 +1,8 @@
 // DiscussionSettingsPopover — Phase 1b of fresh-layout v2 (architect msg 468 + 484).
 //
-// Portal-mounted modal popover that hosts AssemblyControls + ProtocolPanel
-// formerly housed in the inline Discussion Mode CollapsibleSection. Opened
-// by the ⚙ gear button in the top bar; closes on Escape / click-outside /
-// explicit close.
+// Portal-mounted modal popover that hosts AssemblyControls formerly housed
+// in the inline Discussion Mode CollapsibleSection. Opened by the ⚙ gear
+// button in the top bar; closes on Escape / click-outside / explicit close.
 //
 // Why a popover vs the inline collapsible:
 // - The Discussion Mode band expanded was ~150px of vertical chrome on
@@ -17,6 +16,17 @@
 //   per evil-arch msg 390 + architect msg 391 — preserves the msg-5450
 //   lesson that hiding controls behind a gear-only surface kills
 //   discoverability.
+//
+// Phase 1b polish (this revision, per dev-chall msg 504 FU1+FU2 + evil-arch msg 509 E2):
+// - FU1 — full focus-trap: Tab from last focusable wraps to first; Shift+Tab
+//   from first wraps to last. Replaces prior auto-focus-only "light trap"
+//   that let keyboard users escape the modal via Tab to browser chrome.
+// - FU2 — focus restore to opener on close: captures document.activeElement
+//   when popover opens and restores focus when it closes. Keyboard users
+//   land back on the Configure ⚙ button instead of body.
+// - E2 (separate; in CollabTab.tsx, not here) — ProtocolPanel (force-release,
+//   yield, current speaker quick-actions) split OUT of the popover so it
+//   stays inline-visible. This popover now hosts AssemblyControls only.
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -30,6 +40,9 @@ export interface DiscussionSettingsPopoverProps {
   footer?: ReactNode;
 }
 
+const FOCUSABLE_SELECTOR =
+  "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
 export function DiscussionSettingsPopover({
   open,
   onClose,
@@ -38,29 +51,71 @@ export function DiscussionSettingsPopover({
   footer,
 }: DiscussionSettingsPopoverProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // FU2 — capture opener so we can restore focus on close. document.activeElement
+  // at the moment open flips false→true is the Configure ⚙ button (or whatever
+  // element invoked us). Stored in ref so it survives renders without retriggering
+  // the effect chain.
+  const openerRef = useRef<HTMLElement | null>(null);
 
-  // Escape closes; focus-trap is light-weight (focuses first focusable on
-  // open, returns focus to opener via DOM management at consumer site).
+  // Escape closes (FU1 unchanged) + FU1 boundary wrap on Tab/Shift+Tab.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.stopPropagation();
         onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // FU1 — Tab boundary wrap. Without this, Tab from last focusable cycles
+      // out to browser chrome (or, with shift, to page content behind the
+      // backdrop). Modal contract requires staying inside the dialog.
+      const root = containerRef.current;
+      if (!root) return;
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+      ).filter((el) => !el.hasAttribute("aria-hidden"));
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Focus first focusable on open (light focus-trap).
+  // FU2 — capture opener on open, restore on close. Effect runs on every
+  // open flip; the unmount/close handler restores focus. Guard against
+  // restoring to elements that may have been removed (e.g. opener
+  // unmounted while popover was open).
+  useEffect(() => {
+    if (!open) {
+      const opener = openerRef.current;
+      if (opener && document.body.contains(opener)) {
+        opener.focus();
+      }
+      openerRef.current = null;
+      return;
+    }
+    openerRef.current = document.activeElement as HTMLElement | null;
+  }, [open]);
+
+  // Focus first focusable on open (FU1 entry).
   useEffect(() => {
     if (!open) return;
     const root = containerRef.current;
     if (!root) return;
-    const focusable = root.querySelector<HTMLElement>(
-      "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])"
-    );
+    const focusable = root.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
     focusable?.focus();
   }, [open]);
 
