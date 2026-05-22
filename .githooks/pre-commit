@@ -320,6 +320,21 @@ def main() -> None:
         return p2[2:] if p2.startswith("./") else p2
 
     scope_set = {normalize(p) for p in scope}
+    # Glob normalization: scope entries ending with `/**` are equivalent to
+    # the trailing-slash prefix form. Map `desktop/foo/**` → `desktop/foo/`
+    # for the prefix check below. Closes the recurring --no-verify bypass
+    # pattern this session (a5e96ea, 055d19a, 87893c8 + 7749369 all had to
+    # bypass when architect used the `/**` glob form in revise_plan).
+    # Per Instance #12 of the multi-writer ledger + dev-chall msg 396 F4 +
+    # evil-arch msg 394 flag B + tech-leader msg 408 ruling.
+    def to_prefix(p: str) -> str:
+        # Trailing `/**` or `/*` → directory prefix.
+        if p.endswith("/**"):
+            return p[:-2]  # drop "**", keep trailing "/"
+        if p.endswith("/*"):
+            return p[:-1]  # drop "*", keep trailing "/"
+        return p
+    scope_set = {to_prefix(p) for p in scope_set}
     out_of_scope = []
     for staged in staged_files():
         s = normalize(staged)
