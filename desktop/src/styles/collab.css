@@ -7601,9 +7601,15 @@
   margin-bottom: 2px;
 }
 
+/* Phase 1a (architect msg 460 + human msg 457) — restore avatar prominence
+ * in compact card mode. Real role cards with avatars/photos are the
+ * primary surface; shrinking avatars to 22px reduced visual identity too
+ * much. Restored to 28px (same as non-compact). Card padding stays
+ * tightened; only the avatar gets back to original size.
+ */
 .project-roles-grid.project-roles-compact .role-card-avatar-collab {
-  width: 22px !important;
-  height: 22px !important;
+  width: 28px !important;
+  height: 28px !important;
 }
 
 .project-roles-grid.project-roles-compact .role-card-title {
