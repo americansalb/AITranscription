@@ -2850,6 +2850,11 @@ pub mod currency {
         pub escrow_items: Vec<EscrowItem>,
         #[serde(default)]
         pub timed_out: bool,
+        /// Phase 2 (c): turn until which this seat is banned from filing system
+        /// disputes (set on an incorrect system_dispute ruling; cleared on
+        /// reinstate). None = not banned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub system_dispute_ban_until: Option<u64>,
     }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -3209,6 +3214,18 @@ pub mod currency {
                 }
                 // Released amount is already in row.balance_after via the credit path.
             }
+            // Phase 2 (c): reinstatement. balance set to the row's amount (0 per
+            // directive — not 10000); punitive + escrow state fully cleared.
+            "reinstate" => {
+                seat_entry.balance = row.amount;
+                seat_entry.timed_out = false;
+                seat_entry.escrow_items.clear();
+                seat_entry.escrow_held = 0;
+                seat_entry.system_dispute_ban_until = None;
+            }
+            // Phase 2 (c): pool destroyed (both_wrong ruling). Audit-only — no
+            // balance change anywhere (the row's seat is "system:pool").
+            "pool_destroyed" => {}
             other => {
                 return Err(format!(
                     "currency.replay HARD ERROR: unknown transaction type {:?} (row id {})",

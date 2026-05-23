@@ -3744,7 +3744,82 @@ fn handle_protocol_mutate(
     let pd = state.project_dir.clone();
     let actor = format!("{}:{}", state.role, state.instance);
     let section = get_active_section(&pd);
+    // Phase 2 (c) — reinstate_agent is special-cased OUTSIDE do_protocol_mutate:
+    // it resets currency balance (needs the currency lock OUTER) + re-adds the
+    // seat to rotation_order (board lock INNER). do_protocol_mutate only holds
+    // the board lock, so nesting currency inside it would violate the
+    // currency-outer ordering. Human-only; no CAS (rare, no race).
+    if action == "reinstate_agent" {
+        return apply_reinstate_agent(&pd, &actor, &section, &args);
+    }
     do_protocol_mutate(&pd, &actor, &section, action, args, rev_in)
+}
+
+/// Phase 2 (c) — human reinstates a timed-out (or any) seat. Sets balance to 0
+/// (NOT 10000 — they restart from nothing per directive), clears timed_out +
+/// escrow + system-dispute ban, re-adds to rotation_order if assembly is active.
+fn apply_reinstate_agent(pd: &str, actor: &str, section: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    if !actor.starts_with("human:") {
+        return Err("[Reinstate] human-only action — only the human can reinstate a seat.".to_string());
+    }
+    let seat = args.get("seat").and_then(|v| v.as_str())
+        .ok_or("[Reinstate] requires args.seat (\"role:N\")")?.to_string();
+    collab::with_currency_and_board_lock(pd, || {
+        let mut snap = read_balances_snapshot(pd)?;
+        if snap.seats.is_empty() && currency_jsonl_path(pd).exists() { snap = replay_balances_from_ledger(pd)?; }
+        {
+            let e = snap.seats.entry(seat.clone()).or_default();
+            e.balance = 0;
+            e.timed_out = false;
+            e.escrow_items.clear();
+            e.escrow_held = 0;
+            e.system_dispute_ban_until = None;
+        }
+        let now = collab::iso_now();
+        let id = snap.next_txn_id; snap.next_txn_id += 1;
+        append_currency_transaction(pd, &LedgerRow {
+            id, txn_type: "reinstate".to_string(), seat: seat.clone(), amount: 0,
+            reason: format!("reinstated by {} — balance reset to 0", actor),
+            ref_msg: None, balance_after: 0, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: None, linked_edit_msg: None, at: now.clone(),
+        })?;
+        write_balances_snapshot(pd, &snap)?;
+
+        // Re-add to rotation_order if assembly is active (best-effort; protocol
+        // read/write under the board lock that's the inner half of this lock).
+        let mut proto = read_protocol_for_section_value(pd, section);
+        let asm_active = proto.get("preset").and_then(|p| p.as_str()) == Some(PRESET_ASSEMBLY_LINE);
+        if asm_active {
+            if let Some(floor) = proto.get_mut("floor").and_then(|f| f.as_object_mut()) {
+                let ro = floor.entry("rotation_order".to_string()).or_insert_with(|| serde_json::json!([]));
+                if let Some(arr) = ro.as_array_mut() {
+                    if !arr.iter().any(|v| v.as_str() == Some(seat.as_str())) {
+                        arr.push(serde_json::json!(seat));
+                    }
+                }
+            }
+            let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+            if let Some(obj) = proto.as_object_mut() {
+                obj.insert("rev".to_string(), serde_json::json!(cur_rev + 1));
+                obj.insert("last_writer_seat".to_string(), serde_json::json!(actor));
+                obj.insert("last_writer_action".to_string(), serde_json::json!("reinstate_agent"));
+                obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
+            }
+            let _ = write_protocol_for_section_value(pd, section, &proto);
+        }
+
+        let msg_id = next_message_id(pd);
+        let _ = append_to_board(pd, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[Reinstated] {} reinstated by {}", seat, actor),
+            "body": format!("[Reinstated] {} reinstated by {}. Balance reset to 0 (fresh start, not 10000); timed-out + escrow + system-dispute ban cleared.{}",
+                seat, actor, if asm_active { " Re-added to rotation." } else { "" }),
+            "metadata": { "reinstated_seat": seat, "by": actor }
+        }));
+        Ok(serde_json::json!({ "reinstated": seat, "balance": 0, "by": actor }))
+    })
 }
 
 /// Inner of `handle_protocol_mutate` — pure-input version used by tests
@@ -9436,6 +9511,210 @@ fn append_dispute_system_message(dir: &str, subject: &str, body: &str, metadata:
 /// `currency_concede(dispute_id)` — caller (challenger or target) concedes;
 /// the OTHER party wins the full pool. Resolves the dispute, removes it
 /// from the open-disputes snapshot, posts a system message.
+/// Phase 2 (c) — call a judge into a dispute. Debits JUDGE_COST_PER_PARTY (50)
+/// from BOTH parties (+100 to pool), sets judge = "human:0". Caller must be a party.
+fn handle_currency_call_judge(dispute_id: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    if caller.starts_with("human:") {
+        return Err("[CallJudge] Human is exempt from currency disputes.".to_string());
+    }
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut dispute = read_dispute_by_id(&dir, dispute_id)?
+            .ok_or_else(|| format!("[CallJudge] dispute {} not found.", dispute_id))?;
+        if dispute.status != "open" {
+            return Err(format!("[CallJudge] dispute {} is already {}.", dispute_id, dispute.status));
+        }
+        if caller != dispute.challenger && caller != dispute.target {
+            return Err(format!("[CallJudge] You are not a party to dispute {}.", dispute_id));
+        }
+        if dispute.judge.is_some() {
+            return Err(format!("[CallJudge] dispute {} already has a judge.", dispute_id));
+        }
+        let now = collab::iso_now();
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        for party in [dispute.challenger.clone(), dispute.target.clone()] {
+            let bal = {
+                let e = snap.seats.entry(party.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
+                e.balance = e.balance.saturating_sub(JUDGE_COST_PER_PARTY);
+                if e.balance <= DEFICIT_CAP_COPPER { e.timed_out = true; }
+                e.balance
+            };
+            let id = snap.next_txn_id; snap.next_txn_id += 1;
+            append_currency_transaction(&dir, &LedgerRow {
+                id, txn_type: "penalty".to_string(), seat: party.clone(),
+                amount: -JUDGE_COST_PER_PARTY, reason: format!("call judge for dispute {}", dispute_id),
+                ref_msg: Some(dispute.target_msg), balance_after: bal, escrow_id: None, release_turn: None,
+                turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
+            })?;
+        }
+        dispute.pool += JUDGE_COST_PER_PARTY * 2;
+        dispute.judge = Some("human:0".to_string());
+        write_balances_snapshot(&dir, &snap)?;
+        append_dispute_row(&dir, &dispute)?;
+        let _ = append_dispute_system_message(&dir,
+            &format!("[Judge invoked] dispute {} — pool {}", dispute_id, dispute.pool),
+            &format!("[Judge invoked] {} called a judge into dispute {}. Pool now {} copper. Awaiting human:0 ruling (currency_judge_ruling: challenger_wins | target_wins | both_wrong).", caller, dispute_id, dispute.pool),
+            serde_json::json!({"dispute_id": dispute_id, "pool": dispute.pool, "judge": "human:0"}))?;
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({"id": dispute_id})))
+    })
+}
+
+/// Phase 2 (c) — judge ruling. Caller MUST be the dispute's judge. Routes the
+/// pool: challenger_wins → credit challenger; target_wins → credit target;
+/// both_wrong → pool_destroyed (no credit). System disputes (target=="system")
+/// map challenger_wins→reward filer, else→penalty + ban.
+fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    if !matches!(ruling, "challenger_wins" | "target_wins" | "both_wrong") {
+        return Err("[Ruling] ruling must be challenger_wins, target_wins, or both_wrong.".to_string());
+    }
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut dispute = read_dispute_by_id(&dir, dispute_id)?
+            .ok_or_else(|| format!("[Ruling] dispute {} not found.", dispute_id))?;
+        if dispute.status != "open" {
+            return Err(format!("[Ruling] dispute {} is already {}.", dispute_id, dispute.status));
+        }
+        let judge = dispute.judge.clone().ok_or_else(|| format!("[Ruling] dispute {} has no judge (call_judge first).", dispute_id))?;
+        if caller != judge {
+            return Err(format!("[Ruling] only the judge ({}) can rule on dispute {}.", judge, dispute_id));
+        }
+        let now = collab::iso_now();
+        let pool = dispute.pool;
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        let is_system = dispute.target == "system";
+
+        // Helper to credit a seat + emit a credit row.
+        let mut credit_seat = |snap: &mut BalancesSnapshot, seat: &str, amount: i64, reason: String| -> Result<(), String> {
+            let bal = {
+                let e = snap.seats.entry(seat.to_string()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
+                e.balance = e.balance.saturating_add(amount);
+                e.balance
+            };
+            let id = snap.next_txn_id; snap.next_txn_id += 1;
+            append_currency_transaction(&dir, &LedgerRow {
+                id, txn_type: if amount >= 0 { "credit".to_string() } else { "penalty".to_string() },
+                seat: seat.to_string(), amount, reason, ref_msg: Some(dispute.target_msg),
+                balance_after: bal, escrow_id: None, release_turn: None, turn: Some(snap.turn_counter),
+                action_kind: Some(if amount >= 0 { ActionKind::Credit } else { ActionKind::Penalty }), linked_edit_msg: None, at: now.clone(),
+            })
+        };
+
+        let outcome: String;
+        if is_system {
+            // System dispute: filer = challenger, judged correct/incorrect.
+            let filer = dispute.challenger.clone();
+            if ruling == "challenger_wins" {
+                credit_seat(&mut snap, &filer, SYSTEM_DISPUTE_REWARD, format!("system dispute {} correct — reward", dispute_id))?;
+                outcome = format!("correct: {} rewarded {} copper", filer, SYSTEM_DISPUTE_REWARD);
+            } else {
+                // incorrect → additional penalty so total cost = SYSTEM_DISPUTE_PENALTY (filing 50 already paid).
+                let extra = SYSTEM_DISPUTE_PENALTY - SYSTEM_DISPUTE_COST;
+                credit_seat(&mut snap, &filer, -extra, format!("system dispute {} incorrect — penalty", dispute_id))?;
+                if let Some(e) = snap.seats.get_mut(&filer) {
+                    e.system_dispute_ban_until = Some(snap.turn_counter + SYSTEM_DISPUTE_BAN_TURNS);
+                }
+                outcome = format!("incorrect: {} penalized (total {} cu) + {}-turn system-dispute ban", filer, SYSTEM_DISPUTE_PENALTY, SYSTEM_DISPUTE_BAN_TURNS);
+            }
+        } else if ruling == "challenger_wins" {
+            credit_seat(&mut snap, &dispute.challenger.clone(), pool, format!("dispute {} — judge ruled challenger wins", dispute_id))?;
+            outcome = format!("{} (challenger) wins {} copper", dispute.challenger, pool);
+        } else if ruling == "target_wins" {
+            credit_seat(&mut snap, &dispute.target.clone(), pool, format!("dispute {} — judge ruled target wins", dispute_id))?;
+            outcome = format!("{} (target) wins {} copper", dispute.target, pool);
+        } else {
+            // both_wrong → pool destroyed, nobody credited.
+            let id = snap.next_txn_id; snap.next_txn_id += 1;
+            append_currency_transaction(&dir, &LedgerRow {
+                id, txn_type: "pool_destroyed".to_string(), seat: "system:pool".to_string(),
+                amount: -pool, reason: format!("dispute {} — both wrong, pool destroyed", dispute_id),
+                ref_msg: Some(dispute.target_msg), balance_after: 0, escrow_id: None, release_turn: None,
+                turn: Some(snap.turn_counter), action_kind: Some(ActionKind::PoolDestroyed), linked_edit_msg: None, at: now.clone(),
+            })?;
+            outcome = format!("both wrong — pool of {} copper destroyed", pool);
+        }
+
+        write_balances_snapshot(&dir, &snap)?;
+        dispute.status = "resolved".to_string();
+        dispute.resolution = Some(ruling.to_string());
+        dispute.resolved_at = Some(now.clone());
+        append_dispute_row(&dir, &dispute)?;
+        let mut open = read_open_disputes_snapshot(&dir)?;
+        snapshot_remove_open(&mut open, dispute_id, &dispute.challenger, &dispute.target);
+        write_open_disputes_snapshot(&dir, &open)?;
+        let _ = append_dispute_system_message(&dir,
+            &format!("[Dispute ruled] {} — {}", dispute_id, ruling),
+            &format!("[Dispute ruled] judge {} ruled '{}' on dispute {}: {}.", caller, ruling, dispute_id, outcome),
+            serde_json::json!({"dispute_id": dispute_id, "ruling": ruling}))?;
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({"id": dispute_id})))
+    })
+}
+
+/// Phase 2 (c) — file a system dispute (challenge the system itself; human judges).
+/// Costs SYSTEM_DISPUTE_COST (50). Rejected if balance < cost or seat is banned.
+fn handle_currency_system_dispute(description: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let filer = format!("{}:{}", state.role, state.instance);
+    if filer.starts_with("human:") {
+        return Err("[SystemDispute] Human is exempt.".to_string());
+    }
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        let bal = snap.seats.get(&filer).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
+        if bal < SYSTEM_DISPUTE_COST {
+            return Err(format!("[SystemDispute] Insufficient balance: need {}, have {}.", SYSTEM_DISPUTE_COST, bal));
+        }
+        if let Some(until) = snap.seats.get(&filer).and_then(|s| s.system_dispute_ban_until) {
+            if until > snap.turn_counter {
+                return Err(format!("[SystemDispute] You are banned from system disputes until turn {} (now {}).", until, snap.turn_counter));
+            }
+        }
+        let now = collab::iso_now();
+        // Debit the filing cost.
+        let after = {
+            let e = snap.seats.entry(filer.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
+            e.balance = e.balance.saturating_sub(SYSTEM_DISPUTE_COST);
+            e.balance
+        };
+        let id = snap.next_txn_id; snap.next_txn_id += 1;
+        append_currency_transaction(&dir, &LedgerRow {
+            id, txn_type: "penalty".to_string(), seat: filer.clone(),
+            amount: -SYSTEM_DISPUTE_COST, reason: "system dispute filed".to_string(),
+            ref_msg: None, balance_after: after, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
+        })?;
+        // Open the dispute (target = "system", judge = human:0).
+        let mut open = read_open_disputes_snapshot(&dir)?;
+        let dispute_id = next_dispute_id(&mut open);
+        snapshot_add_open(&mut open, &dispute_id, &filer, "system");
+        let dispute = DisputeRow {
+            id: dispute_id.clone(), challenger: filer.clone(), target: "system".to_string(),
+            target_msg: 0, pool: SYSTEM_DISPUTE_COST, status: "open".to_string(), resolution: None,
+            messages: vec![DisputeMessage { from: filer.clone(), body: description.to_string(), added_to_pool: 0, at: now.clone() }],
+            judge: Some("human:0".to_string()), opened_at: now.clone(), resolved_at: None, turn_opened: snap.turn_counter,
+        };
+        write_balances_snapshot(&dir, &snap)?;
+        append_dispute_row(&dir, &dispute)?;
+        write_open_disputes_snapshot(&dir, &open)?;
+        let _ = append_dispute_system_message(&dir,
+            &format!("[System dispute] {} filed {}", filer, dispute_id),
+            &format!("[System dispute] {} filed system dispute {}: {}. human:0 rules via currency_judge_ruling (challenger_wins=correct → +{}, else → -{} total + {}-turn ban).",
+                filer, dispute_id, description, SYSTEM_DISPUTE_REWARD, SYSTEM_DISPUTE_PENALTY, SYSTEM_DISPUTE_BAN_TURNS),
+            serde_json::json!({"dispute_id": dispute_id, "filer": filer, "judge": "human:0"}))?;
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({"id": dispute_id})))
+    })
+}
+
 fn handle_currency_concede(dispute_id: &str) -> Result<serde_json::Value, String> {
     use collab::currency::*;
     let state = get_or_rejoin_state()?;
@@ -12939,6 +13218,40 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         },
                         "required": ["dispute_id", "body"]
                     }
+                },
+                {
+                    "name": "currency_call_judge",
+                    "description": "Call a judge (human:0) into an open dispute you are a party to. Costs 50 copper from BOTH parties (100 added to the pool). After this, only the judge can resolve it via currency_judge_ruling.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "dispute_id": { "type": "string", "description": "Dispute id" }
+                        },
+                        "required": ["dispute_id"]
+                    }
+                },
+                {
+                    "name": "currency_judge_ruling",
+                    "description": "Rule on a dispute (judge only — the seat in the dispute's judge field, default human:0). ruling: challenger_wins (credit challenger the pool), target_wins (credit target), or both_wrong (pool destroyed, nobody credited). For system disputes, challenger_wins = filer correct (reward), otherwise penalty + ban.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "dispute_id": { "type": "string", "description": "Dispute id" },
+                            "ruling": { "type": "string", "enum": ["challenger_wins", "target_wins", "both_wrong"], "description": "The ruling" }
+                        },
+                        "required": ["dispute_id", "ruling"]
+                    }
+                },
+                {
+                    "name": "currency_system_dispute",
+                    "description": "File a dispute against the system itself (e.g. a rules/scoring complaint), judged by human:0. Costs 50 copper. If the human rules it correct you gain 200 copper; if incorrect you lose 250 total and are banned from system disputes for 10 turns.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "description": { "type": "string", "description": "What you are disputing about the system" }
+                        },
+                        "required": ["description"]
+                    }
                 }]
             })
         }
@@ -13773,6 +14086,43 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "content": [{ "type": "text", "text": e }],
                             "isError": true
                         }),
+                    }
+                }
+            } else if tool_name == "currency_call_judge" {
+                // Phase 2 commit (c) — args: dispute_id (String).
+                let dispute_id = params.get("arguments").and_then(|a| a.get("dispute_id"))
+                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if dispute_id.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_call_judge requires dispute_id" }], "isError": true })
+                } else {
+                    match handle_currency_call_judge(&dispute_id) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Judge invoked.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "currency_judge_ruling" {
+                // Phase 2 commit (c) — args: dispute_id (String), ruling (String).
+                let arguments = params.get("arguments");
+                let dispute_id = arguments.and_then(|a| a.get("dispute_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let ruling = arguments.and_then(|a| a.get("ruling")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if dispute_id.is_empty() || ruling.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_judge_ruling requires dispute_id and ruling (challenger_wins|target_wins|both_wrong)" }], "isError": true })
+                } else {
+                    match handle_currency_judge_ruling(&dispute_id, &ruling) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Ruling applied.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "currency_system_dispute" {
+                // Phase 2 commit (c) — args: description (String).
+                let description = params.get("arguments").and_then(|a| a.get("description"))
+                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if description.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_system_dispute requires description" }], "isError": true })
+                } else {
+                    match handle_currency_system_dispute(&description) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("System dispute filed.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                     }
                 }
             } else {
