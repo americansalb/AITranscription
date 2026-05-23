@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Two-controls v1 pre-commit hook (spec 2026-05-14, finding #8).
+DISABLED 2026-05-23 per human msg 1826: "Disable the planning_blocks_commit hook.
+No more plan-scope or plan-hash gates on commits. I'll tell you what to build,
+you build it, you commit it. The plan/execute phase system is off."
 
-Reads .vaak/active-section to determine the active section, then reads that
-section's protocol.json:floor and gates the commit per spec § Pre-commit hook:
+Hook is now a no-op (always exit 0). The original phase / plan_hash / scope
+gating logic is preserved BELOW the early-exit so it can be re-enabled by
+removing the `sys.exit(0)` immediately after the import block. Architect:0
+chose preservation over deletion to make re-enablement trivial.
 
+Original purpose (Two-controls v1 spec 2026-05-14, finding #8):
   - phase == "planning" → reject unconditionally with [planning_blocks_commit].
   - phase == "execution" + plan_hash set → verify (a) plan_path file SHA-256
     matches stored plan_hash ([plan_hash_mismatch]), (b) staged files are a
@@ -28,6 +33,11 @@ Exit codes: 0 = allow commit, 1 = reject commit (git aborts the commit).
 import hashlib
 import json
 import os
+import sys
+
+# DISABLED per human msg 1826 (2026-05-23). All plan-scope / plan-hash / phase
+# gating turned off. Hook always passes. Remove this `sys.exit(0)` to re-enable.
+sys.exit(0)
 import re
 import subprocess
 import sys
