@@ -1134,3 +1134,126 @@
   font-size: 11.5px;
   line-height: 1.45;
 }
+
+/* ============================================================
+ * Vertical-stack layout (sidebar surface)
+ * ============================================================
+ * Opt-in variant for narrow sidebar contexts (~280-320px). The default
+ * .assembly-controls-row uses horizontal flex-wrap which collapses
+ * sub-200px children into "tiny squares" when the row width drops below
+ * ~600px. The vertical variant switches to a 2-column grid (label / control)
+ * so each row reads as label-left, control-right at full sidebar width.
+ *
+ * Authored per architect:0 msg 833 + human msg 867 (always-on vertical sidebar).
+ * Class contract published at ui-architect:1 msg 876. Default horizontal
+ * variant (popover surface) is untouched.
+ */
+
+.assembly-controls.is-vertical .assembly-controls-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  row-gap: 8px;
+  column-gap: 10px;
+  align-items: center;
+}
+
+/* Mic-toggle button + phase pill span both columns and read left-aligned.
+ * They are the section's primary controls; full-width gives them visual
+ * weight without competing with the secondary label/control rows below. */
+.assembly-controls.is-vertical .assembly-mic-btn,
+.assembly-controls.is-vertical .assembly-phase-pill {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* Mic-mode + moderator-picker labels: split their inner "label: select" pair
+ * into the parent grid. .assembly-mic-mode and .assembly-moderator-picker
+ * wrap a label + select; in vertical mode the wrapper becomes a sub-grid
+ * matching the parent's columns so all labels align vertically. */
+.assembly-controls.is-vertical .assembly-mic-mode,
+.assembly-controls.is-vertical .assembly-moderator-picker {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  margin: 0;
+}
+
+.assembly-controls.is-vertical .assembly-mic-mode-label,
+.assembly-controls.is-vertical .assembly-moderator-label {
+  justify-self: start;
+  white-space: nowrap;
+}
+
+.assembly-controls.is-vertical .assembly-mic-mode select,
+.assembly-controls.is-vertical .assembly-moderator-picker select {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Mic-mode hint (the "moderator required" inline notice) spans full width
+ * below the dropdown row when present. */
+.assembly-controls.is-vertical .assembly-mic-mode-hint {
+  grid-column: 1 / -1;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+/* Plan link row: 3-column sub-layout (label / filename / ⋯ menu button).
+ * Filename gets middle-truncation via overflow:hidden + text-overflow on
+ * the inner .assembly-plan-path span. */
+.assembly-controls.is-vertical .assembly-plan-link {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.assembly-controls.is-vertical .assembly-plan-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Delegation chart, replanning queue, fast-flip row, review-intensity row,
+ * propose-replanning button, empty-rotation warning, and status strip all
+ * live OUTSIDE .assembly-controls-row — they're siblings of the row inside
+ * the .assembly-controls section. The section is already flex-column, so
+ * these stack naturally. We only need to enforce full-width sizing so
+ * none of them try to be inline at narrow sidebar widths. */
+.assembly-controls.is-vertical .assembly-delegation-chart,
+.assembly-controls.is-vertical .assembly-replanning-queue,
+.assembly-controls.is-vertical .assembly-moderator-fast-flip,
+.assembly-controls.is-vertical .assembly-review-intensity-row,
+.assembly-controls.is-vertical .assembly-propose-replanning-row,
+.assembly-controls.is-vertical .assembly-empty-rotation-warning,
+.assembly-controls.is-vertical .assembly-status-strip {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Fast-flip buttons stretch full width and stack one per row in vertical
+ * mode so each is a comfortable click target without the two buttons
+ * crowding side-by-side at narrow widths. */
+.assembly-controls.is-vertical .assembly-moderator-fast-flip {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.assembly-controls.is-vertical .assembly-fast-flip-btn {
+  width: 100%;
+  text-align: left;
+}
+
+/* Propose-replanning button (when present) is full-width for parity with
+ * the rest of the vertical surface. */
+.assembly-controls.is-vertical .assembly-propose-replanning-btn {
+  width: 100%;
+  text-align: left;
+}
