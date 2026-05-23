@@ -3444,6 +3444,7 @@ When multiple instances of this role are active:
           const livePreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
           const livePhase = twoControlsProtocol?.floor?.phase as string | undefined;
           const livePlanPath = twoControlsProtocol?.floor?.plan_path as string | undefined;
+          const liveReviewIntensity = twoControlsProtocol?.floor?.review_intensity as number | undefined;
           const phaseLabel = livePhase
             ? livePhase === "execution"
               ? " · Executing"
@@ -3453,6 +3454,9 @@ When multiple instances of this role are active:
             : "";
           const planLabel = livePlanPath
             ? ` · Plan: ${livePlanPath.replace(/^.*[\\/]/, "")}`
+            : "";
+          const reviewIntensityLabel = typeof liveReviewIntensity === "number"
+            ? ` · Review intensity: ${liveReviewIntensity}/10`
             : "";
           return (
           <>
@@ -3465,6 +3469,7 @@ When multiple instances of this role are active:
               <span className="discussion-mode-strip-preset">{livePreset}</span>
               {phaseLabel && <span className="discussion-mode-strip-meta">{phaseLabel}</span>}
               {planLabel && <span className="discussion-mode-strip-meta">{planLabel}</span>}
+              {reviewIntensityLabel && <span className="discussion-mode-strip-meta">{reviewIntensityLabel}</span>}
               <span className="discussion-mode-strip-spacer" />
               <button
                 type="button"
