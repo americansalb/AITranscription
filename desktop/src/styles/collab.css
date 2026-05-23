@@ -8078,3 +8078,14 @@
   color: #1d9bf0;
   font-weight: 600;
 }
+
+/* (9) Hotfix per human msg 663 — Manage Roles pane wasn't scrollable.
+ * RolesTab has min-height:100% so it grows to fill, but the parent
+ * .project-tab has overflow:hidden which clipped the bottom (the
+ * "Add new role" affordance was below the visible viewport).
+ * Cap the pane to viewport-relative max-height with internal scroll.
+ */
+.team-section-roles-pane {
+  max-height: 60vh;
+  overflow-y: auto;
+}
