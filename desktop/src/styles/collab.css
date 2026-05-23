@@ -1642,6 +1642,72 @@
   margin-top: 2px;
 }
 
+/* ==================== Rail sections (Audience + Replanning P1a/P1b) ==================== */
+/* Shared rail-item primitives + audience/replanning section styling per
+ * collab-layout-demo.html mockup parity. Mirrors claims-section muted
+ * count + italic empty-state patterns so the four rail sections feel
+ * like siblings. */
+
+.rail-section-count {
+  font-weight: 400;
+  color: #556677;
+  font-size: 12px;
+}
+.rail-section-count.zero {
+  color: var(--collab-text-muted);
+}
+
+.rail-empty {
+  font-size: 12px;
+  color: var(--collab-text-secondary);
+  font-style: italic;
+  padding: 6px 12px 4px;
+}
+
+.rail-btn {
+  margin: 6px 12px 8px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  color: var(--collab-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.rail-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.rail-btn:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.rail-item {
+  padding: 6px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.rail-item:first-child {
+  border-top: none;
+}
+.rail-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.rail-item-from {
+  font-size: 12px;
+  font-weight: 600;
+}
+.rail-item-meta {
+  font-size: 11px;
+  color: var(--collab-text-muted);
+}
+.rail-item-body {
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  margin-top: 2px;
+}
+
 /* ==================== Message Timeline ==================== */
 
 .message-timeline {
@@ -7793,32 +7859,65 @@
  * keep the existing stacked layout (which already collapses well).
  * ========================================================================== */
 
-/* Right rail: Decision Panel + Active Claims floated to a side column.
- * Width scales with viewport per V1 invariant (msg-388: timeline ≥60%
- * at ≥900px viewport, ≥50% at ≥720px). Three breakpoints:
- *   <1000px → stacked (existing behavior; V1 partially honored via
- *             Discussion Mode max-height cap and panel collapsible defaults)
- *   1000-1199px → 260px rail (narrow but useful)
- *   ≥1200px → 320px rail (default wide)
- * Per architect msg 404 + tech-leader msg 402: lowering breakpoint to
- * 1000px closes V1 invariant for typical laptop viewports (1366×768) too.
+/* P5 (always-on right sidebar at all viewports) per @human:0 msg 867 + 855:
+ * the prior @media (min-width: 1000px) gate left narrow Vaak windows with
+ * rail sections stacked inline as full-width horizontal-looking bars, which
+ * the human flagged as "horizontal bars" / "vertical bars stacked." Now the
+ * rail floats right at ALL viewport widths. Under ~500px the main column
+ * compresses but the rail stays — desktop-first (dev-challenger:0 msg 835
+ * option C). Width still scales: 260px default, 320px @ ≥1200px.
+ *
+ * P1a / P1b additions (audience-section + replanning-section) join the
+ * float group so all four rail-resident CollapsibleSections behave as one
+ * cohesive sidebar column.
  */
-@media (min-width: 1000px) and (max-width: 1199.98px) {
+.project-tab .discussion-mode-section,
+.project-tab .decision-panel-section,
+.project-tab .claims-section,
+.project-tab .audience-section,
+.project-tab .replanning-section {
+  float: right;
+  clear: right;
+  width: 260px;
+  margin-left: 12px;
+  margin-bottom: 12px;
+  position: relative;
+  z-index: 2;
+}
+
+.project-tab .discussion-mode-section {
+  /* P4 (developer:0 lane): Discussion Mode card sits at the TOP of the
+   * rail, above Decisions. Pre-allocated here so the floated rail order
+   * matches DOM order (top-to-bottom: Discussion Mode → Decisions →
+   * Claims → Audience → Replanning). */
+  margin-top: 0;
+}
+
+.project-tab .decision-panel-section {
+  margin-top: 0;
+}
+
+@media (min-width: 1200px) {
+  /* Wider viewport — bump rail to 320px for breathing room. */
+  .project-tab .discussion-mode-section,
   .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    float: right;
-    clear: right;
-    width: 260px;
-    margin-left: 12px;
-    margin-bottom: 12px;
-    position: relative;
-    z-index: 2;
+  .project-tab .claims-section,
+  .project-tab .audience-section,
+  .project-tab .replanning-section {
+    width: 320px;
+    margin-left: 16px;
   }
 
-  .project-tab .decision-panel-section {
-    margin-top: 0;
+  /* Discussion Mode band: when at wide viewport, shrink the always-visible
+   * surface so it doesn't fight the message stream for vertical space. */
+  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
+  .project-tab .discussion-mode-section > .collapsible-section-body {
+    max-height: 180px;
+    overflow-y: auto;
   }
+}
 
+@media (min-width: 1000px) and (max-width: 1199.98px) {
   /* Slightly tighter Discussion Mode cap at narrow wide-screens. */
   .project-tab .discussion-mode-section[open] > .collapsible-section-body,
   .project-tab .discussion-mode-section > .collapsible-section-body {
@@ -7827,47 +7926,9 @@
   }
 }
 
-@media (min-width: 1200px) {
-  /* Right rail container: Decision Panel + Active Claims floated right as
-   * a fixed-width column. Both sections are existing CollapsibleSection
-   * components so no JSX restructure is required — they keep their headers,
-   * keyboard nav, ARIA, and persisted-collapse state.
-   */
-  .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    float: right;
-    clear: right;
-    width: 320px;
-    margin-left: 16px;
-    margin-bottom: 12px;
-    /* Z-index so they sit above the message stream's overflow but below
-     * modals (modals are higher z-index by convention). */
-    position: relative;
-    z-index: 2;
-  }
-
-  .project-tab .decision-panel-section {
-    margin-top: 0;
-  }
-
-  /* Discussion Mode band: when at wide viewport, shrink the always-visible
-   * surface so it doesn't fight the message stream for vertical space.
-   * The band's CollapsibleSection header is 30px; this caps the EXPANDED
-   * body to a max-height with internal scroll if the controls overflow.
-   * Preserves access (all controls reachable) while honoring the ≥60%
-   * timeline constraint.
-   */
-  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
-  .project-tab .discussion-mode-section > .collapsible-section-body {
-    max-height: 180px;
-    overflow-y: auto;
-  }
-}
-
 /* Narrow viewports (<1000px): Discussion Mode capped tighter still + the
  * existing CollapsibleSection auto-derive-from-content default keeps the
- * panel collapsed when empty. Net effect: V1 invariant partially honored
- * even at narrow widths through aggressive vertical compression.
+ * panel collapsed when empty.
  */
 @media (max-width: 999.98px) {
   .project-tab .discussion-mode-section[open] > .collapsible-section-body,
@@ -8046,25 +8107,33 @@
   filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6));
 }
 
-/* (6) Right rail — distinct background + accent left-border */
-@media (min-width: 1000px) {
-  .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    background: rgba(29, 155, 240, 0.04);
-    border-left: 3px solid rgba(29, 155, 240, 0.5);
-    border-radius: 0 10px 10px 0;
-  }
+/* (6) Right rail — distinct background + accent left-border. P5: applies
+ * at all viewports now that the rail is always-on (no @media gate). */
+.project-tab .discussion-mode-section,
+.project-tab .decision-panel-section,
+.project-tab .claims-section,
+.project-tab .audience-section,
+.project-tab .replanning-section {
+  background: rgba(29, 155, 240, 0.04);
+  border-left: 3px solid rgba(29, 155, 240, 0.5);
+  border-radius: 0 10px 10px 0;
+}
 
-  .project-tab .decision-panel-section .collapsible-section-title,
-  .project-tab .claims-section .collapsible-section-title {
-    color: #1d9bf0;
-  }
+.project-tab .discussion-mode-section .collapsible-section-title,
+.project-tab .decision-panel-section .collapsible-section-title,
+.project-tab .claims-section .collapsible-section-title,
+.project-tab .audience-section .collapsible-section-title,
+.project-tab .replanning-section .collapsible-section-title {
+  color: #1d9bf0;
+}
 
-  .project-tab .decision-panel-section .collapsible-section-title::before,
-  .project-tab .claims-section .collapsible-section-title::before {
-    background: #1d9bf0;
-    box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
-  }
+.project-tab .discussion-mode-section .collapsible-section-title::before,
+.project-tab .decision-panel-section .collapsible-section-title::before,
+.project-tab .claims-section .collapsible-section-title::before,
+.project-tab .audience-section .collapsible-section-title::before,
+.project-tab .replanning-section .collapsible-section-title::before {
+  background: #1d9bf0;
+  box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
 }
 
 /* (7) Team Roster band: title accent matches roster role */
