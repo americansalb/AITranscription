@@ -9372,6 +9372,353 @@ fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_j
     })
 }
 
+// ====================================================================
+// Phase 2 commit (b) — Concede + Dispute messages + Auto-judge trigger
+// ====================================================================
+// Per architect:0 msg 1588 ship-fast cadence (review_intensity=2) + the
+// converged Phase 2 spec at `.vaak/design-notes/2026-05-23-currency-
+// disputes-phase2-spec.md`. Builds on commit (a) `60b6188` schema +
+// helpers (DisputeRow, OpenDisputesSnapshot, snapshot_remove_open,
+// append_dispute_row, read_open_disputes_snapshot).
+
+/// Latest-row-per-id read over disputes.jsonl. Disputes are append-only;
+/// the LAST row matching `dispute_id` is the authoritative state. Returns
+/// None if the dispute doesn't exist. Caller must hold the currency-and-
+/// board lock so concurrent appends don't tear the read.
+fn read_dispute_by_id(dir: &str, dispute_id: &str) -> Result<Option<collab::currency::DisputeRow>, String> {
+    let path = collab::currency::disputes_jsonl_path(dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read disputes.jsonl: {}", e))?;
+    // Iterate forward; later rows overwrite earlier ones for the same id.
+    let mut latest: Option<collab::currency::DisputeRow> = None;
+    for line in raw.lines() {
+        if line.trim().is_empty() { continue; }
+        if let Ok(row) = serde_json::from_str::<collab::currency::DisputeRow>(line) {
+            if row.id == dispute_id {
+                latest = Some(row);
+            }
+        }
+    }
+    Ok(latest)
+}
+
+/// Post a system message to the active board.jsonl. Caller must hold the
+/// currency-and-board lock. Mirrors the inline notice append in
+/// `handle_currency_objection` step 7.
+fn append_dispute_system_message(dir: &str, subject: &str, body: &str, metadata: serde_json::Value) -> Result<u64, String> {
+    use std::io::Write;
+    let msg_id = next_message_id(dir);
+    let notice = serde_json::json!({
+        "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+        "timestamp": utc_now_iso(),
+        "subject": subject,
+        "body": body,
+        "metadata": metadata,
+    });
+    let board_path = collab::active_board_path(dir);
+    if let Some(parent) = board_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let line = serde_json::to_string(&notice)
+        .map_err(|e| format!("serialize system notice: {}", e))?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&board_path)
+        .map_err(|e| format!("open board: {}", e))?;
+    writeln!(f, "{}", line).map_err(|e| format!("write board: {}", e))?;
+    Ok(msg_id)
+}
+
+/// `currency_concede(dispute_id)` — caller (challenger or target) concedes;
+/// the OTHER party wins the full pool. Resolves the dispute, removes it
+/// from the open-disputes snapshot, posts a system message.
+fn handle_currency_concede(dispute_id: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    if caller.starts_with("human:") {
+        return Err("[Concede] Human is exempt from currency disputes.".to_string());
+    }
+
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut dispute = read_dispute_by_id(&dir, dispute_id)?
+            .ok_or_else(|| format!("[Concede] dispute {} not found.", dispute_id))?;
+        if dispute.status != "open" {
+            return Err(format!(
+                "[Concede] dispute {} is already {} (resolution: {:?}).",
+                dispute_id, dispute.status, dispute.resolution
+            ));
+        }
+        if caller != dispute.challenger && caller != dispute.target {
+            return Err(format!(
+                "[Concede] You are not a party to dispute {} (challenger={}, target={}).",
+                dispute_id, dispute.challenger, dispute.target
+            ));
+        }
+        // Winner = the OTHER party.
+        let winner = if caller == dispute.target { dispute.challenger.clone() } else { dispute.target.clone() };
+        let loser = caller.clone();
+        let pool = dispute.pool;
+        let now = collab::iso_now();
+
+        // Credit winner full pool.
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
+            snap = replay_balances_from_ledger(&dir)?;
+        }
+        let win_bal = {
+            let e = snap.seats.entry(winner.clone()).or_insert_with(|| {
+                let mut sb = SeatBalance::default();
+                sb.balance = STARTING_BALANCE_COPPER;
+                sb
+            });
+            e.balance = e.balance.saturating_add(pool);
+            // Winning a pool may pull a seat back above the deficit cap.
+            // We do NOT auto-clear timed_out here — reinstatement is the
+            // explicit human action that does that (Phase 2 commit (c)).
+            e.balance
+        };
+        let id = snap.next_txn_id;
+        snap.next_txn_id += 1;
+        let credit_row = LedgerRow {
+            id,
+            txn_type: "credit".to_string(),
+            seat: winner.clone(),
+            amount: pool,
+            reason: format!("dispute {} won (conceded by {})", dispute_id, loser),
+            ref_msg: Some(dispute.target_msg),
+            balance_after: win_bal,
+            escrow_id: None,
+            release_turn: None,
+            turn: Some(snap.turn_counter),
+            action_kind: Some(ActionKind::Credit),
+            linked_edit_msg: None,
+            at: now.clone(),
+        };
+        append_currency_transaction(&dir, &credit_row)?;
+        write_balances_snapshot(&dir, &snap)?;
+
+        // Resolve the dispute. Re-append the updated row (latest-row-per-id wins).
+        dispute.status = "resolved".to_string();
+        dispute.resolution = Some(format!("conceded_by_{}", loser));
+        dispute.resolved_at = Some(now.clone());
+        dispute.messages.push(DisputeMessage {
+            from: loser.clone(),
+            body: format!("[concede] full pool ({} copper) awarded to {}", pool, winner),
+            added_to_pool: 0,
+            at: now.clone(),
+        });
+        append_dispute_row(&dir, &dispute)?;
+
+        // Remove from open-disputes snapshot so the Pass-while-disputed gate
+        // releases the (now-resolved) target.
+        let mut open = read_open_disputes_snapshot(&dir)?;
+        snapshot_remove_open(&mut open, dispute_id, &dispute.challenger, &dispute.target);
+        write_open_disputes_snapshot(&dir, &open)?;
+
+        let _ = append_dispute_system_message(
+            &dir,
+            &format!("[Dispute resolved] {} concedes — {} wins {} copper", loser, winner, pool),
+            &format!(
+                "[Dispute resolved] {} concedes to {}. Pool of {} copper awarded to {} (dispute {}).",
+                loser, winner, pool, winner, dispute_id
+            ),
+            serde_json::json!({
+                "dispute_id": dispute_id,
+                "winner": winner,
+                "loser": loser,
+                "pool": pool,
+                "resolution": "conceded",
+            }),
+        )?;
+
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({
+            "id": dispute_id, "winner": winner, "pool": pool, "status": "resolved",
+        })))
+    })
+}
+
+/// `currency_dispute_message(dispute_id, body, metadata?)` — party adds a
+/// message to the dispute; cost (5 speech / 10 edit) is debited from the
+/// caller and added to the pool. Auto-invokes the judge when pool crosses
+/// `JUDGE_AUTO_INVOKE_THRESHOLD` (500).
+fn handle_currency_dispute_message(
+    dispute_id: &str,
+    body: &str,
+    metadata: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    if caller.starts_with("human:") {
+        return Err("[DisputeMessage] Human is exempt from currency disputes.".to_string());
+    }
+    let body_trimmed = body.trim();
+    if body_trimmed.is_empty() {
+        return Err("[DisputeMessage] body is required (non-empty).".to_string());
+    }
+
+    // Cost gating: edit-related = 10 copper, otherwise = 5. Spec says
+    // "if metadata indicates edit-related" — accept `metadata.edit_related: true`
+    // OR `metadata.action_kind: "edit"`.
+    let edit_related = metadata
+        .and_then(|m| {
+            m.get("edit_related").and_then(|v| v.as_bool())
+                .or_else(|| {
+                    m.get("action_kind")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.eq_ignore_ascii_case("edit"))
+                })
+        })
+        .unwrap_or(false);
+    let cost = if edit_related { DISPUTE_EDIT_COST_COPPER } else { DISPUTE_SPEECH_COST_COPPER };
+
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut dispute = read_dispute_by_id(&dir, dispute_id)?
+            .ok_or_else(|| format!("[DisputeMessage] dispute {} not found.", dispute_id))?;
+        if dispute.status != "open" {
+            return Err(format!(
+                "[DisputeMessage] dispute {} is already {} (resolution: {:?}).",
+                dispute_id, dispute.status, dispute.resolution
+            ));
+        }
+        if caller != dispute.challenger && caller != dispute.target {
+            return Err(format!(
+                "[DisputeMessage] You are not a party to dispute {} (challenger={}, target={}).",
+                dispute_id, dispute.challenger, dispute.target
+            ));
+        }
+
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
+            snap = replay_balances_from_ledger(&dir)?;
+        }
+        let caller_bal = snap
+            .seats
+            .get(&caller)
+            .map(|s| s.balance)
+            .unwrap_or(STARTING_BALANCE_COPPER);
+        if caller_bal < cost {
+            return Err(format!(
+                "[DisputeMessage] Insufficient balance: need {} copper, have {}.",
+                cost, caller_bal
+            ));
+        }
+        // Defensive: timed_out seats shouldn't even be reaching here (their
+        // sends are rejected upstream), but check anyway.
+        if snap.seats.get(&caller).map(|s| s.timed_out).unwrap_or(false) {
+            return Err("[DisputeMessage] You are timed_out and cannot participate in disputes.".to_string());
+        }
+
+        let now = collab::iso_now();
+
+        // Debit cost from caller (penalty row subtracts; opcode=DisputeContribution).
+        let caller_after = {
+            let e = snap
+                .seats
+                .entry(caller.clone())
+                .or_insert_with(|| {
+                    let mut sb = SeatBalance::default();
+                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb
+                });
+            e.balance = e.balance.saturating_sub(cost);
+            if e.balance <= DEFICIT_CAP_COPPER {
+                e.timed_out = true;
+            }
+            e.balance
+        };
+        let txn_id = snap.next_txn_id;
+        snap.next_txn_id += 1;
+        let debit_row = LedgerRow {
+            id: txn_id,
+            txn_type: "penalty".to_string(),
+            seat: caller.clone(),
+            amount: -cost,
+            reason: format!(
+                "dispute {} message ({})",
+                dispute_id,
+                if edit_related { "edit-related, 10c" } else { "speech, 5c" }
+            ),
+            ref_msg: Some(dispute.target_msg),
+            balance_after: caller_after,
+            escrow_id: None,
+            release_turn: None,
+            turn: Some(snap.turn_counter),
+            // Phase 2 opcode pragma: dispute message contributions reuse
+            // ActionKind::Penalty (the row decrements balance). The prose
+            // reason field disambiguates "dispute X message (speech, 5c)"
+            // for ledger UIs; Phase 4 retro-scans use action_kind+reason
+            // pairs if they need to filter dispute traffic from objection
+            // costs vs adversarial-pass penalties.
+            action_kind: Some(ActionKind::Penalty),
+            linked_edit_msg: None,
+            at: now.clone(),
+        };
+        append_currency_transaction(&dir, &debit_row)?;
+        write_balances_snapshot(&dir, &snap)?;
+
+        // Grow pool, append dispute message.
+        dispute.pool = dispute.pool.saturating_add(cost);
+        dispute.messages.push(DisputeMessage {
+            from: caller.clone(),
+            body: body_trimmed.to_string(),
+            added_to_pool: cost,
+            at: now.clone(),
+        });
+
+        // Auto-judge trigger: when pool crosses the threshold, set
+        // judge = "human:0" and post a system notice. Only fires ONCE
+        // (the first crossing — judge_already_set check).
+        let mut auto_judge_fired = false;
+        if dispute.judge.is_none() && dispute.pool >= JUDGE_AUTO_INVOKE_THRESHOLD {
+            dispute.judge = Some("human:0".to_string());
+            auto_judge_fired = true;
+        }
+
+        append_dispute_row(&dir, &dispute)?;
+
+        let _ = append_dispute_system_message(
+            &dir,
+            &format!(
+                "[Dispute message] {} adds {} copper — pool {}",
+                caller, cost, dispute.pool
+            ),
+            &format!(
+                "[Dispute message] {} contributed {} copper to dispute {}. Pool now {} copper.{}",
+                caller,
+                cost,
+                dispute_id,
+                dispute.pool,
+                if auto_judge_fired {
+                    " [Judge auto-invoked] human:0 — pool crossed 500."
+                } else {
+                    ""
+                }
+            ),
+            serde_json::json!({
+                "dispute_id": dispute_id,
+                "from": caller,
+                "added_to_pool": cost,
+                "pool": dispute.pool,
+                "auto_judge_fired": auto_judge_fired,
+            }),
+        )?;
+
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({
+            "id": dispute_id,
+            "pool": dispute.pool,
+            "auto_judge_fired": auto_judge_fired,
+        })))
+    })
+}
+
 /// Handle project_send: send a message to a role
 fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, metadata: Option<serde_json::Value>, _session_id: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
@@ -12568,6 +12915,30 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         },
                         "required": ["target_msg_id", "reason"]
                     }
+                },
+                {
+                    "name": "currency_concede",
+                    "description": "Concede a dispute you are a party to (challenger or target). The OTHER party wins the full pool. Resolves the dispute immediately and releases the Pass-while-disputed gate if you were the target.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "dispute_id": { "type": "string", "description": "Dispute id (e.g. \"disp_000001\") returned by currency_objection or visible in the board [Objection] notice." }
+                        },
+                        "required": ["dispute_id"]
+                    }
+                },
+                {
+                    "name": "currency_dispute_message",
+                    "description": "Contribute a message to an open dispute (challenger or target only). Costs 5 copper for a speech-type message, 10 if metadata.edit_related is true. The cost is added to the dispute pool. When the pool crosses 500 copper, the judge is auto-invoked (set to human:0).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "dispute_id": { "type": "string", "description": "Dispute id" },
+                            "body": { "type": "string", "description": "Message body (non-empty)" },
+                            "metadata": { "type": "object", "description": "Optional. Set { \"edit_related\": true } for the 10-copper edit-related cost, otherwise speech (5 copper) is the default." }
+                        },
+                        "required": ["dispute_id", "body"]
+                    }
                 }]
             })
         }
@@ -13349,6 +13720,60 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                             "isError": true
                         }),
                     },
+                }
+            } else if tool_name == "currency_concede" {
+                // Phase 2 commit (b) — args: dispute_id (String).
+                let arguments = params.get("arguments");
+                let dispute_id = arguments
+                    .and_then(|a| a.get("dispute_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if dispute_id.is_empty() {
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "currency_concede requires dispute_id (String)" }],
+                        "isError": true
+                    })
+                } else {
+                    match handle_currency_concede(&dispute_id) {
+                        Ok(v) => serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Dispute conceded.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }]
+                        }),
+                        Err(e) => serde_json::json!({
+                            "content": [{ "type": "text", "text": e }],
+                            "isError": true
+                        }),
+                    }
+                }
+            } else if tool_name == "currency_dispute_message" {
+                // Phase 2 commit (b) — args: dispute_id (String), body (String), metadata (object?).
+                let arguments = params.get("arguments");
+                let dispute_id = arguments
+                    .and_then(|a| a.get("dispute_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let body = arguments
+                    .and_then(|a| a.get("body"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let metadata = arguments.and_then(|a| a.get("metadata"));
+                if dispute_id.is_empty() || body.is_empty() {
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "currency_dispute_message requires dispute_id (String) and body (String)" }],
+                        "isError": true
+                    })
+                } else {
+                    match handle_currency_dispute_message(&dispute_id, &body, metadata) {
+                        Ok(v) => serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Dispute message added.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }]
+                        }),
+                        Err(e) => serde_json::json!({
+                            "content": [{ "type": "text", "text": e }],
+                            "isError": true
+                        }),
+                    }
                 }
             } else {
                 serde_json::json!({
