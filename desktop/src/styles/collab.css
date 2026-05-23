@@ -8079,65 +8079,6 @@
   font-weight: 600;
 }
 
-/* (12) Phase 1d sidebar per human msg 727 — "make the sidebar wit hthe
- * active claims decisions, discussiion mode at thge top with settings".
- *
- * Adds Discussion Mode card to the existing right rail (above Decisions +
- * Claims) and hides the inline Discussion Mode strip from the main area so
- * the message timeline gets ~70px more vertical room.
- *
- * Behavior:
- *   ≥1000px: Rail visible; inline strip hidden; rail-Discussion-Mode at top
- *   <1000px: Rail items stack into the main flow; inline strip visible as
- *            fallback (since stacking removes the always-visible side surface)
- */
-@media (min-width: 1000px) {
-  /* Discussion Mode rail card — same float-right pattern as Decisions/Claims */
-  .project-tab .rail-discussion-mode-section {
-    float: right;
-    clear: right;
-    width: 320px;
-    margin-left: 16px;
-    margin-bottom: 12px;
-    position: relative;
-    z-index: 2;
-    background: rgba(29, 155, 240, 0.06);
-    border-left: 3px solid rgba(29, 155, 240, 0.6);
-    border-radius: 0 10px 10px 0;
-  }
-
-  .project-tab .rail-discussion-mode-section .collapsible-section-title {
-    color: #1d9bf0;
-  }
-
-  .project-tab .rail-discussion-mode-section .collapsible-section-title::before {
-    background: #1d9bf0;
-    box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
-  }
-
-  /* Cap the body height so AssemblyControls can scroll internally if it overflows.
-     Without this, a tall AssemblyControls would push Decisions/Claims out of view. */
-  .project-tab .rail-discussion-mode-section .collapsible-section-body {
-    max-height: 420px;
-    overflow-y: auto;
-  }
-
-  /* Inline strip becomes redundant when the rail Discussion Mode is shown.
-     Keep it as a fallback for <1000px (default), but hide @ ≥1000px since the
-     rail surface provides the same info + the full settings inline. */
-  .project-tab .discussion-mode-strip {
-    display: none;
-  }
-
-  /* Match narrower rail widths from existing breakpoints (1000-1199px → 280px) */
-}
-
-@media (min-width: 1000px) and (max-width: 1199.98px) {
-  .project-tab .rail-discussion-mode-section {
-    width: 280px;
-  }
-}
-
 /* (11) Rotation flow line per human msg 679 — "bring back assembly flow".
  * Slim inline indicator showing next 3 speakers in rotation order with
  * arrows. Rendered in ProtocolPanel's CompactMicLine below the speaker
