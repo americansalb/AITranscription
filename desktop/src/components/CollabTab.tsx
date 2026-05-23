@@ -19,7 +19,6 @@ import { getAuthToken } from "../lib/api";
 import { CANONICAL_TAGS, ROLE_TEMPLATES, generateBriefing, type PeerRole, type RoleTemplate, type RoleStats } from "../utils/briefingGenerator";
 import { DecisionPanel } from "./DecisionPanel";
 import { CollapsibleSection } from "./CollapsibleSection";
-import { DiscussionSettingsPopover } from "./DiscussionSettingsPopover";
 import { RolesTab } from "./RolesTab";
 import { useProjectDir } from "../contexts/ProjectDirContext";
 import { loadJSON, saveJSON, isBoolean } from "../lib/persistedState";
@@ -842,7 +841,11 @@ export function CollabTab() {
   // + ProtocolPanel. Replaces the always-rendered Discussion Mode band
   // expansion. Closes msg-5450 risk via always-visible thin strip above
   // (preset name + Configure ⚙ button); controls live in the popover.
-  const [discussionPopoverOpen, setDiscussionPopoverOpen] = useState(false);
+  // P5-v2: DiscussionSettingsPopover removed (AssemblyControls now lives in
+  // the sidebar Discussion Mode card). State retained-but-unused for one
+  // commit to avoid a wider rip-out; safe to delete in follow-up.
+  const [_discussionPopoverOpen, _setDiscussionPopoverOpen] = useState(false);
+  void _discussionPopoverOpen; void _setDiscussionPopoverOpen;
   const [interruptTarget, setInterruptTarget] = useState<{ slug: string; instance: number; title: string } | null>(null);
   const [interruptReason, setInterruptReason] = useState("");
   const [buzzedKey, setBuzzedKey] = useState<string | null>(null);
@@ -863,6 +866,34 @@ export function CollabTab() {
   const updateClaimsCollapsed = (next: boolean) => {
     setClaimsCollapsed(next);
     saveJSON("vaak_collab_claims_collapsed", next);
+  };
+  // P5-v2 (architect:0 msg 935 + human msg 932 = B "auto-hide empty"):
+  // Audience + Replanning rail-sections track collapse state. When count===0
+  // the section renders null entirely (no header, no empty-state pixels) per
+  // the locked spec; this state only matters when the section actually mounts.
+  const [audienceCollapsed, setAudienceCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>("vaak_collab_audience_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
+  );
+  const updateAudienceCollapsed = (next: boolean) => {
+    setAudienceCollapsed(next);
+    saveJSON("vaak_collab_audience_collapsed", next);
+  };
+  const [replanningCollapsed, setReplanningCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>("vaak_collab_replanning_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
+  );
+  const updateReplanningCollapsed = (next: boolean) => {
+    setReplanningCollapsed(next);
+    saveJSON("vaak_collab_replanning_collapsed", next);
+  };
+  // Discussion Mode card collapse — sidebar slot, top of rail. Default-expanded
+  // since the controls (preset / mic mode / moderator / review intensity /
+  // plan) are the primary discoverability surface in the new layout.
+  const [discussionModeCardCollapsed, setDiscussionModeCardCollapsed] = useState<boolean | null>(
+    () => loadJSON<boolean | null>("vaak_collab_discussion_mode_card_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
+  );
+  const updateDiscussionModeCardCollapsed = (next: boolean) => {
+    setDiscussionModeCardCollapsed(next);
+    saveJSON("vaak_collab_discussion_mode_card_collapsed", next);
   };
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
@@ -3454,35 +3485,18 @@ When multiple instances of this role are active:
           const planLabel = livePlanPath
             ? ` · Plan: ${livePlanPath.replace(/^.*[\\/]/, "")}`
             : "";
+          // P5-v2 (architect:0 msg 935 + human msg 932 = B):
+          // The horizontal .discussion-mode-strip + DiscussionSettingsPopover
+          // were removed in this commit. Discussion Mode settings (preset /
+          // mic mode / moderator / review intensity / plan) now live in the
+          // sidebar Discussion Mode card below via <AssemblyControls
+          // layout="vertical">. ProtocolPanel (floor + consensus + 1-click
+          // yield / force-release per evil-arch msg 509 + tech-leader msg
+          // 511) stays inline here because those urgency actions need to be
+          // reachable without opening the sidebar card. _livePreset, _phaseLabel,
+          // _planLabel are referenced below for the sidebar card title chip.
+          void livePreset; void phaseLabel; void planLabel;
           return (
-          <>
-            {/* Always-visible Discussion Mode strip — single row, ~30px.
-                Preserves the msg-5450 discoverability surface (preset name
-                is always visible even when AL is off). Configure button is
-                the gear-equivalent affordance opening the popover. */}
-            <div className="discussion-mode-strip" role="region" aria-label="Discussion mode state">
-              <span className="discussion-mode-strip-key">Discussion Mode:</span>
-              <span className="discussion-mode-strip-preset">{livePreset}</span>
-              {phaseLabel && <span className="discussion-mode-strip-meta">{phaseLabel}</span>}
-              {planLabel && <span className="discussion-mode-strip-meta">{planLabel}</span>}
-              <span className="discussion-mode-strip-spacer" />
-              <button
-                type="button"
-                className="discussion-mode-strip-configure"
-                onClick={() => setDiscussionPopoverOpen(true)}
-                title="Configure Discussion Mode (preset, mic-passing, moderator, review intensity, plan)"
-              >
-                Configure ⚙
-              </button>
-            </div>
-
-            {/* ProtocolPanel inline below the strip — Phase 1b polish E2
-                (evil-arch msg 509 + tech-leader msg 511): force-release /
-                yield are destructive actions that should be 1-click, not
-                buried two clicks deep behind Configure ⚙. AssemblyControls
-                (settings: preset / mic mode / moderator / review-intensity
-                / plan) stays in the popover because those are NOT urgent
-                quick-access controls. */}
             <ProtocolPanel
               projectDir={projectDir}
               section={activeSection || "default"}
@@ -3490,28 +3504,6 @@ When multiple instances of this role are active:
               rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
               rolesConfig={project?.config?.roles}
             />
-
-            {/* Popover-mounted SETTINGS only. Renders via createPortal so the
-                modal can layer above the rest of the CollabTab without
-                z-index/overflow gotchas. Closes on Escape, click-outside,
-                or the × button. AssemblyControls is the only child now
-                per E2 split — ProtocolPanel moved inline above. */}
-            <DiscussionSettingsPopover
-              open={discussionPopoverOpen}
-              onClose={() => setDiscussionPopoverOpen(false)}
-              title="Discussion Mode Settings"
-            >
-              {twoControlsProtocol && (
-                <AssemblyControls
-                  protocol={twoControlsProtocol}
-                  mutate={twoControlsMutate}
-                  lastError={twoControlsLastError}
-                  selfRole={null /* human view in CollabTab */}
-                  projectDir={projectDir}
-                />
-              )}
-            </DiscussionSettingsPopover>
-          </>
           );
         })()}
 
@@ -4785,33 +4777,71 @@ When multiple instances of this role are active:
           );
         })()}
 
-        {/* Decision Panel — collapsible-header pattern per layout-density-v1.2
-            (human msg 5174 "where IS the panel" + ui-arch msg 5175 + dev-
-            challenger msg 5176 + tester msg 5177 unified convergence). Panel
-            self-renders always with a one-line header so the human can find
-            it regardless of pending-count; body collapses behind the header
-            when empty or when manually toggled. */}
+        {/* P5-v2 Right Sidebar (`<aside>`) — single container for ALL rail-
+            resident sections per architect:0 msg 935 spec. Replaces the
+            float-right-each-section pattern with a flex-column inside a
+            position:absolute aside. Section visibility is per-component:
+            Discussion Mode always-on, Decision Panel always-on (its own
+            collapsible-header), Claims/Audience/Replanning auto-hide when
+            count===0 so empty sidebar collapses to just Discussion Mode +
+            Decisions header. Locked spec: 280px fixed, all viewports. */}
+        <aside className="collab-sidebar" aria-label="Project sidebar">
+
+        {/* Discussion Mode sidebar card — replaces the inline horizontal
+            `.discussion-mode-strip` per human msg 932 (option B) + architect
+            msg 935. Always-on at top of the right rail. Uses the existing
+            `.is-vertical` layout variant on AssemblyControls (CSS in
+            AssemblyControls.css §vertical-stack, prop wiring already in
+            AssemblyControls.tsx). Wrapping in CollapsibleSection so the
+            human can collapse it to a 30px header when assembly is OFF. */}
+        {twoControlsProtocol && (() => {
+          const dmCollapsedEffective = discussionModeCardCollapsed ?? !twoControlsProtocol.floor?.assembly_active;
+          return (
+          <CollapsibleSection
+            id="discussion-mode-section"
+            title="Discussion Mode"
+            collapsed={dmCollapsedEffective}
+            onToggle={() => updateDiscussionModeCardCollapsed(!dmCollapsedEffective)}
+            className="discussion-mode-section rail-section"
+            headerTooltip={{ expand: "Expand discussion mode controls", collapse: "Collapse discussion mode controls" }}
+          >
+            <AssemblyControls
+              protocol={twoControlsProtocol}
+              mutate={twoControlsMutate}
+              lastError={twoControlsLastError}
+              selfRole={null}
+              projectDir={projectDir}
+              layout="vertical"
+            />
+          </CollapsibleSection>
+          );
+        })()}
+
+        {/* Decision Panel sidebar wrapper — places the panel into the right
+            rail per architect msg 935. DecisionPanel.tsx renders the inner
+            panel chrome (header + body); we wrap it in a section div so the
+            float-right CSS at .decision-panel-section applies. */}
         {projectDir && project && (
-          <DecisionPanel
-            projectDir={projectDir}
-            messages={project.messages}
-            onPendingCountChange={setPendingDecisionCount}
-            getRoleColor={getRoleColor}
-          />
+          <div className="decision-panel-section rail-section">
+            <DecisionPanel
+              projectDir={projectDir}
+              messages={project.messages}
+              onPendingCountChange={setPendingDecisionCount}
+              getRoleColor={getRoleColor}
+            />
+          </div>
         )}
 
-        {/* Active Claims Section — collapsible-header pattern per layout-
-            density-v1.2 (human msg 5174 + team converge msg 5175-5177). Header
-            ALWAYS rendered so the human can find the section; body collapses
-            behind it when empty or manually toggled. Reverts the b086921
-            conditional-render-when-empty that lost discoverability. The
-            existing `claimsCollapsed` state is preserved as the toggle source
-            of truth; default state derives from claims.length so the section
-            auto-collapses on empty and auto-expands on non-empty (unless the
-            human has toggled it, which the state remembers). */}
+        {/* Active Claims Section — auto-hide when empty per human msg 932
+            (option B). Renders null when count===0 so the rail collapses to
+            zero pixels when nothing is happening; reappears with the 150ms
+            fade-in transition (collab.css §rail-section auto-hide) when a
+            claim lands. The `claimsCollapsed` state still drives manual
+            expand/collapse for non-empty state. */}
         {project && (() => {
           const claimsCount = project.claims?.length ?? 0;
-          const collapsedEffective = claimsCollapsed ?? (claimsCount === 0);
+          if (claimsCount === 0) return null;
+          const collapsedEffective = claimsCollapsed ?? false;
           return (
           <CollapsibleSection
             id="claims-section"
@@ -4819,13 +4849,9 @@ When multiple instances of this role are active:
             trailing={<span className="claims-section-count">({claimsCount})</span>}
             collapsed={collapsedEffective}
             onToggle={() => updateClaimsCollapsed(!collapsedEffective)}
-            className="claims-section"
+            className="claims-section rail-section"
             headerTooltip={{ expand: "Expand active claims", collapse: "Collapse active claims" }}
           >
-            {claimsCount === 0 && (
-              <div className="claims-section-empty">No active claims</div>
-            )}
-            {claimsCount > 0 && (
             <>
               {project.claims.map((claim: FileClaim) => {
                   const roleSlug = claim.role_instance.split(":")[0] || "";
@@ -4862,10 +4888,92 @@ When multiple instances of this role are active:
                   );
                 })}
             </>
-            )}
           </CollapsibleSection>
           );
         })()}
+
+        {/* P1a Audience rail-section — auto-hide-empty per human msg 932 (B).
+            count === 0 → render null. Mockup collab-layout-demo.html lines
+            988-998. Count derives from sum of audiencePools.member_count;
+            pools fetched lazily on first modal open, so this section only
+            mounts after the human enables audience for a round. */}
+        {(() => {
+          const audienceMemberTotal = audiencePools.reduce((sum, p) => sum + (p.member_count ?? 0), 0);
+          if (audienceMemberTotal === 0) return null;
+          const collapsedEffective = audienceCollapsed ?? false;
+          return (
+          <CollapsibleSection
+            id="audience-section"
+            title="Audience"
+            trailing={<span className="audience-section-count">({audienceMemberTotal})</span>}
+            collapsed={collapsedEffective}
+            onToggle={() => updateAudienceCollapsed(!collapsedEffective)}
+            className="audience-section rail-section"
+            headerTooltip={{ expand: "Expand audience section", collapse: "Collapse audience section" }}
+          >
+            <>
+              {audiencePools.map((pool) => (
+                <div key={pool.id} className="rail-item audience-section-pool">
+                  <div className="rail-item-head">
+                    <span className="rail-item-from">{pool.name}</span>
+                    <span className="rail-item-meta">{pool.member_count} personas</span>
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                className="rail-btn audience-section-open"
+                onClick={() => setAudiencePanelOpen(true)}
+              >
+                Open Audience Panel
+              </button>
+            </>
+          </CollapsibleSection>
+          );
+        })()}
+
+        {/* P1b Replanning Requests rail-section — auto-hide-empty per human
+            msg 932 (B). count === 0 → render null. Data source:
+            twoControlsProtocol.floor.replanning_requests (same array
+            AssemblyControls consumes; see useProtocolState.ts:43). */}
+        {(() => {
+          const replanningRequests = twoControlsProtocol?.floor?.replanning_requests ?? [];
+          if (replanningRequests.length === 0) return null;
+          const collapsedEffective = replanningCollapsed ?? false;
+          return (
+          <CollapsibleSection
+            id="replanning-section"
+            title="Replanning Requests"
+            trailing={<span className="replanning-section-count">({replanningRequests.length})</span>}
+            collapsed={collapsedEffective}
+            onToggle={() => updateReplanningCollapsed(!collapsedEffective)}
+            className="replanning-section rail-section"
+            headerTooltip={{ expand: "Expand replanning requests", collapse: "Collapse replanning requests" }}
+          >
+            <>
+              {replanningRequests.map((req, idx) => {
+                const seatSlug = (req.seat ?? "").split(":")[0] || "";
+                return (
+                  <div key={`${req.seat ?? "anon"}-${idx}-${req.ts}`} className="rail-item replanning-section-item">
+                    <div className="rail-item-head">
+                      <span
+                        className="rail-item-from"
+                        style={{ color: seatSlug ? getRoleColor(seatSlug) : undefined }}
+                      >
+                        {req.seat ?? "unknown"}
+                      </span>
+                    </div>
+                    {req.reason && <div className="rail-item-body">{req.reason}</div>}
+                  </div>
+                );
+              })}
+            </>
+          </CollapsibleSection>
+          );
+        })()}
+
+        </aside>
+        {/* /P5-v2 Right Sidebar */}
 
         {/* Old Claude CLI banner replaced by Setup Checklist above roster */}
 

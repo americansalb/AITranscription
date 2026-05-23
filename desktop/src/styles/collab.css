@@ -42,6 +42,66 @@
   width: 100%;
   padding: 16px;
   gap: 12px;
+  /* P5-v2 sidebar positioning context (architect:0 msg 935 + human msg 932):
+   * .collab-sidebar is position: absolute against this container. The
+   * padding-right reserves the column so main content doesn't overlap. */
+  position: relative;
+  padding-right: 312px;
+}
+
+/* P5-v2 Right Sidebar — flex column at fixed 280px right of .project-tab.
+ * Replaces the per-section float-right pattern that produced "giant
+ * horizontal bars stacked vertically" at narrow viewports (human msg 907 +
+ * 908 + 910 + 932 lockdown to option B). Sidebar is one rectangle on the
+ * right; rail sections flex-stack inside it. */
+.collab-sidebar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 280px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  z-index: 3;
+}
+
+/* Narrow-viewport fallback (per dev-challenger:0 msg 835 option C):
+ * Under 720px total width the 280px sidebar consumes too much horizontal
+ * space. Drop the sidebar entirely below this threshold so the main pane
+ * can use the full width. <500px is undefined behavior. */
+@media (max-width: 719.98px) {
+  .project-tab {
+    padding-right: 16px;
+  }
+  .collab-sidebar {
+    display: none;
+  }
+}
+
+/* P5-v2 rail-section auto-hide fade-in: when a section transitions from
+ * count===0 (render-null) to count>=1 (mount), it appears with a 150ms
+ * opacity + translateY ramp so the layout shift doesn't feel like a
+ * glitch (ui-architect:1 msg 925 craft note). */
+.rail-section {
+  animation: rail-section-fade-in 150ms ease-out;
+}
+@keyframes rail-section-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-section {
+    animation: none;
+  }
 }
 
 /* ==================== Setup View ==================== */
@@ -1640,6 +1700,54 @@
   white-space: nowrap;
   flex-shrink: 0;
   margin-top: 2px;
+}
+
+/* ==================== Rail item primitives (P1a/P1b Audience + Replanning) ====================
+ * Shared classes for sidebar rail items used by audience-section pool rows
+ * and replanning-section request rows. Matches the visual rhythm of
+ * .claim-card (12px head font, 11px meta, top-border separator). */
+
+.rail-item {
+  padding: 6px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.rail-item:first-child {
+  border-top: none;
+}
+.rail-item-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.rail-item-from {
+  font-size: 12px;
+  font-weight: 600;
+}
+.rail-item-meta {
+  font-size: 11px;
+  color: var(--collab-text-muted);
+}
+.rail-item-body {
+  font-size: 11px;
+  color: var(--collab-text-secondary);
+  margin-top: 2px;
+}
+.rail-btn {
+  margin: 6px 12px 8px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  color: var(--collab-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.rail-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.rail-btn:active {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* ==================== Message Timeline ==================== */
@@ -7793,88 +7901,20 @@
  * keep the existing stacked layout (which already collapses well).
  * ========================================================================== */
 
-/* Right rail: Decision Panel + Active Claims floated to a side column.
- * Width scales with viewport per V1 invariant (msg-388: timeline ≥60%
- * at ≥900px viewport, ≥50% at ≥720px). Three breakpoints:
- *   <1000px → stacked (existing behavior; V1 partially honored via
- *             Discussion Mode max-height cap and panel collapsible defaults)
- *   1000-1199px → 260px rail (narrow but useful)
- *   ≥1200px → 320px rail (default wide)
- * Per architect msg 404 + tech-leader msg 402: lowering breakpoint to
- * 1000px closes V1 invariant for typical laptop viewports (1366×768) too.
+/* P5-v2 (human msg 932 = B "auto-hide empty" + architect:0 msg 935 spec):
+ * Float-right per-section rail RETIRED. Rail sections (Discussion Mode +
+ * DecisionPanel + Claims + Audience + Replanning) now live inside the
+ * `<aside className="collab-sidebar">` flex container declared near the
+ * top of this file. They flex-stack naturally inside the absolute-
+ * positioned 280px column.
+ *
+ * What's preserved: Discussion Mode body max-height cap at wide viewports
+ * so AssemblyControls (vertical layout) doesn't push the rail off-screen.
  */
-@media (min-width: 1000px) and (max-width: 1199.98px) {
-  .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    float: right;
-    clear: right;
-    width: 260px;
-    margin-left: 12px;
-    margin-bottom: 12px;
-    position: relative;
-    z-index: 2;
-  }
-
-  .project-tab .decision-panel-section {
-    margin-top: 0;
-  }
-
-  /* Slightly tighter Discussion Mode cap at narrow wide-screens. */
-  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
-  .project-tab .discussion-mode-section > .collapsible-section-body {
-    max-height: 160px;
-    overflow-y: auto;
-  }
-}
-
-@media (min-width: 1200px) {
-  /* Right rail container: Decision Panel + Active Claims floated right as
-   * a fixed-width column. Both sections are existing CollapsibleSection
-   * components so no JSX restructure is required — they keep their headers,
-   * keyboard nav, ARIA, and persisted-collapse state.
-   */
-  .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    float: right;
-    clear: right;
-    width: 320px;
-    margin-left: 16px;
-    margin-bottom: 12px;
-    /* Z-index so they sit above the message stream's overflow but below
-     * modals (modals are higher z-index by convention). */
-    position: relative;
-    z-index: 2;
-  }
-
-  .project-tab .decision-panel-section {
-    margin-top: 0;
-  }
-
-  /* Discussion Mode band: when at wide viewport, shrink the always-visible
-   * surface so it doesn't fight the message stream for vertical space.
-   * The band's CollapsibleSection header is 30px; this caps the EXPANDED
-   * body to a max-height with internal scroll if the controls overflow.
-   * Preserves access (all controls reachable) while honoring the ≥60%
-   * timeline constraint.
-   */
-  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
-  .project-tab .discussion-mode-section > .collapsible-section-body {
-    max-height: 180px;
-    overflow-y: auto;
-  }
-}
-
-/* Narrow viewports (<1000px): Discussion Mode capped tighter still + the
- * existing CollapsibleSection auto-derive-from-content default keeps the
- * panel collapsed when empty. Net effect: V1 invariant partially honored
- * even at narrow widths through aggressive vertical compression.
- */
-@media (max-width: 999.98px) {
-  .project-tab .discussion-mode-section[open] > .collapsible-section-body,
-  .project-tab .discussion-mode-section > .collapsible-section-body {
-    max-height: 140px;
-    overflow-y: auto;
-  }
+.collab-sidebar .discussion-mode-section[open] > .collapsible-section-body,
+.collab-sidebar .discussion-mode-section > .collapsible-section-body {
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 /* Always: Discussion Mode band default-collapse when assembly is OFF. The
@@ -8046,25 +8086,35 @@
   filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6));
 }
 
-/* (6) Right rail — distinct background + accent left-border */
-@media (min-width: 1000px) {
-  .project-tab .decision-panel-section,
-  .project-tab .claims-section {
-    background: rgba(29, 155, 240, 0.04);
-    border-left: 3px solid rgba(29, 155, 240, 0.5);
-    border-radius: 0 10px 10px 0;
-  }
+/* (6) P5-v2 sidebar — distinct background + accent left-border on ALL rail
+ * sections (Discussion Mode + Decisions + Claims + Audience + Replanning).
+ * Applies at all viewports because the sidebar is always-on; media gate
+ * removed per architect:0 msg 935. */
+.collab-sidebar .discussion-mode-section,
+.collab-sidebar .decision-panel-section,
+.collab-sidebar .claims-section,
+.collab-sidebar .audience-section,
+.collab-sidebar .replanning-section {
+  background: rgba(29, 155, 240, 0.04);
+  border-left: 3px solid rgba(29, 155, 240, 0.5);
+  border-radius: 0 10px 10px 0;
+}
 
-  .project-tab .decision-panel-section .collapsible-section-title,
-  .project-tab .claims-section .collapsible-section-title {
-    color: #1d9bf0;
-  }
+.collab-sidebar .discussion-mode-section .collapsible-section-title,
+.collab-sidebar .decision-panel-section .collapsible-section-title,
+.collab-sidebar .claims-section .collapsible-section-title,
+.collab-sidebar .audience-section .collapsible-section-title,
+.collab-sidebar .replanning-section .collapsible-section-title {
+  color: #1d9bf0;
+}
 
-  .project-tab .decision-panel-section .collapsible-section-title::before,
-  .project-tab .claims-section .collapsible-section-title::before {
-    background: #1d9bf0;
-    box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
-  }
+.collab-sidebar .discussion-mode-section .collapsible-section-title::before,
+.collab-sidebar .decision-panel-section .collapsible-section-title::before,
+.collab-sidebar .claims-section .collapsible-section-title::before,
+.collab-sidebar .audience-section .collapsible-section-title::before,
+.collab-sidebar .replanning-section .collapsible-section-title::before {
+  background: #1d9bf0;
+  box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
 }
 
 /* (7) Team Roster band: title accent matches roster role */
@@ -8073,8 +8123,10 @@
 }
 
 /* (8) Active Claims / Decisions: glanceable accent dot in trailing area */
-.project-tab .decision-panel-section .collapsible-section-trailing,
-.project-tab .claims-section .collapsible-section-trailing {
+.collab-sidebar .decision-panel-section .collapsible-section-trailing,
+.collab-sidebar .claims-section .collapsible-section-trailing,
+.collab-sidebar .audience-section .collapsible-section-trailing,
+.collab-sidebar .replanning-section .collapsible-section-trailing {
   color: #1d9bf0;
   font-weight: 600;
 }

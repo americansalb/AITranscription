@@ -72,11 +72,18 @@ export type AssemblyControlsProps = {
   lastError: string | null;
   selfRole: string | null; // current user's role slug (null = human view)
   projectDir: string | null; // for the list_active_seats_cmd IPC (B.4)
+  // P4 (always-on vertical sidebar per human msg 867): switches the main
+  // controls row from inline flex-wrap to a column-stack of label-left /
+  // control-right rows so the controls fit in a ~280px sidebar slot without
+  // wrapping into the tiny-square failure mode hit by reverted Phase 1d.
+  // CSS class `.assembly-controls.is-vertical` carries the layout rules
+  // (authored by ui-architect:1 per msg 839 craft note).
+  layout?: 'horizontal' | 'vertical';
 };
 
 const REVISE_ALLOWED_ROLES = new Set(['architect', 'manager', 'human']);
 
-export function AssemblyControls({ protocol, mutate, lastError, selfRole, projectDir }: AssemblyControlsProps) {
+export function AssemblyControls({ protocol, mutate, lastError, selfRole, projectDir, layout = 'horizontal' }: AssemblyControlsProps) {
   // B.2 back-compat default render (per architect msg 1298 + human msg 1296).
   // Pre-commit-A sections (5-12 et al.) lack the new floor fields. Original B.1
   // gate `if (assembly_active === undefined) return null` made the UI invisible
@@ -595,7 +602,11 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     : 'Executing — code, commit, ship';
 
   return (
-    <section className="assembly-controls" role="region" aria-label="Assembly and phase controls">
+    <section
+      className={`assembly-controls${layout === 'vertical' ? ' is-vertical' : ''}`}
+      role="region"
+      aria-label="Assembly and phase controls"
+    >
       {/* B.3 Item 2 (per UX-eng spec §43-61): single horizontal row.
           Was 4 vertical rows (~120px); now one flex-wrap row (~36px).
           Mic-button + phase-pill + mic-mode (compact) + plan-link all inline. */}
