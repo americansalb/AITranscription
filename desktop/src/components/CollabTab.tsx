@@ -895,6 +895,11 @@ export function CollabTab() {
     setDiscussionModeCardCollapsed(next);
     saveJSON("vaak_collab_discussion_mode_card_collapsed", next);
   };
+  // Currency toggle uses inline handlers in both IIFEs (header badge + Settings
+  // entry); the re-fetch-after-invoke pattern (mirrors set_discussion_mode at
+  // line ~2384) gives the badge label sub-second refresh, which proved sufficient.
+  // The optimistic-state primitive that was here was deleted as dead-code by
+  // architect:0 after both IIFEs landed the re-fetch + showToast pattern.
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
@@ -3454,11 +3459,22 @@ When multiple instances of this role are active:
             const currencyOn = project?.config?.settings?.currency_enabled !== false;
             const color = currencyOn ? "#f5c518" : "#8899a6";
             const toggleCurrency = async () => {
+              const next = !currencyOn;
               try {
                 const { invoke } = await import("@tauri-apps/api/core");
-                await invoke("set_currency_enabled", { dir: projectDir, enabled: !currencyOn });
+                await invoke("set_currency_enabled", { dir: projectDir, enabled: next });
+                // BUGFIX (human msg 1506 "toggle does nothing"): re-fetch project so
+                // the badge + pills reflect the change immediately. Mirrors
+                // set_discussion_mode (line ~2384) — don't rely on the event listener,
+                // which wasn't refreshing settings.currency_enabled in the UI.
+                const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
+                if (result) setProject(result);
+                // Visible + screen-reader confirmation per tester:0 msg 1521 a11y note.
+                showToast(`Currency mode ${next ? "ON" : "OFF"}`, "success");
               } catch (e) {
-                console.warn("[currency] toggle failed:", e);
+                const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                console.error("[currency] toggle failed:", e);
+                showToast(`Couldn't toggle currency — ${msg}`, "error");
               }
             };
             return (
@@ -3615,11 +3631,20 @@ When multiple instances of this role are active:
             {projectDir && (() => {
               const currencyOn = project?.config?.settings?.currency_enabled !== false;
               const toggleCurrency = async () => {
+                const next = !currencyOn;
                 try {
                   const { invoke } = await import("@tauri-apps/api/core");
-                  await invoke("set_currency_enabled", { dir: projectDir, enabled: !currencyOn });
+                  await invoke("set_currency_enabled", { dir: projectDir, enabled: next });
+                  // BUGFIX (human msg 1506): re-fetch project so both surfaces update
+                  // immediately. Mirrors set_discussion_mode line ~2384.
+                  const result = await invoke<ParsedProject | null>("watch_project_dir", { dir: projectDir });
+                  if (result) setProject(result);
+                  // Visible + screen-reader confirmation per tester:0 msg 1521.
+                  showToast(`Currency mode ${next ? "ON" : "OFF"}`, "success");
                 } catch (e) {
-                  console.warn("[currency] toggle failed:", e);
+                  const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                  console.error("[currency] toggle failed:", e);
+                  showToast(`Couldn't toggle currency — ${msg}`, "error");
                 }
               };
               const color = currencyOn ? "#f5c518" : "#8899a6";
