@@ -9088,6 +9088,100 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     }))
 }
 
+/// Currency Phase 1 commit (b) — record a non-exempt send's earn as an escrow
+/// hold. MUST be called inside `with_currency_and_board_lock` (both locks held).
+///
+/// Accounting model (matches collab::currency::apply_row exactly so live state
+/// == replay state): the earn goes into ESCROW, not balance. `escrow_held +=
+/// earn` and an `escrow_hold` row (negative amount = funds held) is appended;
+/// `balance` is unchanged on send (net 0). The held funds are released to
+/// balance later by commit (c) tick processing once `release_turn` matures.
+///
+/// Lazy-init: a seat with no balance entry is initialized to
+/// STARTING_BALANCE_COPPER with exactly one `init` row before the hold.
+///
+/// balances.json is the authoritative live snapshot (written here every send).
+/// NOTE (commit-c follow-up): replay reconstructs escrow_items with
+/// release_turn=0 because LedgerRow carries no release_turn field — so a
+/// balances.json rebuild-from-ledger is lossy on in-flight escrow timing.
+/// Acceptable in Phase 1 (balances.json is primary; replay is recovery-only);
+/// commit (c) owns escrow release + should extend the row schema if exact
+/// replay fidelity of in-flight escrows is required.
+fn record_currency_earn(
+    dir: &str,
+    seat: &str,
+    action: collab::currency::ActionKind,
+    ref_msg: u64,
+) -> Result<(), String> {
+    use collab::currency::*;
+    if matches!(action, ActionKind::Exempt) {
+        return Ok(());
+    }
+    // balances.json is authoritative when present; rebuild from the ledger
+    // only if the snapshot is missing but a ledger exists (crash recovery).
+    let mut snap = read_balances_snapshot(dir)?;
+    if !balances_json_path(dir).exists() && currency_jsonl_path(dir).exists() {
+        snap = replay_balances_from_ledger(dir)?;
+    }
+    let now = collab::iso_now();
+
+    // Lazy-init the seat (exactly one init row per seat).
+    if !snap.seats.contains_key(seat) {
+        let id = snap.next_txn_id;
+        snap.next_txn_id = snap.next_txn_id.saturating_add(1);
+        snap.seats.entry(seat.to_string()).or_default().balance = STARTING_BALANCE_COPPER;
+        append_currency_transaction(dir, &LedgerRow {
+            id,
+            txn_type: "init".to_string(),
+            seat: seat.to_string(),
+            amount: STARTING_BALANCE_COPPER,
+            reason: "join: initial balance".to_string(),
+            ref_msg: None,
+            balance_after: STARTING_BALANCE_COPPER,
+            escrow_id: None,
+            at: now.clone(),
+        })?;
+    }
+
+    let (earn, ticks, action_str) = match action {
+        ActionKind::Pass => (PASS_EARN_COPPER, PASS_ESCROW_TICKS, "pass"),
+        ActionKind::Speak => (SPEAK_EARN_COPPER, SPEAK_ESCROW_TICKS, "speak"),
+        ActionKind::Exempt => return Ok(()),
+    };
+
+    let escrow_id = next_escrow_id(&mut snap);
+    let release_turn = snap.turn_counter.saturating_add(ticks);
+    let bal_after = {
+        let entry = snap.seats.get_mut(seat).expect("seat present after lazy-init");
+        entry.escrow_held = entry.escrow_held.saturating_add(earn);
+        entry.escrow_items.push(EscrowItem {
+            id: escrow_id.clone(),
+            amount: earn,
+            release_turn,
+            action: action_str.to_string(),
+            ref_msg: Some(ref_msg),
+        });
+        entry.balance
+    };
+
+    let hold_id = snap.next_txn_id;
+    snap.next_txn_id = snap.next_txn_id.saturating_add(1);
+    append_currency_transaction(dir, &LedgerRow {
+        id: hold_id,
+        txn_type: "escrow_hold".to_string(),
+        seat: seat.to_string(),
+        amount: -earn, // negative = funds held (apply_row convention)
+        reason: format!("{} earn @msg {} (escrow {} ticks)", action_str, ref_msg, ticks),
+        ref_msg: Some(ref_msg),
+        balance_after: bal_after,
+        escrow_id: Some(escrow_id),
+        at: now,
+    })?;
+
+    write_balances_snapshot(dir, &snap)?;
+    Ok(())
+}
+
 /// Handle project_send: send a message to a role
 fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, metadata: Option<serde_json::Value>, _session_id: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
@@ -9192,8 +9286,27 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.len() <= 32);
 
-    let result = with_file_lock(&state.project_dir, || {
+    let result = collab::with_currency_and_board_lock(&state.project_dir, || {
         let from_label = format!("{}:{}", state.role, state.instance);
+
+        // Currency Phase 1 commit (b) — TimedOut pre-hook. A seat at the
+        // deficit cap (balance <= -1000) is excluded until the human reinstates.
+        // Checked BEFORE the board append (and inside both locks) so a timed-out
+        // seat's message never lands. Human sends are exempt (they post via the
+        // Tauri path, not this sidecar, and classify as Exempt regardless).
+        // Best-effort read: a balances.json read error must not block sends —
+        // currency is an overlay, not a hard dependency of messaging.
+        if !from_label.starts_with("human:") {
+            if let Ok(snap) = collab::currency::read_balances_snapshot(&state.project_dir) {
+                if snap.seats.get(&from_label).map(|s| s.timed_out).unwrap_or(false) {
+                    return Err(format!(
+                        "[TimedOut] {} is at the currency deficit cap ({} copper) and is excluded from sending. \
+                         A human must reinstate the seat before it can send again.",
+                        from_label, collab::currency::DEFICIT_CAP_COPPER
+                    ));
+                }
+            }
+        }
 
         // Assembly Line gate (atomic with the send) — read state, check, reject or proceed.
         // Inside with_file_lock so the gate-check, board append, and post-accept advance
@@ -9447,6 +9560,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             "metadata": metadata.unwrap_or(serde_json::json!({}))
         });
         append_to_board(&state.project_dir, &message)?;
+
+        // Currency Phase 1 commit (b) — earn hook. Classify the accepted send
+        // and record the earn as an escrow hold (escrow_held += earn, balance
+        // net 0; released to balance by commit (c) once release_turn matures).
+        // Runs AFTER the board append, inside both locks (currency.lock +
+        // board.lock), so message + currency transaction commit atomically.
+        // Human sends classify as Exempt (no charge). Best-effort: a currency
+        // write failure must NOT roll back the already-landed board message.
+        {
+            let action = collab::currency::classify_action(&from_label, msg_type, subject, body);
+            if !matches!(action, collab::currency::ActionKind::Exempt) {
+                if let Err(e) = record_currency_earn(&state.project_dir, &from_label, action, msg_id) {
+                    eprintln!(
+                        "[currency] earn hook failed for {} msg {}: {} (message still landed)",
+                        from_label, msg_id, e
+                    );
+                }
+            }
+        }
 
         // Commit A — planning_unattested informational event emit. Lands
         // AFTER the main message so subscribers see them in order and the
