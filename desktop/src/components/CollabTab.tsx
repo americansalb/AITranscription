@@ -77,6 +77,97 @@ const ROLE_ORDER: Record<string, number> = {
   tester: 3,
 };
 
+// Phase 5 Chitragupta (human msg 1872): raw rows returned by read_currency_feed_cmd.
+// Backend returns the verbatim currency.jsonl ledger row; ALL human-readable
+// formatting + color classification happens here in the frontend.
+interface CurrencyFeedRow {
+  id?: string;
+  type?: string;          // init | credit | debit | escrow_hold | escrow_release | passive | interest | clawback | penalty | reinstate
+  seat?: string;          // role:instance label
+  amount?: number;        // copper
+  reason?: string;        // prose (per ruling 5) — matched by keyword, not equality
+  ref_msg?: number | string;
+  balance_after?: number;
+  escrow_id?: string;
+  release_turn?: number;
+  action_kind?: string;   // Phase 2 opcode hint
+  at?: string;            // ISO timestamp
+}
+
+interface DisputeMessage {
+  seat?: string;
+  text?: string;
+  at?: string;
+}
+
+interface DisputeRow {
+  id?: string;
+  challenger?: string;
+  target?: string;
+  target_msg?: number | string;   // challenged board msg #
+  objection_reason?: string;
+  pool?: number;                   // copper in escrow pool
+  pool_breakdown?: Array<{ seat?: string; amount?: number; reason?: string }>;
+  status?: string;                 // open | resolved
+  resolution?: string;
+  judge?: string | null;
+  messages?: DisputeMessage[];
+  edit_paths?: string[];
+  edit_line_count?: number;
+  opened_at?: string;
+  resolved_at?: string;
+}
+
+type CurrencyTier = "earn" | "hold" | "loss" | "dispute" | "passive" | "destroyed";
+
+// The 13-row transaction→display mapping (human msg 1872, verbatim).
+// reason is prose so sub-types are matched by keyword (includes), not equality.
+function formatCurrencyLine(row: CurrencyFeedRow): { text: string; tier: CurrencyTier } {
+  const seat = row.seat || "someone";
+  const amt = typeof row.amount === "number" ? Math.abs(row.amount).toLocaleString() : "?";
+  const reason = (row.reason || "").toLowerCase();
+  const kind = (row.action_kind || "").toLowerCase();
+  const ref = row.ref_msg != null ? `#${row.ref_msg}` : "";
+  const has = (...keys: string[]) => keys.some((k) => reason.includes(k) || kind.includes(k));
+
+  switch (row.type) {
+    case "init":
+      return { text: `${seat} joined with 10,000 copper`, tier: "passive" };
+    case "escrow_hold":
+      return { text: `${seat} — ${amt} copper held in escrow${row.release_turn != null ? ` (turn ${row.release_turn})` : ""}`, tier: "hold" };
+    case "escrow_release":
+      return { text: `${seat} — ${amt} copper escrow released`, tier: "earn" };
+    case "passive":
+      return { text: `${seat} earned 1 copper passive`, tier: "passive" };
+    case "interest":
+      return { text: `${seat} earned ${amt} copper interest`, tier: "earn" };
+    case "clawback":
+      return { text: `${seat} — ${amt} copper seized for dispute`, tier: "dispute" };
+    case "penalty":
+      return { text: `${seat} penalized ${amt} copper (adversarial pass)`, tier: "loss" };
+    case "reinstate":
+      return { text: `${seat} reinstated — balance reset to 0`, tier: "earn" };
+    case "credit":
+      if (has("dispute_won", "dispute won", "won dispute"))
+        return { text: `${seat} won dispute — ${amt} copper awarded`, tier: "dispute" };
+      if (has("edit"))
+        return { text: `${seat} earned ${amt} copper editing${ref ? ` (msg ${ref})` : ""}`, tier: "earn" };
+      if (has("pass"))
+        return { text: `${seat} earned 1 copper passing`, tier: "earn" };
+      if (has("speak"))
+        return { text: `${seat} earned ${amt} copper speaking${ref ? ` (msg ${ref})` : ""}`, tier: "earn" };
+      return { text: `${seat} earned ${amt} copper${ref ? ` (msg ${ref})` : ""}`, tier: "earn" };
+    case "debit":
+      if (has("pool_destroyed", "pool destroyed"))
+        return { text: `Pool destroyed — ${amt} copper to catnip`, tier: "destroyed" };
+      if (has("objection"))
+        return { text: `${seat} filed objection — 50 copper`, tier: "dispute" };
+      return { text: `${seat} — ${amt} copper debited${row.reason ? ` (${row.reason})` : ""}`, tier: "loss" };
+    default:
+      return { text: `${seat} — ${amt} copper${row.reason ? ` (${row.reason})` : ""}`, tier: "passive" };
+  }
+}
+
 function getRoleColor(slug: string): string {
   if (ROLE_COLORS[slug]) return ROLE_COLORS[slug];
   for (const [prefix, color] of Object.entries(ROLE_COLORS)) {
@@ -982,6 +1073,17 @@ export function CollabTab() {
   // session state; not read by the new strip+popover flow.
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
   const [teamSectionOpen, setTeamSectionOpen] = useState(false);
+  // Phase 5 Chitragupta UI state (human msg 1872/1924).
+  // Flow Feed collapse pref persists across reloads; Judge Seat + Balance Bar
+  // expand are ephemeral (re-collapse on remount is fine — they re-derive from
+  // live data each session).
+  const [feedCollapsed, setFeedCollapsed] = useState<boolean>(
+    () => loadJSON<boolean>("vaak_collab_flow_feed_collapsed", false, (v): v is boolean => typeof v === "boolean"),
+  );
+  const toggleFeedCollapsed = () =>
+    setFeedCollapsed((prev) => { const next = !prev; saveJSON("vaak_collab_flow_feed_collapsed", next); return next; });
+  const [judgeExpanded, setJudgeExpanded] = useState(false);
+  const [balanceExpanded, setBalanceExpanded] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
   const [importRolesStatus, setImportRolesStatus] = useState<string | null>(null);
@@ -1083,6 +1185,11 @@ export function CollabTab() {
     initialized: boolean;
     display: { gold: number; silver: number; copper: number };
   }>>(new Map());
+  // Phase 5 Chitragupta (human msg 1872/1924): raw currency.jsonl rows for the
+  // Flow Feed + open disputes for the Judge Seat. Fetched on the SAME interval
+  // as balances (no new setInterval, per the directive).
+  const [currencyFeed, setCurrencyFeed] = useState<CurrencyFeedRow[]>([]);
+  const [openDisputes, setOpenDisputes] = useState<DisputeRow[]>([]);
   useEffect(() => {
     if (!projectDir || !window.__TAURI__) return;
     let cancelled = false;
@@ -1117,11 +1224,89 @@ export function CollabTab() {
         // Pre-currency Tauri binary lacks this command → leave map empty;
         // roster cards render with no balance pill (no regression).
       }
+      // Flow Feed rows (read_currency_feed_cmd). Independent try so a missing
+      // feed command doesn't blank balances.
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const feed = await invoke<CurrencyFeedRow[]>("read_currency_feed_cmd", { dir: projectDir, count: 80 });
+        if (!cancelled && Array.isArray(feed)) setCurrencyFeed(feed);
+      } catch { /* command absent until Phase 5 backend rebuild — feed stays empty */ }
+      // Open disputes (read_disputes_cmd) for the Judge Seat.
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const disp = await invoke<DisputeRow[]>("read_disputes_cmd", { dir: projectDir });
+        if (!cancelled && Array.isArray(disp)) setOpenDisputes(disp);
+      } catch { /* command absent until Phase 5 backend rebuild — disputes stay empty */ }
     };
     void fetchBalances();
     const id = window.setInterval(fetchBalances, 30_000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [projectDir]);
+
+  // Flow Feed display rows: batch consecutive same-seat passive ticks into one
+  // line, keep the last 50 for render (human msg 1872: "batch passive income",
+  // "last ~50"). Newest is last (we scroll to bottom).
+  const flowFeedRows = useMemo(() => {
+    const out: Array<{ key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }> = [];
+    let passiveRun: { count: number; seat?: string } | null = null;
+    for (const row of currencyFeed) {
+      if (row.type === "passive") {
+        if (passiveRun && passiveRun.seat === row.seat) {
+          passiveRun.count += 1;
+          const last = out[out.length - 1];
+          if (last) { last.text = `${row.seat || "someone"} earned ${passiveRun.count} copper passive (×${passiveRun.count})`; last.at = row.at; }
+          continue;
+        }
+        passiveRun = { count: 1, seat: row.seat };
+      } else {
+        passiveRun = null;
+      }
+      const formatted = formatCurrencyLine(row);
+      out.push({ key: row.id || `${row.at ?? ""}-${out.length}`, text: formatted.text, tier: formatted.tier, seat: row.seat, at: row.at });
+    }
+    return out.slice(-50);
+  }, [currencyFeed]);
+
+  // Running net-flow over the visible window: earnings minus losses/destroyed.
+  const flowNet = useMemo(() => {
+    let net = 0;
+    for (const row of currencyFeed) {
+      const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
+      const tier = formatCurrencyLine(row).tier;
+      if (tier === "earn") net += amt;
+      else if (tier === "loss" || tier === "destroyed") net -= amt;
+    }
+    return net;
+  }, [currencyFeed]);
+
+  // The open dispute that currently needs a ruling (judge assigned, still open).
+  const rulingDispute = useMemo(
+    () => openDisputes.find((d) => d.status === "open" && d.judge != null) ?? null,
+    [openDisputes],
+  );
+
+  // Balance Bar (Surface 3) derived totals + leaderboard. "copper in play" =
+  // every initialized seat's spendable balance + escrow held.
+  const currencyLeaderboard = useMemo(() => {
+    const seats: Array<{ label: string; balance: number; escrow: number }> = [];
+    let total = 0;
+    for (const [label, b] of currencyBalances.entries()) {
+      if (!b.initialized) continue;
+      const inPlay = b.balance_copper + b.escrow_held_copper;
+      total += inPlay;
+      seats.push({ label, balance: b.balance_copper, escrow: b.escrow_held_copper });
+    }
+    seats.sort((a, b) => (b.balance + b.escrow) - (a.balance + a.escrow));
+    return { seats, total };
+  }, [currencyBalances]);
+
+  // Auto-scroll the Flow Feed to the newest line whenever rows change.
+  useEffect(() => {
+    if (feedCollapsed) return;
+    const el = flowFeedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [flowFeedRows, feedCollapsed]);
+
   const sectionDropdownRef = useRef<HTMLDivElement | null>(null);
   const [sectionLoading, setSectionLoading] = useState(false);
   const [savedProjects, setSavedProjects] = useState(() => loadSavedProjects());
@@ -1137,6 +1322,7 @@ export function CollabTab() {
   // per section-switch. Paired with messagesEndCallbackRef below.
   const initialScrollSectionRef = useRef<string | null>(null);
   const messageTimelineRef = useRef<HTMLDivElement>(null);
+  const flowFeedRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMsgCount, setNewMsgCount] = useState(0);
   const prevMsgCountRef = useRef(0);
@@ -3190,6 +3376,115 @@ When multiple instances of this role are active:
 
     return (
       <div className="project-tab">
+        {/* Phase 5 Surface 2 — Judge Seat (human msg 1872/1924). Priority banner
+            at the very top when an open dispute has a judge assigned. Read-only:
+            visualizes evidence + economics. Ruling enforcement (writing the
+            verdict) is Phase 4 — buttons surface that boundary rather than write
+            to .vaak/. */}
+        {rulingDispute && (() => {
+          const d = rulingDispute;
+          const poolCopper = typeof d.pool === "number" ? d.pool : 0;
+          const challengedMsg = project?.messages?.find((m) => String(m.id) === String(d.target_msg));
+          const balOf = (label?: string) => (label ? currencyBalances.get(label) : undefined);
+          const copper = (n?: number) => (typeof n === "number" ? n.toLocaleString() : "?");
+          const ruleNotice = (verdict: string) =>
+            showToast(`"${verdict}" ruling recorded in the UI only — verdict enforcement (pool payout + penalties) ships with Phase 4.`, "info");
+          return (
+            <div className={`judge-seat ${judgeExpanded ? "judge-seat--expanded" : ""}`}>
+              <div className="judge-seat-banner" role="alert">
+                <span className="judge-seat-flag">⚖ RULING REQUIRED</span>
+                <span className="judge-seat-parties">{d.challenger || "?"} vs {d.target || "?"}</span>
+                <span className="judge-seat-pool">Pool: {copper(poolCopper)} copper</span>
+                <button
+                  className="judge-seat-expand-btn"
+                  onClick={() => setJudgeExpanded((v) => !v)}
+                  aria-expanded={judgeExpanded}
+                >
+                  {judgeExpanded ? "Collapse" : "Expand to judge"}
+                </button>
+              </div>
+              {judgeExpanded && (
+                <div className="judge-seat-panel">
+                  <div className="judge-seat-evidence">
+                    <h4>Evidence</h4>
+                    <div className="judge-evidence-block">
+                      <div className="judge-evidence-label">Challenged message {d.target_msg != null ? `#${d.target_msg}` : ""}</div>
+                      <div className="judge-evidence-text">{challengedMsg?.body ?? "(message not found in current board window)"}</div>
+                    </div>
+                    {d.objection_reason && (
+                      <div className="judge-evidence-block">
+                        <div className="judge-evidence-label">Objection reason</div>
+                        <div className="judge-evidence-text">{d.objection_reason}</div>
+                      </div>
+                    )}
+                    {Array.isArray(d.messages) && d.messages.length > 0 && (
+                      <div className="judge-evidence-block">
+                        <div className="judge-evidence-label">Dispute thread</div>
+                        {d.messages.map((m, i) => (
+                          <div key={i} className="judge-dispute-msg">
+                            <span className="judge-dispute-msg-seat">{m.seat || "?"}</span>
+                            <span className="judge-dispute-msg-text">{m.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {Array.isArray(d.edit_paths) && d.edit_paths.length > 0 && (
+                      <div className="judge-evidence-block">
+                        <div className="judge-evidence-label">
+                          Edits ({d.edit_line_count != null ? `${d.edit_line_count} lines` : `${d.edit_paths.length} files`})
+                        </div>
+                        {d.edit_paths.map((p, i) => (
+                          <div key={i} className="judge-evidence-path">{p}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="judge-seat-economics">
+                    <h4>Economics</h4>
+                    <div className="judge-economics-block">
+                      <div className="judge-evidence-label">Pool breakdown</div>
+                      {Array.isArray(d.pool_breakdown) && d.pool_breakdown.length > 0 ? (
+                        d.pool_breakdown.map((b, i) => (
+                          <div key={i} className="judge-economics-row">
+                            <span>{b.seat || "?"}{b.reason ? ` — ${b.reason}` : ""}</span>
+                            <span className="judge-economics-amt">{copper(b.amount)} copper</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="judge-economics-row">
+                          <span>Total escrowed</span>
+                          <span className="judge-economics-amt">{copper(poolCopper)} copper</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="judge-economics-block">
+                      <div className="judge-evidence-label">Party balances</div>
+                      <div className="judge-economics-row">
+                        <span>{d.challenger || "challenger"}</span>
+                        <span className="judge-economics-amt">{copper(balOf(d.challenger)?.balance_copper)} copper</span>
+                      </div>
+                      <div className="judge-economics-row">
+                        <span>{d.target || "target"}</span>
+                        <span className="judge-economics-amt">{copper(balOf(d.target)?.balance_copper)} copper</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="judge-seat-rulings">
+                    <button className="judge-ruling-btn judge-ruling-btn--challenger" onClick={() => ruleNotice("Challenger wins")}>
+                      Challenger wins
+                    </button>
+                    <button className="judge-ruling-btn judge-ruling-btn--target" onClick={() => ruleNotice("Target wins")}>
+                      Target wins
+                    </button>
+                    <button className="judge-ruling-btn judge-ruling-btn--both" onClick={() => ruleNotice("Both wrong")}>
+                      Both wrong
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
         {/* Header */}
         <div className="project-header">
           <button className="project-back-btn" onClick={stopWatching} title="Back to projects">&larr;</button>
@@ -4494,6 +4789,22 @@ When multiple instances of this role are active:
                         {" · 🎙 assembly"}
                       </span>
                     )}
+                    {/* Phase 5 Surface 3 — Balance Bar (human msg 1872/1924).
+                        Running "copper in play" total appended to the team
+                        summary; click toggles a mini-leaderboard inside the
+                        section body. stopPropagation so it doesn't collapse the
+                        section. Hidden until currency data exists. */}
+                    {currencyLeaderboard.seats.length > 0 && (
+                      <button
+                        type="button"
+                        className="balance-bar-summary"
+                        aria-expanded={balanceExpanded}
+                        title={balanceExpanded ? "Hide balances" : "Show balances"}
+                        onClick={(e) => { e.stopPropagation(); setBalanceExpanded((v) => !v); }}
+                      >
+                        {" · "}{currencyLeaderboard.total.toLocaleString()} copper in play
+                      </button>
+                    )}
                   </>
                 }
                 collapsed={rosterSectionCollapsed}
@@ -4510,6 +4821,33 @@ When multiple instances of this role are active:
                     share `useProjectDir()` from pre-req 8162d3f so the
                     divergent-WRITER class on `vaak_collab_project_dir` (F-EA-CTR-A)
                     stays closed. */}
+                {/* Phase 5 Surface 3 — Balance Bar mini-leaderboard. Per-seat
+                    horizontal bar relative to the 10,000-copper start; red zone
+                    when balance < 0. Read-only. */}
+                {balanceExpanded && currencyLeaderboard.seats.length > 0 && (
+                  <div className="balance-leaderboard" role="table" aria-label="Currency leaderboard">
+                    {currencyLeaderboard.seats.map((s) => {
+                      const net = s.balance + s.escrow;
+                      const pct = Math.max(0, Math.min(100, (net / 10000) * 100));
+                      const negative = s.balance < 0;
+                      return (
+                        <div key={s.label} className="balance-leaderboard-row" role="row">
+                          <span className="balance-leaderboard-dot" style={{ background: getRoleColor(s.label.split(":")[0]) }} aria-hidden="true" />
+                          <span className="balance-leaderboard-label">{s.label}</span>
+                          <span className="balance-leaderboard-track">
+                            <span
+                              className={`balance-leaderboard-fill${negative ? " balance-leaderboard-fill--negative" : ""}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </span>
+                          <span className={`balance-leaderboard-amt${negative ? " balance-leaderboard-amt--negative" : ""}`}>
+                            {s.balance.toLocaleString()}{s.escrow > 0 ? ` (+${s.escrow.toLocaleString()} held)` : ""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 <div
                   className="team-section-tabs"
                   role="tablist"
@@ -5215,6 +5553,42 @@ When multiple instances of this role are active:
               <br/>Then restart the app.
             </div>
           </div>
+        )}
+
+        {/* Phase 5 Surface 1 — Flow Feed (Chitragupta's Scroll). Read-only
+            transaction ticker above the timeline. Reads read_currency_feed_cmd
+            on the shared 30s currency poll. Collapsible, pref persisted. */}
+        {currencyFeed.length > 0 && (
+          <CollapsibleSection
+            id="flow-feed-section"
+            className="flow-feed-section"
+            collapsed={feedCollapsed}
+            onToggle={toggleFeedCollapsed}
+            title="Chitragupta"
+            trailing={
+              <span
+                className={`flow-feed-net ${flowNet >= 0 ? "flow-feed-net--up" : "flow-feed-net--down"}`}
+                title="Net flow over recent transactions (earnings minus losses)"
+              >
+                {flowNet >= 0 ? "▲" : "▼"} {Math.abs(flowNet).toLocaleString()} copper
+              </span>
+            }
+            headerTooltip={{ expand: "Expand the divine ledger", collapse: "Collapse the divine ledger" }}
+          >
+            <div className="flow-feed" ref={flowFeedRef} role="log" aria-label="Currency transaction feed" aria-live="polite">
+              {flowFeedRows.map((line) => (
+                <div key={line.key} className={`currency-line currency-line--${line.tier}`}>
+                  <span className="currency-line-time">{line.at ? formatRelativeTime(line.at) : ""}</span>
+                  <span
+                    className="currency-line-dot"
+                    style={{ background: line.seat ? getRoleColor(line.seat.split(":")[0]) : "#888" }}
+                    aria-hidden="true"
+                  />
+                  <span className="currency-line-text">{line.text}</span>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
         )}
 
         {/* Message Timeline */}

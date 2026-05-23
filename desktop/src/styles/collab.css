@@ -8351,3 +8351,261 @@
   max-height: 60vh;
   overflow-y: auto;
 }
+
+/* ============================================================
+ * Phase 5 — Chitragupta: The Divine Ledger (human msg 1872/1924)
+ * Three read-only currency surfaces: Flow Feed, Judge Seat, Balance Bar.
+ * ============================================================ */
+
+/* --- Surface 1: Flow Feed (Chitragupta's Scroll) --- */
+.flow-feed-section {
+  margin: 0 0 8px 0;
+}
+.flow-feed-net {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  font-size: 12px;
+}
+.flow-feed-net--up { color: #1dd174; }
+.flow-feed-net--down { color: #f85149; }
+
+.flow-feed {
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 2px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.currency-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border-left: 3px solid transparent;
+}
+.currency-line-time {
+  flex: 0 0 auto;
+  min-width: 48px;
+  color: #556677;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.currency-line-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+}
+.currency-line-text {
+  flex: 1 1 auto;
+  color: #ccd6dd;
+}
+
+/* Color tiers per the msg 1872 legend */
+.currency-line--earn .currency-line-text { color: #1dd174; }      /* Green — earnings */
+.currency-line--hold .currency-line-text { color: #f5a623; }      /* Amber — escrow holds */
+.currency-line--loss .currency-line-text { color: #f85149; }      /* Red — losses */
+.currency-line--dispute {
+  border-left-color: #e3b341;                                     /* Gold — dispute events get accent */
+}
+.currency-line--dispute .currency-line-text { color: #e3b341; }
+.currency-line--passive .currency-line-text { color: #8b949e; }   /* Gray — passive */
+.currency-line--destroyed .currency-line-text { color: #a371f7; } /* Purple — pool destroyed */
+
+/* --- Surface 2: Judge Seat --- */
+.judge-seat {
+  margin: 0 0 8px 0;
+  border: 1px solid #e3b341;
+  border-radius: 8px;
+  background: rgba(227, 179, 65, 0.06);
+  overflow: hidden;
+}
+.judge-seat-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  flex-wrap: wrap;
+}
+.judge-seat-flag {
+  font-weight: 700;
+  color: #e3b341;
+  letter-spacing: 0.02em;
+}
+.judge-seat-parties {
+  font-weight: 600;
+  color: #ccd6dd;
+}
+.judge-seat-pool {
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}
+.judge-seat-expand-btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid #e3b341;
+  background: transparent;
+  color: #e3b341;
+  font-weight: 600;
+  cursor: pointer;
+}
+.judge-seat-expand-btn:hover {
+  background: #e3b341;
+  color: #1a1a1a;
+}
+
+.judge-seat-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-areas: "evidence economics" "rulings rulings";
+  gap: 12px;
+  padding: 12px;
+  border-top: 1px solid rgba(227, 179, 65, 0.3);
+}
+.judge-seat-evidence { grid-area: evidence; }
+.judge-seat-economics { grid-area: economics; }
+.judge-seat-rulings {
+  grid-area: rulings;
+  display: flex;
+  gap: 12px;
+}
+.judge-seat-panel h4 {
+  margin: 0 0 8px 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+}
+.judge-evidence-block,
+.judge-economics-block {
+  margin-bottom: 10px;
+}
+.judge-evidence-label {
+  font-size: 11px;
+  color: #556677;
+  margin-bottom: 2px;
+}
+.judge-evidence-text {
+  font-size: 13px;
+  color: #ccd6dd;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.judge-dispute-msg {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+.judge-dispute-msg-seat { color: #4db5f5; flex: 0 0 auto; }
+.judge-dispute-msg-text { color: #ccd6dd; }
+.judge-evidence-path {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #c0c8d0;
+}
+.judge-economics-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: #ccd6dd;
+  padding: 1px 0;
+}
+.judge-economics-amt {
+  font-variant-numeric: tabular-nums;
+  color: #f5a623;
+}
+.judge-ruling-btn {
+  flex: 1 1 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.judge-ruling-btn--challenger { background: #1f6f3f; color: #fff; }
+.judge-ruling-btn--target { background: #1c5a8a; color: #fff; }
+.judge-ruling-btn--both { background: #7a2e2e; color: #fff; }
+.judge-ruling-btn:hover { filter: brightness(1.15); }
+
+@media (max-width: 640px) {
+  .judge-seat-panel {
+    grid-template-columns: 1fr;
+    grid-template-areas: "evidence" "economics" "rulings";
+  }
+  .judge-seat-rulings { flex-direction: column; }
+}
+
+/* --- Surface 3: Balance Bar --- */
+.balance-bar-summary {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #f5c518;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.balance-bar-summary:hover { text-decoration: underline; }
+
+.balance-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  margin: 0 0 8px 0;
+  border: 1px solid #2a2f36;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.balance-leaderboard-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.balance-leaderboard-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.balance-leaderboard-label {
+  flex: 0 0 110px;
+  color: #ccd6dd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.balance-leaderboard-track {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: #21262d;
+  overflow: hidden;
+  position: relative;
+}
+.balance-leaderboard-fill {
+  display: block;
+  height: 100%;
+  background: #1dd174;
+  border-radius: 4px;
+}
+.balance-leaderboard-fill--negative { background: #f85149; }
+.balance-leaderboard-amt {
+  flex: 0 0 auto;
+  min-width: 90px;
+  text-align: right;
+  color: #c0c8d0;
+  font-variant-numeric: tabular-nums;
+}
+.balance-leaderboard-amt--negative { color: #f85149; }
