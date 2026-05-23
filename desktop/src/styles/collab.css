@@ -1729,13 +1729,7 @@
   background: rgba(255, 255, 255, 0.05);
   border-radius: 8px;
   padding: 12px;
-  /* P6 (@human:0 msg 874 "vertical bars" = stacked role-color left-accents):
-   * 4px role-color border-left removed from the base message card. Role
-   * identity now travels via the .message-card-from text color only. The
-   * inline `style={{ borderLeftColor: ... }}` on each card becomes a no-op
-   * (left-border width is 0, so the color setter has nothing to color).
-   * Subclasses that explicitly want a left-accent (e.g. .question-card,
-   * .submission-card) still set their own `border-left:` rule. */
+  border-left: 4px solid #657786;
 }
 
 .message-card-header {
