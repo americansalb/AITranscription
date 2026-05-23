@@ -9618,9 +9618,22 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
                 // incorrect → additional penalty so total cost = SYSTEM_DISPUTE_PENALTY (filing 50 already paid).
                 let extra = SYSTEM_DISPUTE_PENALTY - SYSTEM_DISPUTE_COST;
                 credit_seat(&mut snap, &filer, -extra, format!("system dispute {} incorrect — penalty", dispute_id))?;
+                let ban_until = snap.turn_counter + SYSTEM_DISPUTE_BAN_TURNS;
                 if let Some(e) = snap.seats.get_mut(&filer) {
-                    e.system_dispute_ban_until = Some(snap.turn_counter + SYSTEM_DISPUTE_BAN_TURNS);
+                    e.system_dispute_ban_until = Some(ban_until);
                 }
+                // (c.1) Replay-durable ban: audit row carries the until-turn in
+                // release_turn so replay_balances_from_ledger reconstructs the ban
+                // (apply_row "system_dispute_ban" arm). Without this the ban lives
+                // only in the snapshot and a ledger rebuild silently un-bans.
+                let bid = snap.next_txn_id; snap.next_txn_id += 1;
+                append_currency_transaction(&dir, &LedgerRow {
+                    id: bid, txn_type: "system_dispute_ban".to_string(), seat: filer.clone(),
+                    amount: 0, reason: format!("system dispute {} incorrect — {}-turn ban", dispute_id, SYSTEM_DISPUTE_BAN_TURNS),
+                    ref_msg: Some(dispute.target_msg), balance_after: snap.seats.get(&filer).map(|e| e.balance).unwrap_or(0),
+                    escrow_id: None, release_turn: Some(ban_until), turn: Some(snap.turn_counter),
+                    action_kind: None, linked_edit_msg: None, at: now.clone(),
+                })?;
                 outcome = format!("incorrect: {} penalized (total {} cu) + {}-turn system-dispute ban", filer, SYSTEM_DISPUTE_PENALTY, SYSTEM_DISPUTE_BAN_TURNS);
             }
         } else if ruling == "challenger_wins" {

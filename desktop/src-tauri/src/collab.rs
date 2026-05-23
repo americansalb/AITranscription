@@ -3226,6 +3226,13 @@ pub mod currency {
             // Phase 2 (c): pool destroyed (both_wrong ruling). Audit-only — no
             // balance change anywhere (the row's seat is "system:pool").
             "pool_destroyed" => {}
+            // Phase 2 (c.1): system-dispute ban, made replay-durable. The ban is
+            // SET via this audit row (release_turn carries the until-turn) and
+            // CLEARED via the reinstate row above — both reconstructable from the
+            // ledger, so balances.json stays a rebuildable cache of currency.jsonl.
+            "system_dispute_ban" => {
+                seat_entry.system_dispute_ban_until = row.release_turn;
+            }
             other => {
                 return Err(format!(
                     "currency.replay HARD ERROR: unknown transaction type {:?} (row id {})",
