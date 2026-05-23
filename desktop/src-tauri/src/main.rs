@@ -321,6 +321,22 @@ fn get_auto_collab() -> bool {
     load_voice_settings().auto_collab
 }
 
+/// Read the persisted last-opened project path from
+/// `%APPDATA%/com.scribe.app/last-project-v2.json`. Returns the path
+/// string if the file exists and contains a `path` field; None otherwise.
+/// Used by ProjectDirContext to auto-restore the project pointer when
+/// localStorage is empty (e.g. after a webview-cache wipe per human msg 307).
+#[tauri::command]
+fn get_last_project_path() -> Option<String> {
+    let appdata = std::env::var_os("APPDATA")?;
+    let path = std::path::PathBuf::from(appdata)
+        .join("com.scribe.app")
+        .join("last-project-v2.json");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("path")?.as_str().map(|s| s.to_string())
+}
+
 /// Check if the vaak-mcp sidecar binary is accessible
 #[tauri::command]
 fn check_sidecar_status() -> serde_json::Value {
@@ -3543,6 +3559,73 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({"seats": with_human}))
 }
 
+/// Currency UI (Phase 1 display) — frontend-facing balance read per human
+/// msg 1300 ("you need it in the UI ... where are the coins"). Reads
+/// .vaak/balances.json via the shared collab::currency module (rebuilds from
+/// the ledger if the snapshot is missing). Returns, per active non-human seat:
+/// settled balance, escrow held, timed-out flag, and the gold/silver/copper
+/// display split. Seats with no ledger entry yet lazy-default to
+/// STARTING_BALANCE_COPPER so coins render immediately, even before any
+/// currency.jsonl activity. Tauri-only (frontend display); authoritative
+/// currency writes happen in the sidecar.
+#[tauri::command]
+fn get_currency_balances_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    // Snapshot is authoritative; rebuild from the ledger if it's missing.
+    let snap = match collab::currency::read_balances_snapshot(&dir) {
+        Ok(s) => {
+            if s.seats.is_empty() && collab::currency::currency_jsonl_path(&dir).exists() {
+                collab::currency::replay_balances_from_ledger(&dir).unwrap_or(s)
+            } else {
+                s
+            }
+        }
+        Err(_) => collab::currency::BalancesSnapshot::default(),
+    };
+    let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+    let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({ "bindings": [] }));
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            if b.get("status").and_then(|s| s.as_str()) != Some("active") {
+                continue;
+            }
+            let role = b.get("role").and_then(|s| s.as_str()).unwrap_or("");
+            if role.is_empty() || role == "human" {
+                continue;
+            }
+            let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+            let label = format!("{}:{}", role, instance);
+            let (balance, escrow_held, timed_out, initialized) = match snap.seats.get(&label) {
+                Some(sb) => (sb.balance, sb.escrow_held, sb.timed_out, true),
+                None => (collab::currency::STARTING_BALANCE_COPPER, 0, false, false),
+            };
+            let disp = collab::currency::copper_to_display(balance);
+            out.push(serde_json::json!({
+                "label": label,
+                "role": role,
+                "instance": instance,
+                "balance_copper": balance,
+                "escrow_held_copper": escrow_held,
+                "timed_out": timed_out,
+                "initialized": initialized,
+                "display": { "gold": disp.gold, "silver": disp.silver, "copper": disp.copper },
+            }));
+        }
+    }
+    out.sort_by(|a, b| {
+        a.get("label").and_then(|l| l.as_str()).unwrap_or("")
+            .cmp(b.get("label").and_then(|l| l.as_str()).unwrap_or(""))
+    });
+    Ok(serde_json::json!({
+        "turn_counter": snap.turn_counter,
+        "seats": out,
+    }))
+}
+
 /// Slice 9 health pill — read 4-layer resilience status.
 /// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
 ///
@@ -6695,6 +6778,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_last_project_path,
             simulate_paste,
             type_text,
             set_recording_state,
@@ -6761,6 +6845,7 @@ fn main() {
             get_resilience_status,
             // Two-controls B.4.1 — active seats for moderator picker
             list_active_seats_cmd,
+            get_currency_balances_cmd,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,

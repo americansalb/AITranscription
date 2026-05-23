@@ -515,6 +515,55 @@
   opacity: 0.7;
 }
 
+/* Currency balance pill (Phase 1 UI, human msg 1300). Functional baseline —
+   ui-architect to refine. Compact row of gold/silver/copper denominations. */
+.role-card-currency {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+.role-card-currency-coin {
+  font-size: 11px;
+}
+.rc-cur {
+  font-weight: 600;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.rc-cur-gold {
+  color: #f5c518;
+}
+.rc-cur-silver {
+  color: #c0c8d0;
+}
+.rc-cur-copper {
+  color: #d08a5a;
+}
+.rc-cur-escrow {
+  color: var(--collab-text-muted);
+  opacity: 0.85;
+}
+.role-card-currency-timedout {
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+/* initialized:false — starting default, NOT a confirmed ledger balance.
+   Dimmed + italic "starting" tag so the human never reads it as real
+   (dev-challenger:0 msg 1325 phantom-balance guardrail). */
+.role-card-currency-pending {
+  opacity: 0.5;
+}
+.rc-cur-pending-tag {
+  font-style: italic;
+  font-weight: 500;
+  color: var(--collab-text-muted);
+  opacity: 0.8;
+}
+
 .role-card-instances {
   font-variant-numeric: tabular-nums;
 }

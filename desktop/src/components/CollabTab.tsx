@@ -1066,6 +1066,57 @@ export function CollabTab() {
     const id = window.setInterval(fetchAlive, 30_000);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [projectDir]);
+  // Currency Phase 1 UI display (human msg 1300 "you need it in the UI ...
+  // where are the coins"). Polls main.rs:get_currency_balances_cmd on the same
+  // cadence as seatAliveMap. Keyed by "role:instance"; consumed by the roster
+  // card render to show a gold/silver/copper balance pill. Empty map (pre-
+  // currency Tauri binary OR error) → cards render with no pill, no regression.
+  const [currencyBalances, setCurrencyBalances] = useState<Map<string, {
+    balance_copper: number;
+    escrow_held_copper: number;
+    timed_out: boolean;
+    initialized: boolean;
+    display: { gold: number; silver: number; copper: number };
+  }>>(new Map());
+  useEffect(() => {
+    if (!projectDir || !window.__TAURI__) return;
+    let cancelled = false;
+    const fetchBalances = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const resp = await invoke<{ seats: Array<{
+          label: string;
+          balance_copper: number;
+          escrow_held_copper: number;
+          timed_out: boolean;
+          initialized: boolean;
+          display: { gold: number; silver: number; copper: number };
+        }> }>("get_currency_balances_cmd", { dir: projectDir });
+        if (cancelled) return;
+        const next = new Map<string, {
+          balance_copper: number; escrow_held_copper: number;
+          timed_out: boolean; initialized: boolean;
+          display: { gold: number; silver: number; copper: number };
+        }>();
+        for (const s of resp.seats || []) {
+          next.set(s.label, {
+            balance_copper: s.balance_copper,
+            escrow_held_copper: s.escrow_held_copper,
+            timed_out: s.timed_out,
+            initialized: s.initialized,
+            display: s.display,
+          });
+        }
+        setCurrencyBalances(next);
+      } catch {
+        // Pre-currency Tauri binary lacks this command → leave map empty;
+        // roster cards render with no balance pill (no regression).
+      }
+    };
+    void fetchBalances();
+    const id = window.setInterval(fetchBalances, 30_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [projectDir]);
   const sectionDropdownRef = useRef<HTMLDivElement | null>(null);
   const [sectionLoading, setSectionLoading] = useState(false);
   const [savedProjects, setSavedProjects] = useState(() => loadSavedProjects());
@@ -4595,6 +4646,45 @@ When multiple instances of this role are active:
                             {getStatusLabel(card.status)}
                           </span>
                         </div>
+                        {/* Currency balance pill (Phase 1 UI, human msg 1300).
+                            Functional baseline — ui-architect to polish styling.
+                            Shows gold/silver/copper for active seats; escrow held
+                            shown with a lock glyph. Hidden for vacant cards. */}
+                        {(() => {
+                          if (card.status === "vacant") return null;
+                          const bal = currencyBalances.get(cardKey);
+                          if (!bal) return null;
+                          const d = bal.display;
+                          // dev-challenger:0 msg 1325 BLOCKING guardrail: a seat
+                          // with no ledger entry yet (initialized:false) shows the
+                          // 10,000 starting DEFAULT, not a real balance. Render it
+                          // visibly distinct (dimmed + "starting" marker) so the
+                          // human never reads a phantom balance as confirmed. Only
+                          // initialized:true pills show as live numbers.
+                          return (
+                            <div
+                              className={`role-card-currency${bal.timed_out ? " role-card-currency-timedout" : ""}${bal.initialized ? "" : " role-card-currency-pending"}`}
+                              title={
+                                bal.initialized
+                                  ? `${bal.balance_copper.toLocaleString()} copper settled${bal.escrow_held_copper > 0 ? ` · ${bal.escrow_held_copper} held in escrow` : ""}${bal.timed_out ? " · TIMED OUT (deficit cap)" : ""}`
+                                  : `Starting balance (${bal.balance_copper.toLocaleString()} copper) — this seat has no recorded currency activity yet; not a confirmed ledger balance.`
+                              }
+                            >
+                              <span className="role-card-currency-coin" aria-hidden="true">🪙</span>
+                              {d.gold > 0 && <span className="rc-cur rc-cur-gold">{d.gold}g</span>}
+                              {(d.gold > 0 || d.silver > 0) && <span className="rc-cur rc-cur-silver">{d.silver}s</span>}
+                              <span className="rc-cur rc-cur-copper">{d.copper}c</span>
+                              {bal.initialized && bal.escrow_held_copper > 0 && (
+                                <span className="rc-cur rc-cur-escrow" title={`${bal.escrow_held_copper} copper held in escrow`}>
+                                  +{bal.escrow_held_copper}🔒
+                                </span>
+                              )}
+                              {!bal.initialized && (
+                                <span className="rc-cur rc-cur-pending-tag" aria-label="starting balance, no activity yet">starting</span>
+                              )}
+                            </div>
+                          );
+                        })()}
                         {/* Companion badge — show if this role is a companion of another role */}
                         {(() => {
                           const parentRole = Object.entries(project.config.roles).find(([, r]) =>
