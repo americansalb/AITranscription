@@ -9139,6 +9139,7 @@ fn record_currency_earn(
             ref_msg: None,
             balance_after: STARTING_BALANCE_COPPER,
             escrow_id: None,
+            release_turn: None,
             at: now.clone(),
         })?;
     }
@@ -9175,6 +9176,9 @@ fn record_currency_earn(
         ref_msg: Some(ref_msg),
         balance_after: bal_after,
         escrow_id: Some(escrow_id),
+        // Commit (c): carry the maturity turn so replay reconstructs the
+        // EscrowItem.release_turn faithfully (no more =0 placeholder).
+        release_turn: Some(release_turn),
         at: now,
     })?;
 
@@ -9580,6 +9584,21 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             }
         }
 
+        // Currency Phase 1 commit (c) — per-send tick. Escrow release + interest
+        // run on EVERY successful non-human send (so held funds aren't trapped
+        // when assembly is off — developer:0 msg 1069 ruling). NO passive income
+        // here (passive is mic_advance-only, fired at the rotation-advance hook
+        // below). Inside both locks. Best-effort: a tick failure must not roll
+        // back the landed message.
+        if !from_label.starts_with("human:") {
+            if let Err(e) = collab::currency::process_tick(&state.project_dir, false, &[]) {
+                eprintln!(
+                    "[currency] per-send tick failed after {} msg {}: {} (message still landed)",
+                    from_label, msg_id, e
+                );
+            }
+        }
+
         // Commit A — planning_unattested informational event emit. Lands
         // AFTER the main message so subscribers see them in order and the
         // CollabTab badge renderer can correlate the warning with the
@@ -9881,6 +9900,39 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
                 }
                 let _ = write_protocol_for_section_value(&state.project_dir, &section_for_gate, &current);
+
+                // Currency Phase 1 commit (c) — mic_advance tick. Fires when the
+                // mic actually advances: pays passive income (+1) to every active
+                // seat AND runs the escrow release + interest lifecycle. Per spec
+                // tick-split, passive is mic_advance-only. active_seats = active
+                // bindings from sessions.json ("role:instance" labels). Inside
+                // both locks; best-effort (a tick failure doesn't unwind the mic
+                // advance, which already persisted above).
+                {
+                    let sessions = read_sessions(&state.project_dir);
+                    let active_seats: Vec<String> = sessions
+                        .get("bindings")
+                        .and_then(|b| b.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter(|b| {
+                                    b.get("status").and_then(|s| s.as_str()) == Some("active")
+                                })
+                                .filter_map(|b| {
+                                    let role = b.get("role").and_then(|r| r.as_str())?;
+                                    let inst = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                                    if role == "human" { return None; } // human is exempt
+                                    Some(format!("{}:{}", role, inst))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Err(e) =
+                        collab::currency::process_tick(&state.project_dir, true, &active_seats)
+                    {
+                        eprintln!("[currency] mic_advance tick failed: {} (mic still advanced)", e);
+                    }
+                }
 
                 // V3 Phase 2 (rule 3): post a directed [YOUR TURN] message to
                 // the new speaker so they wake on the next project_wait poll

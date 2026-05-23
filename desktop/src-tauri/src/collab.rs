@@ -2778,6 +2778,12 @@ pub mod currency {
         pub balance_after: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub escrow_id: Option<String>,
+        /// Commit (c): the maturity turn for an escrow_hold row, so replay can
+        /// reconstruct EscrowItem.release_turn faithfully (previously lost — set
+        /// to 0 on rebuild). Optional + serde default for backward-compat with
+        /// commit-(a)/(b) rows written before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub release_turn: Option<u64>,
         pub at: String, // ISO8601
     }
 
@@ -2978,7 +2984,10 @@ pub mod currency {
                     seat_entry.escrow_items.push(EscrowItem {
                         id: id.clone(),
                         amount: held,
-                        release_turn: 0, // populated by commit (c); replay carries forward from row metadata if extended
+                        // Commit (c): faithfully reconstruct maturity from the row.
+                        // Falls back to 0 for legacy commit-(a)/(b) rows that
+                        // predate the release_turn field (they mature on next tick).
+                        release_turn: row.release_turn.unwrap_or(0),
                         action: row.reason.clone(),
                         ref_msg: row.ref_msg,
                     });
@@ -3030,6 +3039,167 @@ pub mod currency {
             }
         }
         ActionKind::Speak
+    }
+
+    /// Commit (c) — process ONE currency tick. MUST be called inside
+    /// `with_currency_and_board_lock` (both locks held).
+    ///
+    /// Tick split per spec §"Tick semantics" (developer:0 msg 1069 ruling):
+    ///   - turn_counter increments every tick (per-send AND per mic_advance).
+    ///   - Escrow interest + escrow release run on EVERY tick (so funds aren't
+    ///     trapped when assembly is off).
+    ///   - Passive income runs ONLY on mic_advance ticks (`on_mic_advance`),
+    ///     paid to every seat in `active_seats` ("reward for being present in
+    ///     rotation"). active_seats is ignored when on_mic_advance is false.
+    ///
+    /// Ordering within a tick: interest (on escrow held at tick start) → release
+    /// matured escrow (release_turn <= turn_counter) → passive income.
+    /// balances.json is rewritten once at the end; all ledger rows appended.
+    pub fn process_tick(
+        dir: &str,
+        on_mic_advance: bool,
+        active_seats: &[String],
+    ) -> Result<(), String> {
+        let mut snap = read_balances_snapshot(dir)?;
+        if !balances_json_path(dir).exists() && currency_jsonl_path(dir).exists() {
+            snap = replay_balances_from_ledger(dir)?;
+        }
+        let now = super::iso_now();
+        snap.turn_counter = snap.turn_counter.saturating_add(1);
+        let turn = snap.turn_counter;
+
+        let mut next_id = snap.next_txn_id;
+        let mut rows: Vec<LedgerRow> = Vec::new();
+
+        let seats: Vec<String> = snap.seats.keys().cloned().collect();
+        for seat in &seats {
+            // --- Interest on currently-held escrow (items >= INTEREST_MIN_HELD_COPPER) ---
+            let interest: i64 = snap
+                .seats
+                .get(seat)
+                .map(|e| {
+                    e.escrow_items
+                        .iter()
+                        .filter(|it| it.amount >= INTEREST_MIN_HELD_COPPER)
+                        .map(|it| (it.amount / 10) * INTEREST_PER_10_COPPER_HELD)
+                        .sum()
+                })
+                .unwrap_or(0);
+            if interest > 0 {
+                let bal = {
+                    let e = snap.seats.get_mut(seat).unwrap();
+                    e.balance = e.balance.saturating_add(interest);
+                    e.balance
+                };
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "interest".to_string(),
+                    seat: seat.clone(),
+                    amount: interest,
+                    reason: format!("escrow interest @turn {}", turn),
+                    ref_msg: None,
+                    balance_after: bal,
+                    escrow_id: None,
+                    release_turn: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+            }
+
+            // --- Release matured escrow items (release_turn <= turn) ---
+            let matured: Vec<EscrowItem> = {
+                let e = snap.seats.get_mut(seat).unwrap();
+                let (mature, keep): (Vec<EscrowItem>, Vec<EscrowItem>) =
+                    e.escrow_items.drain(..).partition(|it| it.release_turn <= turn);
+                e.escrow_items = keep;
+                mature
+            };
+            for item in matured {
+                let bal = {
+                    let e = snap.seats.get_mut(seat).unwrap();
+                    e.balance = e.balance.saturating_add(item.amount);
+                    e.escrow_held = (e.escrow_held - item.amount).max(0);
+                    e.balance
+                };
+                // credit row (funds settle into balance) ...
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "credit".to_string(),
+                    seat: seat.clone(),
+                    amount: item.amount,
+                    reason: format!("escrow release: {} settled @turn {}", item.action, turn),
+                    ref_msg: item.ref_msg,
+                    balance_after: bal,
+                    escrow_id: Some(item.id.clone()),
+                    release_turn: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+                // ... + escrow_release row (clears the held item)
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "escrow_release".to_string(),
+                    seat: seat.clone(),
+                    amount: item.amount,
+                    reason: format!("escrow matured: {} @turn {}", item.action, turn),
+                    ref_msg: item.ref_msg,
+                    balance_after: bal,
+                    escrow_id: Some(item.id),
+                    release_turn: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+            }
+        }
+
+        // --- Passive income (mic_advance ticks only) ---
+        if on_mic_advance {
+            for seat in active_seats {
+                // Lazy-init an active seat that has never sent (so it still
+                // earns passive). Exactly one init row; apply_row guards dups.
+                if !snap.seats.contains_key(seat) {
+                    snap.seats.entry(seat.clone()).or_default().balance = STARTING_BALANCE_COPPER;
+                    rows.push(LedgerRow {
+                        id: next_id,
+                        txn_type: "init".to_string(),
+                        seat: seat.clone(),
+                        amount: STARTING_BALANCE_COPPER,
+                        reason: "join: initial balance (passive tick)".to_string(),
+                        ref_msg: None,
+                        balance_after: STARTING_BALANCE_COPPER,
+                        escrow_id: None,
+                        release_turn: None,
+                        at: now.clone(),
+                    });
+                    next_id += 1;
+                }
+                let bal = {
+                    let e = snap.seats.get_mut(seat).unwrap();
+                    e.balance = e.balance.saturating_add(PASSIVE_PER_TICK_COPPER);
+                    e.balance
+                };
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "passive".to_string(),
+                    seat: seat.clone(),
+                    amount: PASSIVE_PER_TICK_COPPER,
+                    reason: format!("passive rotation tick @turn {}", turn),
+                    ref_msg: None,
+                    balance_after: bal,
+                    escrow_id: None,
+                    release_turn: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+            }
+        }
+
+        snap.next_txn_id = next_id;
+        for row in &rows {
+            append_currency_transaction(dir, row)?;
+        }
+        write_balances_snapshot(dir, &snap)?;
+        Ok(())
     }
 }
 
