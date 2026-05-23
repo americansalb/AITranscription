@@ -3443,6 +3443,50 @@ When multiple instances of this role are active:
               </div>
             );
           })()}
+          {/* Currency on/off toggle (human msg 1366) — sibling to the
+              visibility-mode badge. Writes settings.currency_enabled via the
+              set_currency_enabled Tauri command; the sidecar's
+              record_currency_earn gate honors it (skips currency when off),
+              and the roster-card coin pills hide when off. Reuses the
+              discussion-mode-badge layout with currency-colored inline style.
+              Default (absent) is ON — currency is opt-out. */}
+          {projectDir && (() => {
+            const currencyOn = project?.config?.settings?.currency_enabled !== false;
+            const color = currencyOn ? "#f5c518" : "#8899a6";
+            const toggleCurrency = async () => {
+              try {
+                const { invoke } = await import("@tauri-apps/api/core");
+                await invoke("set_currency_enabled", { dir: projectDir, enabled: !currencyOn });
+              } catch (e) {
+                console.warn("[currency] toggle failed:", e);
+              }
+            };
+            return (
+              // a11y per ui-architect:2 msg 1392: keyboard-operable + screen-reader
+              // labeled (the human runs screen-reader mode). role=button + tabIndex
+              // + aria-pressed + Enter/Space activation.
+              <span
+                className="discussion-mode-badge"
+                role="button"
+                tabIndex={0}
+                aria-pressed={currencyOn}
+                aria-label={`Currency economy ${currencyOn ? "on" : "off"}. Activate to turn ${currencyOn ? "off" : "on"}.`}
+                style={{ background: `${color}22`, color, borderColor: `${color}55`, marginLeft: 6 }}
+                onClick={() => { void toggleCurrency(); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void toggleCurrency();
+                  }
+                }}
+                title={currencyOn
+                  ? "Currency economy ON — click to turn OFF (hides coin pills; sidecar stops recording currency on the next message, no restart)"
+                  : "Currency economy OFF — click to turn ON (takes effect on the next message)"}
+              >
+                🪙 {currencyOn ? "On" : "Off"}
+              </span>
+            );
+          })()}
           {/* Change D: "Discuss" button removed per human msg 5538 choice A
               + msg 5237 directive 5. Discussion-format start can return as
               a settings-panel action or moderator-tab affordance if needed. */}
@@ -4652,6 +4696,9 @@ When multiple instances of this role are active:
                             shown with a lock glyph. Hidden for vacant cards. */}
                         {(() => {
                           if (card.status === "vacant") return null;
+                          // Currency on/off toggle (human msg 1366): when currency
+                          // is disabled in settings, hide pills entirely.
+                          if (project?.config?.settings?.currency_enabled === false) return null;
                           const bal = currencyBalances.get(cardKey);
                           if (!bal) return null;
                           const d = bal.display;

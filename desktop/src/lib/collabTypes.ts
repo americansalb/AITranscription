@@ -42,6 +42,7 @@ export interface ProjectConfig {
     auto_collab?: boolean;
     human_in_loop?: boolean;
     discussion_mode?: string;
+    currency_enabled?: boolean;
   };
 }
 

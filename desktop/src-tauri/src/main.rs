@@ -2745,6 +2745,36 @@ fn set_discussion_mode(dir: String, discussion_mode: Option<String>) -> Result<(
     Ok(())
 }
 
+/// Toggle the currency economy on/off (human msg 1366). Writes
+/// settings.currency_enabled to project.json; the sidecar's
+/// record_currency_earn gate reads it to skip currency processing when off.
+/// Default (absent) is treated as ON by readers — currency is opt-out.
+#[tauri::command]
+fn set_currency_enabled(dir: String, enabled: bool) -> Result<(), String> {
+    let dir = validate_project_dir(&dir)?;
+    let config_path = std::path::Path::new(&dir).join(".vaak").join("project.json");
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("Failed to read project.json: {}", e))?;
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse project.json: {}", e))?;
+
+    if config.get("settings").is_none() {
+        config["settings"] = serde_json::json!({});
+    }
+    if let Some(settings) = config.get_mut("settings") {
+        settings["currency_enabled"] = serde_json::Value::Bool(enabled);
+    }
+
+    let pretty = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    collab::atomic_write(&config_path, pretty.as_bytes())
+        .map_err(|e| format!("Failed to write project.json: {}", e))?;
+
+    log_error(&format!("Vaak: currency_enabled set to {}", enabled));
+    notify_collab_change();
+    Ok(())
+}
+
 /// Dedicated channel for collab change notifications. Uses a single background
 /// thread instead of spawning a new OS thread per call (25+ call sites).
 /// Notifications are coalesced: rapid successive calls result in a single HTTP request.
@@ -6846,6 +6876,7 @@ fn main() {
             // Two-controls B.4.1 — active seats for moderator picker
             list_active_seats_cmd,
             get_currency_balances_cmd,
+            set_currency_enabled,
             set_continuous_timeout,
             delete_message,
             clear_all_messages,

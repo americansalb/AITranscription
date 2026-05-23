@@ -9107,6 +9107,22 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 /// Acceptable in Phase 1 (balances.json is primary; replay is recovery-only);
 /// commit (c) owns escrow release + should extend the row schema if exact
 /// replay fidelity of in-flight escrows is required.
+/// Currency on/off gate (human msg 1366). Reads settings.currency_enabled
+/// from project.json. Absent or true → currency runs (opt-out semantics);
+/// explicit false → all currency processing is skipped.
+fn currency_enabled(dir: &str) -> bool {
+    let path = std::path::Path::new(dir).join(".vaak").join("project.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("settings")
+                .and_then(|s| s.get("currency_enabled"))
+                .and_then(|b| b.as_bool())
+        })
+        .unwrap_or(true)
+}
+
 fn record_currency_earn(
     dir: &str,
     seat: &str,
@@ -9115,6 +9131,11 @@ fn record_currency_earn(
 ) -> Result<(), String> {
     use collab::currency::*;
     if matches!(action, ActionKind::Exempt) {
+        return Ok(());
+    }
+    // Currency on/off toggle gate (human msg 1366): when disabled in
+    // project.json settings, record nothing — no ledger rows, no escrow.
+    if !currency_enabled(dir) {
         return Ok(());
     }
     // balances.json is authoritative when present; rebuild from the ledger
@@ -9590,7 +9611,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // here (passive is mic_advance-only, fired at the rotation-advance hook
         // below). Inside both locks. Best-effort: a tick failure must not roll
         // back the landed message.
-        if !from_label.starts_with("human:") {
+        // Currency on/off gate (human msg 1366 + architect:0 msg 1373): when
+        // disabled, skip ticks too — not just earns — so "currency off" truly
+        // freezes the economy (no escrow release, no interest accrual).
+        if !from_label.starts_with("human:") && currency_enabled(&state.project_dir) {
             if let Err(e) = collab::currency::process_tick(&state.project_dir, false, &[]) {
                 eprintln!(
                     "[currency] per-send tick failed after {} msg {}: {} (message still landed)",
@@ -9908,7 +9932,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 // bindings from sessions.json ("role:instance" labels). Inside
                 // both locks; best-effort (a tick failure doesn't unwind the mic
                 // advance, which already persisted above).
-                {
+                // Currency on/off gate (human msg 1366 + architect:0 msg 1373):
+                // skip the whole tick (passive + lifecycle) when disabled, so
+                // "currency off" freezes the economy completely.
+                if currency_enabled(&state.project_dir) {
                     let sessions = read_sessions(&state.project_dir);
                     let active_seats: Vec<String> = sessions
                         .get("bindings")
