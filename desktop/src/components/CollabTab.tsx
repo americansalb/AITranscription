@@ -864,24 +864,6 @@ export function CollabTab() {
     setClaimsCollapsed(next);
     saveJSON("vaak_collab_claims_collapsed", next);
   };
-  // Audience rail-section collapse — P1a parity with mockup line 988-998.
-  // Default-collapsed in the mockup; we mirror the claims-section tristate so
-  // empty auto-collapses and non-empty auto-expands until the human toggles.
-  const [audienceCollapsed, setAudienceCollapsed] = useState<boolean | null>(
-    () => loadJSON<boolean | null>("vaak_collab_audience_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
-  );
-  const updateAudienceCollapsed = (next: boolean) => {
-    setAudienceCollapsed(next);
-    saveJSON("vaak_collab_audience_collapsed", next);
-  };
-  // Replanning rail-section collapse — P1b parity with mockup line 1001-1010.
-  const [replanningCollapsed, setReplanningCollapsed] = useState<boolean | null>(
-    () => loadJSON<boolean | null>("vaak_collab_replanning_collapsed", null, (v): v is boolean | null => v === null || typeof v === "boolean"),
-  );
-  const updateReplanningCollapsed = (next: boolean) => {
-    setReplanningCollapsed(next);
-    saveJSON("vaak_collab_replanning_collapsed", next);
-  };
   const [_addTeamTab, _setAddTeamTab] = useState<"groups" | "roles">("groups");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [groupRoleChecked, setGroupRoleChecked] = useState<Record<string, boolean>>({});
@@ -4880,107 +4862,6 @@ When multiple instances of this role are active:
                   );
                 })}
             </>
-            )}
-          </CollapsibleSection>
-          );
-        })()}
-
-        {/* Audience rail-section — P1a parity with collab-layout-demo.html
-            lines 988-998. Shows enabled persona count and an "Enable for
-            next round" CTA that opens the full Audience Panel modal where
-            topic + pool selection + voting lives. Lazy: audiencePools is
-            populated by the existing modal-open fetch; until then count
-            reads 0 and the rail surfaces the empty-state CTA. */}
-        {(() => {
-          const audienceMemberTotal = audiencePools.reduce((sum, p) => sum + (p.member_count ?? 0), 0);
-          const audienceCount = audienceMemberTotal;
-          const audienceCountClass = audienceCount === 0 ? "rail-section-count zero" : "rail-section-count";
-          const collapsedEffective = audienceCollapsed ?? (audienceCount === 0);
-          return (
-          <CollapsibleSection
-            id="audience-section"
-            title="Audience"
-            trailing={<span className={audienceCountClass}>({audienceCount})</span>}
-            collapsed={collapsedEffective}
-            onToggle={() => updateAudienceCollapsed(!collapsedEffective)}
-            className="audience-section rail-section"
-            headerTooltip={{ expand: "Expand audience section", collapse: "Collapse audience section" }}
-          >
-            {audienceCount === 0 ? (
-              <>
-                <div className="rail-empty audience-section-empty">No audience personas active.</div>
-                <button
-                  type="button"
-                  className="rail-btn audience-section-enable"
-                  onClick={() => setAudiencePanelOpen(true)}
-                >
-                  Enable for next round
-                </button>
-              </>
-            ) : (
-              <>
-                {audiencePools.map((pool) => (
-                  <div key={pool.id} className="rail-item audience-section-pool">
-                    <div className="rail-item-head">
-                      <span className="rail-item-from">{pool.name}</span>
-                      <span className="rail-item-meta">{pool.member_count} personas</span>
-                    </div>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  className="rail-btn audience-section-open"
-                  onClick={() => setAudiencePanelOpen(true)}
-                >
-                  Open Audience Panel
-                </button>
-              </>
-            )}
-          </CollapsibleSection>
-          );
-        })()}
-
-        {/* Replanning Requests rail-section — P1b parity with collab-layout-demo.html
-            lines 1001-1010. Data source: protocol.floor.replanning_requests
-            (same array AssemblyControls consumes; see useProtocolState.ts:43).
-            Empty-state one-liner matches mockup line 1008. Non-empty: each
-            request becomes a rail-item card with requester + reason. */}
-        {(() => {
-          const replanningRequests = twoControlsProtocol?.floor?.replanning_requests ?? [];
-          const replanningCount = replanningRequests.length;
-          const replanningCountClass = replanningCount === 0 ? "rail-section-count zero" : "rail-section-count";
-          const collapsedEffective = replanningCollapsed ?? (replanningCount === 0);
-          return (
-          <CollapsibleSection
-            id="replanning-section"
-            title="Replanning Requests"
-            trailing={<span className={replanningCountClass}>({replanningCount})</span>}
-            collapsed={collapsedEffective}
-            onToggle={() => updateReplanningCollapsed(!collapsedEffective)}
-            className="replanning-section rail-section"
-            headerTooltip={{ expand: "Expand replanning requests", collapse: "Collapse replanning requests" }}
-          >
-            {replanningCount === 0 ? (
-              <div className="rail-empty replanning-section-empty">No replanning requests queued.</div>
-            ) : (
-              <>
-                {replanningRequests.map((req, idx) => {
-                  const seatSlug = (req.seat ?? "").split(":")[0] || "";
-                  return (
-                    <div key={`${req.seat ?? "anon"}-${idx}-${req.ts}`} className="rail-item replanning-section-item">
-                      <div className="rail-item-head">
-                        <span
-                          className="rail-item-from"
-                          style={{ color: seatSlug ? getRoleColor(seatSlug) : undefined }}
-                        >
-                          {req.seat ?? "unknown"}
-                        </span>
-                      </div>
-                      {req.reason && <div className="rail-item-body">{req.reason}</div>}
-                    </div>
-                  );
-                })}
-              </>
             )}
           </CollapsibleSection>
           );
