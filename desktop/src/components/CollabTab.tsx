@@ -3476,23 +3476,13 @@ When multiple instances of this role are active:
               </button>
             </div>
 
-            {/* AssemblyControls inline per human msg 679 — assembly flow
-                belongs at the team surface, not buried behind Configure ⚙.
-                Reverts the Phase 1b popover indirection for the controls
-                the human actually uses while running the team. */}
-            {twoControlsProtocol && (
-              <AssemblyControls
-                protocol={twoControlsProtocol}
-                mutate={twoControlsMutate}
-                lastError={twoControlsLastError}
-                selfRole={null /* human view in CollabTab */}
-                projectDir={projectDir}
-              />
-            )}
-
-            {/* ProtocolPanel inline below — Phase 1b polish E2 already
-                lifted this out of the popover (force-release / yield are
-                destructive 1-click controls). */}
+            {/* ProtocolPanel inline below the strip — Phase 1b polish E2
+                (evil-arch msg 509 + tech-leader msg 511): force-release /
+                yield are destructive actions that should be 1-click, not
+                buried two clicks deep behind Configure ⚙. AssemblyControls
+                (settings: preset / mic mode / moderator / review-intensity
+                / plan) stays in the popover because those are NOT urgent
+                quick-access controls. */}
             <ProtocolPanel
               projectDir={projectDir}
               section={activeSection || "default"}
@@ -3501,18 +3491,25 @@ When multiple instances of this role are active:
               rolesConfig={project?.config?.roles}
             />
 
-            {/* Popover retained empty — future settings surface. The
-                Configure button still opens it but has no children now
-                that AssemblyControls is inline above. Removing the popover
-                wrapper + button is a separate cleanup commit. */}
+            {/* Popover-mounted SETTINGS only. Renders via createPortal so the
+                modal can layer above the rest of the CollabTab without
+                z-index/overflow gotchas. Closes on Escape, click-outside,
+                or the × button. AssemblyControls is the only child now
+                per E2 split — ProtocolPanel moved inline above. */}
             <DiscussionSettingsPopover
               open={discussionPopoverOpen}
               onClose={() => setDiscussionPopoverOpen(false)}
               title="Discussion Mode Settings"
             >
-              <p style={{ padding: "16px", color: "#8899a6", fontSize: "13px", textAlign: "center" }}>
-                Assembly controls moved inline per human msg 679. This popover is now empty — reserved for future settings.
-              </p>
+              {twoControlsProtocol && (
+                <AssemblyControls
+                  protocol={twoControlsProtocol}
+                  mutate={twoControlsMutate}
+                  lastError={twoControlsLastError}
+                  selfRole={null /* human view in CollabTab */}
+                  projectDir={projectDir}
+                />
+              )}
             </DiscussionSettingsPopover>
           </>
           );
