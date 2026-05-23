@@ -3605,6 +3605,54 @@ When multiple instances of this role are active:
         {/* Settings Panel */}
         {settingsOpen && (
           <div className="project-settings-panel">
+            {/* Currency mode — Settings-panel entry per human msg 1493 ("both":
+                header badge + Settings entry). Reads/writes the SAME
+                settings.currency_enabled as the header 🪙 badge (via the
+                set_currency_enabled command shipped in 1148381), so the two
+                surfaces stay in sync automatically. Honest label: this is the
+                engine gate, not display-only. role=switch + aria-checked for
+                screen-reader operability (human runs screen-reader mode). */}
+            {projectDir && (() => {
+              const currencyOn = project?.config?.settings?.currency_enabled !== false;
+              const toggleCurrency = async () => {
+                try {
+                  const { invoke } = await import("@tauri-apps/api/core");
+                  await invoke("set_currency_enabled", { dir: projectDir, enabled: !currencyOn });
+                } catch (e) {
+                  console.warn("[currency] toggle failed:", e);
+                }
+              };
+              const color = currencyOn ? "#f5c518" : "#8899a6";
+              return (
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label-text">Currency mode</div>
+                    <div className="settings-label-hint">Agents earn/spend copper for actions. Off hides the coin pills and stops the economy on the next message (no restart). Same toggle as the 🪙 badge in the header.</div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={currencyOn}
+                    aria-label={`Currency economy ${currencyOn ? "on" : "off"}. Activate to turn ${currencyOn ? "off" : "on"}.`}
+                    onClick={() => { void toggleCurrency(); }}
+                    style={{
+                      background: `${color}22`,
+                      color,
+                      border: `1px solid ${color}55`,
+                      borderRadius: 4,
+                      padding: "4px 12px",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                    title={currencyOn
+                      ? "Currency economy ON — click to turn OFF (hides coin pills; stops recording on the next message, no restart)"
+                      : "Currency economy OFF — click to turn ON (takes effect on the next message)"}
+                  >
+                    🪙 {currencyOn ? "On" : "Off"}
+                  </button>
+                </div>
+              );
+            })()}
             <div className="settings-row">
               <div>
                 <div className="settings-label-text">Message retention</div>
