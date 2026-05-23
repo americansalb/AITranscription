@@ -7885,3 +7885,196 @@
 .discussion-mode-section.collapsed > .collapsible-section-header {
   padding: 4px 8px;
 }
+
+/* ============================================================
+ * Phase 1c — Visible restyle (human msg 645: "looks exactly the same")
+ *
+ * Phase 1b shipped the structural restructure (strip, popover, compact
+ * cards, Track D markers) but the visual signature was too close to
+ * what was there before — the human couldn't perceive the change.
+ *
+ * Phase 1c bumps the visual delta:
+ *   - Discussion Mode strip: accent-bar left, brighter bg, taller
+ *   - Section headers: larger + bolder + accent underline
+ *   - Compact cards: more breathing room (gap 6→12, padding bumped)
+ *   - Mic-holder accent: brighter green wash, stronger glow
+ *   - Right-rail: distinct bg + accent left-border to set it apart
+ *
+ * All overrides are appended (no edits to the Phase 1b rules above)
+ * so the diff is contained and reverting is one-block-delete.
+ * ============================================================ */
+
+/* (1) Discussion Mode strip — visible accent band */
+.discussion-mode-strip {
+  background: linear-gradient(
+    90deg,
+    rgba(29, 155, 240, 0.14) 0%,
+    rgba(29, 155, 240, 0.06) 40%,
+    rgba(255, 255, 255, 0.02) 100%
+  );
+  border-top: 1px solid rgba(29, 155, 240, 0.35);
+  border-bottom: 1px solid rgba(29, 155, 240, 0.18);
+  border-left: 3px solid #1d9bf0;
+  padding: 8px 14px;
+  min-height: 36px;
+  font-size: 12.5px;
+  box-shadow: inset 0 -1px 0 rgba(29, 155, 240, 0.08);
+}
+
+.discussion-mode-strip-key {
+  color: #1d9bf0;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+}
+
+.discussion-mode-strip-preset {
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.discussion-mode-strip-configure {
+  background: rgba(29, 155, 240, 0.12);
+  border: 1px solid rgba(29, 155, 240, 0.45);
+  color: #1d9bf0;
+  font-weight: 600;
+  padding: 4px 14px;
+  font-size: 12px;
+}
+
+.discussion-mode-strip-configure:hover {
+  background: #1d9bf0;
+  color: #ffffff;
+  border-color: #1d9bf0;
+}
+
+/* (2) Section headers — bigger + accent underline glow */
+.project-tab .collapsible-section {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 10px;
+}
+
+.project-tab .collapsible-section-header {
+  padding: 11px 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.025) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+}
+
+.project-tab .collapsible-section-title {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.015em;
+  color: #ffffff;
+  position: relative;
+  padding-left: 10px;
+}
+
+.project-tab .collapsible-section-title::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 14px;
+  background: var(--collab-accent, #1d9bf0);
+  border-radius: 2px;
+}
+
+/* (3) Compact card layout — more breathing room */
+.project-roles-grid.project-roles-compact {
+  gap: 10px;
+}
+
+.project-roles-grid.project-roles-compact .role-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border-width: 1px 1px 1px 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.project-roles-grid.project-roles-compact .role-card:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.project-roles-grid.project-roles-compact .role-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.project-roles-grid.project-roles-compact .role-card-meta {
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+/* (4) Mic-holder accent — brighter, more obviously "LIVE" */
+.role-card.role-card-mic-holder {
+  background: linear-gradient(
+    135deg,
+    rgba(23, 191, 99, 0.18) 0%,
+    rgba(23, 191, 99, 0.06) 60%
+  );
+  border-left-width: 5px;
+  border-left-color: #17bf63;
+  box-shadow:
+    0 0 0 1px rgba(23, 191, 99, 0.35),
+    0 0 20px rgba(23, 191, 99, 0.30),
+    inset 0 0 32px rgba(23, 191, 99, 0.08);
+}
+
+.role-card-mic-glyph {
+  font-size: 18px;
+  filter: drop-shadow(0 0 6px rgba(23, 191, 99, 0.7));
+}
+
+/* (5) Moderator card — clearer gold accent */
+.role-card.role-card-moderator {
+  box-shadow:
+    inset 0 3px 0 0 rgba(251, 191, 36, 0.7),
+    0 0 12px rgba(251, 191, 36, 0.12);
+}
+
+.role-card-moderator-glyph {
+  font-size: 16px;
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6));
+}
+
+/* (6) Right rail — distinct background + accent left-border */
+@media (min-width: 1000px) {
+  .project-tab .decision-panel-section,
+  .project-tab .claims-section {
+    background: rgba(29, 155, 240, 0.04);
+    border-left: 3px solid rgba(29, 155, 240, 0.5);
+    border-radius: 0 10px 10px 0;
+  }
+
+  .project-tab .decision-panel-section .collapsible-section-title,
+  .project-tab .claims-section .collapsible-section-title {
+    color: #1d9bf0;
+  }
+
+  .project-tab .decision-panel-section .collapsible-section-title::before,
+  .project-tab .claims-section .collapsible-section-title::before {
+    background: #1d9bf0;
+    box-shadow: 0 0 8px rgba(29, 155, 240, 0.7);
+  }
+}
+
+/* (7) Team Roster band: title accent matches roster role */
+.roster-section .collapsible-section-title::before {
+  background: #17bf63;
+}
+
+/* (8) Active Claims / Decisions: glanceable accent dot in trailing area */
+.project-tab .decision-panel-section .collapsible-section-trailing,
+.project-tab .claims-section .collapsible-section-trailing {
+  color: #1d9bf0;
+  font-weight: 600;
+}
