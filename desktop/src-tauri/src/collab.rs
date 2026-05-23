@@ -2709,3 +2709,432 @@ pub fn append_decision_resolution(dir: &str, r: &DecisionResolution) -> Result<(
         .map_err(|e| format!("Failed to write resolution: {}", e))?;
     Ok(())
 }
+
+// ============================================================
+// Currency Ledger — Phase 1 (commit a)
+// ============================================================
+// Per architect:0 msg 1135 + plan `.vaak/design-notes/2026-05-23-currency-
+// ledger-phase1-{spec,plan}.md`. Project-wide ledger (.vaak/currency.jsonl
+// append-only) + snapshot (.vaak/balances.json via atomic_write).
+//
+// Lock semantics (ruling 9-corrected per dev-challenger:0 msg 1123 +
+// developer:0 msg 1129):
+//   Sole entry point for touching both ledger and board is
+//   `with_currency_and_board_lock(dir, F)`. Outer = `.vaak/currency.lock`
+//   (section-independent, project-wide). Inner = section-scoped board.lock
+//   via `with_board_lock`. Closure-nest auto-LIFO release. Manual
+//   composition of with_currency_lock + with_board_lock is a deadlock-by-
+//   reverse-order risk; ALWAYS use the combined helper.
+//
+// The sidecar binary (bin/vaak-mcp.rs) defines its own
+// `with_currency_and_board_lock` that nests vaak-mcp.rs::with_file_lock
+// (section-scoped) inside this same outer currency lock. Cross-binary
+// parity: same path `.vaak/currency.lock`, same ordering rule.
+// ============================================================
+
+pub mod currency {
+    use super::atomic_write;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    // ---- Constants (spec §"Constants") ----
+    pub const STARTING_BALANCE_COPPER: i64 = 10_000;
+    pub const DEFICIT_CAP_COPPER: i64 = -1_000;
+    pub const PASS_EARN_COPPER: i64 = 1;
+    pub const SPEAK_EARN_COPPER: i64 = 10;
+    pub const PASS_ESCROW_TICKS: u64 = 3;
+    pub const SPEAK_ESCROW_TICKS: u64 = 5;
+    pub const PASSIVE_PER_TICK_COPPER: i64 = 1;
+    pub const INTEREST_MIN_HELD_COPPER: i64 = 10;
+    pub const INTEREST_PER_10_COPPER_HELD: i64 = 1;
+    pub const PASS_BODY_LEN_THRESHOLD: usize = 100;
+
+    // ---- Types ----
+
+    /// Action classification for a project_send. Exempt = human (no charge).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ActionKind { Pass, Speak, Exempt }
+
+    /// Display split. balances.json carries copper only; UI consumers call
+    /// `copper_to_display`. Per ui-architect:0 msg 1071 single-helper rule.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct CopperDisplay { pub gold: i64, pub silver: i64, pub copper: i64 }
+
+    /// Currency transaction row appended to .vaak/currency.jsonl.
+    /// Self-describing per ui-architect:0 msg 1071 — `reason` is human-prose,
+    /// not an opcode. Future ledger UIs render rows without joining board.jsonl.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct LedgerRow {
+        pub id: u64,
+        #[serde(rename = "type")]
+        pub txn_type: String, // "init" | "credit" | "escrow_hold" | "escrow_release" | "passive" | "interest" | "penalty"
+        pub seat: String,
+        pub amount: i64,
+        pub reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ref_msg: Option<u64>,
+        pub balance_after: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub escrow_id: Option<String>,
+        pub at: String, // ISO8601
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct EscrowItem {
+        pub id: String,           // "esc_{:06x}"
+        pub amount: i64,
+        pub release_turn: u64,
+        pub action: String,       // "pass" | "speak" (Edit/Test in Phase 3)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ref_msg: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct SeatBalance {
+        pub balance: i64,
+        pub escrow_held: i64,
+        #[serde(default)]
+        pub escrow_items: Vec<EscrowItem>,
+        #[serde(default)]
+        pub timed_out: bool,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct BalancesSnapshot {
+        pub turn_counter: u64,
+        #[serde(default)]
+        pub next_txn_id: u64,
+        #[serde(default)]
+        pub next_escrow_id: u64,
+        pub seats: HashMap<String, SeatBalance>,
+    }
+
+    // ---- Paths ----
+
+    fn vaak_root(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak")
+    }
+    pub fn currency_jsonl_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("currency.jsonl")
+    }
+    pub fn balances_json_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("balances.json")
+    }
+    pub fn currency_lock_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("currency.lock")
+    }
+
+    // ---- Display helper ----
+
+    /// Single source of truth for copper → gold/silver/copper display split.
+    /// Per ui-architect:0 msg 1071: do NOT re-implement this elsewhere.
+    /// Per-field sign: negative copper splits into negative gold/silver/copper.
+    pub fn copper_to_display(c: i64) -> CopperDisplay {
+        let sign: i64 = if c < 0 { -1 } else { 1 };
+        let abs = c.abs();
+        let gold = abs / 10_000;
+        let silver = (abs % 10_000) / 100;
+        let copper = abs % 100;
+        CopperDisplay { gold: sign * gold, silver: sign * silver, copper: sign * copper }
+    }
+
+    // ---- Snapshot I/O ----
+
+    pub fn read_balances_snapshot(dir: &str) -> Result<BalancesSnapshot, String> {
+        let path = balances_json_path(dir);
+        if !path.exists() {
+            return Ok(BalancesSnapshot::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read balances.json: {}", e))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse balances.json: {}", e))
+    }
+
+    pub fn write_balances_snapshot(dir: &str, snap: &BalancesSnapshot) -> Result<(), String> {
+        let path = balances_json_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::to_vec_pretty(snap)
+            .map_err(|e| format!("serialize balances.json: {}", e))?;
+        atomic_write(&path, &body)
+    }
+
+    /// Append a transaction row to currency.jsonl. Must be called inside
+    /// with_currency_and_board_lock (or a test that explicitly holds the
+    /// currency lock). Caller is responsible for setting `id` and
+    /// `balance_after` correctly relative to the in-memory snapshot.
+    pub fn append_currency_transaction(dir: &str, row: &LedgerRow) -> Result<(), String> {
+        let path = currency_jsonl_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        let line = serde_json::to_string(row)
+            .map_err(|e| format!("serialize ledger row: {}", e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("open currency.jsonl: {}", e))?;
+        writeln!(f, "{}", line).map_err(|e| format!("write currency.jsonl: {}", e))?;
+        Ok(())
+    }
+
+    /// Generate the next escrow id as `esc_{:06x}` from the snapshot's
+    /// monotonic counter. Caller updates `snap.next_escrow_id` after use.
+    pub fn next_escrow_id(snap: &mut BalancesSnapshot) -> String {
+        let id = snap.next_escrow_id;
+        snap.next_escrow_id = snap.next_escrow_id.wrapping_add(1);
+        format!("esc_{:06x}", id)
+    }
+
+    // ---- Replay (rebuild snapshot from currency.jsonl) ----
+
+    /// Replay currency.jsonl line-by-line and rebuild the BalancesSnapshot.
+    /// Per architect ruling + dev-challenger:0 msg 1080 nit #2:
+    ///   - Last line that fails to parse → WARN-and-skip (partial-write tolerance)
+    ///   - Any earlier line that fails to parse → HARD ERROR
+    ///   - Duplicate `type:"init"` for same seat → HARD ERROR
+    pub fn replay_balances_from_ledger(dir: &str) -> Result<BalancesSnapshot, String> {
+        let path = currency_jsonl_path(dir);
+        if !path.exists() {
+            return Ok(BalancesSnapshot::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read currency.jsonl: {}", e))?;
+        let lines: Vec<&str> = raw.lines().collect();
+        let mut snap = BalancesSnapshot::default();
+        let mut max_txn_id: u64 = 0;
+        let last_idx = lines.len().saturating_sub(1);
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() { continue; }
+            let row: LedgerRow = match serde_json::from_str(line) {
+                Ok(r) => r,
+                Err(e) => {
+                    if i == last_idx {
+                        eprintln!(
+                            "[currency.replay] WARN: skipping unparseable last line {} (partial write tolerance): {}",
+                            i + 1, e
+                        );
+                        continue;
+                    } else {
+                        return Err(format!(
+                            "currency.jsonl parse error at line {}: {} (line: {})",
+                            i + 1, e, line
+                        ));
+                    }
+                }
+            };
+            apply_row(&mut snap, &row)?;
+            if row.id > max_txn_id { max_txn_id = row.id; }
+        }
+        snap.next_txn_id = max_txn_id.saturating_add(1);
+        Ok(snap)
+    }
+
+    /// Apply a single ledger row to an in-memory snapshot. Pure function;
+    /// no I/O. Used by both replay and live-write paths.
+    fn apply_row(snap: &mut BalancesSnapshot, row: &LedgerRow) -> Result<(), String> {
+        let seat_entry = snap.seats.entry(row.seat.clone()).or_default();
+        match row.txn_type.as_str() {
+            "init" => {
+                // Invariant per dev-challenger:0 msg 1080 nit #2: exactly ONE init per seat.
+                // Detect via: if seat already has a non-zero balance OR any prior escrow,
+                // a second init is a HARD ERROR.
+                if seat_entry.balance != 0
+                    || !seat_entry.escrow_items.is_empty()
+                    || seat_entry.escrow_held != 0
+                {
+                    return Err(format!(
+                        "currency.replay HARD ERROR: duplicate init for seat {} (row id {})",
+                        row.seat, row.id
+                    ));
+                }
+                seat_entry.balance = row.amount;
+            }
+            "credit" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+            }
+            "passive" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+            }
+            "interest" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+            }
+            "penalty" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+                if seat_entry.balance <= DEFICIT_CAP_COPPER {
+                    seat_entry.timed_out = true;
+                }
+            }
+            "escrow_hold" => {
+                // Amount is negative (funds held). Track in escrow_held + escrow_items.
+                let held = row.amount.abs();
+                seat_entry.escrow_held = seat_entry.escrow_held.saturating_add(held);
+                if let Some(id) = &row.escrow_id {
+                    seat_entry.escrow_items.push(EscrowItem {
+                        id: id.clone(),
+                        amount: held,
+                        release_turn: 0, // populated by commit (c); replay carries forward from row metadata if extended
+                        action: row.reason.clone(),
+                        ref_msg: row.ref_msg,
+                    });
+                }
+            }
+            "escrow_release" => {
+                // Amount is positive (funds returned to balance). Remove the matching item.
+                let amt = row.amount;
+                seat_entry.escrow_held = (seat_entry.escrow_held - amt).max(0);
+                if let Some(id) = &row.escrow_id {
+                    seat_entry.escrow_items.retain(|it| &it.id != id);
+                }
+                // Released amount is already in row.balance_after via the credit path.
+            }
+            other => {
+                return Err(format!(
+                    "currency.replay HARD ERROR: unknown transaction type {:?} (row id {})",
+                    other, row.id
+                ));
+            }
+        }
+        if seat_entry.balance <= DEFICIT_CAP_COPPER {
+            seat_entry.timed_out = true;
+        }
+        Ok(())
+    }
+
+    /// Classify a project_send into Pass / Speak / Exempt per spec §
+    /// "Pass classification" (ui-architect:2 msg 1073 anchored fix folded
+    /// in architect:0 msg 1075 ruling 1):
+    ///   Exempt = sender starts with "human:"
+    ///   Pass   = type=="status" AND ( body.trim().chars().count() < 100
+    ///                                  OR body.trim().to_lowercase().starts_with("pass")
+    ///                                  OR subject.eq_ignore_ascii_case("passing") )
+    ///   Speak  = everything else
+    pub fn classify_action(from: &str, msg_type: &str, subject: &str, body: &str) -> ActionKind {
+        if from.starts_with("human:") {
+            return ActionKind::Exempt;
+        }
+        if msg_type == "status" {
+            let body_trimmed = body.trim();
+            let body_len = body_trimmed.chars().count();
+            let body_lower = body_trimmed.to_lowercase();
+            let short = body_len < PASS_BODY_LEN_THRESHOLD;
+            let body_pass = body_lower.starts_with("pass");
+            let subject_passing = subject.eq_ignore_ascii_case("passing");
+            if short || body_pass || subject_passing {
+                return ActionKind::Pass;
+            }
+        }
+        ActionKind::Speak
+    }
+}
+
+// ---- Currency lock primitives (commit a) ----
+//
+// Sole entry point: `with_currency_and_board_lock`. Acquires the project-wide
+// `.vaak/currency.lock` as OUTER, then delegates to the section-scoped board
+// lock as INNER. Closure-nest auto-LIFO release. Cross-binary parity with the
+// sidecar's `with_currency_and_board_lock` in bin/vaak-mcp.rs — same outer
+// path, same ordering, MUST NOT diverge.
+
+/// Project-wide currency lock (section-independent). Closure-style; same
+/// pattern as `with_board_lock` but on a fixed `.vaak/currency.lock` path.
+pub fn with_currency_lock<F, R>(dir: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String>,
+{
+    let lock_path = currency::currency_lock_path(dir);
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open currency lock file: {}", e))?;
+
+    const LOCK_TIMEOUT_MS: u64 = 10_000;
+    const LOCK_RETRY_MS: u64 = 50;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let handle = lock_file.as_raw_handle();
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let locked = unsafe {
+            LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+        };
+        if locked == 0 {
+            let start = std::time::Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                let retry = unsafe {
+                    LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                };
+                if retry != 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "currency.lock held for >{}s — stale lock from hung process. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+            }
+        }
+        let result = f();
+        let mut ov2: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let _ = unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ov2) };
+        return result;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = lock_file.as_raw_fd();
+        let start = std::time::Instant::now();
+        loop {
+            let r = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if r == 0 { break; }
+            if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                return Err(format!(
+                    "currency.lock held for >{}s — stale lock. Lock file: {}",
+                    LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+        }
+        let result = f();
+        unsafe { libc::flock(fd, libc::LOCK_UN); }
+        return result;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        // Fallback for non-Windows/Unix targets (none in our deploy set).
+        let _ = lock_file;
+        f()
+    }
+}
+
+/// Sole entry point for code that touches BOTH currency.jsonl/balances.json
+/// AND board.jsonl/protocol.json. Acquires currency.lock as OUTER, then
+/// delegates to `with_board_lock` (section-scoped) as INNER. Closure-nest
+/// auto-LIFO release. MUST NOT compose `with_currency_lock` + `with_board_lock`
+/// manually — that's a deadlock-by-reverse-order risk (dev-challenger:0
+/// msg 1123 single-entry-point guardrail).
+///
+/// Cross-binary parity: `bin/vaak-mcp.rs::with_currency_and_board_lock`
+/// MUST follow the same path: `.vaak/currency.lock` outer, section-scoped
+/// board lock inner. See `bin/vaak-mcp.rs` for the sidecar mirror.
+pub fn with_currency_and_board_lock<F, R>(dir: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String>,
+{
+    with_currency_lock(dir, || with_board_lock(dir, f))
+}

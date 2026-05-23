@@ -12140,6 +12140,40 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         },
                         "required": ["topic"]
                     }
+                },
+                {
+                    "name": "currency_balance",
+                    "description": "Return the calling seat's currency balance, escrow items, and the last 10 transactions affecting that seat. Phase 1 shadow read-only. Returns default 10000 if no transactions yet.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "seat": { "type": "string", "description": "Optional: seat 'role:N'. Defaults to the current session's seat." }
+                        }
+                    }
+                },
+                {
+                    "name": "currency_ledger",
+                    "description": "Return the last N currency transactions, newest first. Optional seat filter. Phase 1 shadow read-only.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "integer", "description": "Max rows to return (default 50)" },
+                            "seat": { "type": "string", "description": "Optional: filter by seat slug" }
+                        }
+                    }
+                },
+                {
+                    "name": "currency_objection",
+                    "description": "STUB (Phase 2). Object to another seat's Speak/Edit. Reserves the Phase 2 signature so callers don't break when the implementation lands.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "to": { "type": "string", "description": "Target seat 'role:N'" },
+                            "ref_msg": { "type": "integer", "description": "Board message id being objected to" },
+                            "reason": { "type": "string", "description": "Brief justification" }
+                        },
+                        "required": ["to", "ref_msg", "reason"]
+                    }
                 }]
             })
         }
@@ -12773,6 +12807,140 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         })
                     }
                 }
+            } else if tool_name == "currency_balance" {
+                // Phase 1 shadow read-only. Per spec ruling 9-corrected:
+                // reads .vaak/balances.json under collab::with_currency_lock to
+                // serialize against in-flight commits from any process. No
+                // mutation, no escrow lifecycle here (commit (c) lands that).
+                let arguments = params.get("arguments")?;
+                let state = match get_or_rejoin_state() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": serde_json::json!({
+                                "content": [{ "type": "text", "text": format!("Not joined: {}", e) }],
+                                "isError": true
+                            })
+                        }));
+                    }
+                };
+                let seat = arguments.get("seat").and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}:{}", state.role, state.instance));
+                let dir = state.project_dir.clone();
+                let result = collab::with_currency_lock(&dir, || {
+                    // Lazy replay-on-read: if balances.json is missing but the
+                    // ledger exists, rebuild the snapshot first. Cheap, correct,
+                    // and avoids needing a separate startup-replay hook for commit (a).
+                    let balances_path = collab::currency::balances_json_path(&dir);
+                    let ledger_path = collab::currency::currency_jsonl_path(&dir);
+                    if !balances_path.exists() && ledger_path.exists() {
+                        let rebuilt = collab::currency::replay_balances_from_ledger(&dir)?;
+                        let _ = collab::currency::write_balances_snapshot(&dir, &rebuilt);
+                    }
+                    let snap = collab::currency::read_balances_snapshot(&dir)?;
+                    let seat_bal = snap.seats.get(&seat).cloned().unwrap_or_default();
+                    // If the seat has never been recorded, treat as not-yet-initialized
+                    // and report the spec's starting balance as the would-be init value.
+                    let balance = if !snap.seats.contains_key(&seat) {
+                        collab::currency::STARTING_BALANCE_COPPER
+                    } else {
+                        seat_bal.balance
+                    };
+                    let display = collab::currency::copper_to_display(balance);
+                    Ok(serde_json::json!({
+                        "seat": seat,
+                        "balance_copper": balance,
+                        "display": { "gold": display.gold, "silver": display.silver, "copper": display.copper },
+                        "escrow_held": seat_bal.escrow_held,
+                        "escrow_items": seat_bal.escrow_items,
+                        "timed_out": seat_bal.timed_out,
+                        "initialized": snap.seats.contains_key(&seat),
+                        "turn_counter": snap.turn_counter
+                    }))
+                });
+                match result {
+                    Ok(v) => serde_json::json!({
+                        "content": [{ "type": "text", "text": v.to_string() }]
+                    }),
+                    Err(e) => serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("currency_balance failed: {}", e) }],
+                        "isError": true
+                    }),
+                }
+            } else if tool_name == "currency_ledger" {
+                // Phase 1 shadow read-only. Returns the last N rows of
+                // .vaak/currency.jsonl (newest first), optionally seat-filtered.
+                let arguments = params.get("arguments")?;
+                let limit = arguments.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                let seat_filter = arguments.get("seat").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let state = match get_or_rejoin_state() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": serde_json::json!({
+                                "content": [{ "type": "text", "text": format!("Not joined: {}", e) }],
+                                "isError": true
+                            })
+                        }));
+                    }
+                };
+                let dir = state.project_dir.clone();
+                let result = collab::with_currency_lock(&dir, || -> Result<serde_json::Value, String> {
+                    let path = collab::currency::currency_jsonl_path(&dir);
+                    if !path.exists() {
+                        return Ok(serde_json::json!({ "rows": [], "total_returned": 0 }));
+                    }
+                    let raw = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("read currency.jsonl: {}", e))?;
+                    let mut rows: Vec<collab::currency::LedgerRow> = Vec::new();
+                    for (i, line) in raw.lines().enumerate() {
+                        if line.trim().is_empty() { continue; }
+                        match serde_json::from_str::<collab::currency::LedgerRow>(line) {
+                            Ok(r) => {
+                                if let Some(ref s) = seat_filter {
+                                    if &r.seat != s { continue; }
+                                }
+                                rows.push(r);
+                            }
+                            Err(e) => {
+                                // Skip unparseable lines silently per replay-tolerance
+                                // pattern; full diagnostics are surfaced at startup
+                                // replay (commit (a) follow-up).
+                                eprintln!("[currency_ledger] skip line {} parse error: {}", i + 1, e);
+                            }
+                        }
+                    }
+                    // Newest first
+                    rows.reverse();
+                    let total = rows.len();
+                    rows.truncate(limit);
+                    Ok(serde_json::json!({ "rows": rows, "total_returned": rows.len(), "total_matching": total }))
+                });
+                match result {
+                    Ok(v) => serde_json::json!({
+                        "content": [{ "type": "text", "text": v.to_string() }]
+                    }),
+                    Err(e) => serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
+                        "isError": true
+                    }),
+                }
+            } else if tool_name == "currency_objection" {
+                // STUB per architect:0 msg 1075 ruling 5: locks the Phase 2
+                // signature {to, ref_msg, reason} so callers don't break when
+                // the implementation lands. Returns explicit not-implemented.
+                serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "Not implemented yet. Phase 2."
+                    }],
+                    "isError": true
+                })
             } else {
                 serde_json::json!({
                     "content": [{
