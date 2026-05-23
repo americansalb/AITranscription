@@ -254,6 +254,14 @@ pub struct ProjectSettings {
     pub workflow_colors: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub discussion_mode: Option<String>,
+    // ROOT CAUSE of human msg 1506+1533+1536 toggle-shows-On bug per developer:1
+    // disk-read: set_currency_enabled was correctly writing project.json, but
+    // parse_project_dir → ProjectSettings struct lacked this field → serde silently
+    // dropped it → the frontend always saw `settings.currency_enabled === undefined`
+    // → `undefined !== false === true` → badge always rendered "On" no matter what
+    // the disk said. Adding the field makes parse_project_dir round-trip it.
+    #[serde(default)]
+    pub currency_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
