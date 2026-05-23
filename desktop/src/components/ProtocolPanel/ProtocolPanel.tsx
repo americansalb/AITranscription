@@ -348,14 +348,60 @@ function CompactMicLine({
           </button>
         )}
       </div>
-      {/* Rotation chip-strip REMOVED per human msg 237 — duplicate surface.
-          The Team roster band (CollabTab.tsx Track D v1+v1.1+v1.2) is now
-          the canonical rotation viz: cards reorder by rotation_order with
-          mic-holder accent + 🎙, moderator ★, rotation-index numbers. The
-          chip-strip here was rendering the same data immediately above the
-          band — 500+px of duplicate chrome before the message timeline.
-          Mic-line above (current speaker + age + force-release) preserved
-          as the compact authoritative signal. */}
+      {/* Per human msg 679 ("bring back assembly flow to the team") — restore
+          a slim flow indicator after the chip-strip was removed in msg 237.
+          The old chip-strip was 500+px of duplicate chrome; this new variant
+          is a single inline line showing only the next 3 speakers in
+          rotation order, arrow-separated. Compact (≤ 30px tall) and
+          complementary to the Team roster cards rather than duplicate. */}
+      {isAssemblyLine && protocol.floor.rotation_order && protocol.floor.rotation_order.length > 0 && (
+        <RotationFlowLine
+          rotationOrder={protocol.floor.rotation_order}
+          currentSpeaker={speaker}
+        />
+      )}
+    </div>
+  );
+}
+
+/// RotationFlowLine — single-line rotation preview per human msg 679.
+/// Shows "Next: A → B → C" where A is the next speaker after the current
+/// one in rotation_order, and B/C are the two after that. Wraps from end
+/// of array back to start. Hidden when rotation_order is empty.
+function RotationFlowLine({
+  rotationOrder,
+  currentSpeaker,
+}: {
+  rotationOrder: string[];
+  currentSpeaker: string | null;
+}) {
+  if (rotationOrder.length === 0) return null;
+  const currentIdx = currentSpeaker
+    ? rotationOrder.indexOf(currentSpeaker)
+    : -1;
+  // If current speaker not in rotation, show first N anyway (start of flow).
+  const startIdx = currentIdx >= 0 ? (currentIdx + 1) % rotationOrder.length : 0;
+  // Show next 3 in order; wrap with modulo so the bottom of the order links
+  // back to the top.
+  const next = [
+    rotationOrder[startIdx % rotationOrder.length],
+    rotationOrder[(startIdx + 1) % rotationOrder.length],
+    rotationOrder[(startIdx + 2) % rotationOrder.length],
+  ].filter(Boolean);
+  if (next.length === 0) return null;
+  return (
+    <div className="protocol-rotation-flow" aria-label="Next speakers in rotation">
+      <span className="protocol-rotation-flow-label">Next:</span>
+      {next.map((seat, i) => (
+        <span key={`${seat}-${i}`} className="protocol-rotation-flow-step">
+          <span className="protocol-rotation-flow-seat">{seat}</span>
+          {i < next.length - 1 && (
+            <span className="protocol-rotation-flow-arrow" aria-hidden="true">
+              →
+            </span>
+          )}
+        </span>
+      ))}
     </div>
   );
 }

@@ -8079,6 +8079,58 @@
   font-weight: 600;
 }
 
+/* (11) Rotation flow line per human msg 679 — "bring back assembly flow".
+ * Slim inline indicator showing next 3 speakers in rotation order with
+ * arrows. Rendered in ProtocolPanel's CompactMicLine below the speaker
+ * line. Not a duplicate of the roster cards: cards show identity
+ * (avatar/title/state); this shows sequence (who's next).
+ */
+.protocol-rotation-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #8899a6;
+  padding: 4px 0 2px;
+  flex-wrap: wrap;
+}
+
+.protocol-rotation-flow-label {
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #1d9bf0;
+  font-size: 10.5px;
+}
+
+.protocol-rotation-flow-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.protocol-rotation-flow-seat {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: rgba(29, 155, 240, 0.08);
+  border: 1px solid rgba(29, 155, 240, 0.20);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #c8d3df;
+}
+
+.protocol-rotation-flow-step:first-child .protocol-rotation-flow-seat {
+  /* The immediate next speaker gets emphasis — they're up next. */
+  background: rgba(29, 155, 240, 0.18);
+  border-color: rgba(29, 155, 240, 0.45);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.protocol-rotation-flow-arrow {
+  color: #5b6478;
+  font-size: 12px;
+}
+
 /* (10) Manage Roles in-pane Add Roster toolbar per human msg 671.
  * Adds an always-visible quick-add row at the top of the Manage Roles
  * pane so the human doesn't have to hunt for the separate "Add to Team"
