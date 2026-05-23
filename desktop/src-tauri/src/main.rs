@@ -3656,6 +3656,50 @@ fn get_currency_balances_cmd(dir: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Phase 5 (Chitragupta) Surface 1 — the Flow Feed. Returns the last `count`
+/// rows of currency.jsonl as raw JSON (newest at the end), plus the total row
+/// count. Read-only; never writes. Human-readable formatting happens in the
+/// frontend per the Phase 5 directive (backend stays a dumb reader).
+#[tauri::command]
+fn read_currency_feed_cmd(dir: String, count: usize) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let path = collab::currency::currency_jsonl_path(&dir);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let total = lines.len();
+    let n = count.min(total);
+    let rows: Vec<serde_json::Value> = lines[total - n..]
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect();
+    Ok(serde_json::json!({ "rows": rows, "total": total }))
+}
+
+/// Phase 5 (Chitragupta) Surface 2 — the Judge Seat. Returns every dispute row
+/// from disputes.jsonl (append-only history; a dispute id can appear multiple
+/// times as its state advances — frontend takes the latest per id) plus the
+/// open_disputes.json snapshot so the UI knows which disputes are still open.
+/// Read-only. The challenged-message text + dispute-message bodies come from
+/// the board the frontend already watches; this command supplies the dispute
+/// records + economics.
+#[tauri::command]
+fn read_disputes_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let dpath = collab::currency::disputes_jsonl_path(&dir);
+    let dcontent = std::fs::read_to_string(&dpath).unwrap_or_default();
+    let disputes: Vec<serde_json::Value> = dcontent
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect();
+    let opath = collab::currency::open_disputes_json_path(&dir);
+    let open: serde_json::Value = std::fs::read_to_string(&opath)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({ "open_by_target": {}, "open_by_challenger": {} }));
+    Ok(serde_json::json!({ "disputes": disputes, "open": open }))
+}
+
 /// Slice 9 health pill — read 4-layer resilience status.
 /// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
 ///
@@ -6876,6 +6920,8 @@ fn main() {
             // Two-controls B.4.1 — active seats for moderator picker
             list_active_seats_cmd,
             get_currency_balances_cmd,
+            read_currency_feed_cmd,
+            read_disputes_cmd,
             set_currency_enabled,
             set_continuous_timeout,
             delete_message,
