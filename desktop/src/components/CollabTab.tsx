@@ -897,6 +897,17 @@ export function CollabTab() {
     setRosterSectionCollapsed(next);
     saveJSON("vaak_collab_roster_collapsed", next);
   };
+  // Phase 1d sidebar Discussion Mode collapse state per human msg 727.
+  // Default: expanded (false) — the human asked for settings visible inline
+  // in the sidebar; the section can still be collapsed to reclaim vertical
+  // space and the choice persists across reloads.
+  const [railDiscussionModeCollapsed, setRailDiscussionModeCollapsed] = useState<boolean>(
+    () => loadJSON("vaak_collab_rail_discussion_mode_collapsed", false, isBoolean),
+  );
+  const updateRailDiscussionModeCollapsed = (next: boolean) => {
+    setRailDiscussionModeCollapsed(next);
+    saveJSON("vaak_collab_rail_discussion_mode_collapsed", next);
+  };
   // Track D v1.2 (per human msg 163 "i cant uncollapse team tab") — v1.1's
   // per-render force-expand trapped the user. Replace with a one-time
   // auto-expand on the assembly-OFF → ON edge only; once expanded the user
@@ -4791,6 +4802,40 @@ When multiple instances of this role are active:
             self-renders always with a one-line header so the human can find
             it regardless of pending-count; body collapses behind the header
             when empty or when manually toggled. */}
+        {/* Phase 1d sidebar — Discussion Mode rail section per human msg 727.
+            Adds the AssemblyControls settings block AT THE TOP of the right
+            rail (above Decisions + Claims) via float-right JSX-order. Pairs
+            with the body class .collab-sidebar-mode which hides the inline
+            Discussion Mode strip at the top of the main area, reclaiming
+            ~70px of vertical chrome for the message timeline.
+
+            Why not move the JSX of the existing strip: keeps the strip-as-
+            fallback path intact for narrow viewports (<1000px) where the
+            sidebar collapses to stacked; the strip remains the top-of-main
+            affordance there. */}
+        {project && twoControlsProtocol && (() => {
+          const railPreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
+          return (
+            <CollapsibleSection
+              id="rail-discussion-mode-section"
+              title="Discussion Mode"
+              trailing={<span className="rail-discussion-mode-preset">{railPreset}</span>}
+              collapsed={railDiscussionModeCollapsed}
+              onToggle={() => updateRailDiscussionModeCollapsed(!railDiscussionModeCollapsed)}
+              className="rail-discussion-mode-section"
+              headerTooltip={{ expand: "Expand discussion mode settings", collapse: "Collapse discussion mode settings" }}
+            >
+              <AssemblyControls
+                protocol={twoControlsProtocol}
+                mutate={twoControlsMutate}
+                lastError={twoControlsLastError}
+                selfRole={null /* human view in CollabTab */}
+                projectDir={projectDir}
+              />
+            </CollapsibleSection>
+          );
+        })()}
+
         {projectDir && project && (
           <DecisionPanel
             projectDir={projectDir}
