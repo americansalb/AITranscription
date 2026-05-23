@@ -1224,18 +1224,28 @@ export function CollabTab() {
         // Pre-currency Tauri binary lacks this command → leave map empty;
         // roster cards render with no balance pill (no regression).
       }
-      // Flow Feed rows (read_currency_feed_cmd). Independent try so a missing
-      // feed command doesn't blank balances.
+      // Flow Feed rows (read_currency_feed_cmd → { rows, total }, newest last).
+      // Independent try so a missing feed command doesn't blank balances.
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const feed = await invoke<CurrencyFeedRow[]>("read_currency_feed_cmd", { dir: projectDir, count: 80 });
-        if (!cancelled && Array.isArray(feed)) setCurrencyFeed(feed);
+        const feedResp = await invoke<{ rows: CurrencyFeedRow[]; total: number }>(
+          "read_currency_feed_cmd", { dir: projectDir, count: 80 });
+        if (!cancelled && Array.isArray(feedResp?.rows)) setCurrencyFeed(feedResp.rows);
       } catch { /* command absent until Phase 5 backend rebuild — feed stays empty */ }
-      // Open disputes (read_disputes_cmd) for the Judge Seat.
+      // Open disputes (read_disputes_cmd → { disputes, open }) for the Judge Seat.
+      // disputes.jsonl is append-only: the same dispute id appears once per state
+      // transition, so collapse to the LATEST row per id for current state
+      // (tester:0 contract msg 1935).
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const disp = await invoke<DisputeRow[]>("read_disputes_cmd", { dir: projectDir });
-        if (!cancelled && Array.isArray(disp)) setOpenDisputes(disp);
+        const dispResp = await invoke<{ disputes: DisputeRow[]; open?: { open_by_target?: string[]; open_by_challenger?: string[] } }>(
+          "read_disputes_cmd", { dir: projectDir });
+        if (!cancelled && Array.isArray(dispResp?.disputes)) {
+          const latest = new Map<string, DisputeRow>();
+          let anon = 0;
+          for (const d of dispResp.disputes) latest.set(d.id ?? `__anon_${anon++}`, d);
+          setOpenDisputes(Array.from(latest.values()));
+        }
       } catch { /* command absent until Phase 5 backend rebuild — disputes stay empty */ }
     };
     void fetchBalances();
