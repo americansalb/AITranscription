@@ -5345,6 +5345,43 @@ When multiple instances of this role are active:
             Decisions header. Locked spec: 280px fixed, all viewports. */}
         <aside className="collab-sidebar" aria-label="Project sidebar">
 
+        {/* Phase 5 Surface 1 — Flow Feed (Chitragupta's Scroll). Relocated into
+            the sidebar rail ABOVE Discussion Mode per human msg 1962. Read-only
+            transaction ticker; reads read_currency_feed_cmd on the shared 30s
+            currency poll. Collapsible, pref persisted; auto-hides when empty. */}
+        {currencyFeed.length > 0 && (
+          <CollapsibleSection
+            id="flow-feed-section"
+            className="flow-feed-section rail-section"
+            collapsed={feedCollapsed}
+            onToggle={toggleFeedCollapsed}
+            title="Chitragupta"
+            trailing={
+              <span
+                className={`flow-feed-net ${flowNet >= 0 ? "flow-feed-net--up" : "flow-feed-net--down"}`}
+                title="Net flow over recent transactions (earnings minus losses)"
+              >
+                {flowNet >= 0 ? "▲" : "▼"} {Math.abs(flowNet).toLocaleString()} copper
+              </span>
+            }
+            headerTooltip={{ expand: "Expand the divine ledger", collapse: "Collapse the divine ledger" }}
+          >
+            <div className="flow-feed" ref={flowFeedRef} role="log" aria-label="Currency transaction feed" aria-live="polite">
+              {flowFeedRows.map((line) => (
+                <div key={line.key} className={`currency-line currency-line--${line.tier}`}>
+                  <span className="currency-line-time">{line.at ? formatRelativeTime(line.at) : ""}</span>
+                  <span
+                    className="currency-line-dot"
+                    style={{ background: line.seat ? getRoleColor(line.seat.split(":")[0]) : "#888" }}
+                    aria-hidden="true"
+                  />
+                  <span className="currency-line-text">{line.text}</span>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
         {/* Discussion Mode sidebar card — replaces the inline horizontal
             `.discussion-mode-strip` per human msg 932 (option B) + architect
             msg 935. Always-on at top of the right rail. Uses the existing
@@ -5563,42 +5600,6 @@ When multiple instances of this role are active:
               <br/>Then restart the app.
             </div>
           </div>
-        )}
-
-        {/* Phase 5 Surface 1 — Flow Feed (Chitragupta's Scroll). Read-only
-            transaction ticker above the timeline. Reads read_currency_feed_cmd
-            on the shared 30s currency poll. Collapsible, pref persisted. */}
-        {currencyFeed.length > 0 && (
-          <CollapsibleSection
-            id="flow-feed-section"
-            className="flow-feed-section"
-            collapsed={feedCollapsed}
-            onToggle={toggleFeedCollapsed}
-            title="Chitragupta"
-            trailing={
-              <span
-                className={`flow-feed-net ${flowNet >= 0 ? "flow-feed-net--up" : "flow-feed-net--down"}`}
-                title="Net flow over recent transactions (earnings minus losses)"
-              >
-                {flowNet >= 0 ? "▲" : "▼"} {Math.abs(flowNet).toLocaleString()} copper
-              </span>
-            }
-            headerTooltip={{ expand: "Expand the divine ledger", collapse: "Collapse the divine ledger" }}
-          >
-            <div className="flow-feed" ref={flowFeedRef} role="log" aria-label="Currency transaction feed" aria-live="polite">
-              {flowFeedRows.map((line) => (
-                <div key={line.key} className={`currency-line currency-line--${line.tier}`}>
-                  <span className="currency-line-time">{line.at ? formatRelativeTime(line.at) : ""}</span>
-                  <span
-                    className="currency-line-dot"
-                    style={{ background: line.seat ? getRoleColor(line.seat.split(":")[0]) : "#888" }}
-                    aria-hidden="true"
-                  />
-                  <span className="currency-line-text">{line.text}</span>
-                </div>
-              ))}
-            </div>
-          </CollapsibleSection>
         )}
 
         {/* Message Timeline */}
