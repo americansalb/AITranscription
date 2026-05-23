@@ -4401,6 +4401,60 @@ When multiple instances of this role are active:
                     aria-labelledby="team-tab-roles"
                     className="team-section-roles-pane"
                   >
+                    {/* Per human msg 671: Manage Roles needs an "Add to Roster"
+                        affordance INSIDE the pane — not buried in the
+                        separate collapsed "Add to Team" section. This is a
+                        compact quick-add toolbar that mirrors handleAddRosterSlot
+                        and openCreateRoleForm from the existing Add Team flow,
+                        but in-place at the top of Manage Roles. */}
+                    {project && (
+                      <div className="manage-roles-add-bar">
+                        <div className="manage-roles-add-bar-label">
+                          Add to roster:
+                        </div>
+                        <div className="manage-roles-add-bar-buttons">
+                          {Object.keys(project.config.roles)
+                            .sort((a, b) => (ROLE_ORDER[a] ?? 99) - (ROLE_ORDER[b] ?? 99))
+                            .map((slug) => {
+                              const role = project.config.roles[slug];
+                              if (!role) return null;
+                              const slotsForRole = (project.config.roster || []).filter(
+                                (s: RosterSlot) => s.role === slug
+                              ).length;
+                              return (
+                                <button
+                                  key={slug}
+                                  className="manage-roles-add-btn"
+                                  onClick={() => handleAddRosterSlot(slug)}
+                                  title={`Add ${role.title} to roster`}
+                                  aria-label={`Add ${role.title} to roster, ${slotsForRole} currently on team`}
+                                >
+                                  <span
+                                    className="manage-roles-add-btn-dot"
+                                    style={{ background: getRoleColor(slug) }}
+                                  />
+                                  <span className="manage-roles-add-btn-label">
+                                    + {role.title}
+                                  </span>
+                                  {slotsForRole > 0 && (
+                                    <span className="manage-roles-add-btn-count">
+                                      {slotsForRole}
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          <button
+                            className="manage-roles-add-btn manage-roles-add-btn-create"
+                            onClick={openCreateRoleForm}
+                            title="Create a new custom role"
+                            aria-label="Create a new custom role"
+                          >
+                            + New Role
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     <RolesTab />
                   </div>
                 )}
