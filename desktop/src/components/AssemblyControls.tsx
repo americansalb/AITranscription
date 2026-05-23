@@ -490,7 +490,30 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
         return <span className="assembly-status-empty">No rotation set</span>;
       }
       if (assemblyActive) {
-        return null;
+        // Pointer-glance per architect msg 1032 + ui-architect:0 msg 1028:
+        // when assembly is active, state who holds the mic + the viewer's
+        // position (or rotation size for the human observer) and defer the
+        // full ordered list to the Team Roster band — the canonical all-N
+        // surface. A pointer can't truncate, so it can't reproduce the
+        // human-msg-1007 "doesn't show everyone" bug the way a sliced list would.
+        const selfIdx = rotationOrder.indexOf(selfSeatLabel);
+        return (
+          <>
+            <span className="assembly-status-label">Current:</span>{' '}
+            <span
+              className="assembly-status-seat"
+              style={currentSpeaker ? { color: getRoleColor(currentSpeaker.split(':')[0]) } : undefined}
+            >
+              {currentSpeaker ?? 'waiting for next speaker'}
+            </span>
+            <span className="assembly-status-sep"> · </span>
+            {selfIdx >= 0 ? (
+              <span className="assembly-status-hint">you&rsquo;re #{selfIdx + 1} of {rotationOrder.length} in rotation</span>
+            ) : (
+              <span className="assembly-status-hint">{rotationOrder.length} in rotation (full order in Team band)</span>
+            )}
+          </>
+        );
       }
       // Zombie-seat filter (human msg 2747): rotation_order may carry seats
       // kicked / disconnected without a corresponding rotation mutation.

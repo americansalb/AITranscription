@@ -8170,10 +8170,11 @@
   color: #c8d3df;
 }
 
-.protocol-rotation-flow-step:first-child .protocol-rotation-flow-seat {
-  /* The immediate next speaker gets emphasis — they're up next. */
+.protocol-rotation-flow-seat.is-current {
+  /* The current mic-holder gets emphasis — full rotation shows everyone,
+     this marks who has the floor right now (per human msg 1007). */
   background: rgba(29, 155, 240, 0.18);
-  border-color: rgba(29, 155, 240, 0.45);
+  border-color: rgba(29, 155, 240, 0.55);
   color: #ffffff;
   font-weight: 600;
 }

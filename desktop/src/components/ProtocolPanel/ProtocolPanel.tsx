@@ -350,10 +350,10 @@ function CompactMicLine({
       </div>
       {/* Per human msg 679 ("bring back assembly flow to the team") — restore
           a slim flow indicator after the chip-strip was removed in msg 237.
-          The old chip-strip was 500+px of duplicate chrome; this new variant
-          is a single inline line showing only the next 3 speakers in
-          rotation order, arrow-separated. Compact (≤ 30px tall) and
-          complementary to the Team roster cards rather than duplicate. */}
+          Per human msg 1007 ("assembly line does not show everyone in team")
+          + architect msg 1032: the flow shows the FULL rotation order, not a
+          next-3 truncation — every active seat must be visible at once. Wraps
+          to multiple lines via flex-wrap; current speaker carries a mic glyph. */}
       {isAssemblyLine && protocol.floor.rotation_order && protocol.floor.rotation_order.length > 0 && (
         <RotationFlowLine
           rotationOrder={protocol.floor.rotation_order}
@@ -364,10 +364,12 @@ function CompactMicLine({
   );
 }
 
-/// RotationFlowLine — single-line rotation preview per human msg 679.
-/// Shows "Next: A → B → C" where A is the next speaker after the current
-/// one in rotation_order, and B/C are the two after that. Wraps from end
-/// of array back to start. Hidden when rotation_order is empty.
+/// RotationFlowLine — full rotation order preview per human msg 1007 +
+/// architect msg 1032. Renders EVERY seat in rotation_order in array order,
+/// arrow-separated, with the current speaker carrying a mic glyph + emphasis.
+/// Replaces the prior next-3 truncation (the bug the human reported: with 7
+/// in rotation only 3 showed). Flex-wraps to multiple lines at 7+ seats — no
+/// horizontal scroll-hide, so the acceptance test "all N visible at once" holds.
 function RotationFlowLine({
   rotationOrder,
   currentSpeaker,
@@ -376,32 +378,28 @@ function RotationFlowLine({
   currentSpeaker: string | null;
 }) {
   if (rotationOrder.length === 0) return null;
-  const currentIdx = currentSpeaker
-    ? rotationOrder.indexOf(currentSpeaker)
-    : -1;
-  // If current speaker not in rotation, show first N anyway (start of flow).
-  const startIdx = currentIdx >= 0 ? (currentIdx + 1) % rotationOrder.length : 0;
-  // Show next 3 in order; wrap with modulo so the bottom of the order links
-  // back to the top.
-  const next = [
-    rotationOrder[startIdx % rotationOrder.length],
-    rotationOrder[(startIdx + 1) % rotationOrder.length],
-    rotationOrder[(startIdx + 2) % rotationOrder.length],
-  ].filter(Boolean);
-  if (next.length === 0) return null;
   return (
-    <div className="protocol-rotation-flow" aria-label="Next speakers in rotation">
-      <span className="protocol-rotation-flow-label">Next:</span>
-      {next.map((seat, i) => (
-        <span key={`${seat}-${i}`} className="protocol-rotation-flow-step">
-          <span className="protocol-rotation-flow-seat">{seat}</span>
-          {i < next.length - 1 && (
-            <span className="protocol-rotation-flow-arrow" aria-hidden="true">
-              →
+    <div className="protocol-rotation-flow" aria-label="Full speaker rotation order">
+      <span className="protocol-rotation-flow-label">Rotation:</span>
+      {rotationOrder.map((seat, i) => {
+        const isCurrent = seat === currentSpeaker;
+        return (
+          <span key={`${seat}-${i}`} className="protocol-rotation-flow-step">
+            <span
+              className={`protocol-rotation-flow-seat${isCurrent ? " is-current" : ""}`}
+              title={isCurrent ? `${seat} has the mic` : seat}
+            >
+              {isCurrent && <span aria-hidden="true">🎙 </span>}
+              {seat}
             </span>
-          )}
-        </span>
-      ))}
+            {i < rotationOrder.length - 1 && (
+              <span className="protocol-rotation-flow-arrow" aria-hidden="true">
+                →
+              </span>
+            )}
+          </span>
+        );
+      })}
     </div>
   );
 }
