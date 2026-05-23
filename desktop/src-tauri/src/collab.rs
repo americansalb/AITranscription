@@ -2758,12 +2758,34 @@ pub mod currency {
     pub const INTEREST_PER_10_COPPER_HELD: i64 = 1;
     pub const PASS_BODY_LEN_THRESHOLD: usize = 100;
 
+    // ---- Phase 2 (Disputes) constants (spec §Constants) ----
+    pub const OBJECTION_COST_COPPER: i64 = 50;
+    pub const DISPUTE_SPEECH_COST_COPPER: i64 = 5;
+    pub const DISPUTE_EDIT_COST_COPPER: i64 = 10;
+    pub const JUDGE_COST_PER_PARTY: i64 = 50;          // 50 each → 100 to pool
+    pub const JUDGE_AUTO_INVOKE_THRESHOLD: i64 = 500;
+    pub const SYSTEM_DISPUTE_COST: i64 = 50;
+    pub const SYSTEM_DISPUTE_REWARD: i64 = 200;        // correct ruling
+    pub const SYSTEM_DISPUTE_PENALTY: i64 = 250;       // incorrect — total debit
+    pub const SYSTEM_DISPUTE_BAN_TURNS: u64 = 10;
+    pub const CLAWBACK_PERCENT: u64 = 90;              // when escrow already released
+
     // ---- Types ----
 
     /// Action classification for a project_send. Exempt = human (no charge).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(rename_all = "snake_case")]
-    pub enum ActionKind { Pass, Speak, Exempt }
+    pub enum ActionKind {
+        // classify_action returns these three (Phase 1)
+        Pass, Speak, Exempt,
+        // Phase 2 ledger opcodes (dev-challenger:0 msg 1428 — stable opcode for
+        // programmatic scans, separate from prose `reason`). Edit/Test reserved
+        // for Phase 4. Exempt kept so classify_action still compiles.
+        Init, Edit, Test,
+        Credit, EscrowHold, EscrowRelease,
+        Passive, Interest, Penalty, Clawback,
+        PoolDestroyed,
+    }
 
     /// Display split. balances.json carries copper only; UI consumers call
     /// `copper_to_display`. Per ui-architect:0 msg 1071 single-helper rule.
@@ -2773,7 +2795,9 @@ pub mod currency {
     /// Currency transaction row appended to .vaak/currency.jsonl.
     /// Self-describing per ui-architect:0 msg 1071 — `reason` is human-prose,
     /// not an opcode. Future ledger UIs render rows without joining board.jsonl.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// Default derived (Phase 2) so construction sites can `..Default::default()`
+    /// the optional Phase-2 fields they don't populate.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     pub struct LedgerRow {
         pub id: u64,
         #[serde(rename = "type")]
@@ -2792,6 +2816,19 @@ pub mod currency {
         /// commit-(a)/(b) rows written before this field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub release_turn: Option<u64>,
+        /// Phase 2: monotonic turn counter at write time. Phase 4 retro-scan
+        /// filters by turn window; None on Phase 1 rows (skipped as "predates
+        /// the field" per developer:1 msg 1430 #11).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub turn: Option<u64>,
+        /// Phase 2: stable opcode for programmatic scans, separate from prose
+        /// `reason` (dev-challenger:0 msg 1428). Phase 4 filters action_kind==Pass.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub action_kind: Option<ActionKind>,
+        /// Phase 2: for Test rows (Phase 4), points at the edit being tested;
+        /// co-liability scan finds linked Tests via this (developer:1 msg 1430 #5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub linked_edit_msg: Option<u64>,
         pub at: String, // ISO8601
     }
 
@@ -2825,6 +2862,54 @@ pub mod currency {
         pub seats: HashMap<String, SeatBalance>,
     }
 
+    // ---- Phase 2: Disputes ----
+
+    /// A single message exchanged inside a dispute (spec §disputes.jsonl).
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DisputeMessage {
+        pub from: String,
+        pub body: String,
+        #[serde(default)]
+        pub added_to_pool: i64,
+        pub at: String,
+    }
+
+    /// A dispute row appended to .vaak/disputes.jsonl (append-only; the latest
+    /// row with a given id is the current state). status: open|resolved|destroyed.
+    /// resolution: null|challenger_wins|target_wins|both_wrong|conceded_by_<seat>.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DisputeRow {
+        pub id: String, // "disp_{:06x}"
+        pub challenger: String,
+        pub target: String,
+        pub target_msg: u64,
+        pub pool: i64,
+        pub status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolution: Option<String>,
+        #[serde(default)]
+        pub messages: Vec<DisputeMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub judge: Option<String>,
+        pub opened_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolved_at: Option<String>,
+        #[serde(default)]
+        pub turn_opened: u64,
+    }
+
+    /// Snapshot mirror for the O(1) Pass-while-disputed gate (developer:1 msg
+    /// 1430 #6). The send-path reads this small file, not the whole disputes.jsonl.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct OpenDisputesSnapshot {
+        #[serde(default)]
+        pub open_by_target: HashMap<String, Vec<String>>,
+        #[serde(default)]
+        pub open_by_challenger: HashMap<String, Vec<String>>,
+        #[serde(default)]
+        pub next_dispute_id: u64,
+    }
+
     // ---- Paths ----
 
     fn vaak_root(dir: &str) -> PathBuf {
@@ -2838,6 +2923,12 @@ pub mod currency {
     }
     pub fn currency_lock_path(dir: &str) -> PathBuf {
         vaak_root(dir).join("currency.lock")
+    }
+    pub fn disputes_jsonl_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("disputes.jsonl")
+    }
+    pub fn open_disputes_json_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("open_disputes.json")
     }
 
     // ---- Display helper ----
@@ -2903,6 +2994,114 @@ pub mod currency {
         let id = snap.next_escrow_id;
         snap.next_escrow_id = snap.next_escrow_id.wrapping_add(1);
         format!("esc_{:06x}", id)
+    }
+
+    // ---- Phase 2: Dispute I/O ----
+    // All callers must hold with_currency_and_board_lock (same lock as
+    // currency + board per Phase 1 ruling 9-corrected).
+
+    /// Append a dispute row to disputes.jsonl (append-only; latest row per id
+    /// wins on read). Mirrors append_currency_transaction.
+    pub fn append_dispute_row(dir: &str, row: &DisputeRow) -> Result<(), String> {
+        let path = disputes_jsonl_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        let line = serde_json::to_string(row)
+            .map_err(|e| format!("serialize dispute row: {}", e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("open disputes.jsonl: {}", e))?;
+        writeln!(f, "{}", line).map_err(|e| format!("write disputes.jsonl: {}", e))?;
+        Ok(())
+    }
+
+    /// Read the open-disputes snapshot (default-empty when the file is absent).
+    pub fn read_open_disputes_snapshot(dir: &str) -> Result<OpenDisputesSnapshot, String> {
+        let path = open_disputes_json_path(dir);
+        if !path.exists() {
+            return Ok(OpenDisputesSnapshot::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read open_disputes.json: {}", e))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse open_disputes.json: {}", e))
+    }
+
+    /// Atomic-write the open-disputes snapshot (mirrors write_balances_snapshot).
+    pub fn write_open_disputes_snapshot(dir: &str, snap: &OpenDisputesSnapshot) -> Result<(), String> {
+        let path = open_disputes_json_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::to_vec_pretty(snap)
+            .map_err(|e| format!("serialize open_disputes.json: {}", e))?;
+        atomic_write(&path, &body)
+    }
+
+    /// Generate the next dispute id `disp_{:06x}` from the snapshot counter.
+    pub fn next_dispute_id(snap: &mut OpenDisputesSnapshot) -> String {
+        let id = snap.next_dispute_id;
+        snap.next_dispute_id = snap.next_dispute_id.wrapping_add(1);
+        format!("disp_{:06x}", id)
+    }
+
+    /// Add an open dispute to the snapshot's by-target + by-challenger indexes.
+    pub fn snapshot_add_open(snap: &mut OpenDisputesSnapshot, dispute_id: &str, challenger: &str, target: &str) {
+        snap.open_by_target.entry(target.to_string()).or_default().push(dispute_id.to_string());
+        snap.open_by_challenger.entry(challenger.to_string()).or_default().push(dispute_id.to_string());
+    }
+
+    /// Remove a resolved/destroyed dispute from the snapshot indexes.
+    pub fn snapshot_remove_open(snap: &mut OpenDisputesSnapshot, dispute_id: &str, challenger: &str, target: &str) {
+        if let Some(v) = snap.open_by_target.get_mut(target) {
+            v.retain(|d| d != dispute_id);
+            if v.is_empty() { snap.open_by_target.remove(target); }
+        }
+        if let Some(v) = snap.open_by_challenger.get_mut(challenger) {
+            v.retain(|d| d != dispute_id);
+            if v.is_empty() { snap.open_by_challenger.remove(challenger); }
+        }
+    }
+
+    /// Phase 2 / Phase 4 prep: the roles flagged adversarial:true. Hardcoded in
+    /// Rust (not read from the runtime tree) for robustness — the source
+    /// `migrations/seed-adversarial-tags.json` documents + version-controls the
+    /// same list (survives a fresh clone, the gap ui-architect:0 msg 1219 flagged).
+    pub const ADVERSARIAL_SEED_ROLES: &[&str] = &["evil-architect", "dev-challenger"];
+
+    /// If any ADVERSARIAL_SEED_ROLES role exists in project.json without
+    /// `adversarial: true`, write the tag in (atomic). Returns true if it wrote.
+    /// Caller MUST hold with_currency_and_board_lock (developer:1 msg 1430 #10
+    /// race: two concurrent seats both seeding project.json).
+    pub fn apply_adversarial_seed(dir: &str) -> Result<bool, String> {
+        let path = Path::new(dir).join(".vaak").join("project.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return Ok(false), // no project.json yet — nothing to seed
+        };
+        let mut val: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse project.json for adversarial seed: {}", e))?;
+        let mut changed = false;
+        if let Some(roles) = val.get_mut("roles").and_then(|r| r.as_object_mut()) {
+            for role in ADVERSARIAL_SEED_ROLES {
+                if let Some(rc) = roles.get_mut(*role).and_then(|r| r.as_object_mut()) {
+                    let already = rc.get("adversarial").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !already {
+                        rc.insert("adversarial".to_string(), serde_json::Value::Bool(true));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            let body = serde_json::to_vec_pretty(&val)
+                .map_err(|e| format!("serialize project.json after adversarial seed: {}", e))?;
+            atomic_write(&path, &body)?;
+        }
+        Ok(changed)
     }
 
     // ---- Replay (rebuild snapshot from currency.jsonl) ----
@@ -3109,6 +3308,9 @@ pub mod currency {
                     balance_after: bal,
                     escrow_id: None,
                     release_turn: None,
+                    turn: Some(turn),
+                    action_kind: None,
+                    linked_edit_msg: None,
                     at: now.clone(),
                 });
                 next_id += 1;
@@ -3140,6 +3342,9 @@ pub mod currency {
                     balance_after: bal,
                     escrow_id: Some(item.id.clone()),
                     release_turn: None,
+                    turn: Some(turn),
+                    action_kind: None,
+                    linked_edit_msg: None,
                     at: now.clone(),
                 });
                 next_id += 1;
@@ -3154,6 +3359,9 @@ pub mod currency {
                     balance_after: bal,
                     escrow_id: Some(item.id),
                     release_turn: None,
+                    turn: Some(turn),
+                    action_kind: None,
+                    linked_edit_msg: None,
                     at: now.clone(),
                 });
                 next_id += 1;
@@ -3177,6 +3385,9 @@ pub mod currency {
                         balance_after: STARTING_BALANCE_COPPER,
                         escrow_id: None,
                         release_turn: None,
+                        turn: Some(turn),
+                        action_kind: Some(ActionKind::Init),
+                        linked_edit_msg: None,
                         at: now.clone(),
                     });
                     next_id += 1;
@@ -3196,6 +3407,9 @@ pub mod currency {
                     balance_after: bal,
                     escrow_id: None,
                     release_turn: None,
+                    turn: Some(turn),
+                    action_kind: None,
+                    linked_edit_msg: None,
                     at: now.clone(),
                 });
                 next_id += 1;

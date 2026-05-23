@@ -8709,6 +8709,18 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     // === GRANDFATHERING: auto-import missing global role templates ===
     grandfather_role_templates(&normalized, &mut config)?;
 
+    // Phase 2 — apply the adversarial-role seed (idempotent): ensure
+    // evil-architect + dev-challenger carry adversarial:true in project.json
+    // for Phase 4's retro-pass penalty. Inside currency+board lock to avoid the
+    // concurrent-seed race (developer:1 msg 1430 #10). Best-effort; a failure
+    // here must not block join. Re-reads config if it wrote, so `roles` below
+    // reflects the seed.
+    if collab::with_currency_and_board_lock(&normalized, || collab::currency::apply_adversarial_seed(&normalized))
+        .unwrap_or(false)
+    {
+        config = read_project_config(&normalized)?;
+    }
+
     let roles = config.get("roles").and_then(|r| r.as_object())
         .ok_or("No roles defined in project.json")?;
 
@@ -9161,6 +9173,9 @@ fn record_currency_earn(
             balance_after: STARTING_BALANCE_COPPER,
             escrow_id: None,
             release_turn: None,
+            turn: Some(snap.turn_counter),
+            action_kind: Some(ActionKind::Init),
+            linked_edit_msg: None,
             at: now.clone(),
         })?;
     }
@@ -9168,7 +9183,9 @@ fn record_currency_earn(
     let (earn, ticks, action_str) = match action {
         ActionKind::Pass => (PASS_EARN_COPPER, PASS_ESCROW_TICKS, "pass"),
         ActionKind::Speak => (SPEAK_EARN_COPPER, SPEAK_ESCROW_TICKS, "speak"),
-        ActionKind::Exempt => return Ok(()),
+        // Exempt + the Phase 2/4 ledger opcodes are never produced by
+        // classify_action for an earn — no-op defensively.
+        _ => return Ok(()),
     };
 
     let escrow_id = next_escrow_id(&mut snap);
@@ -9200,11 +9217,159 @@ fn record_currency_earn(
         // Commit (c): carry the maturity turn so replay reconstructs the
         // EscrowItem.release_turn faithfully (no more =0 placeholder).
         release_turn: Some(release_turn),
+        // Phase 2: turn at write-time + action opcode so Phase 4's retro-scan
+        // can find Pass earns by action_kind within a turn window.
+        turn: Some(snap.turn_counter),
+        action_kind: Some(action),
+        linked_edit_msg: None,
         at: now,
     })?;
 
     write_balances_snapshot(dir, &snap)?;
     Ok(())
+}
+
+/// Phase 2 — currency_objection real impl. Challenge another seat's accepted
+/// message. Inside with_currency_and_board_lock (atomic with board + currency):
+/// validate, debit OBJECTION_COST from challenger, capture target stake (full
+/// escrow if still held → escrow_release row; else 90% of earn clawed back →
+/// penalty row), open a dispute (pool = cost + stake), post a board notice.
+/// Uses existing apply_row txn types (penalty/escrow_release) so replay works
+/// without new handlers. Returns the dispute row JSON.
+fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let challenger = format!("{}:{}", state.role, state.instance);
+    if challenger.starts_with("human:") {
+        return Err("[Objection] Human is exempt from currency disputes.".to_string());
+    }
+
+    collab::with_currency_and_board_lock(&dir, || {
+        // 1. Find the target message in the active board.
+        let board_path = collab::active_board_path(&dir);
+        let board_raw = std::fs::read_to_string(&board_path).unwrap_or_default();
+        let target_from = board_raw.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|m| m.get("id").and_then(|v| v.as_u64()) == Some(target_msg_id))
+            .and_then(|m| m.get("from").and_then(|v| v.as_str()).map(String::from));
+        let target = match target_from {
+            Some(t) => t,
+            None => return Err(format!("[Objection] target_msg {} not found on the board.", target_msg_id)),
+        };
+        if target.starts_with("human:") {
+            return Err("[Objection] Cannot object to a human message (human is exempt).".to_string());
+        }
+        if target == challenger {
+            return Err("[Objection] You cannot object to your own message.".to_string());
+        }
+
+        // 2. Load balances; challenger must afford the cost.
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
+            snap = replay_balances_from_ledger(&dir)?;
+        }
+        let chal_bal = snap.seats.get(&challenger).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
+        if chal_bal < OBJECTION_COST_COPPER {
+            return Err(format!("[Objection] Insufficient balance: need {} copper, have {}.", OBJECTION_COST_COPPER, chal_bal));
+        }
+        let now = collab::iso_now();
+        let mut rows: Vec<LedgerRow> = Vec::new();
+
+        // 3. Debit the objection cost from the challenger (penalty row subtracts).
+        let chal_after = {
+            let e = snap.seats.entry(challenger.clone()).or_insert_with(|| {
+                let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb
+            });
+            e.balance = e.balance.saturating_sub(OBJECTION_COST_COPPER);
+            e.balance
+        };
+        let id = snap.next_txn_id; snap.next_txn_id += 1;
+        rows.push(LedgerRow {
+            id, txn_type: "penalty".to_string(), seat: challenger.clone(),
+            amount: -OBJECTION_COST_COPPER, reason: format!("objection filed vs {} @msg {}", target, target_msg_id),
+            ref_msg: Some(target_msg_id), balance_after: chal_after, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
+        });
+
+        // 4. Capture the target's stake. Find the escrow_hold row for target_msg
+        // to learn the earn; if the escrow item is still held, the full amount
+        // goes to pool (escrow_release row, no balance credit); else 90% clawback.
+        let earn = std::fs::read_to_string(currency_jsonl_path(&dir)).unwrap_or_default()
+            .lines().filter_map(|l| serde_json::from_str::<LedgerRow>(l).ok())
+            .find(|r| r.txn_type == "escrow_hold" && r.ref_msg == Some(target_msg_id))
+            .map(|r| r.amount.abs())
+            .unwrap_or(0);
+        let held_item = snap.seats.get(&target)
+            .and_then(|s| s.escrow_items.iter().find(|it| it.ref_msg == Some(target_msg_id)).cloned());
+        let stake: i64;
+        if let Some(item) = held_item {
+            // Still escrowed → full escrow amount to pool. Remove + decrement.
+            stake = item.amount;
+            let bal = {
+                let e = snap.seats.get_mut(&target).unwrap();
+                e.escrow_held = (e.escrow_held - item.amount).max(0);
+                e.escrow_items.retain(|it| it.id != item.id);
+                e.balance
+            };
+            let rid = snap.next_txn_id; snap.next_txn_id += 1;
+            rows.push(LedgerRow {
+                id: rid, txn_type: "escrow_release".to_string(), seat: target.clone(),
+                amount: item.amount, reason: format!("escrow → dispute pool (objection @msg {})", target_msg_id),
+                ref_msg: Some(target_msg_id), balance_after: bal, escrow_id: Some(item.id), release_turn: None,
+                turn: Some(snap.turn_counter), action_kind: Some(ActionKind::EscrowRelease), linked_edit_msg: None, at: now.clone(),
+            });
+        } else {
+            // Escrow already released to balance → claw back 90% of the earn.
+            stake = ((earn * CLAWBACK_PERCENT as i64) + 99) / 100; // ceil(earn*0.9)
+            let bal = {
+                let e = snap.seats.entry(target.clone()).or_insert_with(|| {
+                    let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb
+                });
+                e.balance = e.balance.saturating_sub(stake);
+                if e.balance <= DEFICIT_CAP_COPPER { e.timed_out = true; }
+                e.balance
+            };
+            let rid = snap.next_txn_id; snap.next_txn_id += 1;
+            rows.push(LedgerRow {
+                id: rid, txn_type: "penalty".to_string(), seat: target.clone(),
+                amount: -stake, reason: format!("objection clawback {}% → dispute pool (@msg {})", CLAWBACK_PERCENT, target_msg_id),
+                ref_msg: Some(target_msg_id), balance_after: bal, escrow_id: None, release_turn: None,
+                turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Clawback), linked_edit_msg: None, at: now.clone(),
+            });
+        }
+
+        // 5. Open the dispute.
+        let pool = OBJECTION_COST_COPPER + stake;
+        let mut open = read_open_disputes_snapshot(&dir)?;
+        let dispute_id = next_dispute_id(&mut open);
+        snapshot_add_open(&mut open, &dispute_id, &challenger, &target);
+        let dispute = DisputeRow {
+            id: dispute_id.clone(), challenger: challenger.clone(), target: target.clone(),
+            target_msg: target_msg_id, pool, status: "open".to_string(), resolution: None,
+            messages: vec![DisputeMessage { from: challenger.clone(), body: reason.to_string(), added_to_pool: 0, at: now.clone() }],
+            judge: None, opened_at: now.clone(), resolved_at: None, turn_opened: snap.turn_counter,
+        };
+
+        // 6. Persist: ledger rows, balances, dispute row, open-disputes snapshot.
+        for r in &rows { append_currency_transaction(&dir, r)?; }
+        write_balances_snapshot(&dir, &snap)?;
+        append_dispute_row(&dir, &dispute)?;
+        write_open_disputes_snapshot(&dir, &open)?;
+
+        // 7. Post the [Objection] board notice.
+        let msg_id = next_message_id(&dir);
+        let notice = serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[Objection] {} challenges {} msg {}", challenger, target, target_msg_id),
+            "body": format!("[Objection] {} challenges {}'s msg {}. Pool: {} copper. {} must respond — currency_concede or currency_dispute_message (cannot Pass while disputed). Reason: {}",
+                challenger, target, target_msg_id, pool, target, reason),
+            "metadata": { "dispute_id": dispute_id, "challenger": challenger, "target": target, "pool": pool }
+        });
+        let _ = append_to_board(&dir, &notice);
+
+        Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({"id": dispute_id, "pool": pool})))
+    })
 }
 
 /// Handle project_send: send a message to a role
@@ -9329,6 +9494,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                          A human must reinstate the seat before it can send again.",
                         from_label, collab::currency::DEFICIT_CAP_COPPER
                     ));
+                }
+            }
+        }
+
+        // Currency Phase 2 — Pass-while-disputed gate. A seat that is the TARGET
+        // of an open dispute cannot send a Pass-classified message — they must
+        // respond (concede or dispute), not duck via a Pass. Reads the O(1)
+        // open_disputes.json snapshot (developer:1 msg 1430 #6), not the full
+        // disputes.jsonl. Only blocks Pass; Speak/Edit/Test by the same seat proceed.
+        if !from_label.starts_with("human:") {
+            let action = collab::currency::classify_action(&from_label, msg_type, subject, body);
+            if matches!(action, collab::currency::ActionKind::Pass) {
+                if let Ok(open) = collab::currency::read_open_disputes_snapshot(&state.project_dir) {
+                    if open.open_by_target.get(&from_label).map(|v| !v.is_empty()).unwrap_or(false) {
+                        return Err(
+                            "[OpenDisputeBlocksPass] You are the target of an open dispute and cannot Pass. \
+                             Respond with currency_concede or currency_dispute_message.".to_string()
+                        );
+                    }
                 }
             }
         }
@@ -12375,15 +12559,14 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "currency_objection",
-                    "description": "STUB (Phase 2). Object to another seat's Speak/Edit. Reserves the Phase 2 signature so callers don't break when the implementation lands.",
+                    "description": "Object to another seat's accepted message. Costs 50 copper (always). Captures the target's stake (their escrow if still held, else 90% of their earn clawed back) into a dispute pool. The target must respond (currency_concede or currency_dispute_message) and cannot Pass while disputed. Cannot object to human messages or your own.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "to": { "type": "string", "description": "Target seat 'role:N'" },
-                            "ref_msg": { "type": "integer", "description": "Board message id being objected to" },
-                            "reason": { "type": "string", "description": "Brief justification" }
+                            "target_msg_id": { "type": "integer", "description": "Board message id being objected to" },
+                            "reason": { "type": "string", "description": "Brief justification for the objection" }
                         },
-                        "required": ["to", "ref_msg", "reason"]
+                        "required": ["target_msg_id", "reason"]
                     }
                 }]
             })
@@ -13142,16 +13325,31 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }),
                 }
             } else if tool_name == "currency_objection" {
-                // STUB per architect:0 msg 1075 ruling 5: locks the Phase 2
-                // signature {to, ref_msg, reason} so callers don't break when
-                // the implementation lands. Returns explicit not-implemented.
-                serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": "Not implemented yet. Phase 2."
-                    }],
-                    "isError": true
-                })
+                // Phase 2 — real impl. Args: target_msg_id (u64), reason (String).
+                let arguments = params.get("arguments");
+                let target_msg_id = arguments
+                    .and_then(|a| a.get("target_msg_id"))
+                    .and_then(|v| v.as_u64());
+                let reason = arguments
+                    .and_then(|a| a.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match target_msg_id {
+                    None => serde_json::json!({
+                        "content": [{ "type": "text", "text": "currency_objection requires target_msg_id (u64)" }],
+                        "isError": true
+                    }),
+                    Some(tid) => match handle_currency_objection(tid, &reason) {
+                        Ok(v) => serde_json::json!({
+                            "content": [{ "type": "text", "text": format!("Objection filed.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }]
+                        }),
+                        Err(e) => serde_json::json!({
+                            "content": [{ "type": "text", "text": e }],
+                            "isError": true
+                        }),
+                    },
+                }
             } else {
                 serde_json::json!({
                     "content": [{

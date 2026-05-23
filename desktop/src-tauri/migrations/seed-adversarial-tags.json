@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "comment": "Roles flagged adversarial:true for the currency system (Phase 4 retroactive-pass penalty targets). Version-controlled so the tags survive a fresh clone (ui-architect:0 msg 1219 gap). The authoritative runtime list is collab::currency::ADVERSARIAL_SEED_ROLES (hardcoded for robust path-independent application via apply_adversarial_seed); this file documents + version-controls it. Keep the two in sync.",
+  "adversarial_roles": ["evil-architect", "dev-challenger"]
+}
