@@ -6003,6 +6003,94 @@ mod protocol_slice2_tests {
         assert_eq!(s["floor"]["current_speaker"], "architect:0");
     }
 
+    /// Commit C (2026-05-24) — handle_project_status defensive heal regression.
+    /// Pins the heal's preconditions + helper invocation. Simulates a section
+    /// that was persisted with assembly preset on but rotation_order cleared
+    /// (the bug per tester msg 34 §"Acceptance criteria for any fix" #1).
+    /// Mirrors the heal block at handle_project_status: predicate fires, helper
+    /// seeds rotation_order from N active seats, current_speaker is anchored to
+    /// the first seat. Regresses if either the predicate name (preset / mode /
+    /// rotation_order key) or the helper's behavior drifts.
+    #[test]
+    fn commit_c_project_status_heal_seeds_when_assembly_on_and_order_empty() {
+        let mut proto = fresh_state_at_default_chat();
+        // Bring the section to the bug state: preset=Assembly Line,
+        // mode=round-robin, but rotation_order=[] (post-enable, pre-seed
+        // fixture — what a section persisted from a prior session looks
+        // like at first read).
+        apply_set_preset(&mut proto, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        proto["floor"]["rotation_order"] = serde_json::json!([]);
+        proto["floor"]["current_speaker"] = serde_json::Value::Null;
+
+        // Mirror the heal's predicate exactly (PRESET_ASSEMBLY_LINE constant +
+        // rotation_order array emptiness). If either side renames or moves,
+        // this test will catch the drift before runtime does.
+        let assembly_on =
+            proto.get("preset").and_then(|p| p.as_str()) == Some(PRESET_ASSEMBLY_LINE);
+        let order_empty = proto["floor"]["rotation_order"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        assert!(assembly_on, "preset wire string must match PRESET_ASSEMBLY_LINE");
+        assert!(order_empty, "fixture must start with empty rotation_order");
+
+        let seats: std::collections::HashSet<String> = [
+            "architect:0".to_string(),
+            "developer:1".to_string(),
+            "tester:0".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        if assembly_on && order_empty {
+            seed_rotation_order_if_empty(&mut proto, &seats);
+        }
+
+        let order: Vec<String> = proto["floor"]["rotation_order"]
+            .as_array()
+            .expect("rotation_order should be an array after heal")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["architect:0", "developer:1", "tester:0"]);
+        assert_eq!(proto["floor"]["current_speaker"], "architect:0");
+    }
+
+    /// Commit C — heal predicate must NOT fire when rotation_order is already
+    /// non-empty (idempotency / no-clobber). A heal that ran every project_status
+    /// call and overwrote an explicit moderator-set order would regress
+    /// `apply_set_rotation_order`'s contract.
+    #[test]
+    fn commit_c_project_status_heal_skips_when_order_non_empty() {
+        let mut proto = fresh_state_at_default_chat();
+        apply_set_preset(&mut proto, &serde_json::json!({"name": "Assembly Line"})).unwrap();
+        // Explicit moderator-set order — heal must leave it alone.
+        proto["floor"]["rotation_order"] =
+            serde_json::json!(["explicit:0", "moderator-set:1"]);
+        proto["floor"]["current_speaker"] = serde_json::json!("explicit:0");
+
+        let order_empty = proto["floor"]["rotation_order"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        assert!(!order_empty, "predicate must read order_empty=false here");
+
+        let unrelated_seats: std::collections::HashSet<String> =
+            ["unrelated:7".to_string()].into_iter().collect();
+        if order_empty {
+            seed_rotation_order_if_empty(&mut proto, &unrelated_seats);
+        }
+
+        let order: Vec<String> = proto["floor"]["rotation_order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(order, vec!["explicit:0", "moderator-set:1"]);
+        assert_eq!(proto["floor"]["current_speaker"], "explicit:0");
+    }
+
     // ===================================================================
     // Fix-A2 — apply_set_rotation_order tests per spec at
     // .vaak/design-notes/fix-a2-set-rotation-order-spec-2026-05-22.md
@@ -12007,6 +12095,72 @@ fn handle_project_status() -> Result<serde_json::Value, String> {
     }
 
     let active_section = get_active_section(&state.project_dir);
+
+    // Commit C (2026-05-24, fix per tester msg 34 §"Acceptance criteria for
+    // any fix" #1): defensive seed when a section comes up with assembly
+    // already on but rotation_order empty (e.g. section persisted
+    // preset="Assembly Line" + rotation_order=[] from a prior session, and
+    // no enable call has fired this run). The existing per-join append at
+    // handle_project_join only pushes the NEW joiner — it does not backfill
+    // already-bound seats whose project_join ran before the seed pipeline
+    // was wired. Heal here so the v1.0 surface contract holds: assembly_active
+    // + N active seats ⇒ rotation_order contains all N at first project_status
+    // call. Idempotent — short-circuits when rotation_order is already
+    // non-empty. Multi-writer/refactor-drift sibling of the protocol_mutate
+    // seed at vaak-mcp.rs:3977 (set_preset / set_assembly path) — same
+    // helper (seed_rotation_order_if_empty), different entry point.
+    {
+        let cheap_read =
+            read_protocol_for_section_value(&state.project_dir, &active_section);
+        let assembly_on =
+            cheap_read.get("preset").and_then(|p| p.as_str()) == Some(PRESET_ASSEMBLY_LINE);
+        let order_empty = cheap_read
+            .get("floor")
+            .and_then(|f| f.get("rotation_order"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        if assembly_on && order_empty {
+            let active_seats = protocol_active_seats_set(&state.project_dir);
+            if !active_seats.is_empty() {
+                let _ = with_file_lock(&state.project_dir, || -> Result<(), String> {
+                    let mut proto =
+                        read_protocol_for_section_value(&state.project_dir, &active_section);
+                    // Re-check under lock — another caller may have seeded
+                    // between the cheap read and lock acquisition.
+                    let still_empty = proto
+                        .get("floor")
+                        .and_then(|f| f.get("rotation_order"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.is_empty())
+                        .unwrap_or(true);
+                    if !still_empty {
+                        return Ok(());
+                    }
+                    seed_rotation_order_if_empty(&mut proto, &active_seats);
+                    let cur_rev = proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if let Some(rev_field) = proto.get_mut("rev") {
+                        *rev_field = serde_json::json!(cur_rev + 1);
+                    }
+                    if let Some(obj) = proto.as_object_mut() {
+                        obj.insert(
+                            "last_writer_action".to_string(),
+                            serde_json::json!("project_status_heal_seed"),
+                        );
+                        obj.insert(
+                            "rev_at".to_string(),
+                            serde_json::json!(utc_now_iso()),
+                        );
+                    }
+                    write_protocol_for_section_value(
+                        &state.project_dir,
+                        &active_section,
+                        &proto,
+                    )
+                });
+            }
+        }
+    }
 
     // Assembly v1.0 acceptance surface (spec 2026-05-13): the acceptance test
     // for v1.0 — verifying a pre-placed joiner's turn arrives by rotation
