@@ -2831,6 +2831,198 @@ pub mod currency {
     pub const DECAY_SILVER_PCT_PER_TURN_TENTHS: i64 = 5;   //  5 tenths = 0.5%
     pub const DECAY_FLOOR_COPPER: i64 = 100;               // balance below this is not taxed
 
+    // ===========================================================================
+    // Economy settings — runtime-tunable constants per human msg 657.
+    // ===========================================================================
+    // The constants above are now DEFAULTS. Live values are read from
+    // .vaak/economy.json on every read_economy_settings() call (no startup
+    // cache, so UI-driven edits land next-turn without rebuild — per tester:0
+    // msg 663 #2 cache-coherence requirement). Missing file → all defaults.
+    // Missing field → that field's default. Parse error → all defaults
+    // (best-effort posture; logs warn).
+    //
+    // Implementation pattern: every code site that previously read a constant
+    // directly will instead call `read_economy_settings(dir).field`. Constant
+    // names preserved as static initializers + as the Default impl.
+
+    pub fn economy_json_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("economy.json")
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct EconomySettings {
+        // Base
+        #[serde(default = "default_starting_balance_copper")]
+        pub starting_balance_copper: i64,
+        #[serde(default = "default_deficit_cap_copper")]
+        pub deficit_cap_copper: i64,
+        #[serde(default = "default_passive_per_tick_copper")]
+        pub passive_per_tick_copper: i64,
+
+        // Earn tier
+        #[serde(default = "default_pass_earn_copper")]
+        pub pass_earn_copper: i64,
+        #[serde(default = "default_speak_earn_copper")]
+        pub speak_earn_copper: i64,
+        #[serde(default = "default_edit_earn_copper")]
+        pub edit_earn_copper: i64,
+        #[serde(default = "default_test_earn_copper")]
+        pub test_earn_copper: i64,
+        #[serde(default = "default_edit_line_bonus_threshold")]
+        pub edit_line_bonus_threshold: u64,
+
+        // Escrow ticks
+        #[serde(default = "default_pass_escrow_ticks")]
+        pub pass_escrow_ticks: u64,
+        #[serde(default = "default_speak_escrow_ticks")]
+        pub speak_escrow_ticks: u64,
+        #[serde(default = "default_edit_escrow_ticks")]
+        pub edit_escrow_ticks: u64,
+        #[serde(default = "default_test_escrow_ticks")]
+        pub test_escrow_ticks: u64,
+
+        // Interest
+        #[serde(default = "default_interest_min_held_copper")]
+        pub interest_min_held_copper: i64,
+        #[serde(default = "default_interest_per_10_copper_held")]
+        pub interest_per_10_copper_held: i64,
+
+        // Classifier
+        #[serde(default = "default_pass_body_len_threshold")]
+        pub pass_body_len_threshold: usize,
+
+        // Disputes
+        #[serde(default = "default_objection_cost_copper")]
+        pub objection_cost_copper: i64,
+        #[serde(default = "default_dispute_speech_cost_copper")]
+        pub dispute_speech_cost_copper: i64,
+        #[serde(default = "default_dispute_edit_cost_copper")]
+        pub dispute_edit_cost_copper: i64,
+        #[serde(default = "default_judge_cost_per_party")]
+        pub judge_cost_per_party: i64,
+        #[serde(default = "default_judge_auto_invoke_threshold")]
+        pub judge_auto_invoke_threshold: i64,
+        #[serde(default = "default_system_dispute_cost")]
+        pub system_dispute_cost: i64,
+        #[serde(default = "default_system_dispute_reward")]
+        pub system_dispute_reward: i64,
+        #[serde(default = "default_system_dispute_penalty")]
+        pub system_dispute_penalty: i64,
+        #[serde(default = "default_system_dispute_ban_turns")]
+        pub system_dispute_ban_turns: u64,
+        #[serde(default = "default_clawback_percent")]
+        pub clawback_percent: u64,
+
+        // Penalty hooks
+        #[serde(default = "default_retro_pass_penalty_copper")]
+        pub retro_pass_penalty_copper: i64,
+        #[serde(default = "default_retro_pass_scan_window_turns")]
+        pub retro_pass_scan_window_turns: u64,
+        #[serde(default = "default_coliability_test_penalty_copper")]
+        pub coliability_test_penalty_copper: i64,
+
+        // Bounty
+        #[serde(default = "default_bounty_claim_stake_percent")]
+        pub bounty_claim_stake_percent: u64,
+        #[serde(default = "default_bounty_abandon_loss_percent")]
+        pub bounty_abandon_loss_percent: u64,
+        #[serde(default = "default_bounty_reject_loss_percent")]
+        pub bounty_reject_loss_percent: u64,
+        #[serde(default = "default_bounty_objection_clawback_percent")]
+        pub bounty_objection_clawback_percent: u64,
+
+        // Decay tax
+        #[serde(default = "default_decay_copper_pct_per_turn_tenths")]
+        pub decay_copper_pct_per_turn_tenths: i64,
+        #[serde(default = "default_decay_silver_pct_per_turn_tenths")]
+        pub decay_silver_pct_per_turn_tenths: i64,
+        #[serde(default = "default_decay_floor_copper")]
+        pub decay_floor_copper: i64,
+    }
+
+    // ---- per-field default fns (required by serde(default = "...")) ----
+    fn default_starting_balance_copper() -> i64 { STARTING_BALANCE_COPPER }
+    fn default_deficit_cap_copper() -> i64 { DEFICIT_CAP_COPPER }
+    fn default_passive_per_tick_copper() -> i64 { PASSIVE_PER_TICK_COPPER }
+    fn default_pass_earn_copper() -> i64 { PASS_EARN_COPPER }
+    fn default_speak_earn_copper() -> i64 { SPEAK_EARN_COPPER }
+    fn default_edit_earn_copper() -> i64 { EDIT_EARN_COPPER }
+    fn default_test_earn_copper() -> i64 { TEST_EARN_COPPER }
+    fn default_edit_line_bonus_threshold() -> u64 { EDIT_LINE_BONUS_THRESHOLD }
+    fn default_pass_escrow_ticks() -> u64 { PASS_ESCROW_TICKS }
+    fn default_speak_escrow_ticks() -> u64 { SPEAK_ESCROW_TICKS }
+    fn default_edit_escrow_ticks() -> u64 { EDIT_ESCROW_TICKS }
+    fn default_test_escrow_ticks() -> u64 { TEST_ESCROW_TICKS }
+    fn default_interest_min_held_copper() -> i64 { INTEREST_MIN_HELD_COPPER }
+    fn default_interest_per_10_copper_held() -> i64 { INTEREST_PER_10_COPPER_HELD }
+    fn default_pass_body_len_threshold() -> usize { PASS_BODY_LEN_THRESHOLD }
+    fn default_objection_cost_copper() -> i64 { OBJECTION_COST_COPPER }
+    fn default_dispute_speech_cost_copper() -> i64 { DISPUTE_SPEECH_COST_COPPER }
+    fn default_dispute_edit_cost_copper() -> i64 { DISPUTE_EDIT_COST_COPPER }
+    fn default_judge_cost_per_party() -> i64 { JUDGE_COST_PER_PARTY }
+    fn default_judge_auto_invoke_threshold() -> i64 { JUDGE_AUTO_INVOKE_THRESHOLD }
+    fn default_system_dispute_cost() -> i64 { SYSTEM_DISPUTE_COST }
+    fn default_system_dispute_reward() -> i64 { SYSTEM_DISPUTE_REWARD }
+    fn default_system_dispute_penalty() -> i64 { SYSTEM_DISPUTE_PENALTY }
+    fn default_system_dispute_ban_turns() -> u64 { SYSTEM_DISPUTE_BAN_TURNS }
+    fn default_clawback_percent() -> u64 { CLAWBACK_PERCENT }
+    fn default_retro_pass_penalty_copper() -> i64 { RETRO_PASS_PENALTY_COPPER }
+    fn default_retro_pass_scan_window_turns() -> u64 { RETRO_PASS_SCAN_WINDOW_TURNS }
+    fn default_coliability_test_penalty_copper() -> i64 { COLIABILITY_TEST_PENALTY_COPPER }
+    fn default_bounty_claim_stake_percent() -> u64 { BOUNTY_CLAIM_STAKE_PERCENT }
+    fn default_bounty_abandon_loss_percent() -> u64 { BOUNTY_ABANDON_LOSS_PERCENT }
+    fn default_bounty_reject_loss_percent() -> u64 { BOUNTY_REJECT_LOSS_PERCENT }
+    fn default_bounty_objection_clawback_percent() -> u64 { BOUNTY_OBJECTION_CLAWBACK_PERCENT }
+    fn default_decay_copper_pct_per_turn_tenths() -> i64 { DECAY_COPPER_PCT_PER_TURN_TENTHS }
+    fn default_decay_silver_pct_per_turn_tenths() -> i64 { DECAY_SILVER_PCT_PER_TURN_TENTHS }
+    fn default_decay_floor_copper() -> i64 { DECAY_FLOOR_COPPER }
+
+    impl Default for EconomySettings {
+        fn default() -> Self {
+            // Serde-roundtripping an empty object hits every default fn — keeps
+            // the defaults-source single (no duplication between this impl and
+            // the per-field default fns above).
+            serde_json::from_str("{}").expect("EconomySettings defaults must serialize")
+        }
+    }
+
+    /// Read economy settings from .vaak/economy.json. Returns defaults when
+    /// the file is absent OR unparseable (best-effort — never blocks the
+    /// economy on a malformed settings file). No caching: every call reads
+    /// the file fresh, so UI-driven edits land next-tick.
+    pub fn read_economy_settings(dir: &str) -> EconomySettings {
+        let path = economy_json_path(dir);
+        if !path.exists() {
+            return EconomySettings::default();
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[currency.economy] WARN: read failed for {} — using defaults: {}", path.display(), e);
+                return EconomySettings::default();
+            }
+        };
+        match serde_json::from_str::<EconomySettings>(&raw) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[currency.economy] WARN: parse failed for {} — using defaults: {}", path.display(), e);
+                EconomySettings::default()
+            }
+        }
+    }
+
+    /// Atomically write economy settings to .vaak/economy.json. Caller is
+    /// responsible for any audit ledger row + sanity validation.
+    pub fn write_economy_settings(dir: &str, settings: &EconomySettings) -> Result<(), String> {
+        let path = economy_json_path(dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("economy.json mkdir: {}", e))?;
+        }
+        let json = serde_json::to_string_pretty(settings)
+            .map_err(|e| format!("economy.json serialize: {}", e))?;
+        atomic_write(&path, json.as_bytes())
+    }
+
     /// Round-up integer division: `ceil(numer / denom)` over non-negative ints.
     /// Used by the decay tax to round fractional decay UP to the nearest whole
     /// (per human msg 420 spec: "5 copper rounded up to the nearest whole").
@@ -2898,7 +3090,10 @@ pub mod currency {
                 escrow_id: None,
                 release_turn: None,
                 turn: Some(snap.turn_counter),
-                action_kind: if amount_copper >= 0 { Some(ActionKind::Credit) } else { Some(ActionKind::Penalty) },
+                // Tester:0 msg 663 #3 spec-drift fix — distinct action_kind so
+                // per-action_kind telemetry doesn't conflate human-issued debits
+                // with retro-Pass + co-liability penalties.
+                action_kind: Some(ActionKind::HumanAdjust),
                 linked_edit_msg: None,
                 at: super::iso_now(),
             };
@@ -2940,6 +3135,17 @@ pub mod currency {
         // Feed readability (copper-decay + silver-decay), both destroy copper
         // to the system sink (no per-seat redistribution).
         Decay,
+        // Human msg 458 + tester:0 msg 663 #3 spec-drift fix: distinct
+        // action_kind for human-issued adjusts so telemetry (architect plan
+        // §5c per-action_kind dashboard) doesn't lump these with retro-Pass
+        // + co-liability penalties. Sign of `amount` distinguishes credit
+        // vs debit; the action_kind is the categorical tag.
+        HumanAdjust,
+        // Human msg 657: distinct action_kind for the audit row emitted when
+        // economy.json settings are written via UI. Captures who-tuned-what-
+        // when at the ledger layer (per evil-arch msg 661 requirement). Amount
+        // is always 0; the reason field carries the field name + old → new.
+        EconomyTune,
     }
 
     /// Display split. balances.json carries copper only; UI consumers call
