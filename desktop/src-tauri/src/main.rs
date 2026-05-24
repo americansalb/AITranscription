@@ -3735,6 +3735,57 @@ fn oxford_initiate_cmd(
             audience: audience.clone(),
             winning_side_reward_copper: reward,
         })?;
+        // Per evil-arch msg 722 + tester msg 724 + architect msg 732: emit
+        // board broadcast so agents discover the active debate by design,
+        // not by gate-rejection error. Direct board.jsonl append under
+        // with_board_lock; the architect-preferred indirect-via-HTTP path
+        // is queued as a refactor — for now the locked direct write closes
+        // the silent-initiate adversarial vector identified in msg 722.
+        let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+        let _ = collab::with_board_lock(&dir, || -> Result<(), String> {
+            use std::io::Write;
+            // Compute next msg id by scanning existing board for max id + 1.
+            let max_id: u64 = std::fs::read_to_string(&board_path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+                .max()
+                .unwrap_or(0);
+            let msg = serde_json::json!({
+                "id": max_id + 1,
+                "from": "system",
+                "to": "all",
+                "type": "broadcast",
+                "timestamp": collab::iso_now(),
+                "subject": format!("[OxfordDebateInitiated] debate {} by human:0", debate_id),
+                "body": format!(
+                    "Oxford-style debate {} initiated by human:0 via UI.\nPremise: {}\nSide A: {}\nSide B: {}\nAudience: {}\nModerator: {} declares speakers via oxford_declare_speaker. Reward: {} copper from pool. Per spec §6.3 only the declared speaker can project_send during their turn; human:0 always bypasses.",
+                    debate_id, premise,
+                    side_a.join(", "), side_b.join(", "),
+                    if audience.is_empty() { "(none)".to_string() } else { audience.join(", ") },
+                    moderator, reward
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "moderator": moderator.clone(),
+                    "side_a": side_a.clone(),
+                    "side_b": side_b.clone(),
+                    "audience": audience.clone(),
+                    "winning_side_reward_copper": reward,
+                    "oxford_event": "initiate",
+                    "initiated_via": "ui"
+                }
+            });
+            if let Some(parent) = board_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut f = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&board_path)
+                .map_err(|e| format!("board open append: {}", e))?;
+            writeln!(f, "{}", msg.to_string()).map_err(|e| format!("board write: {}", e))?;
+            Ok(())
+        });
         Ok(serde_json::json!({
             "debate_id": debate_id,
             "moderator": moderator,
