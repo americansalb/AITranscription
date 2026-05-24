@@ -91,6 +91,8 @@ interface CurrencyFeedRow {
   escrow_id?: string;
   release_turn?: number;
   action_kind?: string;   // Phase 2 opcode hint
+  turn?: number;          // Phase 2 turn counter at write-time (for per-turn batching)
+  linked_edit_msg?: number; // Phase 4 Test→Edit link
   at?: string;            // ISO timestamp
 }
 
@@ -1087,11 +1089,13 @@ export function CollabTab() {
   // Phase 5 (human msg 1971): "More Stats" popup — deep currency breakdown.
   // Ephemeral (re-derives from live data on open).
   const [statsOpen, setStatsOpen] = useState(false);
-  // Phase 5 (human msg 1971): inline per-turn currency notices in the message
-  // timeline ("like the mic pass"). Default ON; toggle in the Chitragupta header.
-  // Pref persisted so the human's choice survives restarts.
+  // Phase 5 (human msg 1971): inline currency notices in the message timeline.
+  // Default OFF per human msg 2077/2082 ("should not be 10 messages every turn
+  // about gold and copper" — too disruptive). Opt-in via the 🔕 toggle, and even
+  // when ON only SIGNIFICANT events (disputes/losses/pool-destroyed) interleave —
+  // routine passive/escrow/interest stays in the sidebar Chitragupta feed.
   const [inlineCurrencyNotices, setInlineCurrencyNotices] = useState<boolean>(
-    () => loadJSON<boolean>("vaak_collab_inline_currency_notices", true, (v): v is boolean => typeof v === "boolean"),
+    () => loadJSON<boolean>("vaak_collab_inline_currency_notices", false, (v): v is boolean => typeof v === "boolean"),
   );
   const toggleInlineCurrencyNotices = () =>
     setInlineCurrencyNotices((prev) => { const next = !prev; saveJSON("vaak_collab_inline_currency_notices", next); return next; });
@@ -1264,27 +1268,43 @@ export function CollabTab() {
     return () => { cancelled = true; window.clearInterval(id); };
   }, [projectDir]);
 
-  // Flow Feed display rows: batch consecutive same-seat passive ticks into one
-  // line, keep the last 50 for render (human msg 1872: "batch passive income",
-  // "last ~50"). Newest is last (we scroll to bottom).
+  // Flow Feed display rows: collapse ALL passive ticks sharing a turn into ONE
+  // line — "N seats earned 1 copper passive (turn 47)" (human msg 1872 intent +
+  // msg 2082 "should not be 10 messages every turn about gold and copper"). The
+  // ledger writes one passive row per seat per turn, appended together, so we
+  // batch by the `turn` field — NOT by consecutive same-seat (the old impl,
+  // which broke the run on each seat → ~6-8 lines/turn = the human's complaint).
+  // Keep the last 50 for render; newest is last (we scroll to bottom).
   const flowFeedRows = useMemo(() => {
     const out: Array<{ key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }> = [];
-    let passiveRun: { count: number; seat?: string } | null = null;
+    let passiveBatch: { turn: number | undefined; count: number; at?: string } | null = null;
+    const flushPassive = () => {
+      if (!passiveBatch) return;
+      const turnLabel = passiveBatch.turn != null ? ` (turn ${passiveBatch.turn})` : "";
+      out.push({
+        key: `passive-turn-${passiveBatch.turn ?? `idx${out.length}`}`,
+        text: `${passiveBatch.count} seat${passiveBatch.count === 1 ? "" : "s"} earned 1 copper passive${turnLabel}`,
+        tier: "passive",
+        at: passiveBatch.at,
+      });
+      passiveBatch = null;
+    };
     for (const row of currencyFeed) {
       if (row.type === "passive") {
-        if (passiveRun && passiveRun.seat === row.seat) {
-          passiveRun.count += 1;
-          const last = out[out.length - 1];
-          if (last) { last.text = `${row.seat || "someone"} earned ${passiveRun.count} copper passive (×${passiveRun.count})`; last.at = row.at; }
-          continue;
+        if (passiveBatch && passiveBatch.turn === row.turn) {
+          passiveBatch.count += 1;
+          passiveBatch.at = row.at;
+        } else {
+          flushPassive();
+          passiveBatch = { turn: row.turn, count: 1, at: row.at };
         }
-        passiveRun = { count: 1, seat: row.seat };
-      } else {
-        passiveRun = null;
+        continue;
       }
+      flushPassive();
       const formatted = formatCurrencyLine(row);
       out.push({ key: row.id || `${row.at ?? ""}-${out.length}`, text: formatted.text, tier: formatted.tier, seat: row.seat, at: row.at });
     }
+    flushPassive();
     return out.slice(-50);
   }, [currencyFeed]);
 
@@ -5379,8 +5399,8 @@ When multiple instances of this role are active:
                   type="button"
                   className={`flow-feed-notices-btn${inlineCurrencyNotices ? " is-on" : ""}`}
                   title={inlineCurrencyNotices
-                    ? "Inline transaction notices ON — click to hide them from the timeline"
-                    : "Inline transaction notices OFF — click to show them in the timeline"}
+                    ? "Inline notices ON — significant events (disputes/losses) show in the timeline; click to hide"
+                    : "Inline notices OFF — click to show significant currency events (disputes/losses) in the timeline"}
                   aria-label="Toggle inline currency notices in the timeline"
                   aria-pressed={inlineCurrencyNotices}
                   onClick={(e) => { e.stopPropagation(); toggleInlineCurrencyNotices(); }}
@@ -5776,10 +5796,18 @@ When multiple instances of this role are active:
               type TimelineItem =
                 | { kind: "msg"; msg: BoardMessage; ts: string }
                 | { kind: "cur"; line: { key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }; ts: string };
+              // Only SIGNIFICANT economic events interleave into the timeline
+              // (human msg 2082: not "10 messages every turn about gold and
+              // copper"). Routine earn/escrow-hold/passive/interest stay in the
+              // sidebar Chitragupta feed; the timeline shows losses, disputes,
+              // and pool-destroyed only.
+              const inlineSignificantTiers = new Set<CurrencyTier>(["loss", "dispute", "destroyed"]);
               const timelineItems: TimelineItem[] = [
                 ...visibleMessages.map((m): TimelineItem => ({ kind: "msg", msg: m, ts: m.timestamp })),
                 ...(inlineCurrencyOn
-                  ? flowFeedRows.map((l): TimelineItem => ({ kind: "cur", line: l, ts: l.at ?? "" }))
+                  ? flowFeedRows
+                      .filter((l) => inlineSignificantTiers.has(l.tier))
+                      .map((l): TimelineItem => ({ kind: "cur", line: l, ts: l.at ?? "" }))
                   : []),
               ].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
 
