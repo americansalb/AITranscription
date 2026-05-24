@@ -13113,9 +13113,13 @@ fn extract_claude_session_id_from_cmdline(cmdline: &str) -> Option<String> {
     while let Some(idx) = cmdline[search_start..].find(NEEDLE) {
         let abs = search_start + idx;
         let after = &cmdline[abs + NEEDLE.len()..];
-        // Skip whitespace and an optional `=` separator (covers `--session-id X`
-        // and `--session-id=X` forms uniformly).
-        let trimmed = after.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+        // Skip whitespace, NUL, and an optional `=` separator. NUL is the
+        // Linux /proc/<pid>/cmdline argv separator and is NOT covered by
+        // char::is_whitespace() (per tester msg 61); including it here keeps
+        // the extractor robust if anyone ever bypasses get_process_cmdline's
+        // NUL→space pre-normalization, and lets the Linux NUL fixture drop
+        // in verbatim alongside the WMI and ps fixtures.
+        let trimmed = after.trim_start_matches(|c: char| c == '\0' || c.is_whitespace() || c == '=');
         // Take exactly 36 chars (UUID length); is_uuid_36 validates shape.
         let token: String = trimmed.chars().take(36).collect();
         if is_uuid_36(&token) {
@@ -13271,6 +13275,19 @@ mod cc_session_id_tests {
         );
         assert_eq!(
             extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_from_linux_proc_cmdline_raw_nul() {
+        // Tester msg 61 fixture verbatim: raw NUL-separated form direct from
+        // /proc/<pid>/cmdline without pre-normalization. The extractor is
+        // NUL-tolerant (post-tester-msg-61 follow-on) so this fixture passes
+        // even if a caller bypasses get_process_cmdline's NUL→space join.
+        let s = "claude\0--dangerously-skip-permissions\0--session-id\03a5856a8-af4a-4bd3-a374-f51d19348cfc\0Join this project as a developer\0";
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(s),
             Some(SAMPLE_UUID.to_string())
         );
     }
