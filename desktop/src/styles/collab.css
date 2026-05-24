@@ -9277,6 +9277,18 @@
   border-color: rgba(168, 85, 247, 0.55);
   color: white;
 }
+/* Reward denomination row — pill selector + amount input side by side. */
+.osm-reward-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.osm-denoms { display: inline-flex; gap: 6px; }
+.osm-denom-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18)); border-radius: 999px; font-size: 12px; cursor: pointer; user-select: none; background: transparent; color: var(--collab-text, rgba(255, 255, 255, 0.85)); }
+.osm-denom-pill input { width: 0; height: 0; opacity: 0; position: absolute; }
+.osm-denom-pill-active { background: rgba(168, 85, 247, 0.16); border-color: rgba(168, 85, 247, 0.5); color: white; }
+.osm-denom-label { text-transform: capitalize; }
+.osm-denom-pill .coin-icon { width: 12px; height: 12px; vertical-align: -1px; }
+.osm-reward-preview { display: block; margin-top: 6px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+/* Lineup summary — live preview of the seats picked for each role. */
+.osm-summary { margin-top: 12px; padding: 8px 10px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.7)); background: rgba(168, 85, 247, 0.06); border-left: 3px solid rgba(168, 85, 247, 0.55); border-radius: 4px; }
+.osm-summary em { color: var(--collab-text-muted, rgba(255, 255, 255, 0.4)); font-style: italic; }
 .osm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10)); }
 .osm-btn { padding: 8px 18px; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2)); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; transition: background 0.12s ease; }
 .osm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }

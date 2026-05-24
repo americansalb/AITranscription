@@ -24,10 +24,12 @@ export function OxfordSetupModal(props: {
   const [sideB, setSideB] = useState<Set<string>>(new Set());
   const [audience, setAudience] = useState<Set<string>>(new Set());
   const [premise, setPremise] = useState<string>("");
-  const [reward, setReward] = useState<string>("500"); // copper
+  const [reward, setReward] = useState<string>("5"); // value in the picked denomination
+  const [rewardDenom, setRewardDenom] = useState<"copper" | "silver" | "gold">("silver");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const premiseRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -36,9 +38,12 @@ export function OxfordSetupModal(props: {
       setSideB(new Set());
       setAudience(new Set());
       setPremise("");
-      setReward("500");
+      setReward("5");
+      setRewardDenom("silver");
       setError(null);
       setBusy(false);
+      const t = setTimeout(() => premiseRef.current?.focus(), 0);
+      return () => clearTimeout(t);
     }
   }, [open]);
 
@@ -65,13 +70,17 @@ export function OxfordSetupModal(props: {
     setSet(next);
   };
 
+  const rewardMultiplier = rewardDenom === "gold" ? 10_000 : rewardDenom === "silver" ? 100 : 1;
+  const rewardParsed = parseInt(reward, 10);
+  const rewardValid = Number.isInteger(rewardParsed) && rewardParsed >= 0;
+  const rewardCopper = rewardValid ? rewardParsed * rewardMultiplier : 0;
+
   const valid =
     moderator !== "" &&
     sideA.size >= 1 &&
     sideB.size >= 1 &&
     premise.trim().length > 0 &&
-    Number.isInteger(parseInt(reward, 10)) &&
-    parseInt(reward, 10) >= 0;
+    rewardValid;
 
   const submit = async () => {
     if (!valid || busy) return;
@@ -86,7 +95,7 @@ export function OxfordSetupModal(props: {
         sideB: Array.from(sideB),
         premise: premise.trim(),
         audience: Array.from(audience),
-        winningSideRewardCopper: parseInt(reward, 10),
+        winningSideRewardCopper: rewardCopper,
       });
       console.log("[oxford_initiate]", result);
       onClose();
@@ -100,14 +109,13 @@ export function OxfordSetupModal(props: {
     label: string,
     set: Set<string>,
     setSet: (s: Set<string>) => void,
-    excludeSelectedInOthers: boolean = true,
   ) => (
     <div className="osm-role-block">
       <label className="osm-role-label">{label} <span className="osm-count">({set.size})</span></label>
       <div className="osm-seat-grid">
         {availableSeats.map((seat) => {
           const checked = set.has(seat);
-          const blockedByOther = excludeSelectedInOthers && !checked &&
+          const blockedByOther = !checked &&
             (seat === moderator || sideA.has(seat) || sideB.has(seat) || audience.has(seat));
           if (blockedByOther) return null;
           return (
@@ -145,6 +153,7 @@ export function OxfordSetupModal(props: {
         <label className="osm-field">
           <span className="osm-field-label">Premise</span>
           <textarea
+            ref={premiseRef}
             className="osm-textarea"
             value={premise}
             onChange={(e) => setPremise(e.target.value)}
@@ -175,18 +184,54 @@ export function OxfordSetupModal(props: {
 
         <label className="osm-field">
           <span className="osm-field-label">
-            Winning-side reward (copper)
-            <span className="osm-hint"> default 500 = 5 silver. Pool-funded; 0 = no reward.</span>
+            Winning-side reward
+            <span className="osm-hint"> Pool-funded. 0 = no reward.</span>
           </span>
-          <input
-            className="osm-input"
-            type="number"
-            min={0}
-            step={1}
-            value={reward}
-            onChange={(e) => setReward(e.target.value)}
-          />
+          <div className="osm-reward-row">
+            <div className="osm-denoms" role="radiogroup" aria-label="reward denomination">
+              {(["copper", "silver", "gold"] as const).map((d) => (
+                <label key={d} className={`osm-denom-pill${rewardDenom === d ? " osm-denom-pill-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="osm-reward-denom"
+                    value={d}
+                    checked={rewardDenom === d}
+                    onChange={() => setRewardDenom(d)}
+                  />
+                  <span className={`coin-icon coin-icon-${d}`} aria-hidden="true" />
+                  <span className="osm-denom-label">{d}</span>
+                </label>
+              ))}
+            </div>
+            <input
+              className="osm-input"
+              type="number"
+              min={0}
+              step={1}
+              value={reward}
+              onChange={(e) => setReward(e.target.value)}
+              aria-label={`reward amount in ${rewardDenom}`}
+            />
+          </div>
+          {rewardValid && (
+            <span className="osm-reward-preview">
+              {rewardCopper === 0
+                ? "No reward (winners get 0c)."
+                : `Winners split ${rewardCopper.toLocaleString()} copper total.`}
+            </span>
+          )}
         </label>
+
+        <div className="osm-summary" aria-live="polite">
+          <strong>Lineup:</strong>{" "}
+          {moderator ? `1 moderator (${moderator})` : <em>no moderator</em>}
+          {", "}
+          {sideA.size > 0 ? `${sideA.size} side A` : <em>no side A</em>}
+          {", "}
+          {sideB.size > 0 ? `${sideB.size} side B` : <em>no side B</em>}
+          {", "}
+          {audience.size > 0 ? `${audience.size} audience` : "no audience"}
+        </div>
 
         <div className="osm-actions">
           <button type="button" className="osm-btn osm-btn-cancel" onClick={onClose} disabled={busy}>Cancel</button>
