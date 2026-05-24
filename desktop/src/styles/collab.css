@@ -9224,3 +9224,62 @@
 .esm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .esm-btn-submit:not(:disabled) { background: #1d9bf0; border-color: #1d9bf0; color: white; }
 .esm-btn-submit:not(:disabled):hover { background: #1a8cd8; }
+
+/* ---- OxfordSetupModal (human msg 706 — Phase A v1 UI) ---- */
+.osm-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1500; animation: abm-fade 0.12s ease;
+}
+.osm-dialog {
+  background: var(--collab-bg-elevated, #1e1f24);
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-top: 3px solid #a855f7;
+  border-radius: 8px;
+  width: 540px; max-width: 94vw; max-height: 88vh;
+  display: flex; flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.osm-title { margin: 0 0 4px; font-size: 15px; }
+.osm-subtitle { margin: 0 0 16px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.osm-error { padding: 8px 12px; background: rgba(255, 107, 107, 0.10); border-left: 3px solid #ff6b6b; color: #ff6b6b; font-size: 12px; border-radius: 4px; margin-bottom: 12px; }
+.osm-field { display: block; margin-bottom: 14px; font-size: 12px; }
+.osm-field-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.osm-hint { text-transform: none; letter-spacing: normal; font-size: 10px; font-style: italic; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); }
+.osm-input, .osm-select, .osm-textarea {
+  display: block; width: 100%; padding: 6px 10px;
+  font: inherit; font-size: 12px;
+  background: var(--collab-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 4px; color: inherit; box-sizing: border-box;
+}
+.osm-textarea { resize: vertical; min-height: 50px; font-family: inherit; }
+.osm-input:focus, .osm-select:focus, .osm-textarea:focus {
+  outline: 2px solid #a855f7; outline-offset: 1px; border-color: transparent;
+}
+.osm-role-block { margin-bottom: 14px; }
+.osm-role-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.osm-count { color: rgba(168, 85, 247, 0.85); font-weight: 600; }
+.osm-seat-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.osm-seat-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; font-size: 11px;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 999px; background: transparent; cursor: pointer; user-select: none;
+  font-family: 'DM Mono', ui-monospace, monospace;
+}
+.osm-seat-pill input { width: 0; height: 0; opacity: 0; position: absolute; }
+.osm-seat-pill-active {
+  background: rgba(168, 85, 247, 0.20);
+  border-color: rgba(168, 85, 247, 0.55);
+  color: white;
+}
+.osm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10)); }
+.osm-btn { padding: 8px 18px; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2)); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; transition: background 0.12s ease; }
+.osm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.osm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.osm-btn-submit:not(:disabled) { background: #a855f7; border-color: #a855f7; color: white; }
+.osm-btn-submit:not(:disabled):hover { background: #9333ea; }

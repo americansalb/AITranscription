@@ -5,6 +5,7 @@ import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
 import { EconomySettingsModal } from "./EconomySettingsModal";
+import { OxfordSetupModal } from "./OxfordSetupModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -984,6 +985,8 @@ export function CollabTab() {
   const [adjustTarget, setAdjustTarget] = useState<{ seat: string; direction: AdjustDirection } | null>(null);
   // Human msg 657: Economy Settings page modal.
   const [economySettingsOpen, setEconomySettingsOpen] = useState(false);
+  // Human msg 706: Oxford debate setup modal.
+  const [oxfordSetupOpen, setOxfordSetupOpen] = useState(false);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -5959,12 +5962,20 @@ When multiple instances of this role are active:
           );
         })()}
 
-        {/* Economy Settings trigger (human msg 657) — opens the EconomySettingsModal
-            for live-tuning every economic constant via UI. Lives in the rail
-            below Discussion Mode; small profile so it doesn't compete with
-            the primary panels. */}
+        {/* Economy Settings + Oxford debate triggers (human msgs 657 + 706).
+            Both live in the rail below Discussion Mode; small profile so they
+            don't compete with the primary panels. */}
         {projectDir && (
           <div className="economy-settings-trigger rail-section">
+            <button
+              type="button"
+              className="economy-settings-btn"
+              onClick={() => setOxfordSetupOpen(true)}
+              title="Start an Oxford-style debate (Phase A v1)"
+            >
+              <span className="economy-settings-icon" aria-hidden="true">⚖</span>
+              <span>Start Oxford Debate</span>
+            </button>
             <button
               type="button"
               className="economy-settings-btn"
@@ -6767,6 +6778,18 @@ When multiple instances of this role are active:
           open={economySettingsOpen}
           projectDir={projectDir || ""}
           onClose={() => setEconomySettingsOpen(false)}
+        />
+
+        {/* Oxford-debate setup modal (human msg 706 — Phase A UI trigger) */}
+        <OxfordSetupModal
+          open={oxfordSetupOpen}
+          projectDir={projectDir || ""}
+          activeSeats={
+            (project?.sessions ?? [])
+              .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
+              .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
+          }
+          onClose={() => setOxfordSetupOpen(false)}
         />
 
         {/* Human balance-adjust modal (replaces window.prompt per ui-arch msg 626) */}

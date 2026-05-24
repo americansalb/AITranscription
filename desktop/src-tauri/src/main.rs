@@ -3656,6 +3656,98 @@ fn get_currency_balances_cmd(dir: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Human msg 706 (2026-05-24) — Tauri-path Oxford debate initiate. The UI
+/// calls this command directly from the Vaak webview to start an Oxford-style
+/// debate. Caller hard-wired to "human:0" (only the human uses this surface).
+/// Backend uses collab::oxford module's validate_initiate + write_active_oxford
+/// helpers under with_oxford_lock — same atomicity as the MCP-tool path.
+/// On success: appends Initiate OxfordEvent + writes active-oxford-debate.json.
+/// Does NOT emit a board broadcast (the UI surfaces the debate via its own
+/// polling); the MCP-tool path is the one that broadcasts.
+#[tauri::command]
+fn oxford_initiate_cmd(
+    dir: String,
+    moderator: String,
+    side_a: Vec<String>,
+    side_b: Vec<String>,
+    premise: String,
+    audience: Vec<String>,
+    winning_side_reward_copper: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let dir = validate_project_dir(&dir)?;
+    let caller = "human:0".to_string();
+
+    // Build active_seats from sessions.json bindings (mirror of the MCP handler).
+    let active_seats: Vec<String> = (|| -> Vec<String> {
+        let sessions_path = std::path::Path::new(&dir).join(".vaak").join("sessions.json");
+        let sessions: serde_json::Value = std::fs::read_to_string(&sessions_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+        let mut out = Vec::new();
+        if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+            for b in bindings {
+                if b.get("status").and_then(|s| s.as_str()) != Some("active") { continue; }
+                let role = b.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                if role.is_empty() || role == "human" { continue; }
+                let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                out.push(format!("{}:{}", role, instance));
+            }
+        }
+        out
+    })();
+
+    if let Some(r) = winning_side_reward_copper {
+        if r < 0 {
+            return Err("[OxfordInvalidReward] winning_side_reward_copper must be >= 0".to_string());
+        }
+    }
+    validate_initiate(&caller, &moderator, &side_a, &side_b, &audience, &active_seats)?;
+
+    with_oxford_lock(&dir, || {
+        if read_active_oxford(&dir)?.is_some() {
+            return Err("[OxfordAlreadyActive]".to_string());
+        }
+        let debate_id = next_debate_id(&dir);
+        let now = collab::iso_now();
+        let reward = winning_side_reward_copper.unwrap_or(OXFORD_DEFAULT_WINNING_REWARD_COPPER);
+        let debate = ActiveOxfordDebate {
+            debate_id,
+            moderator: moderator.clone(),
+            side_a: side_a.clone(),
+            side_b: side_b.clone(),
+            audience: audience.clone(),
+            premise: premise.clone(),
+            current_speaker: None,
+            started_at: now.clone(),
+            turn_history: Vec::new(),
+            winning_side_reward_copper: reward,
+        };
+        write_active_oxford(&dir, &debate)?;
+        append_oxford_event(&dir, &OxfordEvent::Initiate {
+            debate_id,
+            timestamp: now.clone(),
+            moderator: moderator.clone(),
+            side_a: side_a.clone(),
+            side_b: side_b.clone(),
+            premise: premise.clone(),
+            audience: audience.clone(),
+            winning_side_reward_copper: reward,
+        })?;
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "moderator": moderator,
+            "side_a": side_a,
+            "side_b": side_b,
+            "audience": audience,
+            "premise": premise,
+            "winning_side_reward_copper": reward,
+            "started_at": now,
+        }))
+    })
+}
+
 /// Human msg 657 (2026-05-24) — read economy settings as JSON for the UI.
 /// Returns the current EconomySettings (file values + defaults for missing
 /// fields), enabling the Settings page to populate inputs with the live
@@ -7148,6 +7240,7 @@ fn main() {
             currency_human_adjust_cmd,
             read_economy_settings_cmd,
             write_economy_settings_cmd,
+            oxford_initiate_cmd,
             read_currency_feed_cmd,
             read_disputes_cmd,
             read_bounties_cmd,
