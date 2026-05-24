@@ -7048,9 +7048,8 @@ fn main() {
                             match collab::with_currency_and_board_lock(&dir, || {
                                 collab::currency::write_session_snapshot(&dir)
                             }) {
-                                Ok(Ok(p)) => eprintln!("[main] session snapshot written: {:?}", p),
-                                Ok(Err(e)) => eprintln!("[main] session snapshot error: {}", e),
-                                Err(e) => eprintln!("[main] session snapshot lock error: {}", e),
+                                Ok(p) => eprintln!("[main] session snapshot written: {:?}", p),
+                                Err(e) => eprintln!("[main] session snapshot error: {}", e),
                             }
                         }
                     }
