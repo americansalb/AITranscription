@@ -2826,6 +2826,82 @@ pub mod currency {
         (numer + denom - 1) / denom
     }
 
+    /// Human msg 458 — direct human authority over balances. Pure currency
+    /// mutation extracted into collab so both the MCP-tool path (vaak-mcp.rs)
+    /// and the Tauri-command path (main.rs) can call it without duplicating
+    /// the lock + ledger + snapshot dance. Callers are responsible for any
+    /// board broadcast (system message) AFTER this returns.
+    ///
+    /// Validates: non-empty seat, non-empty reason, non-zero amount, caller
+    /// starts with "human:", seat is already known to the snapshot. Returns
+    /// {balance_before, balance_after, timed_out, ...} JSON for the caller.
+    pub fn apply_human_adjust(
+        dir: &str,
+        caller: &str,
+        seat: &str,
+        amount_copper: i64,
+        reason: &str,
+    ) -> Result<serde_json::Value, String> {
+        if !caller.starts_with("human:") {
+            return Err("[HumanAdjust] only human:* can adjust balances directly.".to_string());
+        }
+        if seat.trim().is_empty() {
+            return Err("[HumanAdjust] seat label is required.".to_string());
+        }
+        if reason.trim().is_empty() {
+            return Err("[HumanAdjustReasonRequired] non-empty reason is mandatory (audit requirement per architect msg 469).".to_string());
+        }
+        if amount_copper == 0 {
+            return Err("[HumanAdjust] amount_copper must be non-zero (positive = credit, negative = debit).".to_string());
+        }
+        super::with_currency_and_board_lock(dir, || {
+            let mut snap = read_balances_snapshot(dir)?;
+            if snap.seats.is_empty() && currency_jsonl_path(dir).exists() {
+                snap = replay_balances_from_ledger(dir)?;
+            }
+            if !snap.seats.contains_key(seat) {
+                return Err(format!("[HumanAdjust] seat {} has no balance entry yet (must join first).", seat));
+            }
+            let pre_bal = snap.seats.get(seat).unwrap().balance;
+            let new_bal = pre_bal.saturating_add(amount_copper);
+            {
+                let e = snap.seats.get_mut(seat).unwrap();
+                e.balance = new_bal;
+                if e.balance <= DEFICIT_CAP_COPPER {
+                    e.timed_out = true;
+                }
+            }
+            let id = snap.next_txn_id;
+            snap.next_txn_id += 1;
+            let txn = LedgerRow {
+                id,
+                txn_type: "human_adjust".to_string(),
+                seat: seat.to_string(),
+                amount: amount_copper,
+                reason: format!("human_adjust by {}: {}", caller, reason),
+                ref_msg: None,
+                balance_after: new_bal,
+                escrow_id: None,
+                release_turn: None,
+                turn: Some(snap.turn_counter),
+                action_kind: if amount_copper >= 0 { Some(ActionKind::Credit) } else { Some(ActionKind::Penalty) },
+                linked_edit_msg: None,
+                at: super::iso_now(),
+            };
+            append_currency_transaction(dir, &txn)?;
+            write_balances_snapshot(dir, &snap)?;
+            Ok(serde_json::json!({
+                "seat": seat,
+                "amount_copper": amount_copper,
+                "balance_before": pre_bal,
+                "balance_after": new_bal,
+                "timed_out": new_bal <= DEFICIT_CAP_COPPER,
+                "reason": reason,
+                "txn_id": id,
+            }))
+        })
+    }
+
     // ---- Types ----
 
     /// Action classification for a project_send. Exempt = human (no charge).

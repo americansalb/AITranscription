@@ -3656,6 +3656,26 @@ fn get_currency_balances_cmd(dir: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Human msg 458 (2026-05-24) — Tauri-path human balance adjust. The UI calls
+/// this command directly from within the Vaak webview (no MCP roundtrip). The
+/// `caller` is always hard-wired to "human:0" because only the human is the
+/// user of the Vaak UI; the sidecar's MCP variant (currency_human_adjust)
+/// resolves the caller from the agent session and is therefore the path for
+/// any future "make this also work for moderator role" relaxation. Both
+/// paths share `collab::currency::apply_human_adjust` for the lock + ledger
+/// + snapshot mutation; this command does NOT emit a board system message
+/// (the UI already shows the change via balance polling).
+#[tauri::command]
+fn currency_human_adjust_cmd(
+    dir: String,
+    seat: String,
+    amount_copper: i64,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    collab::currency::apply_human_adjust(&dir, "human:0", &seat, amount_copper, &reason)
+}
+
 /// Phase 5 (Chitragupta) Surface 1 — the Flow Feed. Returns the last `count`
 /// rows of currency.jsonl as raw JSON (newest at the end), plus the total row
 /// count. Read-only; never writes. Human-readable formatting happens in the
@@ -6968,6 +6988,7 @@ fn main() {
             // Two-controls B.4.1 — active seats for moderator picker
             list_active_seats_cmd,
             get_currency_balances_cmd,
+            currency_human_adjust_cmd,
             read_currency_feed_cmd,
             read_disputes_cmd,
             read_bounties_cmd,

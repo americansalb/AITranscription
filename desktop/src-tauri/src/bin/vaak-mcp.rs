@@ -9563,89 +9563,32 @@ fn handle_currency_post_bounty(description: &str, amount: i64, deadline_turns: u
 }
 
 /// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
-/// Gives the human the ability to add OR remove copper from any seat with a
-/// permanent audit row. Per evil-arch msg 461 audit requirements: mandatory
-/// non-empty reason, `txn_type:"human_adjust"`, MCP-layer gate against
-/// stale-sidecar impersonation, distinctive Flow Feed treatment (frontend).
+/// Thin wrapper around `collab::currency::apply_human_adjust` (shared with
+/// the Tauri-command path in main.rs); this fn adds the per-MCP-tool
+/// concerns: resolve the caller from the active session and emit a board
+/// system message announcing the adjust.
 fn handle_currency_human_adjust(seat: &str, amount_copper: i64, reason: &str) -> Result<serde_json::Value, String> {
-    use collab::currency::*;
     let state = get_or_rejoin_state()?;
     let dir = state.project_dir.clone();
     let caller = format!("{}:{}", state.role, state.instance);
-    if !caller.starts_with("human:") {
-        return Err("[HumanAdjust] only human:* can adjust balances directly.".to_string());
-    }
-    if seat.trim().is_empty() {
-        return Err("[HumanAdjust] seat label is required.".to_string());
-    }
-    if reason.trim().is_empty() {
-        return Err("[HumanAdjustReasonRequired] non-empty reason is mandatory (audit requirement per architect msg 469).".to_string());
-    }
-    if amount_copper == 0 {
-        return Err("[HumanAdjust] amount_copper must be non-zero (positive = credit, negative = debit).".to_string());
-    }
-    collab::with_currency_and_board_lock(&dir, || {
-        let mut snap = read_balances_snapshot(&dir)?;
-        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
-            snap = replay_balances_from_ledger(&dir)?;
-        }
-        // Lazy-init the seat if it's never been seen (matches passive-tick
-        // lazy-init behavior so an adjust against a new seat doesn't drop a
-        // hidden 10K credit alongside the requested delta).
-        if !snap.seats.contains_key(seat) {
-            return Err(format!("[HumanAdjust] seat {} has no balance entry yet (must join first).", seat));
-        }
-        let pre_bal = snap.seats.get(seat).unwrap().balance;
-        let new_bal = pre_bal.saturating_add(amount_copper);
-        {
-            let e = snap.seats.get_mut(seat).unwrap();
-            e.balance = new_bal;
-            // Negative adjustments can trip timed_out (mirrors penalty arm).
-            if e.balance <= DEFICIT_CAP_COPPER {
-                e.timed_out = true;
-            }
-        }
-        let id = snap.next_txn_id;
-        snap.next_txn_id += 1;
-        let txn = LedgerRow {
-            id,
-            txn_type: "human_adjust".to_string(),
-            seat: seat.to_string(),
-            amount: amount_copper,
-            reason: format!("human_adjust by {}: {}", caller, reason),
-            ref_msg: None,
-            balance_after: new_bal,
-            escrow_id: None,
-            release_turn: None,
-            turn: Some(snap.turn_counter),
-            action_kind: if amount_copper >= 0 { Some(ActionKind::Credit) } else { Some(ActionKind::Penalty) },
-            linked_edit_msg: None,
-            at: collab::iso_now(),
-        };
-        append_currency_transaction(&dir, &txn)?;
-        write_balances_snapshot(&dir, &snap)?;
-        let msg_id = next_message_id(&dir);
-        let direction = if amount_copper >= 0 { "credited" } else { "debited" };
-        let abs_amount = amount_copper.abs();
-        let _ = append_to_board(&dir, &serde_json::json!({
-            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
-            "timestamp": utc_now_iso(),
-            "subject": format!("[human_adjust] {} {} {} copper", seat, direction, abs_amount),
-            "body": format!("{} adjusted {} by {}{} copper. Reason: {}. New balance: {}.",
-                caller, seat,
-                if amount_copper >= 0 { "+" } else { "" },
-                amount_copper, reason, new_bal),
-            "metadata": { "seat": seat, "amount_copper": amount_copper, "reason": reason, "new_balance": new_bal }
-        }));
-        Ok(serde_json::json!({
-            "seat": seat,
-            "amount_copper": amount_copper,
-            "balance_before": pre_bal,
-            "balance_after": new_bal,
-            "timed_out": new_bal <= DEFICIT_CAP_COPPER,
-            "reason": reason
-        }))
-    })
+    let result = collab::currency::apply_human_adjust(&dir, &caller, seat, amount_copper, reason)?;
+    // Board broadcast (UX nicety; not part of the audit row, which is
+    // already in currency.jsonl).
+    let msg_id = next_message_id(&dir);
+    let new_bal = result.get("balance_after").and_then(|v| v.as_i64()).unwrap_or(0);
+    let direction = if amount_copper >= 0 { "credited" } else { "debited" };
+    let abs_amount = amount_copper.abs();
+    let _ = append_to_board(&dir, &serde_json::json!({
+        "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+        "timestamp": utc_now_iso(),
+        "subject": format!("[human_adjust] {} {} {} copper", seat, direction, abs_amount),
+        "body": format!("{} adjusted {} by {}{} copper. Reason: {}. New balance: {}.",
+            caller, seat,
+            if amount_copper >= 0 { "+" } else { "" },
+            amount_copper, reason, new_bal),
+        "metadata": { "seat": seat, "amount_copper": amount_copper, "reason": reason, "new_balance": new_bal }
+    }));
+    Ok(result)
 }
 
 /// Phase 6 (a) — claim an open bounty, staking 10% of the amount.

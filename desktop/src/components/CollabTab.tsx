@@ -5410,6 +5410,79 @@ When multiple instances of this role are active:
                               {!bal.initialized && (
                                 <span className="rc-cur rc-cur-pending-tag" aria-label="starting balance, no activity yet">starting</span>
                               )}
+                              {/* Human msg 458: +/- buttons for direct balance adjustment.
+                                  Always visible in Vaak UI because the human is the
+                                  only user of this surface; backend gates calls to
+                                  human:0 regardless. v1 uses window.prompt for amount
+                                  + reason (simple, upgrade to inline editor later). */}
+                              <span className="rc-cur-adjust-btns" aria-label="human balance adjust controls">
+                                <button
+                                  type="button"
+                                  className="rc-cur-adjust-btn rc-cur-adjust-plus"
+                                  title={`Add copper to ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — writes permanent audit row)`}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const seat = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                                    const amtStr = window.prompt(`Add how much copper to ${seat}?\n(1 gold = 100 silver = 10000 copper)`);
+                                    if (!amtStr) return;
+                                    const amt = parseInt(amtStr.trim(), 10);
+                                    if (Number.isNaN(amt) || amt <= 0) {
+                                      alert("Amount must be a positive integer (copper).");
+                                      return;
+                                    }
+                                    const reason = window.prompt(`Why? (audit-required, non-empty)`);
+                                    if (!reason || !reason.trim()) {
+                                      alert("Reason is required.");
+                                      return;
+                                    }
+                                    try {
+                                      const { invoke } = await import("@tauri-apps/api/core");
+                                      const result = await invoke("currency_human_adjust_cmd", {
+                                        dir: projectDir,
+                                        seat,
+                                        amountCopper: amt,
+                                        reason: reason.trim(),
+                                      });
+                                      console.log("[human_adjust] credit", seat, amt, result);
+                                    } catch (err) {
+                                      alert(`Adjust failed: ${err}`);
+                                    }
+                                  }}
+                                >+</button>
+                                <button
+                                  type="button"
+                                  className="rc-cur-adjust-btn rc-cur-adjust-minus"
+                                  title={`Remove copper from ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — can trip timed_out if balance crosses -1000)`}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const seat = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
+                                    const amtStr = window.prompt(`Remove how much copper from ${seat}?\n(1 gold = 100 silver = 10000 copper. WARN: deficit cap is -1000c.)`);
+                                    if (!amtStr) return;
+                                    const amt = parseInt(amtStr.trim(), 10);
+                                    if (Number.isNaN(amt) || amt <= 0) {
+                                      alert("Amount must be a positive integer (copper).");
+                                      return;
+                                    }
+                                    const reason = window.prompt(`Why? (audit-required, non-empty)`);
+                                    if (!reason || !reason.trim()) {
+                                      alert("Reason is required.");
+                                      return;
+                                    }
+                                    try {
+                                      const { invoke } = await import("@tauri-apps/api/core");
+                                      const result = await invoke("currency_human_adjust_cmd", {
+                                        dir: projectDir,
+                                        seat,
+                                        amountCopper: -amt,
+                                        reason: reason.trim(),
+                                      });
+                                      console.log("[human_adjust] debit", seat, amt, result);
+                                    } catch (err) {
+                                      alert(`Adjust failed: ${err}`);
+                                    }
+                                  }}
+                                >−</button>
+                              </span>
                             </div>
                           );
                         })()}

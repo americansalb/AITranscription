@@ -564,6 +564,46 @@
   opacity: 0.8;
 }
 
+/* Human msg 458 — +/- buttons for direct human balance adjust.
+   Lives inside role-card-currency pill, after the denomination badges.
+   Tiny, low-contrast until hovered, so they don't clutter the timeline. */
+.rc-cur-adjust-btns {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 4px;
+}
+.rc-cur-adjust-btn {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.15));
+  background: transparent;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.5));
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.rc-cur-adjust-btn:hover {
+  background: var(--collab-bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border-color: var(--collab-border-strong, rgba(255, 255, 255, 0.3));
+}
+.rc-cur-adjust-plus:hover {
+  color: rgb(23, 191, 99);
+  border-color: rgba(23, 191, 99, 0.5);
+}
+.rc-cur-adjust-minus:hover {
+  color: rgb(217, 119, 6);
+  border-color: rgba(217, 119, 6, 0.5);
+}
+.rc-cur-adjust-btn:focus-visible {
+  outline: 2px solid var(--collab-focus, #1d9bf0);
+  outline-offset: 1px;
+}
+
 .role-card-instances {
   font-variant-numeric: tabular-nums;
 }
