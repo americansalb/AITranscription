@@ -2747,7 +2747,13 @@ pub mod currency {
     use std::path::{Path, PathBuf};
 
     // ---- Constants (spec §"Constants") ----
-    pub const STARTING_BALANCE_COPPER: i64 = 10_000;
+    // Per human msg 647: 5 silver (500c) starting balance for new roles.
+    // Was 10_000 (1 gold) — lowered to make first-time-seen seats earn their
+    // way up instead of starting rich. Existing balances unaffected; only
+    // first-time-seen seats lazy-init at this value (and Phase 7 carry-over
+    // governs returning seats per snapshot). This will move into economy.json
+    // per human msg 657 directive as soon as that infra ships.
+    pub const STARTING_BALANCE_COPPER: i64 = 500;
     pub const DEFICIT_CAP_COPPER: i64 = -1_000;
     pub const PASS_EARN_COPPER: i64 = 1;
     pub const SPEAK_EARN_COPPER: i64 = 10;
