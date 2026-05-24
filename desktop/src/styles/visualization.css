@@ -1,0 +1,96 @@
+/* Visualization Tab styles — Phase B v1 shell.
+   Spec: .vaak/design-notes/2026-05-24-phase-b-visualization-tab-spec.md §2.2
+   Layout: slim header row, then body splits into ~70% canvas + ~28% side panel
+   (≤30% per human msg 458 constraint). */
+
+.viz-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--collab-bg, #14171f);
+  color: var(--collab-text, rgba(255, 255, 255, 0.92));
+}
+
+.viz-tab-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+  background: rgba(255, 255, 255, 0.02);
+  flex-shrink: 0;
+}
+.viz-tab-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: rgba(168, 85, 247, 0.16);
+  color: #a855f7;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  border-radius: 999px;
+}
+.viz-tab-subtitle {
+  font-size: 11px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.5));
+}
+
+.viz-tab-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viz-canvas-placeholder {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 14px;
+  border: 2px dashed var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 30% 30%, rgba(168, 85, 247, 0.05), transparent 60%),
+    radial-gradient(circle at 70% 70%, rgba(29, 155, 240, 0.04), transparent 60%);
+}
+.viz-canvas-placeholder-text {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.4));
+}
+
+.viz-side-panel {
+  width: 28%;
+  min-width: 240px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+  background: rgba(255, 255, 255, 0.015);
+}
+.viz-side-panel-header {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.55));
+  border-bottom: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+}
+.viz-side-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.viz-side-panel-placeholder {
+  margin: 0;
+  font-size: 12px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.45));
+  font-style: italic;
+}

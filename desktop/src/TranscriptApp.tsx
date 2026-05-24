@@ -12,6 +12,7 @@ import {
 import { transcriptListener } from "./lib/transcriptListener";
 import { CollabTab } from "./components/CollabTab";
 import { RolesTab } from "./components/RolesTab";
+import { VisualizationTab } from "./components/VisualizationTab";
 import { ProjectDirProvider } from "./contexts/ProjectDirContext";
 import { useToast } from "./components/Toast";
 import { PreferencesTab } from "./components/PreferencesTab";
@@ -32,7 +33,7 @@ import {
 } from "./lib/queueStore";
 
 // Tab type for navigation
-type TabType = "preferences" | "sessions" | "roles" | "collab";
+type TabType = "preferences" | "sessions" | "roles" | "collab" | "viz";
 
 
 export function TranscriptApp() {
@@ -310,7 +311,7 @@ export function TranscriptApp() {
           tabIndex={activeTab === "preferences" ? 0 : -1}
           onKeyDown={(e) => {
             if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("sessions"); }
-            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("collab"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("viz"); }
           }}
         >
           Preferences
@@ -354,11 +355,29 @@ export function TranscriptApp() {
           aria-controls="panel-collab"
           tabIndex={activeTab === "collab" ? 0 : -1}
           onKeyDown={(e) => {
-            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("preferences"); }
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("viz"); }
             if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("roles"); }
           }}
         >
           Collab
+        </button>
+        {/* Visualization Tab — Phase B v1 per architect spec
+            .vaak/design-notes/2026-05-24-phase-b-visualization-tab-spec.md
+            Sibling to Collab; renders the same team-state in MMORPG-style
+            bird's-eye view. v1 is tab-shell only (B1a) — content lands B1b+. */}
+        <button
+          className={`main-tab ${activeTab === "viz" ? "active" : ""}`}
+          onClick={() => setActiveTab("viz")}
+          role="tab"
+          aria-selected={activeTab === "viz"}
+          aria-controls="panel-viz"
+          tabIndex={activeTab === "viz" ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") { e.preventDefault(); setActiveTab("preferences"); }
+            if (e.key === "ArrowLeft") { e.preventDefault(); setActiveTab("collab"); }
+          }}
+        >
+          Visualization
         </button>
       </div>
 
@@ -390,6 +409,14 @@ export function TranscriptApp() {
       <div id="panel-collab" role="tabpanel" aria-labelledby="tab-collab" style={{ display: activeTab === "collab" ? "flex" : "none", flex: 1, minHeight: 0 }}>
         <CollabTab />
       </div>
+
+      {/* Visualization Tab — mounted only when active (no live listeners yet).
+          B1a: shell only; B1b adds roster rendering, B1c adds currency popups. */}
+      {activeTab === "viz" && (
+        <div id="panel-viz" role="tabpanel" aria-labelledby="tab-viz" style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+          <VisualizationTab />
+        </div>
+      )}
 
       {/* Sessions Tab */}
       {activeTab === "sessions" && (
