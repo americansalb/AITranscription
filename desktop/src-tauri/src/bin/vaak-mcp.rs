@@ -9562,6 +9562,92 @@ fn handle_currency_post_bounty(description: &str, amount: i64, deadline_turns: u
     })
 }
 
+/// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
+/// Gives the human the ability to add OR remove copper from any seat with a
+/// permanent audit row. Per evil-arch msg 461 audit requirements: mandatory
+/// non-empty reason, `txn_type:"human_adjust"`, MCP-layer gate against
+/// stale-sidecar impersonation, distinctive Flow Feed treatment (frontend).
+fn handle_currency_human_adjust(seat: &str, amount_copper: i64, reason: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    if !caller.starts_with("human:") {
+        return Err("[HumanAdjust] only human:* can adjust balances directly.".to_string());
+    }
+    if seat.trim().is_empty() {
+        return Err("[HumanAdjust] seat label is required.".to_string());
+    }
+    if reason.trim().is_empty() {
+        return Err("[HumanAdjustReasonRequired] non-empty reason is mandatory (audit requirement per architect msg 469).".to_string());
+    }
+    if amount_copper == 0 {
+        return Err("[HumanAdjust] amount_copper must be non-zero (positive = credit, negative = debit).".to_string());
+    }
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
+            snap = replay_balances_from_ledger(&dir)?;
+        }
+        // Lazy-init the seat if it's never been seen (matches passive-tick
+        // lazy-init behavior so an adjust against a new seat doesn't drop a
+        // hidden 10K credit alongside the requested delta).
+        if !snap.seats.contains_key(seat) {
+            return Err(format!("[HumanAdjust] seat {} has no balance entry yet (must join first).", seat));
+        }
+        let pre_bal = snap.seats.get(seat).unwrap().balance;
+        let new_bal = pre_bal.saturating_add(amount_copper);
+        {
+            let e = snap.seats.get_mut(seat).unwrap();
+            e.balance = new_bal;
+            // Negative adjustments can trip timed_out (mirrors penalty arm).
+            if e.balance <= DEFICIT_CAP_COPPER {
+                e.timed_out = true;
+            }
+        }
+        let id = snap.next_txn_id;
+        snap.next_txn_id += 1;
+        let txn = LedgerRow {
+            id,
+            txn_type: "human_adjust".to_string(),
+            seat: seat.to_string(),
+            amount: amount_copper,
+            reason: format!("human_adjust by {}: {}", caller, reason),
+            ref_msg: None,
+            balance_after: new_bal,
+            escrow_id: None,
+            release_turn: None,
+            turn: Some(snap.turn_counter),
+            action_kind: if amount_copper >= 0 { Some(ActionKind::Credit) } else { Some(ActionKind::Penalty) },
+            linked_edit_msg: None,
+            at: collab::iso_now(),
+        };
+        append_currency_transaction(&dir, &txn)?;
+        write_balances_snapshot(&dir, &snap)?;
+        let msg_id = next_message_id(&dir);
+        let direction = if amount_copper >= 0 { "credited" } else { "debited" };
+        let abs_amount = amount_copper.abs();
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[human_adjust] {} {} {} copper", seat, direction, abs_amount),
+            "body": format!("{} adjusted {} by {}{} copper. Reason: {}. New balance: {}.",
+                caller, seat,
+                if amount_copper >= 0 { "+" } else { "" },
+                amount_copper, reason, new_bal),
+            "metadata": { "seat": seat, "amount_copper": amount_copper, "reason": reason, "new_balance": new_bal }
+        }));
+        Ok(serde_json::json!({
+            "seat": seat,
+            "amount_copper": amount_copper,
+            "balance_before": pre_bal,
+            "balance_after": new_bal,
+            "timed_out": new_bal <= DEFICIT_CAP_COPPER,
+            "reason": reason
+        }))
+    })
+}
+
 /// Phase 6 (a) — claim an open bounty, staking 10% of the amount.
 fn handle_currency_claim_bounty(bounty_id: &str) -> Result<serde_json::Value, String> {
     use collab::currency::*;
@@ -14194,6 +14280,19 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "currency_human_adjust",
+                    "description": "Adjust a seat's copper balance up or down (HUMAN ONLY). Per human msg 458 — gives the human direct control over the economy as the ultimate authority. Writes a permanent ledger row with mandatory non-empty `reason` for audit. Negative amounts can push a seat below the deficit cap (-1000c) → timed_out. Positive amounts have no cap. Stale-sidecar impersonation is blocked at the MCP layer.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "seat": { "type": "string", "description": "Target seat label (e.g. \"developer:1\")" },
+                            "amount_copper": { "type": "integer", "description": "Amount in copper. Positive credits the seat; negative debits." },
+                            "reason": { "type": "string", "description": "Non-empty audit reason (mandatory). Appears in Flow Feed." }
+                        },
+                        "required": ["seat", "amount_copper", "reason"]
+                    }
+                },
+                {
                     "name": "currency_post_bounty",
                     "description": "Post a bounty (HUMAN ONLY). Directs effort: agents compete to complete it. Amount comes from the infinite house pool (no debit on post; paid on approval). Returns the bounty id.",
                     "inputSchema": {
@@ -15087,6 +15186,15 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
                         "isError": true
                     }),
+                }
+            } else if tool_name == "currency_human_adjust" {
+                let a = params.get("arguments");
+                let seat = a.and_then(|a| a.get("seat")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let amount_copper = a.and_then(|a| a.get("amount_copper")).and_then(|v| v.as_i64()).unwrap_or(0);
+                let reason = a.and_then(|a| a.get("reason")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                match handle_currency_human_adjust(&seat, amount_copper, &reason) {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Balance adjusted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                 }
             } else if tool_name == "currency_post_bounty" {
                 let a = params.get("arguments");

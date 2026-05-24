@@ -2806,6 +2806,26 @@ pub mod currency {
     pub const BOUNTY_REJECT_LOSS_PERCENT: u64 = 100;       // reject → lose full stake
     pub const BOUNTY_OBJECTION_CLAWBACK_PERCENT: u64 = 90; // successful objection on approved bounty
 
+    // ---- Decay tax (human msg 458, 2026-05-24) ----
+    // Per-turn wealth tax to create a structural sink against inflation. Human
+    // picked evil-arch msg 428's spec: 1% labeled "copper" + 0.5% labeled "silver"
+    // per turn = 1.5% of balance per turn destroyed. Emits TWO ledger rows per
+    // seat per turn (one copper-labeled, one silver-labeled) for Flow Feed
+    // readability. Excludes escrow (in-flight work protected). Floor at
+    // DECAY_FLOOR_COPPER to prevent decay-driven timeouts.
+    pub const DECAY_COPPER_PCT_PER_TURN_TENTHS: i64 = 10;  // 10 tenths = 1.0%
+    pub const DECAY_SILVER_PCT_PER_TURN_TENTHS: i64 = 5;   //  5 tenths = 0.5%
+    pub const DECAY_FLOOR_COPPER: i64 = 100;               // balance below this is not taxed
+
+    /// Round-up integer division: `ceil(numer / denom)` over non-negative ints.
+    /// Used by the decay tax to round fractional decay UP to the nearest whole
+    /// (per human msg 420 spec: "5 copper rounded up to the nearest whole").
+    #[inline]
+    fn ceil_div(numer: i64, denom: i64) -> i64 {
+        if numer <= 0 || denom <= 0 { return 0; }
+        (numer + denom - 1) / denom
+    }
+
     // ---- Types ----
 
     /// Action classification for a project_send. Exempt = human (no charge).
@@ -2826,6 +2846,10 @@ pub mod currency {
         BountyEarn,     // claimant paid out on approval (credit = amount + stake)
         BountyClawback, // objection-on-approved-bounty claws back 90% of payout
         BountyExpire,   // expired/abandoned bounty stake destroyed
+        // Human msg 458: per-turn wealth tax. Emitted in two flavors for Flow
+        // Feed readability (copper-decay + silver-decay), both destroy copper
+        // to the system sink (no per-seat redistribution).
+        Decay,
     }
 
     /// Display split. balances.json carries copper only; UI consumers call
@@ -3531,6 +3555,23 @@ pub mod currency {
                 seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
             }
             "penalty" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+                if seat_entry.balance <= DEFICIT_CAP_COPPER {
+                    seat_entry.timed_out = true;
+                }
+            }
+            "decay" => {
+                // Human msg 458 per-turn wealth tax. Amount is negative.
+                // Decay never trips timed_out (floor at DECAY_FLOOR_COPPER
+                // is enforced at the write side); intentionally NO deficit
+                // check here so replay matches live behavior.
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+            }
+            "human_adjust" => {
+                // Human msg 458 — direct human authority over balances.
+                // Positive credits, negative debits; can trip timed_out
+                // (mirrors penalty arm) when a negative adjust crosses the
+                // deficit cap. Audit row preserved verbatim in `reason`.
                 seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
                 if seat_entry.balance <= DEFICIT_CAP_COPPER {
                     seat_entry.timed_out = true;
@@ -4494,6 +4535,91 @@ pub mod currency {
             assert_eq!(2000u64 * BOUNTY_OBJECTION_CLAWBACK_PERCENT / 100, 1800);
         }
 
+        // ── Human msg 458 (2026-05-24): per-turn decay tax ──
+        // 1% (copper-labeled) + 0.5% (silver-labeled) of TOTAL BALANCE per turn,
+        // ceil-rounded, floor at DECAY_FLOOR_COPPER. See process_tick comment for
+        // the total-balance-vs-denomination-bucket interpretation rationale.
+
+        #[test]
+        fn t_decay_ceil_div_helper() {
+            assert_eq!(ceil_div(0, 1000), 0);
+            assert_eq!(ceil_div(1, 1000), 1);   // any positive numer → at least 1
+            assert_eq!(ceil_div(999, 1000), 1);
+            assert_eq!(ceil_div(1000, 1000), 1);
+            assert_eq!(ceil_div(1001, 1000), 2);
+        }
+
+        #[test]
+        fn t_decay_constants() {
+            assert_eq!(DECAY_COPPER_PCT_PER_TURN_TENTHS, 10); // 1.0%
+            assert_eq!(DECAY_SILVER_PCT_PER_TURN_TENTHS, 5);  // 0.5%
+            assert_eq!(DECAY_FLOOR_COPPER, 100);
+        }
+
+        // Helper that mirrors the decay math in process_tick so we can unit-test
+        // the per-balance behavior without spinning up an on-disk snapshot.
+        fn decay_loss_for_balance(bal: i64) -> (i64, i64) {
+            if bal < DECAY_FLOOR_COPPER { return (0, 0); }
+            let d = copper_to_display(bal);
+            let copper_loss = ceil_div(d.copper * DECAY_COPPER_PCT_PER_TURN_TENTHS, 1000);
+            let silver_loss_silvers = ceil_div(d.silver * DECAY_SILVER_PCT_PER_TURN_TENTHS, 1000);
+            let silver_loss_cu = silver_loss_silvers * 100;
+            let mut total = copper_loss + silver_loss_cu;
+            let max_drain = (bal - DECAY_FLOOR_COPPER).max(0);
+            if total > max_drain { total = max_drain; }
+            let c_row = copper_loss.min(total);
+            let s_row = total - c_row;
+            (c_row, s_row)
+        }
+
+        #[test]
+        fn t_decay_gold_only_hoarder_loses_nothing() {
+            // 10000 = 1g 0s 0c → no decay (per human spec "keeps all of their gold").
+            assert_eq!(decay_loss_for_balance(10_000), (0, 0));
+            // 30000 = 3g 0s 0c → no decay (evil-arch msg 473 table row).
+            assert_eq!(decay_loss_for_balance(30_000), (0, 0));
+            // 1_500_000 = 150g 0s 0c → no decay.
+            assert_eq!(decay_loss_for_balance(1_500_000), (0, 0));
+        }
+
+        #[test]
+        fn t_decay_evil_arch_msg_473_table() {
+            // Per evil-arch msg 473 corrected table:
+            //  10,500 = 1g 5s 0c   → 0c copper + 100c silver = 100c
+            //  12,345 = 1g 23s 45c → 1c copper + 100c silver = 101c
+            //  9,999  = 0g 99s 99c → 1c copper + 100c silver = 101c
+            assert_eq!(decay_loss_for_balance(10_500), (0, 100));
+            assert_eq!(decay_loss_for_balance(12_345), (1, 100));
+            assert_eq!(decay_loss_for_balance(9_999),  (1, 100));
+        }
+
+        #[test]
+        fn t_decay_max_per_seat_per_turn_is_101() {
+            // Per evil-arch's math: max bucket residual = 99s 99c regardless of
+            // gold portion. ceil(99×0.005)=1s, ceil(99×0.01)=1c → 101c total.
+            let max_residual_balance = 99 * 100 + 99; // 9999c
+            assert_eq!(decay_loss_for_balance(max_residual_balance), (1, 100));
+            // Adding any amount of gold doesn't change max decay.
+            assert_eq!(decay_loss_for_balance(50_000 + 9999), (1, 100));
+        }
+
+        #[test]
+        fn t_decay_floor_protects_small_balances() {
+            // Below floor → no decay.
+            assert_eq!(decay_loss_for_balance(DECAY_FLOOR_COPPER - 1), (0, 0));
+            assert_eq!(decay_loss_for_balance(50), (0, 0));
+            // Floor itself is NOT decayed (treated as the protection threshold).
+            assert_eq!(decay_loss_for_balance(DECAY_FLOOR_COPPER), (0, 0));
+        }
+
+        #[test]
+        fn t_decay_floor_clamp_caps_drain() {
+            // Balance = floor + 1 (101c) has 1g=0, silver=1, copper=1.
+            // Raw decay would be ceil(1×0.01)=1c copper + ceil(1×0.005)=1s=100c → 101c.
+            // But max_drain = 1c. So decay clamps to 1c (copper-row only; silver-row=0).
+            assert_eq!(decay_loss_for_balance(DECAY_FLOOR_COPPER + 1), (1, 0));
+        }
+
         // ── Commit E (2026-05-24): interest-stacking exploit closed ──
         // Architect ruling msg 180 + evil-arch msg 172 + dev:1 msg 175.
         // With INTEREST_PER_10_COPPER_HELD = 0, even an escrow item at the
@@ -4808,6 +4934,108 @@ pub mod currency {
                     release_turn: None,
                     turn: Some(turn),
                     action_kind: None,
+                    linked_edit_msg: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+            }
+        }
+
+        // --- Decay tax (human msg 458, evil-arch msg 473 corrected spec) ---
+        // Every turn (NOT gated on on_mic_advance): each seat with positive
+        // balance > DECAY_FLOOR_COPPER loses:
+        //   copper_loss = ceil(copper_bucket × 1.0%)   bucket in 0..=99
+        //   silver_loss = ceil(silver_bucket × 0.5%)   bucket in 0..=99, in SILVERS (×100 for cu)
+        // Gold portion is UNTOUCHED — per human msg 420 "keeps all of their
+        // gold" + architect msg 469 ratification. Max decay per seat per turn
+        // is therefore 1c + (1silver=100c) = 101c regardless of balance size.
+        // Gold-tier hoarders are immune to decay by design (safe-haven tier).
+        //
+        // Source of denomination split: existing copper_to_display() helper
+        // (collab.rs:3059) — single source of truth per ui-arch msg 1071.
+        //
+        // Decay applies to BALANCE only (escrow_held is in-flight work,
+        // protected per evil-arch msg 428 edge case). Floor at
+        // DECAY_FLOOR_COPPER prevents decay from creating timeouts.
+        //
+        // Two ledger rows per non-zero decay (copper-labeled + silver-labeled)
+        // for Flow Feed readability; zero-amount rows skipped.
+        //
+        // This block REPLACED an earlier total-balance interpretation that
+        // evil-arch msg 473 correctly flagged as violating the gold-preserved
+        // contract.
+        for seat in &seats {
+            let pre_bal = match snap.seats.get(seat) {
+                Some(e) => e.balance,
+                None => continue,
+            };
+            if pre_bal < DECAY_FLOOR_COPPER {
+                continue; // no decay below the floor
+            }
+            let display = copper_to_display(pre_bal);
+            // ceil(copper_bucket × pct/1000) where pct is in tenths-of-percent.
+            let copper_loss_cu = ceil_div(display.copper * DECAY_COPPER_PCT_PER_TURN_TENTHS, 1000);
+            let silver_loss_silvers = ceil_div(display.silver * DECAY_SILVER_PCT_PER_TURN_TENTHS, 1000);
+            let silver_loss_cu = silver_loss_silvers * 100;
+
+            let mut total_loss = copper_loss_cu + silver_loss_cu;
+            if total_loss == 0 {
+                continue; // gold-only hoarder, or no fractional residual
+            }
+            // Floor protection: never decay past DECAY_FLOOR_COPPER.
+            let max_drain = (pre_bal - DECAY_FLOOR_COPPER).max(0);
+            if total_loss > max_drain {
+                total_loss = max_drain;
+            }
+            if total_loss == 0 {
+                continue;
+            }
+            // Apportion: copper-row first up to its slot, silver-row gets the
+            // remainder. Keeps row labels honest when floor clamps the tail.
+            let copper_row_amount = copper_loss_cu.min(total_loss);
+            let silver_row_amount = total_loss - copper_row_amount;
+
+            if copper_row_amount > 0 {
+                let bal = {
+                    let e = snap.seats.get_mut(seat).unwrap();
+                    e.balance = e.balance.saturating_sub(copper_row_amount);
+                    e.balance
+                };
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "decay".to_string(),
+                    seat: seat.clone(),
+                    amount: -copper_row_amount,
+                    reason: format!("copper decay @turn {} (1.0% of {}c bucket)", turn, display.copper),
+                    ref_msg: None,
+                    balance_after: bal,
+                    escrow_id: None,
+                    release_turn: None,
+                    turn: Some(turn),
+                    action_kind: Some(ActionKind::Decay),
+                    linked_edit_msg: None,
+                    at: now.clone(),
+                });
+                next_id += 1;
+            }
+            if silver_row_amount > 0 {
+                let bal = {
+                    let e = snap.seats.get_mut(seat).unwrap();
+                    e.balance = e.balance.saturating_sub(silver_row_amount);
+                    e.balance
+                };
+                rows.push(LedgerRow {
+                    id: next_id,
+                    txn_type: "decay".to_string(),
+                    seat: seat.clone(),
+                    amount: -silver_row_amount,
+                    reason: format!("silver decay @turn {} (0.5% of {}s bucket)", turn, display.silver),
+                    ref_msg: None,
+                    balance_after: bal,
+                    escrow_id: None,
+                    release_turn: None,
+                    turn: Some(turn),
+                    action_kind: Some(ActionKind::Decay),
                     linked_edit_msg: None,
                     at: now.clone(),
                 });
