@@ -8513,6 +8513,38 @@
 .currency-inline-notice.currency-line--bounty { border-left-color: #d4a017; }
 .currency-inline-notice.currency-line--bounty .currency-inline-text { color: #e3c050; }
 
+/* Change #1 (human msg 2262) — per-message economic footer. A small, muted
+   strip of chips at the bottom of each message card telling that message's
+   economic story (earn + escrow state, penalties, clawbacks, objections).
+   Tier colors mirror the Flow Feed palette; chips wrap so a contested message
+   can carry several without breaking the card layout. */
+.message-econ-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.econ-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+  color: #8b949e;
+}
+/* Tier colors (mirror .currency-line--* / .flow-feed-net--*). The chip element
+   itself is colored (no .currency-line-text child), so set color directly. */
+.econ-chip.currency-line--earn { color: #1dd174; }      /* green — settled earnings */
+.econ-chip.currency-line--hold { color: #f5a623; }      /* amber — held in escrow */
+.econ-chip.currency-line--loss { color: #f85149; }      /* red — penalties */
+.econ-chip.currency-line--dispute { color: #e3b341; }   /* gold — disputes/clawbacks */
+.econ-chip.currency-line--passive { color: #8b949e; }   /* gray — passive */
+.econ-chip.currency-line--destroyed { color: #a371f7; } /* purple — pool destroyed */
+.econ-chip.currency-line--bounty { color: #e3c050; }    /* bounty gold */
+
 /* Phase 6 — Bounty Board sidebar section. */
 .bounty-board-count {
   font-size: 11px;

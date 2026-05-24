@@ -216,6 +216,70 @@ function formatCurrencyLine(row: CurrencyFeedRow): { text: string; tier: Currenc
   }
 }
 
+// Change #1 (human msg 2262): per-message economic footer. The economic story
+// belongs ON the message that caused it, not only in the sidebar feed. Given the
+// currency.jsonl rows whose `ref_msg` points at one board message (plus an
+// optional dispute targeting it), collapse them into a short list of footer
+// chips: the earn + its escrow state, any penalty/clawback, and any objection.
+// Returns null when there's nothing economic to show (e.g. human messages, which
+// never earn currency, so naturally produce no rows).
+type EconChip = { text: string; tier: CurrencyTier };
+function buildMsgEconomy(rows: CurrencyFeedRow[] | undefined, dispute: DisputeRow | undefined): EconChip[] | null {
+  const chips: EconChip[] = [];
+  if (rows && rows.length) {
+    const hold = rows.find((r) => r.type === "escrow_hold");
+    const release = rows.find((r) => r.type === "escrow_release");
+    const credit = rows.find((r) => r.type === "credit");
+    const penalty = rows.find((r) => r.type === "penalty");
+    const clawback = rows.find((r) => r.type === "clawback");
+
+    // The action label: prefer the explicit action_kind on the hold/credit row,
+    // else sniff the reason prose (speak/pass/edit/test).
+    const reason = `${hold?.reason ?? ""} ${credit?.reason ?? ""}`.toLowerCase();
+    const actLabel =
+      (hold?.action_kind || credit?.action_kind || "").toLowerCase() ||
+      (reason.includes("edit") ? "edit"
+        : reason.includes("test") ? "test"
+        : reason.includes("pass") ? "pass"
+        : reason.includes("speak") ? "speak"
+        : "earn");
+
+    // The earn magnitude: the credit (settled) amount, else the held amount.
+    const earnAmt =
+      typeof credit?.amount === "number" ? Math.abs(credit.amount)
+        : typeof hold?.amount === "number" ? Math.abs(hold.amount)
+        : null;
+
+    if (earnAmt != null) {
+      if (release || credit) {
+        chips.push({ text: `+${earnAmt}⊕ ${actLabel} · ✓ released`, tier: "earn" });
+      } else if (hold) {
+        const turnTxt = hold.release_turn != null ? ` · in escrow → turn ${hold.release_turn}` : " · in escrow";
+        chips.push({ text: `+${earnAmt}⊕ ${actLabel}${turnTxt}`, tier: "hold" });
+      } else {
+        chips.push({ text: `+${earnAmt}⊕ ${actLabel}`, tier: "earn" });
+      }
+    }
+    if (penalty && typeof penalty.amount === "number") {
+      chips.push({ text: `−${Math.abs(penalty.amount)}⊕ penalty`, tier: "loss" });
+    }
+    if (clawback && typeof clawback.amount === "number") {
+      chips.push({ text: `−${Math.abs(clawback.amount)}⊕ clawed back`, tier: "dispute" });
+    }
+  }
+  if (dispute) {
+    if (dispute.status === "open") {
+      chips.push({
+        text: `⊗ objected by ${dispute.challenger ?? "?"} · pool ${dispute.pool ?? 0}⊕`,
+        tier: "dispute",
+      });
+    } else {
+      chips.push({ text: `⊗ ${dispute.resolution || "resolved"}`, tier: "dispute" });
+    }
+  }
+  return chips.length ? chips : null;
+}
+
 function getRoleColor(slug: string): string {
   if (ROLE_COLORS[slug]) return ROLE_COLORS[slug];
   for (const [prefix, color] of Object.entries(ROLE_COLORS)) {
@@ -1384,6 +1448,32 @@ export function CollabTab() {
     flushPassive();
     return out.slice(-50);
   }, [currencyFeed]);
+
+  // Change #1 (human msg 2262): index currency rows + disputes by the board
+  // message they reference, so each message card can render its own economic
+  // footer. Keyed by String(msg.id) since ref_msg/target_msg are number|string.
+  // Only the most recent ~80 ledger rows are fetched, so footers naturally
+  // appear on recent messages and degrade to nothing on older ones.
+  const economicByMsg = useMemo(() => {
+    const map = new Map<string, CurrencyFeedRow[]>();
+    for (const row of currencyFeed) {
+      if (row.ref_msg == null) continue;
+      const key = String(row.ref_msg);
+      const arr = map.get(key);
+      if (arr) arr.push(row);
+      else map.set(key, [row]);
+    }
+    return map;
+  }, [currencyFeed]);
+
+  const disputeByMsg = useMemo(() => {
+    const map = new Map<string, DisputeRow>();
+    for (const d of openDisputes) {
+      if (d.target_msg == null) continue;
+      map.set(String(d.target_msg), d);
+    }
+    return map;
+  }, [openDisputes]);
 
   // Running net-flow over the visible window: earnings minus losses/destroyed.
   const flowNet = useMemo(() => {
@@ -6445,6 +6535,24 @@ When multiple instances of this role are active:
                       )}
                     </div>
                   )}
+                  {/* Change #1 (human msg 2262): per-message economic footer.
+                      The real economic story is told here — on the message that
+                      caused it — not in a separate sidebar. Human messages earn
+                      no currency, so this is naturally null for them. */}
+                  {msg.from !== "human" && (() => {
+                    const econ = buildMsgEconomy(
+                      economicByMsg.get(String(msg.id)),
+                      disputeByMsg.get(String(msg.id)),
+                    );
+                    if (!econ) return null;
+                    return (
+                      <div className="message-econ-footer" role="note" aria-label="Economic activity for this message">
+                        {econ.map((chip, i) => (
+                          <span key={i} className={`econ-chip currency-line--${chip.tier}`}>{chip.text}</span>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}</>);
