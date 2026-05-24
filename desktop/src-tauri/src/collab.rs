@@ -2755,14 +2755,16 @@ pub mod currency {
     // edit (real file writes via the file-op-claim.py PostToolUse marker) is the
     // economy's "work pays more than talk" lever. Base 25 + 1 copper per line
     // beyond EDIT_LINE_BONUS_THRESHOLD (matches the human's "+75 edit (150 lines)"
-    // example: 25 + max(0, 150-100) = 75). Edit escrow matures over its own,
-    // longer window (EDIT_ESCROW_TICKS) per the human's "in escrow (10 turns)".
+    // example: 25 + max(0, 150-100) = 75). Edit + Test escrow mature over their
+    // own longer windows per human msg 18 (2026-05-24): pass=10, speak=20,
+    // edit=50, test=50 — heavier work, heavier hold.
     pub const EDIT_EARN_COPPER: i64 = 25;
     pub const TEST_EARN_COPPER: i64 = 10;
     pub const EDIT_LINE_BONUS_THRESHOLD: u64 = 100; // +1 copper/line beyond this
-    pub const PASS_ESCROW_TICKS: u64 = 3;
-    pub const SPEAK_ESCROW_TICKS: u64 = 5;
-    pub const EDIT_ESCROW_TICKS: u64 = 10;
+    pub const PASS_ESCROW_TICKS: u64 = 10;
+    pub const SPEAK_ESCROW_TICKS: u64 = 20;
+    pub const EDIT_ESCROW_TICKS: u64 = 50;
+    pub const TEST_ESCROW_TICKS: u64 = 50;
     pub const PASSIVE_PER_TICK_COPPER: i64 = 1;
     pub const INTEREST_MIN_HELD_COPPER: i64 = 10;
     pub const INTEREST_PER_10_COPPER_HELD: i64 = 1;

@@ -9365,7 +9365,7 @@ fn record_currency_earn(
             EDIT_ESCROW_TICKS,
             "edit",
         ),
-        ActionKind::Test => (TEST_EARN_COPPER, SPEAK_ESCROW_TICKS, "test"),
+        ActionKind::Test => (TEST_EARN_COPPER, TEST_ESCROW_TICKS, "test"),
         // Exempt + the Phase 2 ledger opcodes are never produced by
         // classify_action for an earn — no-op defensively.
         _ => return Ok(()),
