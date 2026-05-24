@@ -5183,6 +5183,341 @@ pub mod currency {
     }
 }
 
+// ============================================================
+// Phase A — Oxford-Style Debate (spec v2.2, architect msg 510 green-light)
+// Foundation skeleton: schema types + path helpers + lock primitive +
+// initiate validator. MCP tool wiring, audience voting, react, gate logic
+// land in follow-up commits.
+// ============================================================
+pub mod oxford {
+    use super::atomic_write;
+    use serde::{Deserialize, Serialize};
+    use std::path::{Path, PathBuf};
+
+    // ---- Constants (Phase A spec v2.2 §6.1 + §6.2) ----
+    pub const OXFORD_DEFAULT_WINNING_REWARD_COPPER: i64 = 500; // 5 silver per dev:1 msg 498
+    pub const OXFORD_TURN_SOFT_LIMIT_SECS: u64 = 60;            // soft limit per evil-arch msg 489 #2
+    pub const OXFORD_TURN_HARD_LIMIT_SECS: u64 = 120;           // hard ceiling
+    pub const OXFORD_AUDIENCE_VOTE_WINDOW_SECS: u64 = 30;       // §5
+    pub const OXFORD_MODERATOR_VACANCY_TIMEOUT_SECS: u64 = 300; // §6.5 v2 new
+    pub const OXFORD_REACT_RATE_LIMIT_PER_MIN: u64 = 3;         // §3.4a
+    pub const OXFORD_REACT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+    /// Append-only event log for an entire debate's lifecycle. Single source
+    /// of truth for replay + audit. See spec §4.1 for the row shapes.
+    pub fn oxford_debates_jsonl_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("oxford-debates.jsonl")
+    }
+
+    /// Snapshot of the CURRENT active debate (one at a time per project per
+    /// spec §6.4). Removed when debate ends. Single-writer per §6.5 v2 lock.
+    pub fn active_oxford_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("active-oxford-debate.json")
+    }
+
+    /// Project-wide oxford lock — gates all writes to active-oxford-debate.json
+    /// and oxford-debates.jsonl. Per spec §6.5 v2: "active-oxford-debate.json
+    /// writes use explicit lock file."
+    pub fn oxford_lock_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("oxford.lock")
+    }
+
+    // ---- Schema types ----
+
+    /// A single turn entry in the debate history. `ended_at` is None for
+    /// the currently-active turn.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct OxfordTurn {
+        pub seat: String,
+        pub started_at: String, // ISO8601
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub ended_at: Option<String>,
+    }
+
+    /// Snapshot of the currently-active Oxford debate. Atomically written
+    /// after each state-changing MCP tool call. Removed (file deleted) when
+    /// debate ends — readers must tolerate file-absent as "no active debate."
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ActiveOxfordDebate {
+        pub debate_id: u64,
+        pub moderator: String,
+        pub side_a: Vec<String>,
+        pub side_b: Vec<String>,
+        pub audience: Vec<String>,
+        pub premise: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub current_speaker: Option<String>,
+        pub started_at: String,
+        #[serde(default)]
+        pub turn_history: Vec<OxfordTurn>,
+        /// v2.2 (per dev:1 msg 498 + human msg 497): winning-side reward
+        /// configured at initiate, default OXFORD_DEFAULT_WINNING_REWARD_COPPER
+        /// (500 = 5 silver). Distributed pool-funded at end on strict-majority
+        /// audience vote.
+        pub winning_side_reward_copper: i64,
+    }
+
+    /// Lifecycle event appended to oxford-debates.jsonl. Tagged union over
+    /// the event kinds in spec §4.1.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "event", rename_all = "snake_case")]
+    pub enum OxfordEvent {
+        Initiate {
+            debate_id: u64,
+            timestamp: String,
+            moderator: String,
+            side_a: Vec<String>,
+            side_b: Vec<String>,
+            premise: String,
+            audience: Vec<String>,
+            winning_side_reward_copper: i64,
+        },
+        SpeakerDeclared { debate_id: u64, timestamp: String, seat: String },
+        React { debate_id: u64, timestamp: String, seat: String, emoji: String },
+        Kicked { debate_id: u64, timestamp: String, seat: String },
+        AudienceVote { debate_id: u64, timestamp: String, voter: String, vote: String },
+        Ended {
+            debate_id: u64,
+            timestamp: String,
+            outcome: String, // "side_a_wins" | "side_b_wins" | "draw" | "no_winner" | "abandoned"
+            audience_tally_nonhuman: Option<serde_json::Value>,
+            audience_human_vote: Option<String>,
+            reward_distributed: Option<i64>, // total cu distributed (None if no_winner)
+        },
+    }
+
+    // ---- Lock primitive ----
+
+    /// Project-wide oxford lock. Closure-style; reuses the existing currency
+    /// lock as the underlying serialization primitive (oxford writes touch
+    /// the same per-project file area, and reward-distribution at debate-end
+    /// already needs currency lock). The dedicated oxford.lock path is
+    /// reserved per spec §6.5 v2 for a future refactor that splits the locks
+    /// if write contention becomes measurable. For now, single shared lock
+    /// preserves the spec's "single-writer constraint" guarantee — no sidecar
+    /// can write the oxford state outside this primitive.
+    pub fn with_oxford_lock<F, R>(dir: &str, f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> Result<R, String>,
+    {
+        super::with_currency_lock(dir, f)
+    }
+
+    // ---- I/O primitives ----
+
+    pub fn read_active_oxford(dir: &str) -> Result<Option<ActiveOxfordDebate>, String> {
+        let path = active_oxford_path(dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| format!("oxford read: {}", e))?;
+        if raw.trim().is_empty() || raw.trim() == "{}" {
+            return Ok(None);
+        }
+        serde_json::from_str::<ActiveOxfordDebate>(&raw)
+            .map(Some)
+            .map_err(|e| format!("oxford parse: {}", e))
+    }
+
+    pub fn write_active_oxford(dir: &str, debate: &ActiveOxfordDebate) -> Result<(), String> {
+        let path = active_oxford_path(dir);
+        let json = serde_json::to_string_pretty(debate)
+            .map_err(|e| format!("oxford serialize: {}", e))?;
+        atomic_write(&path, json.as_bytes())
+    }
+
+    pub fn clear_active_oxford(dir: &str) -> Result<(), String> {
+        let path = active_oxford_path(dir);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("oxford clear: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn append_oxford_event(dir: &str, event: &OxfordEvent) -> Result<(), String> {
+        use std::io::Write;
+        let path = oxford_debates_jsonl_path(dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("oxford mkdir: {}", e))?;
+        }
+        let line = serde_json::to_string(event).map_err(|e| format!("oxford serialize event: {}", e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("oxford open append: {}", e))?;
+        writeln!(f, "{}", line).map_err(|e| format!("oxford append write: {}", e))?;
+        Ok(())
+    }
+
+    /// Compute the next debate_id by scanning oxford-debates.jsonl for the
+    /// highest `Initiate` event's debate_id. Returns 1 if no debates yet.
+    pub fn next_debate_id(dir: &str) -> u64 {
+        let path = oxford_debates_jsonl_path(dir);
+        if !path.exists() {
+            return 1;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return 1,
+        };
+        let mut max_id: u64 = 0;
+        for line in raw.lines() {
+            if let Ok(event) = serde_json::from_str::<OxfordEvent>(line) {
+                if let OxfordEvent::Initiate { debate_id, .. } = event {
+                    if debate_id > max_id {
+                        max_id = debate_id;
+                    }
+                }
+            }
+        }
+        max_id + 1
+    }
+
+    /// Pure validation helper (Phase A spec §3.1 gates). Returns Err with
+    /// specific gate-error strings for the caller to surface. Caller is
+    /// responsible for the actual write + lock acquisition.
+    pub fn validate_initiate(
+        caller: &str,
+        moderator: &str,
+        side_a: &[String],
+        side_b: &[String],
+        audience: &[String],
+        active_seats: &[String],
+    ) -> Result<(), String> {
+        if side_a.is_empty() || side_b.is_empty() {
+            return Err("[OxfordRequireMinOnePerSide]".to_string());
+        }
+        // Caller must be the moderator OR human:0
+        if caller != moderator && !caller.starts_with("human:") {
+            return Err("[OxfordInitiationDenied]".to_string());
+        }
+        // Moderator may not appear in any side or audience.
+        if side_a.iter().any(|s| s == moderator) || side_b.iter().any(|s| s == moderator) || audience.iter().any(|s| s == moderator) {
+            return Err("[OxfordRoleConflict]".to_string());
+        }
+        // No seat may appear in both side_a and side_b.
+        for s in side_a {
+            if side_b.iter().any(|b| b == s) {
+                return Err("[OxfordRoleConflict]".to_string());
+            }
+            if audience.iter().any(|a| a == s) {
+                return Err("[OxfordRoleConflict]".to_string());
+            }
+        }
+        for s in side_b {
+            if audience.iter().any(|a| a == s) {
+                return Err("[OxfordRoleConflict]".to_string());
+            }
+        }
+        // All non-human seats must be in the active roster.
+        let in_roster = |seat: &str| seat.starts_with("human:") || active_seats.iter().any(|r| r == seat);
+        if !in_roster(moderator) {
+            return Err("[OxfordSeatNotInRoster]".to_string());
+        }
+        for s in side_a.iter().chain(side_b.iter()).chain(audience.iter()) {
+            if !in_roster(s) {
+                return Err("[OxfordSeatNotInRoster]".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn s(v: &[&str]) -> Vec<String> {
+            v.iter().map(|x| x.to_string()).collect()
+        }
+
+        #[test]
+        fn t_validate_empty_side_rejected() {
+            let active = s(&["architect:0", "developer:1", "evil-architect:0"]);
+            let err = validate_initiate("manager:0", "manager:0", &[], &s(&["developer:1"]), &[], &active).unwrap_err();
+            assert_eq!(err, "[OxfordRequireMinOnePerSide]");
+        }
+
+        #[test]
+        fn t_validate_caller_not_moderator_or_human_rejected() {
+            let active = s(&["architect:0", "developer:1"]);
+            let err = validate_initiate(
+                "developer:1",          // caller
+                "manager:0",            // moderator
+                &s(&["architect:0"]), &s(&["developer:1"]), &[], &active,
+            ).unwrap_err();
+            assert_eq!(err, "[OxfordInitiationDenied]");
+        }
+
+        #[test]
+        fn t_validate_human_can_initiate_any() {
+            let active = s(&["architect:0", "developer:1", "manager:0"]);
+            let result = validate_initiate(
+                "human:0",
+                "manager:0",
+                &s(&["architect:0"]), &s(&["developer:1"]), &[], &active,
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn t_validate_moderator_in_side_rejected() {
+            let active = s(&["architect:0", "developer:1", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0", "manager:0",
+                &s(&["manager:0", "architect:0"]), &s(&["developer:1"]),
+                &[], &active,
+            ).unwrap_err();
+            assert_eq!(err, "[OxfordRoleConflict]");
+        }
+
+        #[test]
+        fn t_validate_same_seat_both_sides_rejected() {
+            let active = s(&["architect:0", "developer:1", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0", "manager:0",
+                &s(&["architect:0", "developer:1"]),
+                &s(&["developer:1"]), // dev:1 on both sides
+                &[], &active,
+            ).unwrap_err();
+            assert_eq!(err, "[OxfordRoleConflict]");
+        }
+
+        #[test]
+        fn t_validate_seat_not_in_roster_rejected() {
+            let active = s(&["architect:0", "developer:1", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0", "manager:0",
+                &s(&["architect:0"]),
+                &s(&["nobody:99"]),    // not in roster
+                &[], &active,
+            ).unwrap_err();
+            assert_eq!(err, "[OxfordSeatNotInRoster]");
+        }
+
+        #[test]
+        fn t_validate_human_audience_member_allowed() {
+            let active = s(&["architect:0", "developer:1", "manager:0"]);
+            let result = validate_initiate(
+                "human:0", "manager:0",
+                &s(&["architect:0"]), &s(&["developer:1"]),
+                &s(&["human:0"]),     // human in audience
+                &active,
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn t_next_debate_id_empty_dir_returns_one() {
+            let tmp = std::env::temp_dir().join(format!("oxford_test_{}", std::process::id()));
+            let _ = std::fs::create_dir_all(tmp.join(".vaak"));
+            let dir_str = tmp.to_string_lossy().to_string();
+            assert_eq!(next_debate_id(&dir_str), 1);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+}
+
 // ---- Currency lock primitives (commit a) ----
 //
 // Sole entry point: `with_currency_and_board_lock`. Acquires the project-wide
