@@ -2759,7 +2759,15 @@ pub mod currency {
     // own longer windows per human msg 18 (2026-05-24): pass=10, speak=20,
     // edit=50, test=50 — heavier work, heavier hold.
     pub const EDIT_EARN_COPPER: i64 = 25;
-    pub const TEST_EARN_COPPER: i64 = 10;
+    // Plan v2 P1-2b (architect ruling Option A msg 469, human msg 543
+    // observation, dev:1 msg 547 ship). Raised 10 → 20 to flatten the
+    // Test/Speak dominance asymmetry that produced ZERO Test rows in a
+    // 16-hour live session. EV of testing an Edit was +10 (earn) − 15
+    // (co-liability) = structurally negative. Now +20 − 15 = +5, closing
+    // half the gap. Future v3 (Phase 9/10 candidate per architect msg
+    // 545) may further scale Test earn proportionally to edit_lines for
+    // large-Edit risk premium; v2 keeps the flat raise pending live data.
+    pub const TEST_EARN_COPPER: i64 = 20;
     pub const EDIT_LINE_BONUS_THRESHOLD: u64 = 100; // +1 copper/line beyond this
     pub const PASS_ESCROW_TICKS: u64 = 10;
     pub const SPEAK_ESCROW_TICKS: u64 = 20;
