@@ -1087,6 +1087,14 @@ export function CollabTab() {
   // Phase 5 (human msg 1971): "More Stats" popup — deep currency breakdown.
   // Ephemeral (re-derives from live data on open).
   const [statsOpen, setStatsOpen] = useState(false);
+  // Phase 5 (human msg 1971): inline per-turn currency notices in the message
+  // timeline ("like the mic pass"). Default ON; toggle in the Chitragupta header.
+  // Pref persisted so the human's choice survives restarts.
+  const [inlineCurrencyNotices, setInlineCurrencyNotices] = useState<boolean>(
+    () => loadJSON<boolean>("vaak_collab_inline_currency_notices", true, (v): v is boolean => typeof v === "boolean"),
+  );
+  const toggleInlineCurrencyNotices = () =>
+    setInlineCurrencyNotices((prev) => { const next = !prev; saveJSON("vaak_collab_inline_currency_notices", next); return next; });
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
   const [importRolesStatus, setImportRolesStatus] = useState<string | null>(null);
@@ -5369,6 +5377,18 @@ When multiple instances of this role are active:
                 </span>
                 <button
                   type="button"
+                  className={`flow-feed-notices-btn${inlineCurrencyNotices ? " is-on" : ""}`}
+                  title={inlineCurrencyNotices
+                    ? "Inline transaction notices ON — click to hide them from the timeline"
+                    : "Inline transaction notices OFF — click to show them in the timeline"}
+                  aria-label="Toggle inline currency notices in the timeline"
+                  aria-pressed={inlineCurrencyNotices}
+                  onClick={(e) => { e.stopPropagation(); toggleInlineCurrencyNotices(); }}
+                >
+                  {inlineCurrencyNotices ? "🔔" : "🔕"}
+                </button>
+                <button
+                  type="button"
                   className="flow-feed-stats-btn"
                   title="Open detailed currency stats"
                   aria-label="Open detailed currency stats"
@@ -5746,6 +5766,23 @@ When multiple instances of this role are active:
               const hasHiddenMessages = messageListDerivedCache.hasHiddenMessages;
               const visibleMessages = messageListDerivedCache.visibleMessages;
 
+              // Phase 5 Layer 1 (human msg 1971): interleave per-turn currency
+              // notices into the timeline "like the mic pass". Merge the Flow
+              // Feed rows (already display-formatted in flowFeedRows) with the
+              // board messages, sorted by ISO timestamp (lexical = chronological).
+              // Gated on the inline-notices toggle AND currency being enabled.
+              const inlineCurrencyOn =
+                inlineCurrencyNotices && project?.config?.settings?.currency_enabled !== false;
+              type TimelineItem =
+                | { kind: "msg"; msg: BoardMessage; ts: string }
+                | { kind: "cur"; line: { key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }; ts: string };
+              const timelineItems: TimelineItem[] = [
+                ...visibleMessages.map((m): TimelineItem => ({ kind: "msg", msg: m, ts: m.timestamp })),
+                ...(inlineCurrencyOn
+                  ? flowFeedRows.map((l): TimelineItem => ({ kind: "cur", line: l, ts: l.at ?? "" }))
+                  : []),
+              ].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+
               return (<>
               {hasHiddenMessages && (
                 <button
@@ -5755,7 +5792,30 @@ When multiple instances of this role are active:
                   Load {Math.min(MSG_PAGE_SIZE, totalCount - visibleMsgLimit)} earlier messages ({totalCount - visibleMsgLimit} hidden)
                 </button>
               )}
-              {visibleMessages.map((msg: BoardMessage) => {
+              {timelineItems.map((item) => {
+              // Phase 5 Layer 1 — inline currency notice (mic-pass-style divider).
+              if (item.kind === "cur") {
+                const line = item.line;
+                return (
+                  <div
+                    key={`cur-${line.key}`}
+                    className={`currency-inline-notice currency-line--${line.tier}`}
+                    role="note"
+                  >
+                    <span className="currency-inline-icon" aria-hidden="true">🪙</span>
+                    <span
+                      className="currency-inline-dot"
+                      style={{ background: line.seat ? getRoleColor(line.seat.split(":")[0]) : "#888" }}
+                      aria-hidden="true"
+                    />
+                    <span className="currency-inline-text">{line.text}</span>
+                    <span className="currency-inline-time" title={line.at || ""}>
+                      {line.at ? formatRelativeTime(line.at) : ""}
+                    </span>
+                  </div>
+                );
+              }
+              const msg = item.msg;
               // Vote proposal → render as VoteCard
               if (voteProposalIds.has(msg.id)) {
                 const tally = voteTallies.find((t) => t.proposalId === msg.id);

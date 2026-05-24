@@ -8432,6 +8432,58 @@
 }
 .flow-feed-stats-btn:hover { background: rgba(255, 255, 255, 0.12); }
 .flow-feed-stats-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+.flow-feed-notices-btn {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 1;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.flow-feed-notices-btn.is-on { opacity: 1; }
+.flow-feed-notices-btn:hover { background: rgba(255, 255, 255, 0.1); }
+.flow-feed-notices-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+
+/* Phase 5 Layer 1 (human msg 1971): inline per-turn currency notice in the
+   message timeline — a compact divider, mic-pass styled. Tier color comes from
+   the shared .currency-line--* classes (left border accent). */
+.currency-inline-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0;
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-left: 3px solid #30363d;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 4px;
+}
+.currency-inline-icon { flex: 0 0 auto; font-size: 12px; }
+.currency-inline-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
+.currency-inline-text { flex: 1 1 auto; color: #ccd6dd; }
+.currency-inline-time {
+  flex: 0 0 auto;
+  color: #556677;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+/* Tier accents reuse the legend; map onto the left border + text for inline. */
+.currency-inline-notice.currency-line--earn { border-left-color: #1dd174; }
+.currency-inline-notice.currency-line--earn .currency-inline-text { color: #1dd174; }
+.currency-inline-notice.currency-line--hold { border-left-color: #f5a623; }
+.currency-inline-notice.currency-line--hold .currency-inline-text { color: #f5a623; }
+.currency-inline-notice.currency-line--loss { border-left-color: #f85149; }
+.currency-inline-notice.currency-line--loss .currency-inline-text { color: #f85149; }
+.currency-inline-notice.currency-line--dispute { border-left-color: #e3b341; }
+.currency-inline-notice.currency-line--dispute .currency-inline-text { color: #e3b341; }
+.currency-inline-notice.currency-line--passive { border-left-color: #30363d; opacity: 0.7; }
+.currency-inline-notice.currency-line--passive .currency-inline-text { color: #8b949e; }
+.currency-inline-notice.currency-line--destroyed { border-left-color: #a371f7; }
+.currency-inline-notice.currency-line--destroyed .currency-inline-text { color: #a371f7; }
 
 .currency-stats-overlay {
   position: fixed;
