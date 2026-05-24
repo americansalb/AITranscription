@@ -3700,6 +3700,27 @@ fn read_disputes_cmd(dir: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "disputes": disputes, "open": open }))
 }
 
+/// Phase 6 (c) — the Bounty Board. Returns every bounties.jsonl row (append-only
+/// history; frontend collapses to latest-per-id) + the open_bounties.json
+/// snapshot. Read-only; never writes.
+#[tauri::command]
+fn read_bounties_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let bpath = collab::currency::bounties_jsonl_path(&dir);
+    let bcontent = std::fs::read_to_string(&bpath).unwrap_or_default();
+    let bounties: Vec<serde_json::Value> = bcontent
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect();
+    let opath = collab::currency::open_bounties_json_path(&dir);
+    let open: serde_json::Value = std::fs::read_to_string(&opath)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({ "next_bounty_id": 0, "bounties": {} }));
+    Ok(serde_json::json!({ "bounties": bounties, "open": open }))
+}
+
 /// Slice 9 health pill — read 4-layer resilience status.
 /// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
 ///
@@ -6922,6 +6943,7 @@ fn main() {
             get_currency_balances_cmd,
             read_currency_feed_cmd,
             read_disputes_cmd,
+            read_bounties_cmd,
             set_currency_enabled,
             set_continuous_timeout,
             delete_message,

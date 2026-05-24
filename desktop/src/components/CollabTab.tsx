@@ -96,6 +96,24 @@ interface CurrencyFeedRow {
   at?: string;            // ISO timestamp
 }
 
+// Phase 6 Bounties (human msg 2074): raw bounties.jsonl row.
+interface BountyRow {
+  id: string;
+  description?: string;
+  amount?: number;
+  posted_by?: string;
+  deadline_turn?: number;
+  status?: string;        // open | claimed | submitted | approved | rejected | expired | abandoned
+  claimant?: string | null;
+  claim_stake?: number;
+  submission_msg?: number | null;
+  approved_by?: string | null;
+  last_rejection_reason?: string | null;
+  posted_at?: string;
+  resolved_at?: string | null;
+  turn_posted?: number;
+}
+
 interface DisputeMessage {
   seat?: string;
   text?: string;
@@ -120,7 +138,7 @@ interface DisputeRow {
   resolved_at?: string;
 }
 
-type CurrencyTier = "earn" | "hold" | "loss" | "dispute" | "passive" | "destroyed";
+type CurrencyTier = "earn" | "hold" | "loss" | "dispute" | "passive" | "destroyed" | "bounty";
 
 // The 13-row transaction→display mapping (human msg 1872, verbatim).
 // reason is prose so sub-types are matched by keyword (includes), not equality.
@@ -149,6 +167,14 @@ function formatCurrencyLine(row: CurrencyFeedRow): { text: string; tier: Currenc
       return { text: `${seat} penalized ${amt} copper (adversarial pass)`, tier: "loss" };
     case "reinstate":
       return { text: `${seat} reinstated — balance reset to 0`, tier: "earn" };
+    case "bounty_stake":
+      return { text: `${seat} staked ${amt} copper to claim a bounty`, tier: "bounty" };
+    case "bounty_earn":
+      return { text: `${seat} earned ${amt} copper completing a bounty`, tier: "bounty" };
+    case "bounty_clawback":
+      return { text: `${seat} — ${amt} copper clawed back on bounty objection`, tier: "dispute" };
+    case "bounty_expire":
+      return { text: `${amt} copper destroyed on expired/abandoned bounty`, tier: "destroyed" };
     case "credit":
       if (has("dispute_won", "dispute won", "won dispute"))
         return { text: `${seat} won dispute — ${amt} copper awarded`, tier: "dispute" };
@@ -1089,6 +1115,12 @@ export function CollabTab() {
   // Phase 5 (human msg 1971): "More Stats" popup — deep currency breakdown.
   // Ephemeral (re-derives from live data on open).
   const [statsOpen, setStatsOpen] = useState(false);
+  // Phase 6 (human msg 2074): Bounty Board collapse pref.
+  const [bountyBoardCollapsed, setBountyBoardCollapsed] = useState<boolean>(
+    () => loadJSON<boolean>("vaak_collab_bounty_board_collapsed", false, (v): v is boolean => typeof v === "boolean"),
+  );
+  const toggleBountyBoardCollapsed = () =>
+    setBountyBoardCollapsed((p) => { const n = !p; saveJSON("vaak_collab_bounty_board_collapsed", n); return n; });
   // Phase 5 (human msg 1971): inline currency notices in the message timeline.
   // Default OFF per human msg 2077/2082 ("should not be 10 messages every turn
   // about gold and copper" — too disruptive). Opt-in via the 🔕 toggle, and even
@@ -1205,6 +1237,7 @@ export function CollabTab() {
   // as balances (no new setInterval, per the directive).
   const [currencyFeed, setCurrencyFeed] = useState<CurrencyFeedRow[]>([]);
   const [openDisputes, setOpenDisputes] = useState<DisputeRow[]>([]);
+  const [bounties, setBounties] = useState<BountyRow[]>([]);
   useEffect(() => {
     if (!projectDir || !window.__TAURI__) return;
     let cancelled = false;
@@ -1262,6 +1295,18 @@ export function CollabTab() {
           setOpenDisputes(Array.from(latest.values()));
         }
       } catch { /* command absent until Phase 5 backend rebuild — disputes stay empty */ }
+      // Phase 6 — bounties (read_bounties_cmd → { bounties, open }). Append-only;
+      // collapse to latest row per id.
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const bResp = await invoke<{ bounties: BountyRow[] }>("read_bounties_cmd", { dir: projectDir });
+        if (!cancelled && Array.isArray(bResp?.bounties)) {
+          const latest = new Map<string, BountyRow>();
+          let anon = 0;
+          for (const b of bResp.bounties) latest.set(b.id ?? `__anon_${anon++}`, b);
+          setBounties(Array.from(latest.values()));
+        }
+      } catch { /* command absent until Phase 6 backend rebuild — bounties stay empty */ }
     };
     void fetchBalances();
     const id = window.setInterval(fetchBalances, 30_000);
@@ -5541,6 +5586,60 @@ When multiple instances of this role are active:
               </div>
             </div>
           </div>
+        )}
+
+        {/* Phase 6 (human msg 2074) — Bounty Board. Read-only display; actions
+            (claim/submit/approve/etc) are performed via the currency_* MCP tools
+            by agents/human — mirrors the Judge Seat display-only pattern (buttons
+            show the exact tool to run). Auto-hides when no bounties exist. */}
+        {bounties.length > 0 && (
+          <CollapsibleSection
+            id="bounty-board-section"
+            className="bounty-board-section rail-section"
+            collapsed={bountyBoardCollapsed}
+            onToggle={toggleBountyBoardCollapsed}
+            title="Bounty Board"
+            trailing={
+              <span className="bounty-board-count">
+                {bounties.filter((b) => ["open", "claimed", "submitted"].includes(b.status || "")).length} pending
+              </span>
+            }
+          >
+            <div className="bounty-board">
+              {[...bounties].sort((a, b) => (b.turn_posted ?? 0) - (a.turn_posted ?? 0)).map((b) => (
+                <div key={b.id} className={`bounty-row bounty-row--${b.status || "open"}`}>
+                  <div className="bounty-row-head">
+                    <span className={`bounty-status bounty-status--${b.status || "open"}`}>{b.status || "open"}</span>
+                    <span className="bounty-amount">{(b.amount ?? 0).toLocaleString()}c</span>
+                  </div>
+                  <div className="bounty-desc">{b.description || ""}</div>
+                  <div className="bounty-meta">
+                    {b.claimant && <span className="bounty-claimant">claimant: {b.claimant}</span>}
+                    {b.deadline_turn != null && <span className="bounty-deadline">deadline turn {b.deadline_turn}</span>}
+                    {b.status === "approved" && b.approved_by && <span className="bounty-approved">✓ paid · approved by {b.approved_by}</span>}
+                    {b.last_rejection_reason && <span className="bounty-reject">rejected: {b.last_rejection_reason}</span>}
+                  </div>
+                  <div className="bounty-actions">
+                    {b.status === "open" && (
+                      <button className="bounty-btn" onClick={() => showToast(`To claim: run currency_claim_bounty("${b.id}") — stakes ${Math.floor((b.amount ?? 0) * 0.1)} copper (10%).`, "info")}>Claim</button>
+                    )}
+                    {b.status === "claimed" && (
+                      <>
+                        <button className="bounty-btn" onClick={() => showToast(`Claimant: run currency_submit_bounty("${b.id}", <your work's msg id>) to submit.`, "info")}>Submit</button>
+                        <button className="bounty-btn" onClick={() => showToast(`Claimant: run currency_abandon_bounty("${b.id}") to abandon (forfeits half the stake).`, "info")}>Abandon</button>
+                      </>
+                    )}
+                    {b.status === "submitted" && (
+                      <>
+                        <button className="bounty-btn" onClick={() => showToast(`Human/judge: run currency_approve_bounty("${b.id}") to pay out ${(b.amount ?? 0).toLocaleString()} copper + return stake.`, "info")}>Approve</button>
+                        <button className="bounty-btn" onClick={() => showToast(`Human/judge: run currency_reject_bounty("${b.id}", "<reason>") — claimant forfeits full stake.`, "info")}>Reject</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
         )}
 
         {/* Discussion Mode sidebar card — replaces the inline horizontal
