@@ -114,6 +114,21 @@ interface BountyRow {
   turn_posted?: number;
 }
 
+// Phase 7 (human msg 2074): one end-of-session snapshot from currency-history/.
+interface SessionSnapshotSeat {
+  final_balance?: number;
+  total_earned?: number;
+  total_lost?: number;
+  disputes_won?: number;
+  disputes_lost?: number;
+  bounties_completed?: number;
+  times_timed_out?: number;
+}
+interface SessionSnapshot {
+  session_date?: string;
+  seats?: Record<string, SessionSnapshotSeat>;
+}
+
 interface DisputeMessage {
   seat?: string;
   text?: string;
@@ -1238,6 +1253,12 @@ export function CollabTab() {
   const [currencyFeed, setCurrencyFeed] = useState<CurrencyFeedRow[]>([]);
   const [openDisputes, setOpenDisputes] = useState<DisputeRow[]>([]);
   const [bounties, setBounties] = useState<BountyRow[]>([]);
+  const [sessionHistory, setSessionHistory] = useState<SessionSnapshot[]>([]);
+  const [scoreboardCollapsed, setScoreboardCollapsed] = useState<boolean>(
+    () => loadJSON<boolean>("vaak_collab_scoreboard_collapsed", true, (v): v is boolean => typeof v === "boolean"),
+  );
+  const toggleScoreboardCollapsed = () =>
+    setScoreboardCollapsed((p) => { const n = !p; saveJSON("vaak_collab_scoreboard_collapsed", n); return n; });
   useEffect(() => {
     if (!projectDir || !window.__TAURI__) return;
     let cancelled = false;
@@ -1307,6 +1328,12 @@ export function CollabTab() {
           setBounties(Array.from(latest.values()));
         }
       } catch { /* command absent until Phase 6 backend rebuild — bounties stay empty */ }
+      // Phase 7 — lifetime session snapshots (read_currency_history_cmd).
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const hResp = await invoke<{ snapshots: SessionSnapshot[] }>("read_currency_history_cmd", { dir: projectDir });
+        if (!cancelled && Array.isArray(hResp?.snapshots)) setSessionHistory(hResp.snapshots);
+      } catch { /* command absent until Phase 7 backend rebuild — history stays empty */ }
     };
     void fetchBalances();
     const id = window.setInterval(fetchBalances, 30_000);
@@ -1385,6 +1412,36 @@ export function CollabTab() {
     seats.sort((a, b) => (b.balance + b.escrow) - (a.balance + a.escrow));
     return { seats, total };
   }, [currencyBalances]);
+
+  // Phase 7 — lifetime Scoreboard: aggregate every session snapshot per seat
+  // (frontend TypeScript per directive). Net = earned - lost; avg = mean final
+  // balance across sessions the seat appeared in.
+  const scoreboard = useMemo(() => {
+    type Agg = {
+      label: string; sessions: number; earned: number; lost: number;
+      disputesWon: number; disputesLost: number; bounties: number;
+      timedOut: number; balanceSum: number;
+    };
+    const agg = new Map<string, Agg>();
+    for (const snap of sessionHistory) {
+      const seats = snap.seats || {};
+      for (const [label, s] of Object.entries(seats)) {
+        const a = agg.get(label) ?? { label, sessions: 0, earned: 0, lost: 0, disputesWon: 0, disputesLost: 0, bounties: 0, timedOut: 0, balanceSum: 0 };
+        a.sessions += 1;
+        a.earned += s.total_earned ?? 0;
+        a.lost += s.total_lost ?? 0;
+        a.disputesWon += s.disputes_won ?? 0;
+        a.disputesLost += s.disputes_lost ?? 0;
+        a.bounties += s.bounties_completed ?? 0;
+        a.timedOut += s.times_timed_out ?? 0;
+        a.balanceSum += s.final_balance ?? 0;
+        agg.set(label, a);
+      }
+    }
+    return Array.from(agg.values())
+      .map((a) => ({ ...a, net: a.earned - a.lost, avg: a.sessions ? Math.round(a.balanceSum / a.sessions) : 0 }))
+      .sort((x, y) => y.net - x.net);
+  }, [sessionHistory]);
 
   // Auto-scroll the Flow Feed to the newest line whenever rows change.
   useEffect(() => {
@@ -5636,6 +5693,46 @@ When multiple instances of this role are active:
                       </>
                     )}
                   </div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Phase 7 (human msg 2074) — Lifetime Scoreboard. Aggregates every
+            end-of-session snapshot per agent (frontend TS). Collapsed by default;
+            auto-hides until at least one session has ended + been snapshotted. */}
+        {scoreboard.length > 0 && (
+          <CollapsibleSection
+            id="scoreboard-section"
+            className="scoreboard-section rail-section"
+            collapsed={scoreboardCollapsed}
+            onToggle={toggleScoreboardCollapsed}
+            title="Lifetime Scoreboard"
+            trailing={<span className="scoreboard-count">{sessionHistory.length} session{sessionHistory.length === 1 ? "" : "s"}</span>}
+          >
+            <div className="scoreboard">
+              <div className="scoreboard-row scoreboard-row--head">
+                <span className="sb-agent">Agent</span>
+                <span className="sb-num" title="Sessions">Sess</span>
+                <span className="sb-num" title="Net (earned − lost)">Net</span>
+                <span className="sb-num" title="Disputes won / lost">W/L</span>
+                <span className="sb-num" title="Bounties completed">Bnty</span>
+                <span className="sb-num" title="Times timed out">TO</span>
+                <span className="sb-num" title="Average final balance">Avg</span>
+              </div>
+              {scoreboard.map((a) => (
+                <div key={a.label} className="scoreboard-row">
+                  <span className="sb-agent">
+                    <span className="sb-dot" style={{ background: getRoleColor(a.label.split(":")[0]) }} aria-hidden="true" />
+                    {a.label}
+                  </span>
+                  <span className="sb-num">{a.sessions}</span>
+                  <span className={`sb-num ${a.net >= 0 ? "sb-pos" : "sb-neg"}`}>{a.net >= 0 ? "+" : ""}{a.net.toLocaleString()}</span>
+                  <span className="sb-num">{a.disputesWon}/{a.disputesLost}</span>
+                  <span className="sb-num">{a.bounties}</span>
+                  <span className="sb-num">{a.timedOut}</span>
+                  <span className="sb-num">{a.avg.toLocaleString()}</span>
                 </div>
               ))}
             </div>

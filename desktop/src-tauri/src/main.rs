@@ -3721,6 +3721,33 @@ fn read_bounties_cmd(dir: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "bounties": bounties, "open": open }))
 }
 
+/// Phase 7 (b) — read all end-of-session snapshots from .vaak/currency-history/
+/// for the lifetime Scoreboard. Files are zero-padded (`<date>-NNN.json`) so a
+/// filename sort is chronological. Returns the parsed snapshots in order.
+/// Aggregation happens in the frontend (per directive). Read-only.
+#[tauri::command]
+fn read_currency_history_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let hist_dir = std::path::Path::new(&dir).join(".vaak").join("currency-history");
+    let mut snapshots: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&hist_dir) {
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+        files.sort();
+        for p in files {
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    snapshots.push(v);
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({ "snapshots": snapshots }))
+}
+
 /// Slice 9 health pill — read 4-layer resilience status.
 /// Spec §12.4. Returns JSON with per-layer health + a roll-up status.
 ///
@@ -6944,6 +6971,7 @@ fn main() {
             read_currency_feed_cmd,
             read_disputes_cmd,
             read_bounties_cmd,
+            read_currency_history_cmd,
             set_currency_enabled,
             set_continuous_timeout,
             delete_message,

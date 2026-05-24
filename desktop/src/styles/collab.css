@@ -8548,6 +8548,25 @@
 .bounty-btn:hover { background: rgba(255, 255, 255, 0.12); }
 .bounty-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
 
+/* Phase 7 — Lifetime Scoreboard sidebar section. */
+.scoreboard-count { font-size: 11px; font-weight: 600; color: #8b949e; }
+.scoreboard { display: flex; flex-direction: column; gap: 1px; padding: 4px 2px; font-size: 11px; }
+.scoreboard-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 1.6fr) 0.7fr 1fr 0.9fr 0.7fr 0.6fr 1fr;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+.scoreboard-row--head { color: #8b949e; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; font-size: 10px; }
+.scoreboard-row:not(.scoreboard-row--head):nth-child(even) { background: rgba(255, 255, 255, 0.02); }
+.sb-agent { display: flex; align-items: center; gap: 5px; color: #ccd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; }
+.sb-num { text-align: right; font-variant-numeric: tabular-nums; color: #ccd6dd; }
+.sb-pos { color: #1dd174; }
+.sb-neg { color: #f85149; }
+
 .currency-stats-overlay {
   position: fixed;
   inset: 0;
