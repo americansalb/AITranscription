@@ -4153,6 +4153,156 @@ pub mod currency {
         s.starts_with(|c: char| c.is_whitespace())
     }
 
+    // ── tester:0 acceptance units (autonomous run, human msg 2074) ──────────
+    // Pure-function executed verification of the Phase 4 classifier (T1-4/17/18)
+    // + Phase 6 stake/clawback constant-formula math (T4). No logic changes;
+    // `matches!` used so ActionKind needs no extra derives.
+    #[cfg(test)]
+    mod tester_acceptance_units {
+        use super::*;
+
+        // ── Phase 4: classify_action precedence + Edit/Test detection ──
+        #[test]
+        fn t_human_is_exempt() {
+            assert!(matches!(
+                classify_action("human:0", "edit", "anything", "edit: x", true),
+                ActionKind::Exempt
+            ));
+        }
+
+        #[test]
+        fn t_short_status_is_pass() {
+            assert!(matches!(
+                classify_action("dev:0", "status", "s", "ok", false),
+                ActionKind::Pass
+            ));
+        }
+
+        #[test]
+        fn t18_pass_body_beats_edit_subject() {
+            // status + body starting "pass" classifies Pass BEFORE the Edit arm,
+            // even when subject is "[edit]". (tester:0 msg 2019 precedence row.)
+            assert!(matches!(
+                classify_action("dev:0", "status", "[edit]", "pass", false),
+                ActionKind::Pass
+            ));
+        }
+
+        #[test]
+        fn t1_edit_explicit_type() {
+            assert!(matches!(
+                classify_action("dev:0", "edit", "fix race", "a sufficiently long body here", false),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t2_edit_subject_prefix() {
+            // Body MUST exceed PASS_BODY_LEN_THRESHOLD (100), else a status msg
+            // classifies Pass (short) before the Edit-subject arm. (Nuance found
+            // by the executed slate; pinned separately in the test below.)
+            let long_body = "this is a deliberately long edit description body that exceeds one hundred characters so the short-status pass rule does not shadow the edit-subject detection";
+            assert!(long_body.chars().count() >= PASS_BODY_LEN_THRESHOLD);
+            assert!(matches!(
+                classify_action("dev:0", "status", "[edit] fix", long_body, false),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t17_edit_body_prefix() {
+            let long_body = "edit: this is a deliberately long edit body that exceeds one hundred characters so it is not treated as a short status pass and reaches the edit-prefix detection arm";
+            assert!(long_body.chars().count() >= PASS_BODY_LEN_THRESHOLD);
+            assert!(matches!(
+                classify_action("dev:0", "status", "ack", long_body, false),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t_short_status_edit_subject_is_pass_not_edit() {
+            // NUANCE (found by executed slate): a SHORT status msg with an
+            // "[edit]" subject classifies Pass, NOT Edit — Pass > Edit precedence
+            // and the short-status rule fires first. Edit detection on type=status
+            // only works when body length >= PASS_BODY_LEN_THRESHOLD. The reliable
+            // Edit path is the explicit type="edit" (t1), which skips the Pass arm.
+            assert!(matches!(
+                classify_action("dev:0", "status", "[edit] fix", "short body", false),
+                ActionKind::Pass
+            ));
+        }
+
+        #[test]
+        fn t3_test_with_resolved_link() {
+            assert!(matches!(
+                classify_action("dev:0", "test", "x", "certifies fix #5", true),
+                ActionKind::Test
+            ));
+        }
+
+        #[test]
+        fn t4_orphan_test_downgrades_to_speak() {
+            // type=test but resolved_to_edit=false → not a real certification → Speak.
+            assert!(matches!(
+                classify_action("dev:0", "test", "x", "certifies fix #5", false),
+                ActionKind::Speak
+            ));
+        }
+
+        #[test]
+        fn t18_edit_beats_test_precedence() {
+            // A message matching BOTH edit and test shapes → Edit wins (checked first).
+            assert!(matches!(
+                classify_action("dev:0", "edit", "[test]", "test: and edit both", true),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t_speak_fallback() {
+            assert!(matches!(
+                classify_action("dev:0", "review", "topic", "a normal substantive review message body", false),
+                ActionKind::Speak
+            ));
+        }
+
+        // ── body_has_action_prefix edge cases (dev-challenger msg 2053 #8) ──
+        #[test]
+        fn t_prefix_no_false_positive_on_editor() {
+            // "editor: ..." must NOT match the "edit" action prefix.
+            assert!(!body_has_action_prefix("editor: refactor", "edit"));
+        }
+
+        #[test]
+        fn t_prefix_matches_dash_separator() {
+            assert!(body_has_action_prefix("edit - fix it", "edit"));
+        }
+
+        #[test]
+        fn t_prefix_requires_trailing_space() {
+            // "edit:x" (no space after separator) must NOT match.
+            assert!(!body_has_action_prefix("edit:x", "edit"));
+        }
+
+        // ── Phase 6: stake / abandon / clawback constant-formula math (T4) ──
+        #[test]
+        fn t4_bounty_stake_math() {
+            assert_eq!(2000u64 * BOUNTY_CLAIM_STAKE_PERCENT / 100, 200);
+            assert_eq!(999u64 * BOUNTY_CLAIM_STAKE_PERCENT / 100, 99);
+            assert_eq!(1u64 * BOUNTY_CLAIM_STAKE_PERCENT / 100, 0); // <10c → 0 stake (documented)
+        }
+
+        #[test]
+        fn t_bounty_abandon_half() {
+            assert_eq!(200u64 * BOUNTY_ABANDON_LOSS_PERCENT / 100, 100);
+        }
+
+        #[test]
+        fn t_bounty_objection_clawback_90pct() {
+            assert_eq!(2000u64 * BOUNTY_OBJECTION_CLAWBACK_PERCENT / 100, 1800);
+        }
+    }
+
     /// Commit (c) — process ONE currency tick. MUST be called inside
     /// `with_currency_and_board_lock` (both locks held).
     ///
