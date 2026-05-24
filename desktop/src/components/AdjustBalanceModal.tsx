@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 /**
  * Human-balance-adjust modal (replaces window.prompt for the per-card +/-
@@ -39,6 +40,7 @@ export function AdjustBalanceModal(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const amountRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Reset state every time the modal opens.
   useEffect(() => {
@@ -54,17 +56,12 @@ export function AdjustBalanceModal(props: {
     }
   }, [open]);
 
-  // Escape to close.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, busy, onClose]);
+  useModalA11y({
+    open,
+    onClose,
+    containerRef: dialogRef,
+    closeAllowed: () => !busy,
+  });
 
   if (!open) return null;
 
@@ -97,8 +94,10 @@ export function AdjustBalanceModal(props: {
       }}
     >
       <div
+        ref={dialogRef}
         className="abm-dialog"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="abm-title"
         onClick={(e) => e.stopPropagation()}
         style={{ borderTop: `3px solid ${accent}` }}

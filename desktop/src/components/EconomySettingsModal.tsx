@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 /**
  * Economy Settings page (modal). Per human msg 657: "every hardcoded economic
@@ -107,6 +108,7 @@ export function EconomySettingsModal(props: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) {
@@ -129,14 +131,12 @@ export function EconomySettingsModal(props: {
     })();
   }, [open, projectDir]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, busy, onClose]);
+  useModalA11y({
+    open,
+    onClose,
+    containerRef: dialogRef,
+    closeAllowed: () => !busy,
+  });
 
   if (!open) return null;
 
@@ -177,8 +177,10 @@ export function EconomySettingsModal(props: {
   return (
     <div className="esm-backdrop" onClick={() => { if (!busy) onClose(); }}>
       <div
+        ref={dialogRef}
         className="esm-dialog"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="esm-title"
         onClick={(e) => e.stopPropagation()}
       >

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useModalA11y } from "../hooks/useModalA11y";
 
 /**
  * Oxford-style debate setup modal (Phase A v1 UI per human msg 706 "where is
@@ -26,6 +27,7 @@ export function OxfordSetupModal(props: {
   const [reward, setReward] = useState<string>("500"); // copper
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -40,14 +42,12 @@ export function OxfordSetupModal(props: {
     }
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, busy, onClose]);
+  useModalA11y({
+    open,
+    onClose,
+    containerRef: dialogRef,
+    closeAllowed: () => !busy,
+  });
 
   if (!open) return null;
 
@@ -128,8 +128,10 @@ export function OxfordSetupModal(props: {
   return (
     <div className="osm-backdrop" onClick={() => { if (!busy) onClose(); }}>
       <div
+        ref={dialogRef}
         className="osm-dialog"
         role="dialog"
+        aria-modal="true"
         aria-labelledby="osm-title"
         onClick={(e) => e.stopPropagation()}
       >
