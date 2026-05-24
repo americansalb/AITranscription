@@ -89,6 +89,58 @@ def upsert_claim(vaak_dir: Path, seat: str, session_id: str, file_path: str) -> 
         pass
 
 
+def lines_written(tool: str, tool_input: dict) -> int:
+    """Best-effort line count for a single edit op. Write → content,
+    Edit → new_string, NotebookEdit → new_source. splitlines() handles a
+    trailing newline correctly; empty payload → 0."""
+    text = ""
+    if tool == "Write":
+        text = tool_input.get("content") or ""
+    elif tool == "Edit":
+        text = tool_input.get("new_string") or ""
+    elif tool == "NotebookEdit":
+        text = tool_input.get("new_source") or ""
+    return len(text.splitlines()) if text else 0
+
+
+def accumulate_pending_edit(vaak_dir: Path, seat: str, file_path: str, lines: int) -> None:
+    """Phase 8 (human msg 2262): record a DETECTED edit so the sidecar can mint
+    an Edit earn on the seat's next project_send. ACCUMULATES across multiple
+    Edit/Write calls between sends (lines summed, files de-duped, ops counted)
+    so a multi-edit turn isn't undercounted; the sidecar resets it on consume.
+
+    Filename uses 'role-instance' (':' is illegal on Windows) to match the
+    sidecar reader (vaak-mcp.rs pending_edit_marker_path)."""
+    sessions_dir = vaak_dir / "sessions"
+    marker = sessions_dir / f"{seat.replace(':', '-')}-pending-edit.json"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+
+    prev_lines = data.get("lines") if isinstance(data.get("lines"), int) else 0
+    files: list = data.get("files") if isinstance(data.get("files"), list) else []
+    if file_path not in files:
+        files.append(file_path)
+    prev_ops = data.get("ops") if isinstance(data.get("ops"), int) else 0
+
+    payload = {
+        "seat": seat,
+        "lines": prev_lines + max(0, lines),
+        "files": files,
+        "ops": prev_ops + 1,
+        "updated_at": now_iso,
+    }
+    try:
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read()
@@ -136,6 +188,13 @@ def main() -> None:
         sys.exit(0)
 
     upsert_claim(vaak_dir, seat, session_id, file_path)
+
+    # Phase 8 (human msg 2262): a DETECTED edit (Edit/Write/NotebookEdit — NOT a
+    # Read) accumulates a pending-edit marker the sidecar consumes to mint an
+    # Edit earn on the next send, so doing the work pays more than talking.
+    if tool in ("Edit", "Write", "NotebookEdit"):
+        accumulate_pending_edit(vaak_dir, seat, file_path, lines_written(tool, payload.get("tool_input", {})))
+
     sys.exit(0)
 
 

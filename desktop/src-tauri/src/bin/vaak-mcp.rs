@@ -9263,12 +9263,56 @@ fn ledger_has_edit_row(dir: &str, msg_id: u64) -> bool {
     false
 }
 
+/// Phase 8 (human msg 2262): path to a seat's pending-edit marker, written by
+/// the `file-op-claim.py` PostToolUse hook after a real Edit/Write/NotebookEdit.
+/// Seat "role:instance" → `.vaak/sessions/role-instance-pending-edit.json`
+/// (':' is illegal in Windows filenames; the hook uses the same '-' form).
+fn pending_edit_marker_path(dir: &str, seat: &str) -> std::path::PathBuf {
+    let safe = seat.replace(':', "-");
+    std::path::Path::new(dir)
+        .join(".vaak")
+        .join("sessions")
+        .join(format!("{}-pending-edit.json", safe))
+}
+
+/// Peek the pending-edit marker WITHOUT consuming it. Returns
+/// `(has_pending_edit, total_lines)`. Best-effort: any read/parse failure ⇒
+/// `(false, 0)` (currency is an overlay, never blocks a send). The marker is
+/// per-seat and written only by that seat's own process, so no lock is needed
+/// (a seat sends serially — it cannot race its own marker).
+fn peek_pending_edit(dir: &str, seat: &str) -> (bool, u64) {
+    let path = pending_edit_marker_path(dir, seat);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => {
+                let lines = v.get("lines").and_then(|x| x.as_u64()).unwrap_or(0);
+                (true, lines)
+            }
+            // Corrupt/partial marker → treat as "no detected edit" rather than
+            // crediting an unknown line count.
+            Err(_) => (false, 0),
+        },
+        Err(_) => (false, 0),
+    }
+}
+
+/// Consume (delete) a seat's pending-edit marker. Called on the send-accept
+/// path AFTER the earn is recorded, so the same file-write work can't be
+/// credited to a second message. Best-effort: a delete failure is logged-silent
+/// (worst case the next send re-credits, which a fresh marker overwrite avoids).
+fn consume_pending_edit(dir: &str, seat: &str) {
+    let _ = std::fs::remove_file(pending_edit_marker_path(dir, seat));
+}
+
 fn record_currency_earn(
     dir: &str,
     seat: &str,
     action: collab::currency::ActionKind,
     ref_msg: u64,
     linked_edit_msg: Option<u64>,
+    // Phase 8 (human msg 2262): line count from the pending-edit marker for a
+    // DETECTED Edit. 0 for self-tagged edits (no marker) and all non-Edit kinds.
+    edit_lines: u64,
 ) -> Result<(), String> {
     use collab::currency::*;
     if matches!(action, ActionKind::Exempt) {
@@ -9312,8 +9356,15 @@ fn record_currency_earn(
     let (earn, ticks, action_str) = match action {
         ActionKind::Pass => (PASS_EARN_COPPER, PASS_ESCROW_TICKS, "pass"),
         ActionKind::Speak => (SPEAK_EARN_COPPER, SPEAK_ESCROW_TICKS, "speak"),
-        // Phase 4 (a): Edit + Test earns. Escrow maturity matches Speak.
-        ActionKind::Edit => (EDIT_EARN_COPPER, SPEAK_ESCROW_TICKS, "edit"),
+        // Phase 8 (human msg 2262): Edit = 25 base + 1 copper/line beyond the
+        // bonus threshold (saturating_sub → max(0, lines-100)); self-tagged
+        // edits pass edit_lines=0 → base only. Edit escrow matures over its own
+        // longer window so the "work pays more" earn is also held longer.
+        ActionKind::Edit => (
+            EDIT_EARN_COPPER + edit_lines.saturating_sub(EDIT_LINE_BONUS_THRESHOLD) as i64,
+            EDIT_ESCROW_TICKS,
+            "edit",
+        ),
         ActionKind::Test => (TEST_EARN_COPPER, SPEAK_ESCROW_TICKS, "test"),
         // Exempt + the Phase 2 ledger opcodes are never produced by
         // classify_action for an earn — no-op defensively.
@@ -10556,6 +10607,18 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             }
         }
 
+        // Phase 8 (human msg 2262): peek this seat's pending-edit marker ONCE,
+        // before any classification. Reused by the Pass-while-disputed gate
+        // (below) and the earn hook (after the board append) so both see the
+        // SAME has_pending_edit verdict. NOT consumed here — only on the
+        // send-accept path after the earn lands, so a rejected send keeps the
+        // marker for the agent's next (real) send. Human sends never have markers.
+        let (has_pending_edit, pending_edit_lines) = if from_label.starts_with("human:") {
+            (false, 0)
+        } else {
+            peek_pending_edit(&state.project_dir, &from_label)
+        };
+
         // Currency Phase 2 — Pass-while-disputed gate. A seat that is the TARGET
         // of an open dispute cannot send a Pass-classified message — they must
         // respond (concede or dispute), not duck via a Pass. Reads the O(1)
@@ -10563,9 +10626,12 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // disputes.jsonl. Only blocks Pass; Speak/Edit/Test by the same seat proceed.
         if !from_label.starts_with("human:") {
             // resolved_to_edit=false: the gate only cares whether this is a Pass;
-            // Edit/Test/Speak all fall through (a possible Test misclassifies as
-            // Speak here, which is fine — both are "not Pass").
-            let action = collab::currency::classify_action(&from_label, msg_type, subject, body, false);
+            // Edit/Test/Speak all fall through. has_pending_edit promotes a real
+            // edit to Edit (not Pass) so a seat that actually did work isn't
+            // blocked as a Pass-dodge.
+            let action = collab::currency::classify_action_detected(
+                &from_label, msg_type, subject, body, false, has_pending_edit,
+            );
             if matches!(action, collab::currency::ActionKind::Pass) {
                 if let Ok(open) = collab::currency::read_open_disputes_snapshot(&state.project_dir) {
                     if open.open_by_target.get(&from_label).map(|v| !v.is_empty()).unwrap_or(false) {
@@ -10848,8 +10914,11 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 Some(n) => ledger_has_edit_row(&state.project_dir, n),
                 None => false,
             };
-            let action = collab::currency::classify_action(
-                &from_label, msg_type, subject, body, resolved_to_edit,
+            // Phase 8: detection-aware classify. A real file-write (has_pending_edit)
+            // outranks Pass so terse "done" statuses after genuine edits earn Edit,
+            // not Pass — the fix for the inert WORK tier (human msg 2246/2262).
+            let action = collab::currency::classify_action_detected(
+                &from_label, msg_type, subject, body, resolved_to_edit, has_pending_edit,
             );
             if !matches!(action, collab::currency::ActionKind::Exempt) {
                 // Only a Test carries its linked Edit forward into the ledger.
@@ -10858,12 +10927,25 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 } else {
                     None
                 };
-                if let Err(e) = record_currency_earn(&state.project_dir, &from_label, action, msg_id, linked) {
+                // edit_lines drives the Edit line-bonus (25 + max(0, lines-100));
+                // only meaningful when this is a detected Edit, else 0.
+                let edit_lines = if matches!(action, collab::currency::ActionKind::Edit) {
+                    pending_edit_lines
+                } else {
+                    0
+                };
+                if let Err(e) = record_currency_earn(&state.project_dir, &from_label, action, msg_id, linked, edit_lines) {
                     eprintln!(
                         "[currency] earn hook failed for {} msg {}: {} (message still landed)",
                         from_label, msg_id, e
                     );
                 }
+            }
+            // Consume the pending-edit marker on the accept path (message landed),
+            // regardless of earn success, so the same file-write work can't be
+            // re-credited to a later message. No-op when no marker existed.
+            if has_pending_edit {
+                consume_pending_edit(&state.project_dir, &from_label);
             }
         }
 

@@ -2751,12 +2751,18 @@ pub mod currency {
     pub const DEFICIT_CAP_COPPER: i64 = -1_000;
     pub const PASS_EARN_COPPER: i64 = 1;
     pub const SPEAK_EARN_COPPER: i64 = 10;
-    // Phase 4 (a): Edit + Test earns. Substantive work, valued like Speak.
-    // Escrow maturity matches Speak (SPEAK_ESCROW_TICKS) per spec.
-    pub const EDIT_EARN_COPPER: i64 = 10;
+    // Phase 4 (a): Edit + Test earns. Phase 8 (human msg 2262): an auto-DETECTED
+    // edit (real file writes via the file-op-claim.py PostToolUse marker) is the
+    // economy's "work pays more than talk" lever. Base 25 + 1 copper per line
+    // beyond EDIT_LINE_BONUS_THRESHOLD (matches the human's "+75 edit (150 lines)"
+    // example: 25 + max(0, 150-100) = 75). Edit escrow matures over its own,
+    // longer window (EDIT_ESCROW_TICKS) per the human's "in escrow (10 turns)".
+    pub const EDIT_EARN_COPPER: i64 = 25;
     pub const TEST_EARN_COPPER: i64 = 10;
+    pub const EDIT_LINE_BONUS_THRESHOLD: u64 = 100; // +1 copper/line beyond this
     pub const PASS_ESCROW_TICKS: u64 = 3;
     pub const SPEAK_ESCROW_TICKS: u64 = 5;
+    pub const EDIT_ESCROW_TICKS: u64 = 10;
     pub const PASSIVE_PER_TICK_COPPER: i64 = 1;
     pub const INTEREST_MIN_HELD_COPPER: i64 = 10;
     pub const INTEREST_PER_10_COPPER_HELD: i64 = 1;
@@ -4119,6 +4125,38 @@ pub mod currency {
         ActionKind::Speak
     }
 
+    /// Phase 8 (human msg 2262): classify with PostToolUse edit-DETECTION.
+    ///
+    /// `has_pending_edit` is set by the caller when this seat has a pending-edit
+    /// marker written by `file-op-claim.py` after a real Edit/Write/NotebookEdit
+    /// tool call. A DETECTED edit is the ONLY thing that outranks the Pass arm:
+    /// doing the work must pay even when the agent sends a terse "done"/"passing"
+    /// status (the exact case that made the whole WORK tier inert — real commits
+    /// scored as plain Speak/Pass). Self-tagged edits (`type:"edit"`, `[edit]`
+    /// subject, `edit:` body) deliberately stay BELOW Pass inside
+    /// `classify_action`, so a self-declared tag can NOT be used to dodge the
+    /// Pass-while-disputed gate or inflate a genuine pass — detection is
+    /// ungameable, self-declaration is not. This preserves every existing
+    /// precedence test (T18 et al.) while making real edits beat Pass.
+    ///
+    /// Keeps `classify_action` a pure string-and-flag fn; the file-system peek
+    /// that produces `has_pending_edit` lives in the sidecar caller.
+    pub fn classify_action_detected(
+        from: &str,
+        msg_type: &str,
+        subject: &str,
+        body: &str,
+        resolved_to_edit: bool,
+        has_pending_edit: bool,
+    ) -> ActionKind {
+        // Humans are exempt regardless of any stray marker (they post via the
+        // Tauri path, not this sidecar, and never run the seat hook).
+        if !from.starts_with("human:") && has_pending_edit {
+            return ActionKind::Edit;
+        }
+        classify_action(from, msg_type, subject, body, resolved_to_edit)
+    }
+
     /// `msg_type=="edit"` OR subject "[edit]…" OR body "edit: …" (loose prefix).
     fn is_edit_action(msg_type: &str, subject: &str, body: &str) -> bool {
         msg_type == "edit"
@@ -4264,6 +4302,57 @@ pub mod currency {
                 classify_action("dev:0", "review", "topic", "a normal substantive review message body", false),
                 ActionKind::Speak
             ));
+        }
+
+        // ── Phase 8: classify_action_detected — edit DETECTION beats Pass ──
+        #[test]
+        fn t_detected_edit_beats_short_status_pass() {
+            // The bug we are fixing: agent edits files then sends a terse status.
+            // Without detection this is Pass (+1); with detection it is Edit.
+            assert!(matches!(
+                classify_action_detected("dev:0", "status", "done", "done", false, true),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t_detected_edit_beats_pass_body() {
+            // body starts "pass" → classify_action alone returns Pass; detection
+            // overrides because real file writes happened.
+            assert!(matches!(
+                classify_action_detected("dev:0", "status", "passing", "pass", false, true),
+                ActionKind::Edit
+            ));
+        }
+
+        #[test]
+        fn t_no_detection_falls_through_to_classify_action() {
+            // has_pending_edit=false → identical to classify_action. Short status
+            // stays Pass (no regression to the WORK-tier-off baseline).
+            assert!(matches!(
+                classify_action_detected("dev:0", "status", "done", "done", false, false),
+                ActionKind::Pass
+            ));
+        }
+
+        #[test]
+        fn t_detected_edit_ignored_for_human() {
+            // A stray marker must never reclassify a human send away from Exempt.
+            assert!(matches!(
+                classify_action_detected("human:0", "status", "done", "done", false, true),
+                ActionKind::Exempt
+            ));
+        }
+
+        // ── Phase 8: Edit earn = 25 base + 1 copper/line beyond threshold ──
+        #[test]
+        fn t_edit_line_bonus_math() {
+            // Matches the human's "+75 edit (150 lines)" example.
+            let earn = |lines: u64| EDIT_EARN_COPPER + lines.saturating_sub(EDIT_LINE_BONUS_THRESHOLD) as i64;
+            assert_eq!(earn(150), 75); // 25 + (150-100)
+            assert_eq!(earn(100), 25); // at threshold → base only
+            assert_eq!(earn(40), 25);  // below threshold → base only (saturating)
+            assert_eq!(earn(0), 25);   // self-tagged edit w/ no marker → base only
         }
 
         // ── body_has_action_prefix edge cases (dev-challenger msg 2053 #8) ──
