@@ -9679,6 +9679,160 @@ fn handle_oxford_initiate(
     })
 }
 
+/// Phase A v2.2 commit 3 — oxford_declare_speaker. Moderator-only.
+/// Records the speaker change, updates current_speaker + turn_history,
+/// broadcasts to the team. Per spec §3.2.
+fn handle_oxford_declare_speaker(seat: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if caller != debate.moderator {
+            return Err("[OxfordModeratorOnly]".to_string());
+        }
+        let in_a = debate.side_a.iter().any(|s| s == seat);
+        let in_b = debate.side_b.iter().any(|s| s == seat);
+        if !in_a && !in_b {
+            return Err("[OxfordNonDebaterCannotSpeak]".to_string());
+        }
+        let now = collab::iso_now();
+        // Close the previous turn (set ended_at on the last open turn).
+        if let Some(prev) = debate.turn_history.last_mut() {
+            if prev.ended_at.is_none() {
+                prev.ended_at = Some(now.clone());
+            }
+        }
+        debate.turn_history.push(OxfordTurn {
+            seat: seat.to_string(),
+            started_at: now.clone(),
+            ended_at: None,
+        });
+        debate.current_speaker = Some(seat.to_string());
+        let debate_id = debate.debate_id;
+        write_active_oxford(&dir, &debate)?;
+        append_oxford_event(&dir, &OxfordEvent::SpeakerDeclared {
+            debate_id,
+            timestamp: now.clone(),
+            seat: seat.to_string(),
+        })?;
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordSpeakerDeclared] debate {} — {}", debate_id, seat),
+            "body": format!("Moderator {} declares {} as the next speaker (debate {}). 60s soft / 120s hard floor per spec §6.2.", caller, seat, debate_id),
+            "metadata": { "debate_id": debate_id, "speaker": seat, "oxford_event": "speaker_declared" }
+        }));
+        Ok(serde_json::json!({ "debate_id": debate_id, "current_speaker": seat, "turn_started_at": now }))
+    })
+}
+
+/// Phase A v2.2 commit 3 — oxford_end. Moderator-only. Writes the Ended
+/// event with the moderator's announced outcome, clears active-oxford-
+/// debate.json. Reward distribution per spec §6.1 v2.2 deferred to a
+/// follow-up commit (gated on pool_balance from plan v2 §3b); this
+/// handler emits reward_distributed=None.
+fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    let valid_outcomes = ["side_a_wins", "side_b_wins", "draw", "abandoned"];
+    if !valid_outcomes.iter().any(|v| *v == outcome) {
+        return Err(format!("[OxfordInvalidOutcome] outcome must be one of {:?}", valid_outcomes));
+    }
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if caller != debate.moderator {
+            return Err("[OxfordModeratorOnly]".to_string());
+        }
+        let now = collab::iso_now();
+        // Close current speaker's open turn (if any).
+        if let Some(prev) = debate.turn_history.last_mut() {
+            if prev.ended_at.is_none() {
+                prev.ended_at = Some(now.clone());
+            }
+        }
+        let debate_id = debate.debate_id;
+        append_oxford_event(&dir, &OxfordEvent::Ended {
+            debate_id,
+            timestamp: now.clone(),
+            outcome: outcome.to_string(),
+            audience_tally_nonhuman: None,
+            audience_human_vote: None,
+            reward_distributed: None, // populated in a follow-up commit
+        })?;
+        clear_active_oxford(&dir)?;
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordDebateEnded] debate {} — {}", debate_id, outcome),
+            "body": format!("Moderator {} ends debate {} with outcome '{}'. Audience-vote + reward distribution will be added in a follow-up commit (deferred per spec §6.1 dependency on pool_balance §3b).", caller, debate_id, outcome),
+            "metadata": { "debate_id": debate_id, "outcome": outcome, "oxford_event": "ended" }
+        }));
+        Ok(serde_json::json!({ "debate_id": debate_id, "outcome": outcome, "ended_at": now }))
+    })
+}
+
+/// Phase A v2.2 commit 3 — oxford_kick. Moderator-only. Removes a seat from
+/// the role they were in; if the seat was the active speaker, current_speaker
+/// is cleared and the moderator must declare the next speaker.
+fn handle_oxford_kick(seat: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if caller != debate.moderator {
+            return Err("[OxfordModeratorOnly]".to_string());
+        }
+        if seat == debate.moderator {
+            return Err("[OxfordCannotKickModerator]".to_string());
+        }
+        let was_in_a = debate.side_a.iter().any(|s| s == seat);
+        let was_in_b = debate.side_b.iter().any(|s| s == seat);
+        let was_in_aud = debate.audience.iter().any(|s| s == seat);
+        if !(was_in_a || was_in_b || was_in_aud) {
+            return Err("[OxfordSeatNotInDebate]".to_string());
+        }
+        debate.side_a.retain(|s| s != seat);
+        debate.side_b.retain(|s| s != seat);
+        debate.audience.retain(|s| s != seat);
+        let now = collab::iso_now();
+        let was_active_speaker = debate.current_speaker.as_deref() == Some(seat);
+        if was_active_speaker {
+            if let Some(prev) = debate.turn_history.last_mut() {
+                if prev.ended_at.is_none() { prev.ended_at = Some(now.clone()); }
+            }
+            debate.current_speaker = None;
+        }
+        let debate_id = debate.debate_id;
+        write_active_oxford(&dir, &debate)?;
+        append_oxford_event(&dir, &OxfordEvent::Kicked {
+            debate_id,
+            timestamp: now.clone(),
+            seat: seat.to_string(),
+        })?;
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordSeatKicked] debate {} — {} removed", debate_id, seat),
+            "body": format!("Moderator {} kicks {} from debate {}. {}", caller, seat, debate_id,
+                if was_active_speaker { "Turn auto-passes; moderator must declare next speaker." } else { "" }),
+            "metadata": { "debate_id": debate_id, "seat": seat, "was_active_speaker": was_active_speaker, "oxford_event": "kicked" }
+        }));
+        Ok(serde_json::json!({ "debate_id": debate_id, "kicked": seat, "was_active_speaker": was_active_speaker }))
+    })
+}
+
 /// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
 /// Thin wrapper around `collab::currency::apply_human_adjust` (shared with
 /// the Tauri-command path in main.rs); this fn adds the per-MCP-tool
@@ -14340,6 +14494,33 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_declare_speaker",
+                    "description": "Declare the next speaker in an active Oxford debate (MODERATOR ONLY). Seat must be a member of side_a or side_b. Closes the previous turn and starts a new one with `started_at = now`. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordNonDebaterCannotSpeak].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "seat": { "type": "string", "description": "Seat slug of next speaker (must be in side_a or side_b)" } },
+                        "required": ["seat"]
+                    }
+                },
+                {
+                    "name": "oxford_end",
+                    "description": "End an active Oxford debate (MODERATOR ONLY). Writes the Ended event with the moderator's announced outcome and clears the active-debate snapshot. Outcome must be one of: side_a_wins, side_b_wins, draw, abandoned. Reward distribution + audience-vote window will be added in a follow-up commit (deferred pending pool_balance from plan v2 §3b). Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordInvalidOutcome].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "outcome": { "type": "string", "description": "side_a_wins | side_b_wins | draw | abandoned" } },
+                        "required": ["outcome"]
+                    }
+                },
+                {
+                    "name": "oxford_kick",
+                    "description": "Remove a participant from an active Oxford debate (MODERATOR ONLY). Seat can be in side_a, side_b, or audience (cannot kick the moderator themselves). If the seat was the active speaker, turn auto-passes and the moderator must declare the next speaker. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordCannotKickModerator], [OxfordSeatNotInDebate].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "seat": { "type": "string", "description": "Seat slug to remove from debate" } },
+                        "required": ["seat"]
+                    }
+                },
+                {
                     "name": "oxford_initiate",
                     "description": "Initiate an Oxford-style debate (Phase A v2.2). Caller must be the moderator OR human:0. Designates moderator (1), side_a (1+), side_b (1+), audience (0+), and a premise. All participants are notified via board broadcast. Roles are strict mutex (no overlaps; no seat in two roles). At debate end, if strict-majority audience vote produces a winner, the winning side splits `winning_side_reward_copper` (default 500 = 5 silver) from the pool. Errors: [OxfordRequireMinOnePerSide], [OxfordInitiationDenied], [OxfordRoleConflict], [OxfordSeatNotInRoster], [OxfordAlreadyActive].",
                     "inputSchema": {
@@ -15262,6 +15443,36 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
                         "isError": true
                     }),
+                }
+            } else if tool_name == "oxford_declare_speaker" {
+                let seat = params.get("arguments").and_then(|a| a.get("seat")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if seat.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_declare_speaker requires seat (String)" }], "isError": true })
+                } else {
+                    match handle_oxford_declare_speaker(&seat) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Speaker declared.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "oxford_end" {
+                let outcome = params.get("arguments").and_then(|a| a.get("outcome")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if outcome.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_end requires outcome (String): side_a_wins | side_b_wins | draw | abandoned" }], "isError": true })
+                } else {
+                    match handle_oxford_end(&outcome) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Debate ended.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "oxford_kick" {
+                let seat = params.get("arguments").and_then(|a| a.get("seat")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if seat.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_kick requires seat (String)" }], "isError": true })
+                } else {
+                    match handle_oxford_kick(&seat) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Seat kicked.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
                 }
             } else if tool_name == "oxford_initiate" {
                 let a = params.get("arguments");
