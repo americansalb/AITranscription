@@ -2781,6 +2781,11 @@ pub mod currency {
     // spam without nuking a normally-active seat.
     pub const RETRO_PASS_PENALTY_COPPER: i64 = 3;
     pub const RETRO_PASS_SCAN_WINDOW_TURNS: u64 = 12;
+    // Phase 4 (c): co-liability — a tester who certified an Edit that the team
+    // later ruled bad shares the blame. 15 copper per tester (per-seat, not
+    // per-test-row — Q2 dedupe). Steeper than the retro-Pass sting: a bad
+    // certification is a stronger signal than a lazy pass.
+    pub const COLIABILITY_TEST_PENALTY_COPPER: i64 = 15;
 
     // ---- Types ----
 
@@ -3414,6 +3419,89 @@ pub mod currency {
         }
 
         Ok(count)
+    }
+
+    /// Phase 4 (c): co-liability scan. When the challenger effectively won AND
+    /// the disputed message was an Edit, the testers who CERTIFIED that edit
+    /// (Test rows whose `linked_edit_msg == target_msg`) share the blame:
+    /// COLIABILITY_TEST_PENALTY_COPPER each, deduped per seat (Q2 — N tests
+    /// from one tester = one penalty). NO adversarial filter (architect 2021:
+    /// Q2=B was scoped to retro-Pass only). Returns the number of seats hit.
+    ///
+    /// Mutual exclusion with retro-Pass is structural: this fn returns 0 unless
+    /// the target row is an Edit, and emit_retro_pass_penalties returns 0 unless
+    /// it's a Speak — so for any one target exactly one path fires (spec T10).
+    pub fn emit_coliability_penalties(
+        dir: &str,
+        snap: &mut BalancesSnapshot,
+        target_seat: &str,
+        target_msg: u64,
+    ) -> Result<u64, String> {
+        let ledger = read_ledger_rows(dir)?;
+
+        // Gate: the disputed message must be an Edit. (Speak targets are the
+        // retro-Pass path; Phase 1 legacy rows without action_kind are skipped.)
+        let is_edit_target = ledger.iter().any(|r| {
+            r.seat == target_seat
+                && r.ref_msg == Some(target_msg)
+                && r.action_kind == Some(ActionKind::Edit)
+        });
+        if !is_edit_target {
+            return Ok(0);
+        }
+
+        let now = super::iso_now();
+        let mut penalized: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for row in ledger.iter() {
+            if row.action_kind != Some(ActionKind::Test) {
+                continue;
+            }
+            if row.linked_edit_msg != Some(target_msg) {
+                continue;
+            }
+            // Q2 per-seat dedupe: first Test row from a seat penalizes it once;
+            // subsequent rows from the same seat are skipped.
+            if !penalized.insert(row.seat.clone()) {
+                continue;
+            }
+
+            let new_balance = {
+                let e = snap.seats.entry(row.seat.clone()).or_insert_with(|| {
+                    let mut sb = SeatBalance::default();
+                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb
+                });
+                e.balance = e.balance.saturating_sub(COLIABILITY_TEST_PENALTY_COPPER);
+                // Deficit-cap interaction (spec T11): co-liability stacking past
+                // -1000 trips timed_out, mirroring apply_row's penalty arm so the
+                // live snapshot matches a fresh replay.
+                if e.balance <= DEFICIT_CAP_COPPER {
+                    e.timed_out = true;
+                }
+                e.balance
+            };
+
+            let id = snap.next_txn_id;
+            snap.next_txn_id += 1;
+            append_currency_transaction(dir, &LedgerRow {
+                id,
+                txn_type: "penalty".to_string(),
+                seat: row.seat.clone(),
+                amount: -COLIABILITY_TEST_PENALTY_COPPER,
+                reason: format!("co-liability — tested bad edit msg #{}", target_msg),
+                ref_msg: Some(target_msg),
+                balance_after: new_balance,
+                escrow_id: None,
+                release_turn: None,
+                turn: Some(snap.turn_counter),
+                action_kind: Some(ActionKind::Penalty),
+                linked_edit_msg: Some(target_msg),
+                at: now.clone(),
+            })?;
+        }
+
+        Ok(penalized.len() as u64)
     }
 
     /// Classify a project_send into Pass / Speak / Exempt per spec §

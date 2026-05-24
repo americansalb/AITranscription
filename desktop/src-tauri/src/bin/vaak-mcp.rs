@@ -9714,8 +9714,17 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
         let retro_count = if !is_system && ruling == "challenger_wins" {
             emit_retro_pass_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg, dispute_id)?
         } else { 0 };
+        // Phase 4 (c) — co-liability hook. Same gate; only does anything when the
+        // disputed message was an Edit (mutually exclusive with retro-Pass, which
+        // only fires on a Speak target).
+        let coliab_count = if !is_system && ruling == "challenger_wins" {
+            emit_coliability_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg)?
+        } else { 0 };
         let outcome = if retro_count > 0 {
             format!("{} (+{} retro pass {} penalty)", outcome, retro_count, if retro_count == 1 { "row" } else { "rows" })
+        } else { outcome };
+        let outcome = if coliab_count > 0 {
+            format!("{} (+{} co-liability {} penalized)", outcome, coliab_count, if coliab_count == 1 { "tester" } else { "testers" })
         } else { outcome };
 
         write_balances_snapshot(&dir, &snap)?;
@@ -9866,6 +9875,10 @@ fn handle_currency_concede(dispute_id: &str) -> Result<serde_json::Value, String
         // System disputes (target=="system") never have a real seat to scan.
         if loser == dispute.target && dispute.target != "system" {
             emit_retro_pass_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg, dispute_id)?;
+            // Phase 4 (c) — co-liability on the same effective-winner gate; fires
+            // only if the disputed message was an Edit (mutually exclusive with
+            // retro-Pass).
+            emit_coliability_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg)?;
         }
 
         write_balances_snapshot(&dir, &snap)?;
