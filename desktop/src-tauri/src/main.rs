@@ -3693,6 +3693,67 @@ fn write_economy_settings_cmd(
     let dir = validate_project_dir(&dir)?;
     let new_settings: collab::currency::EconomySettings = serde_json::from_value(settings)
         .map_err(|e| format!("[EconomyTuneInvalidPayload] {}", e))?;
+    // Semantic validation per architect msg 701 + evil-arch msg 691 + tester
+    // msg 693 consolidated list. Reject malformed-semantics settings before
+    // writing so the UI surfaces inline error + no audit row pollution + no
+    // economy.json mutation. Defense-in-depth: UI also pre-validates (cheap
+    // user feedback) + this is the security gate (canonical).
+    let s = &new_settings;
+    let mut violations: Vec<String> = Vec::new();
+    if s.interest_per_10_copper_held < 0 {
+        violations.push("interest_per_10_copper_held must be >= 0".to_string());
+    }
+    if s.decay_floor_copper > s.starting_balance_copper {
+        violations.push(format!(
+            "decay_floor_copper ({}) must be <= starting_balance_copper ({})",
+            s.decay_floor_copper, s.starting_balance_copper
+        ));
+    }
+    if s.starting_balance_copper > 0 && s.objection_cost_copper > s.starting_balance_copper / 5 {
+        violations.push(format!(
+            "objection_cost_copper ({}) must be <= starting_balance_copper/5 ({})",
+            s.objection_cost_copper, s.starting_balance_copper / 5
+        ));
+    }
+    if s.deficit_cap_copper > 0 {
+        violations.push(format!(
+            "deficit_cap_copper ({}) must be <= 0 (negative threshold for timeout)",
+            s.deficit_cap_copper
+        ));
+    }
+    if s.bounty_claim_stake_percent > 100 {
+        violations.push(format!(
+            "bounty_claim_stake_percent ({}) must be in [0, 100]",
+            s.bounty_claim_stake_percent
+        ));
+    }
+    if s.bounty_abandon_loss_percent > 100 {
+        violations.push(format!(
+            "bounty_abandon_loss_percent ({}) must be in [0, 100]",
+            s.bounty_abandon_loss_percent
+        ));
+    }
+    if s.bounty_reject_loss_percent > 100 {
+        violations.push(format!(
+            "bounty_reject_loss_percent ({}) must be in [0, 100]",
+            s.bounty_reject_loss_percent
+        ));
+    }
+    if s.bounty_objection_clawback_percent > 100 {
+        violations.push(format!(
+            "bounty_objection_clawback_percent ({}) must be in [0, 100]",
+            s.bounty_objection_clawback_percent
+        ));
+    }
+    if s.clawback_percent > 100 {
+        violations.push(format!(
+            "clawback_percent ({}) must be in [0, 100]",
+            s.clawback_percent
+        ));
+    }
+    if !violations.is_empty() {
+        return Err(format!("[EconomyTuneInvalidValue] {}", violations.join("; ")));
+    }
     let old_settings = collab::currency::read_economy_settings(&dir);
 
     // Diff per field — compare via serde Value to enumerate every field generically.
