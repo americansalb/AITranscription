@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
+import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -976,6 +977,10 @@ export function CollabTab() {
   // `setProjectDir(...) + persistDir(...)` call sites collapse to a single
   // call (see startWatching / stopWatching below).
   const { projectDir, setProjectDir } = useProjectDir();
+  // Human msg 616/626: replace window.prompt-based +/- buttons with a proper
+  // modal. Single seat/direction tracked here; AdjustBalanceModal renders
+  // when adjustTarget is non-null.
+  const [adjustTarget, setAdjustTarget] = useState<{ seat: string; direction: AdjustDirection } | null>(null);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -5419,67 +5424,25 @@ When multiple instances of this role are active:
                                 <button
                                   type="button"
                                   className="rc-cur-adjust-btn rc-cur-adjust-plus"
-                                  title={`Add copper to ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — writes permanent audit row)`}
-                                  onClick={async (e) => {
+                                  title={`Add copper/silver/gold to ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — writes permanent audit row)`}
+                                  onClick={(e) => {
                                     e.stopPropagation();
-                                    const seat = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
-                                    const amtStr = window.prompt(`Add how much copper to ${seat}?\n(1 gold = 100 silver = 10000 copper)`);
-                                    if (!amtStr) return;
-                                    const amt = parseInt(amtStr.trim(), 10);
-                                    if (Number.isNaN(amt) || amt <= 0) {
-                                      alert("Amount must be a positive integer (copper).");
-                                      return;
-                                    }
-                                    const reason = window.prompt(`Why? (audit-required, non-empty)`);
-                                    if (!reason || !reason.trim()) {
-                                      alert("Reason is required.");
-                                      return;
-                                    }
-                                    try {
-                                      const { invoke } = await import("@tauri-apps/api/core");
-                                      const result = await invoke("currency_human_adjust_cmd", {
-                                        dir: projectDir,
-                                        seat,
-                                        amountCopper: amt,
-                                        reason: reason.trim(),
-                                      });
-                                      console.log("[human_adjust] credit", seat, amt, result);
-                                    } catch (err) {
-                                      alert(`Adjust failed: ${err}`);
-                                    }
+                                    setAdjustTarget({
+                                      seat: `${card.slug}:${card.instance >= 0 ? card.instance : 0}`,
+                                      direction: "credit",
+                                    });
                                   }}
                                 >+</button>
                                 <button
                                   type="button"
                                   className="rc-cur-adjust-btn rc-cur-adjust-minus"
-                                  title={`Remove copper from ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — can trip timed_out if balance crosses -1000)`}
-                                  onClick={async (e) => {
+                                  title={`Remove copper/silver/gold from ${card.slug}:${card.instance >= 0 ? card.instance : 0} (human override — can trip timed_out if balance crosses -1000c)`}
+                                  onClick={(e) => {
                                     e.stopPropagation();
-                                    const seat = `${card.slug}:${card.instance >= 0 ? card.instance : 0}`;
-                                    const amtStr = window.prompt(`Remove how much copper from ${seat}?\n(1 gold = 100 silver = 10000 copper. WARN: deficit cap is -1000c.)`);
-                                    if (!amtStr) return;
-                                    const amt = parseInt(amtStr.trim(), 10);
-                                    if (Number.isNaN(amt) || amt <= 0) {
-                                      alert("Amount must be a positive integer (copper).");
-                                      return;
-                                    }
-                                    const reason = window.prompt(`Why? (audit-required, non-empty)`);
-                                    if (!reason || !reason.trim()) {
-                                      alert("Reason is required.");
-                                      return;
-                                    }
-                                    try {
-                                      const { invoke } = await import("@tauri-apps/api/core");
-                                      const result = await invoke("currency_human_adjust_cmd", {
-                                        dir: projectDir,
-                                        seat,
-                                        amountCopper: -amt,
-                                        reason: reason.trim(),
-                                      });
-                                      console.log("[human_adjust] debit", seat, amt, result);
-                                    } catch (err) {
-                                      alert(`Adjust failed: ${err}`);
-                                    }
+                                    setAdjustTarget({
+                                      seat: `${card.slug}:${card.instance >= 0 ? card.instance : 0}`,
+                                      direction: "debit",
+                                    });
                                   }}
                                 >−</button>
                               </span>
@@ -6753,6 +6716,24 @@ When multiple instances of this role are active:
             <button type="button" onClick={() => setMicToConfirmed(null)} aria-label="Cancel mic transfer">\u00d7</button>
           </div>
         )}
+
+        {/* Human balance-adjust modal (replaces window.prompt per ui-arch msg 626) */}
+        <AdjustBalanceModal
+          open={adjustTarget !== null}
+          seat={adjustTarget?.seat ?? ""}
+          direction={adjustTarget?.direction ?? "credit"}
+          onClose={() => setAdjustTarget(null)}
+          onSubmit={async (amountCopper, reason) => {
+            if (!adjustTarget) return;
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("currency_human_adjust_cmd", {
+              dir: projectDir,
+              seat: adjustTarget.seat,
+              amountCopper,
+              reason,
+            });
+          }}
+        />
 
         {/* Role Briefing Modal */}
         {selectedRole && (

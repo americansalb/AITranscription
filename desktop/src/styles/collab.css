@@ -604,6 +604,152 @@
   outline-offset: 1px;
 }
 
+/* ---- AdjustBalanceModal (human balance adjust) ---- */
+.abm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1500;
+  animation: abm-fade 0.12s ease;
+}
+@keyframes abm-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.abm-dialog {
+  background: var(--collab-bg-elevated, #1e1f24);
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 18px 22px 16px;
+  width: 360px;
+  max-width: 92vw;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  font-family: inherit;
+}
+.abm-title {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.abm-seat {
+  font-family: 'DM Mono', ui-monospace, monospace;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.7));
+  font-weight: 500;
+}
+.abm-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.6));
+  margin-bottom: 10px;
+}
+.abm-required {
+  color: #d97706;
+}
+.abm-denoms {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.abm-denom-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.15));
+  border-radius: 999px;
+  font-size: 12px;
+  text-transform: capitalize;
+  cursor: pointer;
+  user-select: none;
+  background: transparent;
+  color: var(--collab-text, rgba(255, 255, 255, 0.85));
+}
+.abm-denom-pill input {
+  width: 0;
+  height: 0;
+  opacity: 0;
+  position: absolute;
+}
+.abm-denom-pill-active {
+  background: rgba(29, 155, 240, 0.18);
+  border-color: rgba(29, 155, 240, 0.55);
+  color: white;
+}
+.abm-input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--collab-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 5px;
+  color: inherit;
+  box-sizing: border-box;
+}
+.abm-input:focus {
+  outline: 2px solid var(--collab-focus, #1d9bf0);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+.abm-preview {
+  font-size: 12px;
+  color: var(--collab-text, rgba(255, 255, 255, 0.85));
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 10px;
+  border-radius: 5px;
+  margin: 4px 0 12px;
+  min-height: 16px;
+}
+.abm-preview-hint {
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.5));
+  font-style: italic;
+}
+.abm-error {
+  font-size: 12px;
+  color: #ff6b6b;
+  background: rgba(255, 107, 107, 0.08);
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+  border-left: 3px solid #ff6b6b;
+}
+.abm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.abm-btn {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2));
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.abm-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+.abm-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.abm-btn-submit {
+  /* color/bg overridden inline per direction (green credit, amber debit) */
+}
+
 .role-card-instances {
   font-variant-numeric: tabular-nums;
 }
