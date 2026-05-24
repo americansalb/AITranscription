@@ -5403,10 +5403,22 @@ When multiple instances of this role are active:
                                   : `Starting balance (${bal.balance_copper.toLocaleString()} copper) — this seat has no recorded currency activity yet; not a confirmed ledger balance.`
                               }
                             >
-                              <span className="role-card-currency-coin" aria-hidden="true">🪙</span>
-                              {d.gold > 0 && <span className="rc-cur rc-cur-gold">{d.gold}g</span>}
-                              {(d.gold > 0 || d.silver > 0) && <span className="rc-cur rc-cur-silver">{d.silver}s</span>}
-                              <span className="rc-cur rc-cur-copper">{d.copper}c</span>
+                              {d.gold > 0 && (
+                                <span className="rc-cur rc-cur-gold">
+                                  <span className="coin-icon coin-icon-gold" aria-hidden="true" />
+                                  {d.gold}
+                                </span>
+                              )}
+                              {(d.gold > 0 || d.silver > 0) && (
+                                <span className="rc-cur rc-cur-silver">
+                                  <span className="coin-icon coin-icon-silver" aria-hidden="true" />
+                                  {d.silver}
+                                </span>
+                              )}
+                              <span className="rc-cur rc-cur-copper">
+                                <span className="coin-icon coin-icon-copper" aria-hidden="true" />
+                                {d.copper}
+                              </span>
                               {bal.initialized && bal.escrow_held_copper > 0 && (
                                 <span className="rc-cur rc-cur-escrow" title={`${bal.escrow_held_copper} copper held in escrow`}>
                                   +{bal.escrow_held_copper}🔒

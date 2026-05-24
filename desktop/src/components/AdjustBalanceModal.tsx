@@ -119,7 +119,8 @@ export function AdjustBalanceModal(props: {
                   checked={denomination === d}
                   onChange={() => setDenomination(d)}
                 />
-                {d}
+                <span className={`coin-icon coin-icon-${d}`} aria-hidden="true" />
+                <span className="abm-denom-label">{d}</span>
               </label>
             ))}
           </div>
