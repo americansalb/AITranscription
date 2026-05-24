@@ -9707,6 +9707,17 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
             outcome = format!("both wrong — pool of {} copper destroyed", pool);
         }
 
+        // Phase 4 (b) — retroactive Pass-penalty hook. Fires only on
+        // challenger_wins against a non-system target whose Speak was the row
+        // objected. Adversarial filter (Q2=B) + Speak/Edit gating + window
+        // scan all live inside `emit_retro_pass_penalties`.
+        let retro_count = if !is_system && ruling == "challenger_wins" {
+            emit_retro_pass_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg, dispute_id)?
+        } else { 0 };
+        let outcome = if retro_count > 0 {
+            format!("{} (+{} retro pass {} penalty)", outcome, retro_count, if retro_count == 1 { "row" } else { "rows" })
+        } else { outcome };
+
         write_balances_snapshot(&dir, &snap)?;
         dispute.status = "resolved".to_string();
         dispute.resolution = Some(ruling.to_string());
@@ -9846,6 +9857,17 @@ fn handle_currency_concede(dispute_id: &str) -> Result<serde_json::Value, String
             at: now.clone(),
         };
         append_currency_transaction(&dir, &credit_row)?;
+
+        // Phase 4 (b) — retroactive Pass-penalty hook on the concede path.
+        // Effective-winner predicate per spec v4 "Hook firing gate": fires
+        // when the conceding seat IS the dispute target (= challenger
+        // effectively wins). Challenger-concedes path (loser==challenger →
+        // target_wins effective) emits zero penalty rows (T14 negative case).
+        // System disputes (target=="system") never have a real seat to scan.
+        if loser == dispute.target && dispute.target != "system" {
+            emit_retro_pass_penalties(&dir, &mut snap, &dispute.target, dispute.target_msg, dispute_id)?;
+        }
+
         write_balances_snapshot(&dir, &snap)?;
 
         // Resolve the dispute. Re-append the updated row (latest-row-per-id wins).

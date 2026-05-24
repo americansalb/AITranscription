@@ -2774,6 +2774,14 @@ pub mod currency {
     pub const SYSTEM_DISPUTE_BAN_TURNS: u64 = 10;
     pub const CLAWBACK_PERCENT: u64 = 90;              // when escrow already released
 
+    // ---- Phase 4 (b) Retroactive Pass-penalty constants ----
+    // Per spec v4 (`.vaak/design-notes/2026-05-23-currency-phase4-spec.md`).
+    // Small per-row sting (-3 copper) × 12-turn scan window = max -36 copper
+    // for a fully-passive seat, enough to disincentivize rubber-stamp Pass
+    // spam without nuking a normally-active seat.
+    pub const RETRO_PASS_PENALTY_COPPER: i64 = 3;
+    pub const RETRO_PASS_SCAN_WINDOW_TURNS: u64 = 12;
+
     // ---- Types ----
 
     /// Action classification for a project_send. Exempt = human (no charge).
@@ -3248,6 +3256,164 @@ pub mod currency {
             seat_entry.timed_out = true;
         }
         Ok(())
+    }
+
+    /// Phase 4 (b) — does seat's role have `adversarial: true` in project.json?
+    /// Locks the Q2=B filter (human msg 1924) onto retro-Pass penalty: only
+    /// targets whose role was seeded adversarial (or hand-flagged in
+    /// project.json) get the retro Pass penalty. Returns false on any I/O or
+    /// parse error — fail-closed so we don't penalize non-adversarial seats
+    /// when project.json is briefly unavailable.
+    pub fn is_adversarial_role(seat: &str, dir: &str) -> bool {
+        let role = match seat.split(':').next() {
+            Some(r) if !r.is_empty() => r,
+            _ => return false,
+        };
+        let path = Path::new(dir).join(".vaak").join("project.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let val: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        val.get("roles")
+            .and_then(|r| r.get(role))
+            .and_then(|rc| rc.get("adversarial"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Phase 4 (b) — parsed iterator over currency.jsonl rows. Used by the
+    /// retro-Pass scan + (future) co-liability scan. Unparseable lines are
+    /// logged and skipped (best-effort during the live hook; replay path uses
+    /// the stricter `replay_balances_from_ledger`). Caller MUST hold the
+    /// currency lock for read-consistency.
+    pub fn read_ledger_rows(dir: &str) -> Result<Vec<LedgerRow>, String> {
+        let path = currency_jsonl_path(dir);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read currency.jsonl: {}", e))?;
+        let mut rows: Vec<LedgerRow> = Vec::new();
+        for (i, line) in raw.lines().enumerate() {
+            if line.trim().is_empty() { continue; }
+            match serde_json::from_str::<LedgerRow>(line) {
+                Ok(r) => rows.push(r),
+                Err(e) => {
+                    eprintln!(
+                        "[currency.read_ledger_rows] WARN: skip line {}: {}",
+                        i + 1, e
+                    );
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Phase 4 (b) — Retroactive Pass-penalty hook.
+    /// Fires from `currency_judge_ruling` (challenger_wins) and
+    /// `currency_concede` (target concedes → challenger effectively wins).
+    /// Gates per spec v4 "Hook firing gate" + "Retroactive Pass-penalty algorithm":
+    ///   1. `is_adversarial_role(target_seat, dir)` (Q2=B, human msg 1924 — LOCKED).
+    ///   2. Target row is a `Speak` (Edit targets → co-liability path, commit (c)).
+    ///   3. Target Speak row's `turn` is `Some(_)` (Phase 1 legacy rows skipped;
+    ///      no backfill per anti-scope).
+    /// Scans the seat's `Pass` rows in `[from_turn..target_turn)` window
+    /// (inclusive-start, exclusive-end, per Q1 ruling) and emits one
+    /// `Penalty` row per Pass row, debiting balance directly (not escrow).
+    /// Returns count of penalty rows emitted (0 if any gate skipped).
+    ///
+    /// MUST be called inside `with_currency_and_board_lock`. Caller is
+    /// responsible for writing the snapshot afterward; this fn mutates
+    /// `snap` in-place and appends rows to currency.jsonl.
+    pub fn emit_retro_pass_penalties(
+        dir: &str,
+        snap: &mut BalancesSnapshot,
+        target_seat: &str,
+        target_msg: u64,
+        dispute_id: &str,
+    ) -> Result<u64, String> {
+        // Gate 1: Q2=B adversarial filter (human msg 1924, LOCKED — non-adversarial
+        // targets escape the retro hook entirely; T20 is the regression guard).
+        if !is_adversarial_role(target_seat, dir) {
+            return Ok(0);
+        }
+
+        let ledger = read_ledger_rows(dir)?;
+
+        // Gate 2: target row must be a Speak with `action_kind == Speak`. Edit
+        // targets are co-liability (commit c) territory; Phase 1 legacy rows
+        // without `action_kind` are skipped per "no backfill" anti-scope.
+        let target_speak = ledger.iter().find(|r| {
+            r.seat == target_seat
+                && r.ref_msg == Some(target_msg)
+                && r.action_kind == Some(ActionKind::Speak)
+        });
+        let target_speak = match target_speak {
+            Some(r) => r,
+            None => return Ok(0),
+        };
+
+        // Gate 3: target_turn must be Some (Phase 1 legacy compat).
+        let target_turn = match target_speak.turn {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        // Window [from_turn..target_turn): inclusive start, exclusive end.
+        let from_turn = target_turn.saturating_sub(RETRO_PASS_SCAN_WINDOW_TURNS);
+        let now = super::iso_now();
+        let mut count: u64 = 0;
+
+        for row in ledger.iter() {
+            if row.seat != target_seat { continue; }
+            if row.action_kind != Some(ActionKind::Pass) { continue; }
+            let row_turn = match row.turn {
+                Some(t) => t,
+                None => continue, // None-skip (per developer:1 1899 legacy-compat)
+            };
+            if row_turn < from_turn || row_turn >= target_turn { continue; }
+
+            let new_balance = {
+                let e = snap.seats.entry(target_seat.to_string()).or_insert_with(|| {
+                    let mut sb = SeatBalance::default();
+                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb
+                });
+                e.balance = e.balance.saturating_sub(RETRO_PASS_PENALTY_COPPER);
+                // Deficit-cap interaction (spec T19): penalty stack that crosses
+                // -1000 trips timed_out. Mirrors apply_row's penalty arm so the
+                // live snapshot stays consistent with a fresh replay.
+                if e.balance <= DEFICIT_CAP_COPPER {
+                    e.timed_out = true;
+                }
+                e.balance
+            };
+
+            let id = snap.next_txn_id;
+            snap.next_txn_id += 1;
+            append_currency_transaction(dir, &LedgerRow {
+                id,
+                txn_type: "penalty".to_string(),
+                seat: target_seat.to_string(),
+                amount: -RETRO_PASS_PENALTY_COPPER,
+                reason: format!("adversarial pass (retro from {})", dispute_id),
+                ref_msg: row.ref_msg.or(Some(target_msg)),
+                balance_after: new_balance,
+                escrow_id: None,
+                release_turn: None,
+                turn: Some(snap.turn_counter),
+                action_kind: Some(ActionKind::Penalty),
+                linked_edit_msg: None,
+                at: now.clone(),
+            })?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     /// Classify a project_send into Pass / Speak / Exempt per spec §
