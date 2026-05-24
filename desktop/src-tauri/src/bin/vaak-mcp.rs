@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Vaak MCP Server - Bridges Claude Code to Vaak for voice output
 //!
 //! This is a minimal MCP (Model Context Protocol) server that provides a `speak` tool
@@ -9562,6 +9563,122 @@ fn handle_currency_post_bounty(description: &str, amount: i64, deadline_turns: u
     })
 }
 
+/// Phase A v2.2 — oxford_initiate handler. Resolves caller from session,
+/// reads sessions.json for the active_seats roster, validates per spec §3.1
+/// gates, then writes the Initiate event + active-oxford-debate.json snapshot
+/// under the oxford lock. Emits a board broadcast to notify all participants.
+///
+/// Discussion-mode auto-disable (spec §4.3) deferred to a follow-up commit
+/// alongside the project_send gate hook — keeps this commit atomic.
+fn handle_oxford_initiate(
+    moderator: &str,
+    side_a: &[String],
+    side_b: &[String],
+    premise: &str,
+    audience: &[String],
+    winning_side_reward_copper: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    // Build active_seats from sessions.json bindings (status=="active",
+    // non-human roles only — human:0 is always valid in any seat role).
+    let active_seats: Vec<String> = (|| -> Vec<String> {
+        let sessions_str = std::fs::read_to_string(sessions_json_path(&dir)).ok();
+        let sessions: serde_json::Value = sessions_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+        let mut out = Vec::new();
+        if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+            for b in bindings {
+                if b.get("status").and_then(|s| s.as_str()) != Some("active") { continue; }
+                let role = b.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                if role.is_empty() || role == "human" { continue; }
+                let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                out.push(format!("{}:{}", role, instance));
+            }
+        }
+        out
+    })();
+
+    // Pure validation up front (no lock yet).
+    validate_initiate(&caller, moderator, side_a, side_b, audience, &active_seats)?;
+
+    collab::oxford::with_oxford_lock(&dir, || {
+        // Re-check no active debate is in progress (atomic under lock).
+        if read_active_oxford(&dir)?.is_some() {
+            return Err("[OxfordAlreadyActive]".to_string());
+        }
+        let debate_id = next_debate_id(&dir);
+        let now = collab::iso_now();
+        let reward = winning_side_reward_copper.unwrap_or(OXFORD_DEFAULT_WINNING_REWARD_COPPER);
+
+        // Build and persist snapshot.
+        let debate = ActiveOxfordDebate {
+            debate_id,
+            moderator: moderator.to_string(),
+            side_a: side_a.to_vec(),
+            side_b: side_b.to_vec(),
+            audience: audience.to_vec(),
+            premise: premise.to_string(),
+            current_speaker: None,
+            started_at: now.clone(),
+            turn_history: Vec::new(),
+            winning_side_reward_copper: reward,
+        };
+        write_active_oxford(&dir, &debate)?;
+
+        // Append the Initiate event to the audit log.
+        append_oxford_event(&dir, &OxfordEvent::Initiate {
+            debate_id,
+            timestamp: now.clone(),
+            moderator: moderator.to_string(),
+            side_a: side_a.to_vec(),
+            side_b: side_b.to_vec(),
+            premise: premise.to_string(),
+            audience: audience.to_vec(),
+            winning_side_reward_copper: reward,
+        })?;
+
+        // Board broadcast — every participant gets the notification.
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordDebateInitiated] debate {} by {}", debate_id, moderator),
+            "body": format!(
+                "Oxford-style debate {} initiated by {}.\nPremise: {}\nSide A: {}\nSide B: {}\nAudience: {}\nModerator declares speakers via oxford_declare_speaker. Reward on strict-majority audience vote: {} copper from pool. Per spec §6.3, only the declared speaker can project_send during their turn; human:0 always bypasses.",
+                debate_id, moderator, premise,
+                side_a.join(", "), side_b.join(", "),
+                if audience.is_empty() { "(none)".to_string() } else { audience.join(", ") },
+                reward
+            ),
+            "metadata": {
+                "debate_id": debate_id,
+                "moderator": moderator,
+                "side_a": side_a,
+                "side_b": side_b,
+                "audience": audience,
+                "winning_side_reward_copper": reward,
+                "oxford_event": "initiate"
+            }
+        }));
+
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "moderator": moderator,
+            "side_a": side_a,
+            "side_b": side_b,
+            "audience": audience,
+            "premise": premise,
+            "winning_side_reward_copper": reward,
+            "started_at": now,
+        }))
+    })
+}
+
 /// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
 /// Thin wrapper around `collab::currency::apply_human_adjust` (shared with
 /// the Tauri-command path in main.rs); this fn adds the per-MCP-tool
@@ -14223,6 +14340,22 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_initiate",
+                    "description": "Initiate an Oxford-style debate (Phase A v2.2). Caller must be the moderator OR human:0. Designates moderator (1), side_a (1+), side_b (1+), audience (0+), and a premise. All participants are notified via board broadcast. Roles are strict mutex (no overlaps; no seat in two roles). At debate end, if strict-majority audience vote produces a winner, the winning side splits `winning_side_reward_copper` (default 500 = 5 silver) from the pool. Errors: [OxfordRequireMinOnePerSide], [OxfordInitiationDenied], [OxfordRoleConflict], [OxfordSeatNotInRoster], [OxfordAlreadyActive].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "moderator": { "type": "string", "description": "Seat slug for moderator (e.g. \"manager:0\")" },
+                            "side_a": { "type": "array", "items": { "type": "string" }, "description": "1+ seat slugs for side A debaters" },
+                            "side_b": { "type": "array", "items": { "type": "string" }, "description": "1+ seat slugs for side B debaters" },
+                            "premise": { "type": "string", "description": "Debate proposition text" },
+                            "audience": { "type": "array", "items": { "type": "string" }, "description": "0+ seat slugs for audience (can include \"human:0\")" },
+                            "winning_side_reward_copper": { "type": "integer", "description": "Optional override of default 500c (= 5 silver) winning-side reward pool" }
+                        },
+                        "required": ["moderator", "side_a", "side_b", "premise", "audience"]
+                    }
+                },
+                {
                     "name": "currency_human_adjust",
                     "description": "Adjust a seat's copper balance up or down (HUMAN ONLY). Per human msg 458 — gives the human direct control over the economy as the ultimate authority. Writes a permanent ledger row with mandatory non-empty `reason` for audit. Negative amounts can push a seat below the deficit cap (-1000c) → timed_out. Positive amounts have no cap. Stale-sidecar impersonation is blocked at the MCP layer.",
                     "inputSchema": {
@@ -15129,6 +15262,28 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
                         "isError": true
                     }),
+                }
+            } else if tool_name == "oxford_initiate" {
+                let a = params.get("arguments");
+                let moderator = a.and_then(|a| a.get("moderator")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let premise = a.and_then(|a| a.get("premise")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let to_str_vec = |key: &str| -> Vec<String> {
+                    a.and_then(|a| a.get(key))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default()
+                };
+                let side_a = to_str_vec("side_a");
+                let side_b = to_str_vec("side_b");
+                let audience = to_str_vec("audience");
+                let reward = a.and_then(|a| a.get("winning_side_reward_copper")).and_then(|v| v.as_i64());
+                if moderator.is_empty() || premise.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_initiate requires moderator (String) and premise (String)" }], "isError": true })
+                } else {
+                    match handle_oxford_initiate(&moderator, &side_a, &side_b, &premise, &audience, reward) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Oxford debate initiated.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
                 }
             } else if tool_name == "currency_human_adjust" {
                 let a = params.get("arguments");
