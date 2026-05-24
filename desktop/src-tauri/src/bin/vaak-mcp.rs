@@ -9120,6 +9120,13 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
 
     notify_desktop();
 
+    // Bug #3 Part B v2 Phase 1 canary (tester msg 52 / architect msg 54):
+    // record which session-id source resolved THIS process's binding into the
+    // per-seat liveness file so a regression to `fallback_hash` is greppable
+    // in one command instead of waiting for a thousand-row ledger drift to
+    // notice that Edit/Test earns are dead again.
+    update_seat_cc_session_source(&normalized, role, instance, read_session_source());
+
     let active_section = get_active_section(project_dir);
 
     // Advance last_seen_id to the max ID in recent_messages so project_check
@@ -13048,6 +13055,274 @@ fn generate_fallback_id() -> String {
     format!("{}-{:016x}", hostname, hasher.finish())
 }
 
+// ==================== Claude Code session-id from PPID cmdline ====================
+//
+// Architect msg 54 (Option A, 2026-05-24): the file-op-claim PostToolUse hook
+// looks up bindings[*].session_id by the Claude Code native session UUID in
+// payload.session_id. Empirically (msg 47): CLAUDE_CODE_SESSION_ID env var is
+// not propagated to MCP children, params._meta is None, but the parent
+// claude.exe carries `--session-id <UUID>` in its command line. Reading PPID
+// cmdline makes the binding's session_id = the same UUID the hook sees, so
+// the hook lookup succeeds zero-change.
+
+/// Records the source picked by `get_session_id()` so `handle_project_join`
+/// can write it into `.vaak/sessions/<seat>.json:cc_session_source` as a
+/// greppable canary. Per tester msg 52 / architect msg 54 guardrail: silent
+/// fall-through to the hash path is exactly the bug that shipped 8 days of
+/// dead Edit/Test earns; the canary makes it `grep -L '"ppid_cmdline"'`-able.
+static SESSION_SOURCE: Mutex<Option<&'static str>> = Mutex::new(None);
+
+fn record_session_source(src: &'static str) {
+    if let Ok(mut guard) = SESSION_SOURCE.lock() {
+        *guard = Some(src);
+    }
+}
+
+fn read_session_source() -> &'static str {
+    SESSION_SOURCE.lock().ok().and_then(|g| *g).unwrap_or("cached_or_unknown")
+}
+
+/// Validate canonical 36-char UUID shape (8-4-4-4-12 hex with dashes).
+/// Used by the cmdline extractor — keeps the matcher tight so a stray flag
+/// like `--session-id foo` can't return garbage.
+fn is_uuid_36(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    for (i, b) in s.as_bytes().iter().enumerate() {
+        let is_dash_pos = i == 8 || i == 13 || i == 18 || i == 23;
+        if is_dash_pos {
+            if *b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Pure helper: scan a process command-line string for `--session-id <UUID>`
+/// and return the UUID if present and valid. No I/O. Testable across the
+/// Windows quoted-path form, Linux NUL-joined form, and macOS ps form via
+/// a single hand-rolled scan (avoids pulling in the `regex` crate as a new
+/// dep — pattern is fixed and small).
+fn extract_claude_session_id_from_cmdline(cmdline: &str) -> Option<String> {
+    const NEEDLE: &str = "--session-id";
+    let mut search_start = 0;
+    while let Some(idx) = cmdline[search_start..].find(NEEDLE) {
+        let abs = search_start + idx;
+        let after = &cmdline[abs + NEEDLE.len()..];
+        // Skip whitespace and an optional `=` separator (covers `--session-id X`
+        // and `--session-id=X` forms uniformly).
+        let trimmed = after.trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+        // Take exactly 36 chars (UUID length); is_uuid_36 validates shape.
+        let token: String = trimmed.chars().take(36).collect();
+        if is_uuid_36(&token) {
+            return Some(token);
+        }
+        search_start = abs + NEEDLE.len();
+    }
+    None
+}
+
+/// Read the command-line of a process by PID (Windows). Uses PowerShell
+/// Get-CimInstance because wmic is deprecated on newer Windows and a native
+/// PEB walk would need elevated privileges + significant FFI surface.
+#[cfg(windows)]
+fn get_process_cmdline(pid: u32) -> Option<String> {
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter 'ProcessId={}').CommandLine",
+        pid
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Read the command-line of a process by PID (Linux). /proc/<pid>/cmdline is
+/// NUL-separated; we join with spaces so the shared extractor sees a uniform
+/// whitespace-separated string.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn get_process_cmdline(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
+    let joined: String = raw
+        .split(|b| *b == 0)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.trim().is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
+}
+
+/// Read the command-line of a process by PID (macOS). `ps -o command=` prints
+/// just the command, no header.
+#[cfg(target_os = "macos")]
+fn get_process_cmdline(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Compose: get PPID → read its cmdline → extract `--session-id <UUID>`.
+/// Returns None if any step fails (PPID unknown, cmdline unreadable, no UUID
+/// in cmdline). Used by `get_session_id` as the Bug #3 Phase 1 primitive
+/// (architect msg 2718 from 2026-05-16 + msg 54 from 2026-05-24).
+fn try_claude_session_id_from_ppid_cmdline() -> Option<String> {
+    let ppid = get_parent_pid()?;
+    let cmdline = get_process_cmdline(ppid)?;
+    extract_claude_session_id_from_cmdline(&cmdline)
+}
+
+/// Write the recorded session source into `.vaak/sessions/<role>-<instance>.json`
+/// as `cc_session_source`. Called from `handle_project_join` once the binding
+/// is in place. Greppable canary so a regression to fallback hash surfaces in
+/// one command (`grep -L '"cc_session_source":"ppid_cmdline"' .vaak/sessions/*.json`)
+/// instead of waiting for a thousand-row ledger drift. Fail-open.
+fn update_seat_cc_session_source(project_dir: &str, role: &str, instance: u32, source: &str) {
+    let sessions_dir = std::path::Path::new(project_dir).join(".vaak").join("sessions");
+    if !sessions_dir.exists() {
+        let _ = std::fs::create_dir_all(&sessions_dir);
+    }
+    let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+    let mut state: serde_json::Value = std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("cc_session_source".to_string(), serde_json::json!(source));
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = atomic_write(&seat_file, serialized.as_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod cc_session_id_tests {
+    //! Unit tests for the CC session-id PPID-cmdline extractor (architect
+    //! msg 54 / Option A). Pure-fn signature lets us validate the three
+    //! platform cmdline forms without spawning processes. Tester:0 owns the
+    //! cross-platform fixture additions per msg 52; this baseline covers the
+    //! Windows-WMI form (the empirical sample on the dev box).
+    use super::{extract_claude_session_id_from_cmdline, is_uuid_36};
+
+    const SAMPLE_UUID: &str = "3a5856a8-af4a-4bd3-a374-f51d19348cfc";
+
+    #[test]
+    fn uuid_36_accepts_canonical_form() {
+        assert!(is_uuid_36(SAMPLE_UUID));
+        assert!(is_uuid_36("00000000-0000-0000-0000-000000000000"));
+        assert!(is_uuid_36("ffffffff-ffff-ffff-ffff-ffffffffffff"));
+    }
+
+    #[test]
+    fn uuid_36_rejects_wrong_shapes() {
+        assert!(!is_uuid_36(""));
+        assert!(!is_uuid_36("3a5856a8af4a4bd3a374f51d19348cfc")); // no dashes
+        assert!(!is_uuid_36("3a5856a8-af4a-4bd3-a374-f51d19348cf")); // 35 chars
+        assert!(!is_uuid_36("zzzzzzzz-af4a-4bd3-a374-f51d19348cfc")); // non-hex
+        assert!(!is_uuid_36("3a5856a8.af4a.4bd3.a374.f51d19348cfc")); // wrong separator
+    }
+
+    #[test]
+    fn extracts_from_windows_wmi_form() {
+        // Empirical sample captured on dev box 2026-05-24 (developer:1's parent
+        // claude.exe — see board msg 47 §3). Quoted path + flag + UUID + prompt.
+        let cmd = format!(
+            r#""C:\Users\18479\.local\bin\claude.exe" --dangerously-skip-permissions --session-id {} "Join this project as a developer using the mcp vaak project_join tool with role developer.""#,
+            SAMPLE_UUID
+        );
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_from_linux_proc_cmdline_joined() {
+        // /proc/<pid>/cmdline is NUL-separated; get_process_cmdline joins with
+        // spaces. So the extractor sees a uniform whitespace form.
+        let cmd = format!(
+            "/home/x/.local/bin/claude --dangerously-skip-permissions --session-id {} prompt",
+            SAMPLE_UUID
+        );
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_from_macos_ps_form() {
+        let cmd = format!("claude --session-id {} prompt", SAMPLE_UUID);
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_from_equals_form() {
+        // Some CLI parsers accept `--flag=value`; tolerate it.
+        let cmd = format!("claude --session-id={} prompt", SAMPLE_UUID);
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_flag_absent() {
+        let cmd = r#""C:\path\claude.exe" --dangerously-skip-permissions "prompt""#;
+        assert_eq!(extract_claude_session_id_from_cmdline(cmd), None);
+    }
+
+    #[test]
+    fn returns_none_when_uuid_malformed() {
+        // Flag present but value isn't a UUID — must NOT return garbage.
+        let cmd = "claude --session-id not-a-uuid foo";
+        assert_eq!(extract_claude_session_id_from_cmdline(cmd), None);
+    }
+
+    #[test]
+    fn skips_first_match_when_value_invalid_and_tries_again() {
+        // Defense against pathological inputs where `--session-id` appears in
+        // a quoted prompt before the real flag. Scanner advances past each
+        // failed candidate rather than locking onto the first hit.
+        let cmd = format!(
+            r#"claude --session-id bogus_value "talk about --session-id {}""#,
+            SAMPLE_UUID
+        );
+        assert_eq!(
+            extract_claude_session_id_from_cmdline(&cmd),
+            Some(SAMPLE_UUID.to_string())
+        );
+    }
+}
+
 /// Get a stable session ID using a priority chain of methods
 fn get_session_id() -> String {
     // Tier 1.5 diagnostic breadcrumb (architect msg 2681 / revised msg 2685
@@ -13101,6 +13376,7 @@ fn get_session_id() -> String {
     if let Ok(env_session) = std::env::var("CLAUDE_CODE_SESSION_ID") {
         if !env_session.is_empty() {
             eprintln!("[vaak-mcp] Session source: CLAUDE_CODE_SESSION_ID env var");
+            record_session_source("env_claude_code");
             return env_session;
         }
     }
@@ -13108,13 +13384,29 @@ fn get_session_id() -> String {
     if let Ok(env_session) = std::env::var("CLAUDE_SESSION_ID") {
         if !env_session.is_empty() {
             eprintln!("[vaak-mcp] Session source: CLAUDE_SESSION_ID env var (legacy)");
+            record_session_source("env_claude_legacy");
             return env_session;
         }
+    }
+
+    // Bug #3 Part B v2 Phase 1 — Option A (architect msg 54, 2026-05-24).
+    // Claude Code spawns its MCP children with `--session-id <UUID>` in the
+    // parent claude.exe cmdline. That UUID is the same id the PostToolUse hook
+    // payload carries, so matching the binding to it makes file-op-claim.py's
+    // lookup succeed zero-change. Tried after env vars (which would dominate
+    // if Anthropic ever re-enables CLAUDE_CODE_SESSION_ID) but BEFORE terminal-
+    // session fallbacks (WT/iTerm/TTY) — those generate stable per-terminal
+    // ids that are NOT the CC session UUID and would leave the hook inert.
+    if let Some(cc_uuid) = try_claude_session_id_from_ppid_cmdline() {
+        eprintln!("[vaak-mcp] Session source: PPID cmdline --session-id ({})", cc_uuid);
+        record_session_source("ppid_cmdline");
+        return cc_uuid;
     }
 
     if let Ok(wt_session) = std::env::var("WT_SESSION") {
         if !wt_session.is_empty() {
             eprintln!("[vaak-mcp] Session source: Windows Terminal (WT_SESSION)");
+            record_session_source("wt_session");
             return format!("wt-{}", wt_session);
         }
     }
@@ -13122,6 +13414,7 @@ fn get_session_id() -> String {
     if let Ok(iterm_session) = std::env::var("ITERM_SESSION_ID") {
         if !iterm_session.is_empty() {
             eprintln!("[vaak-mcp] Session source: iTerm2 (ITERM_SESSION_ID)");
+            record_session_source("iterm_session");
             return format!("iterm-{}", iterm_session);
         }
     }
@@ -13129,6 +13422,7 @@ fn get_session_id() -> String {
     if let Ok(term_session) = std::env::var("TERM_SESSION_ID") {
         if !term_session.is_empty() {
             eprintln!("[vaak-mcp] Session source: Terminal session (TERM_SESSION_ID)");
+            record_session_source("term_session");
             return format!("term-{}", term_session);
         }
     }
@@ -13136,6 +13430,7 @@ fn get_session_id() -> String {
     #[cfg(windows)]
     if let Some(hwnd) = get_console_window_handle() {
         eprintln!("[vaak-mcp] Session source: Windows console handle");
+        record_session_source("console_handle");
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
@@ -13145,6 +13440,7 @@ fn get_session_id() -> String {
     #[cfg(unix)]
     if let Some(tty) = get_tty_path() {
         eprintln!("[vaak-mcp] Session source: TTY path ({})", tty);
+        record_session_source("tty_path");
         let clean = tty.replace("/dev/", "").replace("/", "-");
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -13152,7 +13448,16 @@ fn get_session_id() -> String {
         return format!("{}-tty-{}", hostname, clean);
     }
 
-    eprintln!("[vaak-mcp] Session source: Fallback hash");
+    // Architect msg 54 guardrail #1: silent fall-through to fallback_hash is
+    // exactly the bug that shipped 8 days of dead Edit/Test earns. Loud WARN
+    // with concrete next step so a future regression is obvious in stderr.
+    eprintln!(
+        "[vaak-mcp] WARN Session source: Fallback hash. Claude Code --session-id flag not found in PPID cmdline — \
+         work-earn channel will be INERT (file-op-claim.py PostToolUse lookups will silently no-op). \
+         Next step: verify parent claude.exe cmdline contains `--session-id <UUID>`; if absent, the CC \
+         launch invocation changed."
+    );
+    record_session_source("fallback_hash");
     generate_fallback_id()
 }
 
