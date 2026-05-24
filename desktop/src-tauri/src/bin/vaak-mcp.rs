@@ -9210,11 +9210,58 @@ fn currency_enabled(dir: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Phase 4 (a): pull the first `#<digits>` reference from a message body
+/// (e.g. "test: ok #228" → Some(228)). Used to resolve a Test's linked Edit.
+fn extract_first_msg_ref(body: &str) -> Option<u64> {
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 {
+                if let Ok(n) = body[i + 1..j].parse::<u64>() {
+                    return Some(n);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Phase 4 (a): true iff the currency ledger has an `action_kind == Edit` row
+/// whose `ref_msg == msg_id`. This is the Q3 "resolved to a real Edit" check —
+/// done in the caller so `classify_action` stays a pure string-and-flag fn.
+fn ledger_has_edit_row(dir: &str, msg_id: u64) -> bool {
+    let path = collab::currency::currency_jsonl_path(dir);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<collab::currency::LedgerRow>(line) {
+            if row.ref_msg == Some(msg_id)
+                && matches!(row.action_kind, Some(collab::currency::ActionKind::Edit))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn record_currency_earn(
     dir: &str,
     seat: &str,
     action: collab::currency::ActionKind,
     ref_msg: u64,
+    linked_edit_msg: Option<u64>,
 ) -> Result<(), String> {
     use collab::currency::*;
     if matches!(action, ActionKind::Exempt) {
@@ -9258,7 +9305,10 @@ fn record_currency_earn(
     let (earn, ticks, action_str) = match action {
         ActionKind::Pass => (PASS_EARN_COPPER, PASS_ESCROW_TICKS, "pass"),
         ActionKind::Speak => (SPEAK_EARN_COPPER, SPEAK_ESCROW_TICKS, "speak"),
-        // Exempt + the Phase 2/4 ledger opcodes are never produced by
+        // Phase 4 (a): Edit + Test earns. Escrow maturity matches Speak.
+        ActionKind::Edit => (EDIT_EARN_COPPER, SPEAK_ESCROW_TICKS, "edit"),
+        ActionKind::Test => (TEST_EARN_COPPER, SPEAK_ESCROW_TICKS, "test"),
+        // Exempt + the Phase 2 ledger opcodes are never produced by
         // classify_action for an earn — no-op defensively.
         _ => return Ok(()),
     };
@@ -9296,7 +9346,10 @@ fn record_currency_earn(
         // can find Pass earns by action_kind within a turn window.
         turn: Some(snap.turn_counter),
         action_kind: Some(action),
-        linked_edit_msg: None,
+        // Phase 4 (a): Test earns carry the resolved Edit they certify; Pass/
+        // Speak/Edit pass None. Lets the co-liability scan (commit c) walk
+        // Test→Edit links.
+        linked_edit_msg,
         at: now,
     })?;
 
@@ -10143,7 +10196,10 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // open_disputes.json snapshot (developer:1 msg 1430 #6), not the full
         // disputes.jsonl. Only blocks Pass; Speak/Edit/Test by the same seat proceed.
         if !from_label.starts_with("human:") {
-            let action = collab::currency::classify_action(&from_label, msg_type, subject, body);
+            // resolved_to_edit=false: the gate only cares whether this is a Pass;
+            // Edit/Test/Speak all fall through (a possible Test misclassifies as
+            // Speak here, which is fine — both are "not Pass").
+            let action = collab::currency::classify_action(&from_label, msg_type, subject, body, false);
             if matches!(action, collab::currency::ActionKind::Pass) {
                 if let Ok(open) = collab::currency::read_open_disputes_snapshot(&state.project_dir) {
                     if open.open_by_target.get(&from_label).map(|v| !v.is_empty()).unwrap_or(false) {
@@ -10417,9 +10473,26 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // Human sends classify as Exempt (no charge). Best-effort: a currency
         // write failure must NOT roll back the already-landed board message.
         {
-            let action = collab::currency::classify_action(&from_label, msg_type, subject, body);
+            // Phase 4 (a): resolve a possible Test→Edit link before classifying.
+            // Pull the first `#N` from the body; resolved_to_edit is true only if
+            // that msg id has a real Edit row in the ledger (Q3 — numeric ref
+            // alone is not enough; an orphan Test downgrades to Speak).
+            let linked_edit_msg = extract_first_msg_ref(body);
+            let resolved_to_edit = match linked_edit_msg {
+                Some(n) => ledger_has_edit_row(&state.project_dir, n),
+                None => false,
+            };
+            let action = collab::currency::classify_action(
+                &from_label, msg_type, subject, body, resolved_to_edit,
+            );
             if !matches!(action, collab::currency::ActionKind::Exempt) {
-                if let Err(e) = record_currency_earn(&state.project_dir, &from_label, action, msg_id) {
+                // Only a Test carries its linked Edit forward into the ledger.
+                let linked = if matches!(action, collab::currency::ActionKind::Test) {
+                    linked_edit_msg
+                } else {
+                    None
+                };
+                if let Err(e) = record_currency_earn(&state.project_dir, &from_label, action, msg_id, linked) {
                     eprintln!(
                         "[currency] earn hook failed for {} msg {}: {} (message still landed)",
                         from_label, msg_id, e

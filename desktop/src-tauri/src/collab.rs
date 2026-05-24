@@ -2751,6 +2751,10 @@ pub mod currency {
     pub const DEFICIT_CAP_COPPER: i64 = -1_000;
     pub const PASS_EARN_COPPER: i64 = 1;
     pub const SPEAK_EARN_COPPER: i64 = 10;
+    // Phase 4 (a): Edit + Test earns. Substantive work, valued like Speak.
+    // Escrow maturity matches Speak (SPEAK_ESCROW_TICKS) per spec.
+    pub const EDIT_EARN_COPPER: i64 = 10;
+    pub const TEST_EARN_COPPER: i64 = 10;
     pub const PASS_ESCROW_TICKS: u64 = 3;
     pub const SPEAK_ESCROW_TICKS: u64 = 5;
     pub const PASSIVE_PER_TICK_COPPER: i64 = 1;
@@ -3254,7 +3258,21 @@ pub mod currency {
     ///                                  OR body.trim().to_lowercase().starts_with("pass")
     ///                                  OR subject.eq_ignore_ascii_case("passing") )
     ///   Speak  = everything else
-    pub fn classify_action(from: &str, msg_type: &str, subject: &str, body: &str) -> ActionKind {
+    /// Phase 4 (a): `resolved_to_edit` is computed by the CALLER (vaak-mcp
+    /// project_send) — it reads the ledger and reports whether the send's
+    /// linked_edit_msg points at a real `action_kind == Edit` row. Keeping that
+    /// I/O in the caller leaves this fn pure + unit-testable (Q3 ruling).
+    ///
+    /// Precedence is the early-return ORDER: Exempt > Pass > Edit > Test > Speak
+    /// (architect ruling v3, per dev-challenger:0 1897 + developer:0 1901). T18
+    /// is the regression guard — flipping any two blocks fails it.
+    pub fn classify_action(
+        from: &str,
+        msg_type: &str,
+        subject: &str,
+        body: &str,
+        resolved_to_edit: bool,
+    ) -> ActionKind {
         if from.starts_with("human:") {
             return ActionKind::Exempt;
         }
@@ -3269,7 +3287,51 @@ pub mod currency {
                 return ActionKind::Pass;
             }
         }
+        // Phase 4 (a): Edit before Test (precedence). Edit = explicit type,
+        // "[edit]" subject, or loose "edit: …" body prefix.
+        if is_edit_action(msg_type, subject, body) {
+            return ActionKind::Edit;
+        }
+        // Test = the same shape AND a resolvable linked Edit. Orphan Tests
+        // (no real Edit to certify) fall through to Speak (dev-challenger 1428).
+        if is_test_action(msg_type, subject, body) && resolved_to_edit {
+            return ActionKind::Test;
+        }
         ActionKind::Speak
+    }
+
+    /// `msg_type=="edit"` OR subject "[edit]…" OR body "edit: …" (loose prefix).
+    fn is_edit_action(msg_type: &str, subject: &str, body: &str) -> bool {
+        msg_type == "edit"
+            || subject.trim_start().to_lowercase().starts_with("[edit]")
+            || body_has_action_prefix(body, "edit")
+    }
+
+    /// `msg_type=="test"` OR subject "[test]…" OR body "test: …". The
+    /// linked-Edit requirement is enforced separately via `resolved_to_edit`.
+    fn is_test_action(msg_type: &str, subject: &str, body: &str) -> bool {
+        msg_type == "test"
+            || subject.trim_start().to_lowercase().starts_with("[test]")
+            || body_has_action_prefix(body, "test")
+    }
+
+    /// Matches `^\[?word\]?\s*[:—-]\s+` case-insensitively — the ergonomic
+    /// "word: …" / "[word] — …" body prefix. Pure string scan (no regex dep).
+    fn body_has_action_prefix(body: &str, word: &str) -> bool {
+        let lower = body.trim_start().to_lowercase();
+        let s = lower.strip_prefix('[').unwrap_or(&lower);
+        let s = match s.strip_prefix(word) {
+            Some(r) => r,
+            None => return false,
+        };
+        let s = s.strip_prefix(']').unwrap_or(s);
+        let s = s.trim_start(); // \s*
+        let s = match s.strip_prefix(|c: char| c == ':' || c == '—' || c == '-') {
+            Some(r) => r,
+            None => return false,
+        };
+        // \s+ : at least one whitespace must follow the separator.
+        s.starts_with(|c: char| c.is_whitespace())
     }
 
     /// Commit (c) — process ONE currency tick. MUST be called inside
