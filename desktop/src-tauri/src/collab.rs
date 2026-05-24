@@ -5136,6 +5136,11 @@ pub mod currency {
         on_mic_advance: bool,
         active_seats: &[String],
     ) -> Result<(), String> {
+        // Human msg 657 + architect msg 671 #1: re-read settings on every tick
+        // so UI-driven economy.json edits land next-tick without restart. No
+        // startup caching — the file is small (< 1KB) and parse cost is < 1ms.
+        let settings = read_economy_settings(dir);
+
         let mut snap = read_balances_snapshot(dir)?;
         if !balances_json_path(dir).exists() && currency_jsonl_path(dir).exists() {
             snap = replay_balances_from_ledger(dir)?;
@@ -5149,15 +5154,15 @@ pub mod currency {
 
         let seats: Vec<String> = snap.seats.keys().cloned().collect();
         for seat in &seats {
-            // --- Interest on currently-held escrow (items >= INTEREST_MIN_HELD_COPPER) ---
+            // --- Interest on currently-held escrow (items >= interest_min_held_copper) ---
             let interest: i64 = snap
                 .seats
                 .get(seat)
                 .map(|e| {
                     e.escrow_items
                         .iter()
-                        .filter(|it| it.amount >= INTEREST_MIN_HELD_COPPER)
-                        .map(|it| (it.amount / 10) * INTEREST_PER_10_COPPER_HELD)
+                        .filter(|it| it.amount >= settings.interest_min_held_copper)
+                        .map(|it| (it.amount / 10) * settings.interest_per_10_copper_held)
                         .sum()
                 })
                 .unwrap_or(0);
@@ -5265,21 +5270,21 @@ pub mod currency {
                 Some(e) => e.balance,
                 None => continue,
             };
-            if pre_bal < DECAY_FLOOR_COPPER {
+            if pre_bal < settings.decay_floor_copper {
                 continue; // no decay below the floor
             }
             let display = copper_to_display(pre_bal);
             // ceil(copper_bucket × pct/1000) where pct is in tenths-of-percent.
-            let copper_loss_cu = ceil_div(display.copper * DECAY_COPPER_PCT_PER_TURN_TENTHS, 1000);
-            let silver_loss_silvers = ceil_div(display.silver * DECAY_SILVER_PCT_PER_TURN_TENTHS, 1000);
+            let copper_loss_cu = ceil_div(display.copper * settings.decay_copper_pct_per_turn_tenths, 1000);
+            let silver_loss_silvers = ceil_div(display.silver * settings.decay_silver_pct_per_turn_tenths, 1000);
             let silver_loss_cu = silver_loss_silvers * 100;
 
             let mut total_loss = copper_loss_cu + silver_loss_cu;
             if total_loss == 0 {
                 continue; // gold-only hoarder, or no fractional residual
             }
-            // Floor protection: never decay past DECAY_FLOOR_COPPER.
-            let max_drain = (pre_bal - DECAY_FLOOR_COPPER).max(0);
+            // Floor protection: never decay past decay_floor_copper.
+            let max_drain = (pre_bal - settings.decay_floor_copper).max(0);
             if total_loss > max_drain {
                 total_loss = max_drain;
             }
@@ -5345,15 +5350,15 @@ pub mod currency {
                 // Lazy-init an active seat that has never sent (so it still
                 // earns passive). Exactly one init row; apply_row guards dups.
                 if !snap.seats.contains_key(seat) {
-                    snap.seats.entry(seat.clone()).or_default().balance = STARTING_BALANCE_COPPER;
+                    snap.seats.entry(seat.clone()).or_default().balance = settings.starting_balance_copper;
                     rows.push(LedgerRow {
                         id: next_id,
                         txn_type: "init".to_string(),
                         seat: seat.clone(),
-                        amount: STARTING_BALANCE_COPPER,
+                        amount: settings.starting_balance_copper,
                         reason: "join: initial balance (passive tick)".to_string(),
                         ref_msg: None,
-                        balance_after: STARTING_BALANCE_COPPER,
+                        balance_after: settings.starting_balance_copper,
                         escrow_id: None,
                         release_turn: None,
                         turn: Some(turn),
@@ -5365,14 +5370,14 @@ pub mod currency {
                 }
                 let bal = {
                     let e = snap.seats.get_mut(seat).unwrap();
-                    e.balance = e.balance.saturating_add(PASSIVE_PER_TICK_COPPER);
+                    e.balance = e.balance.saturating_add(settings.passive_per_tick_copper);
                     e.balance
                 };
                 rows.push(LedgerRow {
                     id: next_id,
                     txn_type: "passive".to_string(),
                     seat: seat.clone(),
-                    amount: PASSIVE_PER_TICK_COPPER,
+                    amount: settings.passive_per_tick_copper,
                     reason: format!("passive rotation tick @turn {}", turn),
                     ref_msg: None,
                     balance_after: bal,
