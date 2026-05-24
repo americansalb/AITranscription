@@ -4,6 +4,7 @@ import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionC
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
+import { EconomySettingsModal } from "./EconomySettingsModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -981,6 +982,8 @@ export function CollabTab() {
   // modal. Single seat/direction tracked here; AdjustBalanceModal renders
   // when adjustTarget is non-null.
   const [adjustTarget, setAdjustTarget] = useState<{ seat: string; direction: AdjustDirection } | null>(null);
+  // Human msg 657: Economy Settings page modal.
+  const [economySettingsOpen, setEconomySettingsOpen] = useState(false);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -5956,6 +5959,24 @@ When multiple instances of this role are active:
           );
         })()}
 
+        {/* Economy Settings trigger (human msg 657) — opens the EconomySettingsModal
+            for live-tuning every economic constant via UI. Lives in the rail
+            below Discussion Mode; small profile so it doesn't compete with
+            the primary panels. */}
+        {projectDir && (
+          <div className="economy-settings-trigger rail-section">
+            <button
+              type="button"
+              className="economy-settings-btn"
+              onClick={() => setEconomySettingsOpen(true)}
+              title="Tune every economic constant live — saves to .vaak/economy.json, takes effect next tick"
+            >
+              <span className="economy-settings-icon" aria-hidden="true">⚙</span>
+              <span>Economy Settings</span>
+            </button>
+          </div>
+        )}
+
         {/* Decision Panel sidebar wrapper — places the panel into the right
             rail per architect msg 935. DecisionPanel.tsx renders the inner
             panel chrome (header + body); we wrap it in a section div so the
@@ -6740,6 +6761,13 @@ When multiple instances of this role are active:
             <button type="button" onClick={() => setMicToConfirmed(null)} aria-label="Cancel mic transfer">\u00d7</button>
           </div>
         )}
+
+        {/* Economy Settings modal (human msg 657 — live-tunable constants) */}
+        <EconomySettingsModal
+          open={economySettingsOpen}
+          projectDir={projectDir || ""}
+          onClose={() => setEconomySettingsOpen(false)}
+        />
 
         {/* Human balance-adjust modal (replaces window.prompt per ui-arch msg 626) */}
         <AdjustBalanceModal
