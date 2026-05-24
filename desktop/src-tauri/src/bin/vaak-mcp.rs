@@ -9611,6 +9611,26 @@ fn handle_oxford_initiate(
         if read_active_oxford(&dir)?.is_some() {
             return Err("[OxfordAlreadyActive]".to_string());
         }
+        // Phase A v2.2 §4.3 — auto-disable any other discussion mode on initiate
+        // (per human msg 458 "disables any other debate or discussion type when
+        // you initiate it" + evil-arch msg 524 spec-inconsistency resolution).
+        // Best-effort: read discussion.json, set mode=null, write back. Errors
+        // here are logged but don't abort the debate-initiate (discussion.json
+        // may not exist on a fresh project).
+        let disc_path = std::path::Path::new(&dir).join(".vaak").join("discussion.json");
+        if disc_path.exists() {
+            let prior_mode = std::fs::read_to_string(&disc_path).ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(|s| s.to_string()));
+            if let Some(prior) = prior_mode {
+                if !prior.is_empty() && prior != "null" {
+                    let disabled = serde_json::json!({ "mode": serde_json::Value::Null });
+                    if let Err(e) = std::fs::write(&disc_path, serde_json::to_string_pretty(&disabled).unwrap_or_default()) {
+                        eprintln!("[oxford_initiate] WARN: failed to auto-disable discussion mode '{}': {}", prior, e);
+                    }
+                }
+            }
+        }
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
         let reward = winning_side_reward_copper.unwrap_or(OXFORD_DEFAULT_WINNING_REWARD_COPPER);
@@ -10896,6 +10916,43 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             if binding.get("session_id").and_then(|s| s.as_str()) == Some(&state.session_id) {
                 if binding.get("status").and_then(|s| s.as_str()) == Some("revoked") {
                     return Err("Your role has been revoked. You cannot send messages. Call project_leave to exit.".to_string());
+                }
+            }
+        }
+    }
+
+    // Phase A v2.2 §6.3 — Oxford debate speaker-only gate.
+    // When an Oxford debate is active, only the currently-declared speaker
+    // (or human:0, or the moderator) can project_send. Non-speaking debaters
+    // + audience must use oxford_react for visual signals.
+    // Exceptions per spec §6.3:
+    //   - human:0 always bypasses (sovereignty)
+    //   - moderator can send (procedural directives, end announcements)
+    //   - "system" messages (this path doesn't emit system; included for completeness)
+    //   - Not-in-debate seats can use Collab tab independently (only active-debate
+    //     participants are gated)
+    let caller = format!("{}:{}", state.role, state.instance);
+    if !caller.starts_with("human:") {
+        if let Ok(Some(debate)) = collab::oxford::read_active_oxford(&state.project_dir) {
+            let in_debate = debate.moderator == caller
+                || debate.side_a.iter().any(|s| s == &caller)
+                || debate.side_b.iter().any(|s| s == &caller)
+                || debate.audience.iter().any(|s| s == &caller);
+            if in_debate && debate.moderator != caller {
+                // Audience members + non-speaking debaters can't board-send.
+                let is_current_speaker = debate.current_speaker.as_deref() == Some(caller.as_str());
+                if !is_current_speaker {
+                    let in_audience = debate.audience.iter().any(|s| s == &caller);
+                    if in_audience {
+                        return Err(format!(
+                            "[OxfordNonDebaterCannotSpeak] You are in the audience for debate {}. Use oxford_react for visual signals instead.",
+                            debate.debate_id
+                        ));
+                    }
+                    return Err(format!(
+                        "[OxfordNotYourTurn] Active debate {} — current speaker is {:?}. Wait for the moderator to declare you, or use oxford_react.",
+                        debate.debate_id, debate.current_speaker
+                    ));
                 }
             }
         }
