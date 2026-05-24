@@ -4110,13 +4110,26 @@ pub mod currency {
             return ActionKind::Exempt;
         }
         if msg_type == "status" {
-            let body_trimmed = body.trim();
-            let body_len = body_trimmed.chars().count();
-            let body_lower = body_trimmed.to_lowercase();
-            let short = body_len < PASS_BODY_LEN_THRESHOLD;
-            let body_pass = body_lower.starts_with("pass");
-            let subject_passing = subject.eq_ignore_ascii_case("passing");
-            if short || body_pass || subject_passing {
+            // Commit D (2026-05-24, architect msg 180 RULING 3): narrow PASS
+            // qualifier — joint AND between subject_in_whitelist AND
+            // body_in_whitelist. The bare body_len<PASS_BODY_LEN_THRESHOLD
+            // short-circuit is GONE — length is not signal, substance template
+            // is. Both sides of the message must match a canonical pass
+            // pattern; anything else falls through to SPEAK (or Edit/Test
+            // arms if applicable).
+            //
+            // Subject whitelist: empty OR "pass" / "passing" / "pass." / "passing."
+            //   (case-insensitive)
+            // Body whitelist:    empty OR matches body_matches_pass_template:
+            //   - "pass" / "passing" (with optional trailing period)
+            //   - "Read msg <N> [...] passing[.]"
+            //   - "Read msg <N> [...] no add (from|on) [...] -lane[.]"
+            //
+            // Anti-pattern killer: ("passing", "No add. Standing by for human
+            // restart.") now classifies SPEAK — body fails whitelist.
+            let subject_in_whitelist = is_subject_pass_whitelist(subject);
+            let body_in_whitelist = is_body_pass_whitelist(body);
+            if subject_in_whitelist && body_in_whitelist {
                 return ActionKind::Pass;
             }
         }
@@ -4163,6 +4176,60 @@ pub mod currency {
             return ActionKind::Edit;
         }
         classify_action(from, msg_type, subject, body, resolved_to_edit)
+    }
+
+    /// Commit D (2026-05-24, architect msg 180 RULING 3) — subject whitelist
+    /// for the narrow PASS qualifier. Subject is whitelisted when it is empty
+    /// OR matches `(passing|pass)[.]?` (case-insensitive, trimmed).
+    fn is_subject_pass_whitelist(subject: &str) -> bool {
+        let s = subject.trim();
+        if s.is_empty() {
+            return true;
+        }
+        let lower = s.to_lowercase();
+        matches!(lower.as_str(), "pass" | "passing" | "pass." | "passing.")
+    }
+
+    /// Commit D (2026-05-24, architect msg 180 RULING 3) — body whitelist for
+    /// the narrow PASS qualifier. Body is whitelisted when it is empty OR
+    /// matches a canonical pass template:
+    ///   - "pass" / "passing" (with optional trailing period)
+    ///   - "Read msg <N> [...] passing[.]"
+    ///   - "Read msg <N> [...] no add (from|on) [...] -lane[.]"
+    /// Pure string scan (no regex dep). Case-insensitive. Period-stripped at
+    /// the tail for forgiving template matching.
+    fn is_body_pass_whitelist(body: &str) -> bool {
+        let s = body.trim();
+        if s.is_empty() {
+            return true;
+        }
+        let lower = s.to_lowercase();
+        let core = lower.trim_end_matches('.');
+        // Bare "pass" / "passing" (any case, optional trailing period)
+        if core == "pass" || core == "passing" {
+            return true;
+        }
+        // "Read msg <digits>..." canonical patterns.
+        if let Some(rest) = lower.strip_prefix("read msg ") {
+            let digit_len = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digit_len > 0 {
+                let after_digits = &rest[digit_len..];
+                // Tail must contain "passing" OR (("no add from" OR "no add on")
+                // AND "-lane"). The exact regex per architect msg 180:
+                //   ^read msg \d+.*passing\.?$
+                //   ^read msg \d+.*no add (from|on).*-lane\.?$
+                if after_digits.contains("passing") {
+                    return true;
+                }
+                let has_no_add_lens =
+                    after_digits.contains("no add from") || after_digits.contains("no add on");
+                let has_lane = after_digits.contains("-lane");
+                if has_no_add_lens && has_lane {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// `msg_type=="edit"` OR subject "[edit]…" OR body "edit: …" (loose prefix).
@@ -4217,20 +4284,36 @@ pub mod currency {
         }
 
         #[test]
-        fn t_short_status_is_pass() {
+        fn t_canonical_passing_subject_is_pass() {
+            // Commit D (2026-05-24): replaces t_short_status_is_pass — the bare
+            // body-length short-circuit is gone. PASS qualifier now requires
+            // subject + body BOTH in whitelist. Canonical subject="passing"
+            // with empty body classifies PASS.
             assert!(matches!(
-                classify_action("dev:0", "status", "s", "ok", false),
+                classify_action("dev:0", "status", "passing", "", false),
                 ActionKind::Pass
             ));
         }
 
         #[test]
-        fn t18_pass_body_beats_edit_subject() {
-            // status + body starting "pass" classifies Pass BEFORE the Edit arm,
-            // even when subject is "[edit]". (tester:0 msg 2019 precedence row.)
+        fn t_commit_d_anti_pattern_passing_subject_substantive_body_is_speak() {
+            // Architect msg 180 RULING 3 killer case: subject="passing"
+            // (whitelisted) + body="No add. Standing by for human restart."
+            // (NOT whitelisted) → joint AND fails → falls through to SPEAK.
+            // Pre-Commit D this classified PASS under the body<100 short-circuit;
+            // post-Commit D the substantive body is correctly priced.
+            // Replaces t18_pass_body_beats_edit_subject (premise invalid under
+            // joint AND — subject "[edit]" is not in the pass whitelist, so the
+            // old "Pass shadows Edit" nuance no longer applies).
             assert!(matches!(
-                classify_action("dev:0", "status", "[edit]", "pass", false),
-                ActionKind::Pass
+                classify_action(
+                    "dev:0",
+                    "status",
+                    "passing",
+                    "No add. Standing by for human restart.",
+                    false
+                ),
+                ActionKind::Speak
             ));
         }
 
@@ -4266,15 +4349,20 @@ pub mod currency {
         }
 
         #[test]
-        fn t_short_status_edit_subject_is_pass_not_edit() {
-            // NUANCE (found by executed slate): a SHORT status msg with an
-            // "[edit]" subject classifies Pass, NOT Edit — Pass > Edit precedence
-            // and the short-status rule fires first. Edit detection on type=status
-            // only works when body length >= PASS_BODY_LEN_THRESHOLD. The reliable
-            // Edit path is the explicit type="edit" (t1), which skips the Pass arm.
+        fn t_commit_d_short_body_edit_subject_classifies_edit() {
+            // Post-Commit D (architect msg 180 RULING 3): a status msg with
+            // subject="[edit] fix" + short body NOW classifies Edit, not Pass.
+            // Reason: subject "[edit] fix" is NOT in the PASS subject whitelist
+            // ({empty, pass, passing, pass., passing.}) → joint AND fails → falls
+            // through to the Edit arm, which fires on `subject.starts_with("[edit]")`.
+            // Pre-Commit D this classified Pass under the body<100 short-circuit;
+            // the old nuance ("body must be long for Edit subject to win on
+            // type=status") is gone — length is not signal under joint AND.
+            // The reliable Edit path remains explicit type="edit" (t1), which
+            // skips the Pass arm entirely regardless.
             assert!(matches!(
                 classify_action("dev:0", "status", "[edit] fix", "short body", false),
-                ActionKind::Pass
+                ActionKind::Edit
             ));
         }
 
@@ -4335,11 +4423,18 @@ pub mod currency {
 
         #[test]
         fn t_no_detection_falls_through_to_classify_action() {
-            // has_pending_edit=false → identical to classify_action. Short status
-            // stays Pass (no regression to the WORK-tier-off baseline).
+            // has_pending_edit=false → identical to classify_action.
+            // Post-Commit D (2026-05-24): ("done", "done") is NOT a canonical
+            // pass shape — subject "done" fails subject_whitelist, body "done"
+            // fails body_whitelist (only "pass"/"passing"/"read msg..." patterns
+            // qualify). So this falls through to SPEAK, not PASS. Pre-Commit D
+            // this returned PASS via the body<100 short-circuit. The intent of
+            // the test — proving has_pending_edit=false drops back to the
+            // underlying classify_action result — is preserved by asserting on
+            // SPEAK, the current correct classification for this shape.
             assert!(matches!(
                 classify_action_detected("dev:0", "status", "done", "done", false, false),
-                ActionKind::Pass
+                ActionKind::Speak
             ));
         }
 
@@ -4443,6 +4538,160 @@ pub mod currency {
                 (0..SPEAK_ESCROW_TICKS as i64).map(|_| (SPEAK_EARN_COPPER / 10) * INTEREST_PER_10_COPPER_HELD).sum();
             let net_pnl: i64 = -SPEAK_EARN_COPPER + interest_over_window + SPEAK_EARN_COPPER;
             assert_eq!(net_pnl, 0);
+        }
+
+        // ── Commit D (2026-05-24): classifier retune to joint AND ──
+        // Architect ruling msg 180 RULING 3 + evil-arch msg 177 + tester msg
+        // 147 fixture set + dev:1 msg 175 finding #3. PASS qualifier is now a
+        // joint AND between subject_in_whitelist AND body_in_whitelist; the
+        // body<PASS_BODY_LEN_THRESHOLD short-circuit is GONE. Length is not
+        // signal — substance template is.
+
+        #[test]
+        fn t_commit_d_subject_whitelist_unit() {
+            assert!(is_subject_pass_whitelist(""));
+            assert!(is_subject_pass_whitelist("passing"));
+            assert!(is_subject_pass_whitelist("Passing"));
+            assert!(is_subject_pass_whitelist("PASSING"));
+            assert!(is_subject_pass_whitelist("pass"));
+            assert!(is_subject_pass_whitelist("pass."));
+            assert!(is_subject_pass_whitelist("passing."));
+            assert!(is_subject_pass_whitelist("  passing  ")); // trimmed
+            // Substantive subjects must NOT be whitelisted.
+            assert!(!is_subject_pass_whitelist("passing the mic"));
+            assert!(!is_subject_pass_whitelist("status update"));
+            assert!(!is_subject_pass_whitelist("[edit] fix"));
+            assert!(!is_subject_pass_whitelist("s"));
+            assert!(!is_subject_pass_whitelist("re: topic"));
+        }
+
+        #[test]
+        fn t_commit_d_body_whitelist_unit() {
+            assert!(is_body_pass_whitelist(""));
+            assert!(is_body_pass_whitelist("pass"));
+            assert!(is_body_pass_whitelist("Pass."));
+            assert!(is_body_pass_whitelist("passing"));
+            assert!(is_body_pass_whitelist("passing."));
+            assert!(is_body_pass_whitelist("PASSING."));
+            // Canonical "Read msg <N>...passing." pattern.
+            assert!(is_body_pass_whitelist("Read msg 162 from architect:0. Passing."));
+            // Canonical "Read msg <N>...no add from <lens>-lane." pattern.
+            assert!(is_body_pass_whitelist(
+                "Read msg 162 from architect:0. No add from developer-lane."
+            ));
+            assert!(is_body_pass_whitelist(
+                "Read msg 100 from x. No add on test-lane."
+            ));
+            // Anti-pattern bodies must NOT be whitelisted.
+            assert!(!is_body_pass_whitelist("No add. Standing by for human restart."));
+            assert!(!is_body_pass_whitelist("Wrote project_X. Standing by."));
+            assert!(!is_body_pass_whitelist("alive"));
+            assert!(!is_body_pass_whitelist("agreed"));
+            assert!(!is_body_pass_whitelist("ok"));
+            // "Read msg" without canonical tail → SPEAK.
+            assert!(!is_body_pass_whitelist(
+                "Read msg 5 from x. Disagree with conclusion."
+            ));
+        }
+
+        #[test]
+        fn t_commit_d_canonical_pass_shapes() {
+            // ("passing", "") → PASS
+            assert!(matches!(
+                classify_action("dev:0", "status", "passing", "", false),
+                ActionKind::Pass
+            ));
+            // ("", "Pass.") → PASS
+            assert!(matches!(
+                classify_action("dev:0", "status", "", "Pass.", false),
+                ActionKind::Pass
+            ));
+            // ("passing", "Read msg 162 from architect:0. No add from developer-lane.") → PASS
+            assert!(matches!(
+                classify_action(
+                    "dev:0",
+                    "status",
+                    "passing",
+                    "Read msg 162 from architect:0. No add from developer-lane.",
+                    false
+                ),
+                ActionKind::Pass
+            ));
+            // ("", "") — degenerate both-empty case → PASS (whitelist coverage).
+            assert!(matches!(
+                classify_action("dev:0", "status", "", "", false),
+                ActionKind::Pass
+            ));
+        }
+
+        #[test]
+        fn t_commit_d_anti_pattern_substantive_status_is_speak() {
+            // tester msg 147 fixture: SPEAK-class cases that escape the new
+            // whitelist (substantive bodies fail body_whitelist).
+            assert!(matches!(
+                classify_action(
+                    "dev:0",
+                    "status",
+                    "passing",
+                    "Wrote project_X. Standing by.",
+                    false
+                ),
+                ActionKind::Speak
+            ));
+            assert!(matches!(
+                classify_action("dev:0", "status", "status", "alive", false),
+                ActionKind::Speak
+            ));
+            assert!(matches!(
+                classify_action("dev:0", "status", "tester:0 active", "", false),
+                ActionKind::Speak
+            ));
+            assert!(matches!(
+                classify_action("dev:0", "status", "re: topic", "agreed", false),
+                ActionKind::Speak
+            ));
+        }
+
+        #[test]
+        fn t_commit_d_msg_110_113_115_anti_pattern_is_speak() {
+            // The killer case architect msg 180 used to invalidate evil-arch's
+            // option (ii). subject="passing" (whitelisted) but
+            // body="No add. Standing by for human restart." (NOT whitelisted)
+            // → joint AND fails → SPEAK. Under the pre-Commit D rule, this
+            // classified PASS via the body<100 short-circuit; Commit D closes
+            // the loophole.
+            assert!(matches!(
+                classify_action(
+                    "dev:0",
+                    "status",
+                    "passing",
+                    "No add. Standing by for human restart.",
+                    false
+                ),
+                ActionKind::Speak
+            ));
+        }
+
+        #[test]
+        fn t_commit_d_edit_arm_still_fires_when_pass_fails() {
+            // Regression guard: when joint AND fails, Edit/Test arms still
+            // fire correctly. status + "[edit] fix" subject → not in subject
+            // whitelist → falls through to Edit arm.
+            assert!(matches!(
+                classify_action(
+                    "dev:0",
+                    "status",
+                    "[edit] fix",
+                    "real edit description with enough body",
+                    false
+                ),
+                ActionKind::Edit
+            ));
+            // Speak fallback when nothing matches any arm.
+            assert!(matches!(
+                classify_action("dev:0", "review", "thoughts", "long review body", false),
+                ActionKind::Speak
+            ));
         }
     }
 
