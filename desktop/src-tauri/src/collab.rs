@@ -3185,6 +3185,208 @@ pub mod currency {
         latest
     }
 
+    // ---- Phase 7: Persistence (session snapshot + carry-over) ----
+
+    pub fn currency_history_dir(dir: &str) -> PathBuf {
+        vaak_root(dir).join("currency-history")
+    }
+
+    /// Build the end-of-session snapshot JSON (spec §Item 1). Aggregates the
+    /// current balances + the ledger/disputes/bounties into per-seat lifetime-ish
+    /// metrics. `times_timed_out` is best-effort (1 if currently timed_out, else
+    /// counts penalty rows that drove balance under the cap is not tracked — we
+    /// report the current flag). Pure read; no locks taken here (caller holds).
+    pub fn build_session_snapshot(dir: &str) -> serde_json::Value {
+        let bal = read_balances_snapshot(dir).unwrap_or_default();
+        let ledger = read_ledger_rows(dir).unwrap_or_default();
+        let bounties = read_latest_bounties(dir);
+        // latest dispute row per id
+        let mut disputes: HashMap<String, DisputeRow> = HashMap::new();
+        if let Ok(c) = std::fs::read_to_string(disputes_jsonl_path(dir)) {
+            for l in c.lines() {
+                if l.trim().is_empty() { continue; }
+                if let Ok(d) = serde_json::from_str::<DisputeRow>(l) { disputes.insert(d.id.clone(), d); }
+            }
+        }
+
+        let mut seats = serde_json::Map::new();
+        let mut pool_destroyed: i64 = 0;
+        for row in &ledger {
+            if row.txn_type == "pool_destroyed" || row.txn_type == "bounty_expire" {
+                pool_destroyed += row.amount.abs();
+            }
+        }
+
+        // union of seats from balances + ledger
+        let mut all_seats: std::collections::BTreeSet<String> = bal.seats.keys().cloned().collect();
+        for r in &ledger { if r.seat != "system:pool" { all_seats.insert(r.seat.clone()); } }
+
+        for seat in all_seats {
+            let sb = bal.seats.get(&seat);
+            let final_balance = sb.map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
+            let timed_out = sb.map(|s| s.timed_out).unwrap_or(false);
+            let (mut earned, mut lost) = (0i64, 0i64);
+            let (mut speaks, mut edits, mut tests, mut passes, mut adv_pass) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            let mut starting_balance = STARTING_BALANCE_COPPER;
+            for r in ledger.iter().filter(|r| r.seat == seat) {
+                match r.txn_type.as_str() {
+                    "init" => starting_balance = r.amount,
+                    "credit" | "escrow_release" | "interest" | "passive" | "bounty_earn" => { if r.amount > 0 { earned += r.amount; } }
+                    "penalty" | "clawback" | "debit" | "bounty_stake" => {
+                        lost += r.amount.abs();
+                        if r.reason.to_lowercase().contains("adversarial pass") { adv_pass += 1; }
+                    }
+                    _ => {}
+                }
+                match r.action_kind {
+                    Some(ActionKind::Speak) => speaks += 1,
+                    Some(ActionKind::Edit) => edits += 1,
+                    Some(ActionKind::Test) => tests += 1,
+                    Some(ActionKind::Pass) => passes += 1,
+                    _ => {}
+                }
+            }
+            let mut obj_filed = 0u64; let mut obj_recv = 0u64; let mut dwon = 0u64; let mut dlost = 0u64;
+            for d in disputes.values() {
+                if d.challenger == seat { obj_filed += 1; }
+                if d.target == seat { obj_recv += 1; }
+                let res = d.resolution.as_deref().unwrap_or("");
+                let challenger_won = res == "challenger_wins" || res.starts_with("conceded_by_") && res != format!("conceded_by_{}", d.challenger);
+                if d.status == "resolved" {
+                    if challenger_won {
+                        if d.challenger == seat { dwon += 1; } else if d.target == seat { dlost += 1; }
+                    } else if res == "target_wins" || res == format!("conceded_by_{}", d.challenger) {
+                        if d.target == seat { dwon += 1; } else if d.challenger == seat { dlost += 1; }
+                    }
+                }
+            }
+            let bounties_completed = bounties.values()
+                .filter(|b| b.status == "approved" && b.claimant.as_deref() == Some(seat.as_str()))
+                .count() as u64;
+
+            seats.insert(seat.clone(), serde_json::json!({
+                "final_balance": final_balance,
+                "starting_balance": starting_balance,
+                "total_earned": earned,
+                "total_lost": lost,
+                "speaks": speaks, "edits": edits, "tests": tests, "passes": passes,
+                "objections_filed": obj_filed, "objections_received": obj_recv,
+                "disputes_won": dwon, "disputes_lost": dlost,
+                "bounties_completed": bounties_completed,
+                "times_timed_out": if timed_out { 1 } else { 0 },
+                "adversarial_pass_penalties": adv_pass,
+            }));
+        }
+
+        let now = super::iso_now();
+        let date = now.get(0..10).unwrap_or("").to_string();
+        serde_json::json!({
+            "session_date": date,
+            "session_end_ts": now,
+            "duration_turns": bal.turn_counter,
+            "seats": seats,
+            "total_pool_destroyed": pool_destroyed,
+        })
+    }
+
+    /// Write the session snapshot to .vaak/currency-history/<date>-NNN.json with a
+    /// 3-digit zero-padded sequence (filename lex order = chronological). Caller
+    /// holds the currency lock. Returns the written path.
+    pub fn write_session_snapshot(dir: &str) -> Result<PathBuf, String> {
+        let snapshot = build_session_snapshot(dir);
+        let date = snapshot.get("session_date").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+        let hist = currency_history_dir(dir);
+        let _ = std::fs::create_dir_all(&hist);
+        // find next sequence for this date
+        let mut max_seq = 0u32;
+        if let Ok(entries) = std::fs::read_dir(&hist) {
+            for e in entries.flatten() {
+                if let Some(name) = e.file_name().to_str() {
+                    if let Some(rest) = name.strip_prefix(&format!("{}-", date)) {
+                        if let Some(num) = rest.strip_suffix(".json") {
+                            if let Ok(n) = num.parse::<u32>() { if n > max_seq { max_seq = n; } }
+                        }
+                    }
+                }
+            }
+        }
+        let path = hist.join(format!("{}-{:03}.json", date, max_seq + 1));
+        let body = serde_json::to_vec_pretty(&snapshot).map_err(|e| format!("serialize snapshot: {}", e))?;
+        atomic_write(&path, &body)?;
+        Ok(path)
+    }
+
+    /// Carry-over on session start (spec §Item 2). For each seat in the MOST
+    /// RECENT snapshot, compute the carried starting_balance (cap 10000, timed-out
+    /// → 0, deficit → 0) and seed balances.json + an `init` ledger row. Only seeds
+    /// seats NOT already in balances.json (idempotent re-join). Also appends one
+    /// multi-line "Session started" banner row for the Flow Feed (spec §Item 4).
+    /// Returns the count of carried seats. Caller holds the currency lock.
+    pub fn apply_carryover(dir: &str) -> Result<u64, String> {
+        let hist = currency_history_dir(dir);
+        // most recent snapshot file (zero-padded → lex max is newest)
+        let mut files: Vec<PathBuf> = match std::fs::read_dir(&hist) {
+            Ok(e) => e.flatten().map(|x| x.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json")).collect(),
+            Err(_) => return Ok(0),
+        };
+        if files.is_empty() { return Ok(0); }
+        files.sort();
+        let latest = files.last().unwrap();
+        let snap_json: serde_json::Value = match std::fs::read_to_string(latest)
+            .ok().and_then(|s| serde_json::from_str(&s).ok()) {
+            Some(v) => v,
+            None => return Ok(0),
+        };
+        let prev_date = snap_json.get("session_date").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let seats = match snap_json.get("seats").and_then(|v| v.as_object()) {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+
+        let mut bal = read_balances_snapshot(dir)?;
+        if bal.seats.is_empty() && currency_jsonl_path(dir).exists() {
+            bal = replay_balances_from_ledger(dir)?;
+        }
+        let now = super::iso_now();
+        let mut carried = 0u64;
+        let mut banner_lines: Vec<String> = vec!["Session started. Carry-over:".to_string()];
+        for (seat, sdata) in seats {
+            if bal.seats.contains_key(seat) { continue; } // already seeded this session
+            let prev_final = sdata.get("final_balance").and_then(|v| v.as_i64()).unwrap_or(STARTING_BALANCE_COPPER);
+            let (start, note) = if prev_final > STARTING_BALANCE_COPPER {
+                (STARTING_BALANCE_COPPER, format!("capped from {}", prev_final))
+            } else if prev_final <= DEFICIT_CAP_COPPER {
+                (0, "timed out last session".to_string())
+            } else if prev_final > 0 {
+                (prev_final, "carried".to_string())
+            } else {
+                (0, "deficit not carried".to_string())
+            };
+            bal.seats.entry(seat.clone()).or_default().balance = start;
+            let id = bal.next_txn_id; bal.next_txn_id = bal.next_txn_id.saturating_add(1);
+            append_currency_transaction(dir, &LedgerRow {
+                id, txn_type: "init".to_string(), seat: seat.clone(), amount: start,
+                reason: format!("carried over from session {}", prev_date),
+                ref_msg: None, balance_after: start, escrow_id: None, release_turn: None,
+                turn: Some(bal.turn_counter), action_kind: Some(ActionKind::Init), linked_edit_msg: None, at: now.clone(),
+            })?;
+            banner_lines.push(format!("{}: {} copper ({})", seat, start, note));
+            carried += 1;
+        }
+        if carried > 0 {
+            write_balances_snapshot(dir, &bal)?;
+            let id = bal.next_txn_id;
+            append_currency_transaction(dir, &LedgerRow {
+                id, txn_type: "init".to_string(), seat: "system:session".to_string(), amount: 0,
+                reason: banner_lines.join("\n"),
+                ref_msg: None, balance_after: 0, escrow_id: None, release_turn: None,
+                turn: Some(bal.turn_counter), action_kind: Some(ActionKind::Init), linked_edit_msg: None, at: now.clone(),
+            })?;
+        }
+        Ok(carried)
+    }
+
     /// Add an open dispute to the snapshot's by-target + by-challenger indexes.
     pub fn snapshot_add_open(snap: &mut OpenDisputesSnapshot, dispute_id: &str, challenger: &str, target: &str) {
         snap.open_by_target.entry(target.to_string()).or_default().push(dispute_id.to_string());

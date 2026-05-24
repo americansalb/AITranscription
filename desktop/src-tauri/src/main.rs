@@ -7038,6 +7038,22 @@ fn main() {
                 if let tauri::RunEvent::Exit = event {
                     HTTP_SERVER_SHUTDOWN.store(true, Ordering::Relaxed);
                     eprintln!("[main] App exiting — HTTP server shutdown signaled");
+                    // Phase 7 (a) — end-of-session currency snapshot. RunEvent::Exit
+                    // fires ONCE on full app exit (sidesteps the per-window
+                    // CloseRequested multi-fire ambiguity tester:0 flagged). Writes
+                    // one .vaak/currency-history/<date>-NNN.json for the active
+                    // project. Best-effort: a failure must not block exit.
+                    if let Some(dir) = get_last_project_path() {
+                        if collab::currency::currency_jsonl_path(&dir).exists() {
+                            match collab::with_currency_and_board_lock(&dir, || {
+                                collab::currency::write_session_snapshot(&dir)
+                            }) {
+                                Ok(Ok(p)) => eprintln!("[main] session snapshot written: {:?}", p),
+                                Ok(Err(e)) => eprintln!("[main] session snapshot error: {}", e),
+                                Err(e) => eprintln!("[main] session snapshot lock error: {}", e),
+                            }
+                        }
+                    }
                 }
                 // NOTE: Do NOT kill spawned Claude agents on app exit.
                 // Terminal sessions must survive app restarts so agents keep their context.

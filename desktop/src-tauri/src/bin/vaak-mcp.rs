@@ -8796,6 +8796,13 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
         config = read_project_config(&normalized)?;
     }
 
+    // Phase 7 (a) — carry-over on session start. Seeds each seat from the most
+    // recent currency-history snapshot (cap 10000 / timed-out → 0) by writing an
+    // `init` row, only for seats not yet in balances.json this session (idempotent
+    // re-join). Best-effort; a failure must not block join. No-op when there's no
+    // prior snapshot (returns 0) — fresh projects keep the standard 10000 lazy-init.
+    let _ = collab::with_currency_and_board_lock(&normalized, || collab::currency::apply_carryover(&normalized));
+
     let roles = config.get("roles").and_then(|r| r.as_object())
         .ok_or("No roles defined in project.json")?;
 
