@@ -2767,7 +2767,13 @@ pub mod currency {
     pub const TEST_ESCROW_TICKS: u64 = 50;
     pub const PASSIVE_PER_TICK_COPPER: i64 = 1;
     pub const INTEREST_MIN_HELD_COPPER: i64 = 10;
-    pub const INTEREST_PER_10_COPPER_HELD: i64 = 1;
+    // Commit E (2026-05-24): zeroed to kill the interest-stacking exploit
+    // (evil-arch msg 172 + dev:1 msg 175 + architect ruling msg 180). Positive
+    // interest on penalty escrow inverted the SPEAK incentive (-10 hold, +20
+    // interest over 20 ticks = net +20 cu pure profit; stacked across concurrent
+    // escrows). Phase-5 redesign may re-introduce a positive incentive on a
+    // coherent vehicle (e.g., bounty stake), NOT on penalty escrow.
+    pub const INTEREST_PER_10_COPPER_HELD: i64 = 0;
     pub const PASS_BODY_LEN_THRESHOLD: usize = 100;
 
     // ---- Phase 2 (Disputes) constants (spec §Constants) ----
@@ -4391,6 +4397,52 @@ pub mod currency {
         #[test]
         fn t_bounty_objection_clawback_90pct() {
             assert_eq!(2000u64 * BOUNTY_OBJECTION_CLAWBACK_PERCENT / 100, 1800);
+        }
+
+        // ── Commit E (2026-05-24): interest-stacking exploit closed ──
+        // Architect ruling msg 180 + evil-arch msg 172 + dev:1 msg 175.
+        // With INTEREST_PER_10_COPPER_HELD = 0, even an escrow item at the
+        // INTEREST_MIN_HELD_COPPER threshold (10cu) generates zero interest
+        // per tick. Stacking N concurrent eligible escrows therefore also
+        // generates zero. This re-aligns SPEAK net P&L with the spec intent
+        // (penalty escrow, NOT a savings instrument): -10 hold, +10 refund
+        // at maturity, 0 interest = net 0 cu (was net +20 cu pre-fix).
+        #[test]
+        fn t_commit_e_interest_per_10_copper_held_is_zero() {
+            assert_eq!(INTEREST_PER_10_COPPER_HELD, 0);
+        }
+
+        #[test]
+        fn t_commit_e_threshold_escrow_yields_zero_interest_per_tick() {
+            // Mirrors the formula at collab.rs:4434-4438 against a single
+            // threshold-amount escrow item.
+            let amount: i64 = INTEREST_MIN_HELD_COPPER; // 10
+            let interest_per_tick = (amount / 10) * INTEREST_PER_10_COPPER_HELD;
+            assert_eq!(interest_per_tick, 0);
+        }
+
+        #[test]
+        fn t_commit_e_stacked_speak_escrows_yield_zero_interest() {
+            // Pre-fix, a seat holding 5 concurrent SPEAK escrows (each 10cu)
+            // earned 5cu per tick × 20 ticks = +100cu pure profit.
+            // Post-fix, the sum is 0 regardless of count.
+            let amount: i64 = INTEREST_MIN_HELD_COPPER;
+            let stacked: i64 = (0..5)
+                .map(|_| (amount / 10) * INTEREST_PER_10_COPPER_HELD)
+                .sum();
+            assert_eq!(stacked, 0);
+        }
+
+        #[test]
+        fn t_commit_e_speak_net_pnl_over_20_ticks_is_neutral() {
+            // Net P&L of one SPEAK escrow over its full 20-tick window:
+            //   = -SPEAK_EARN_COPPER (hold) + 0 (interest accrued) + SPEAK_EARN_COPPER (refund)
+            //   = 0
+            // Pre-fix this was +20 (the bug); post-fix it is neutral.
+            let interest_over_window: i64 =
+                (0..SPEAK_ESCROW_TICKS as i64).map(|_| (SPEAK_EARN_COPPER / 10) * INTEREST_PER_10_COPPER_HELD).sum();
+            let net_pnl: i64 = -SPEAK_EARN_COPPER + interest_over_window + SPEAK_EARN_COPPER;
+            assert_eq!(net_pnl, 0);
         }
     }
 
