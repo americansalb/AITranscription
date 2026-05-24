@@ -8197,6 +8197,32 @@
 .discussion-mode-section.collapsed > .collapsible-section-header {
   padding: 4px 8px;
 }
+/* Discussion Mode trailing state badge — per human msg 674 (2026-05-24).
+   Shows current preset + phase + visibility on the collapsed bar so the
+   human always sees what mode they're in without expanding the card. */
+.discussion-mode-section-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.65));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+.dm-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  flex-shrink: 0;
+}
+.dm-state-dot-on {
+  background: #17bf63;
+  box-shadow: 0 0 4px rgba(23, 191, 99, 0.5);
+}
 
 /* ============================================================
  * Phase 1c — Visible restyle (human msg 645: "looks exactly the same")

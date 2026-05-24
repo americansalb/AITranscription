@@ -5923,10 +5923,22 @@ When multiple instances of this role are active:
             human can collapse it to a 30px header when assembly is OFF. */}
         {twoControlsProtocol && (() => {
           const dmCollapsedEffective = discussionModeCardCollapsed ?? !twoControlsProtocol.floor?.assembly_active;
+          const livePreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
+          const livePhase = twoControlsProtocol?.floor?.phase as string | undefined;
+          const assemblyOn = twoControlsProtocol?.floor?.assembly_active === true;
+          const visibilityMode = project?.config?.settings?.discussion_mode === "open" ? "Open" : "Directed";
+          const phaseLabel = livePhase === "execution" ? " · Executing" : livePhase === "planning" ? " · Planning" : "";
+          const dmTrailing = (
+            <span className="discussion-mode-section-state" aria-label={`current mode: ${assemblyOn ? livePreset : "off"}${phaseLabel}, visibility ${visibilityMode}`}>
+              <span className={`dm-state-dot${assemblyOn ? " dm-state-dot-on" : ""}`} aria-hidden="true" />
+              {assemblyOn ? livePreset : "off"}{phaseLabel} · {visibilityMode}
+            </span>
+          );
           return (
           <CollapsibleSection
             id="discussion-mode-section"
             title="Discussion Mode"
+            trailing={dmTrailing}
             collapsed={dmCollapsedEffective}
             onToggle={() => updateDiscussionModeCardCollapsed(!dmCollapsedEffective)}
             className="discussion-mode-section rail-section"
