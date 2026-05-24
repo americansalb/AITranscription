@@ -153,7 +153,7 @@ interface DisputeRow {
   resolved_at?: string;
 }
 
-type CurrencyTier = "earn" | "hold" | "loss" | "dispute" | "passive" | "destroyed" | "bounty";
+type CurrencyTier = "earn" | "hold" | "loss" | "dispute" | "passive" | "destroyed" | "bounty" | "session-start";
 
 // The 13-row transaction→display mapping (human msg 1872, verbatim).
 // reason is prose so sub-types are matched by keyword (includes), not equality.
@@ -167,6 +167,11 @@ function formatCurrencyLine(row: CurrencyFeedRow): { text: string; tier: Currenc
 
   switch (row.type) {
     case "init":
+      // Phase 7 (c) — Session-start carry-over banner. Backend writes a
+      // single Init row with multi-line `reason` summarizing per-seat
+      // carry-over. Renderer keeps the prose verbatim (CSS handles wrap).
+      if (row.reason && row.reason.startsWith("Session started. Carry-over:"))
+        return { text: row.reason, tier: "session-start" as CurrencyTier };
       return { text: `${seat} joined with 10,000 copper`, tier: "passive" };
     case "escrow_hold":
       return { text: `${seat} — ${amt} copper held in escrow${row.release_turn != null ? ` (turn ${row.release_turn})` : ""}`, tier: "hold" };

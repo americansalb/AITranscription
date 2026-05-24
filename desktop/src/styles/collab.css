@@ -8418,6 +8418,28 @@
 .currency-line--passive .currency-line-text { color: #8b949e; }   /* Gray — passive */
 .currency-line--destroyed .currency-line-text { color: #a371f7; } /* Purple — pool destroyed */
 
+/* Phase 7 (c) — Session-start carry-over banner. Multi-line render so the
+   per-seat summary in the reason field stays readable; teal accent makes it
+   distinct from regular init rows. */
+.currency-line--session-start {
+  border-left-color: #14b8a6;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+.currency-line--session-start .currency-line-text {
+  color: #5eead4;
+  white-space: pre-line;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.currency-inline-notice.currency-line--session-start {
+  border-left-color: #14b8a6;
+}
+.currency-inline-notice.currency-line--session-start .currency-inline-text {
+  color: #5eead4;
+  white-space: pre-line;
+}
+
 /* --- Phase 5 (human msg 1971): "More Stats" button + popup modal --- */
 .flow-feed-stats-btn {
   margin-left: 8px;
