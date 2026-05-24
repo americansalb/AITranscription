@@ -2786,6 +2786,11 @@ pub mod currency {
     // per-test-row — Q2 dedupe). Steeper than the retro-Pass sting: a bad
     // certification is a stronger signal than a lazy pass.
     pub const COLIABILITY_TEST_PENALTY_COPPER: i64 = 15;
+    // Phase 6: bounty economy.
+    pub const BOUNTY_CLAIM_STAKE_PERCENT: u64 = 10;        // 10% of bounty held as claim stake
+    pub const BOUNTY_ABANDON_LOSS_PERCENT: u64 = 50;       // abandon → lose half the stake
+    pub const BOUNTY_REJECT_LOSS_PERCENT: u64 = 100;       // reject → lose full stake
+    pub const BOUNTY_OBJECTION_CLAWBACK_PERCENT: u64 = 90; // successful objection on approved bounty
 
     // ---- Types ----
 
@@ -2802,6 +2807,11 @@ pub mod currency {
         Credit, EscrowHold, EscrowRelease,
         Passive, Interest, Penalty, Clawback,
         PoolDestroyed,
+        // Phase 6: bounty economy opcodes.
+        BountyStake,    // claimant stakes 10% to claim a bounty (debit)
+        BountyEarn,     // claimant paid out on approval (credit = amount + stake)
+        BountyClawback, // objection-on-approved-bounty claws back 90% of payout
+        BountyExpire,   // expired/abandoned bounty stake destroyed
     }
 
     /// Display split. balances.json carries copper only; UI consumers call
@@ -2881,6 +2891,10 @@ pub mod currency {
         pub next_txn_id: u64,
         #[serde(default)]
         pub next_escrow_id: u64,
+        /// Phase 6: monotonic bounty id counter (serde-default for back-compat
+        /// with pre-Phase-6 snapshots).
+        #[serde(default)]
+        pub next_bounty_id: u64,
         pub seats: HashMap<String, SeatBalance>,
     }
 
@@ -2932,6 +2946,46 @@ pub mod currency {
         pub next_dispute_id: u64,
     }
 
+    // ---- Phase 6: Bounties ----
+
+    /// A bounty row appended to .vaak/bounties.jsonl (append-only; latest row
+    /// per `id` is current state). status: open|claimed|submitted|approved|
+    /// rejected|expired|abandoned.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct BountyRow {
+        pub id: String, // "bounty_{:06x}"
+        pub description: String,
+        pub amount: i64,
+        pub posted_by: String,
+        pub deadline_turn: u64,
+        pub status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub claimant: Option<String>,
+        #[serde(default)]
+        pub claim_stake: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub submission_msg: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub approved_by: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub last_rejection_reason: Option<String>,
+        pub posted_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub resolved_at: Option<String>,
+        #[serde(default)]
+        pub turn_posted: u64,
+    }
+
+    /// Snapshot mirror for fast UI render + lifecycle lookups. Maps bounty id →
+    /// latest row. next_bounty_id mirrors balances.json for id allocation.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct OpenBountiesSnapshot {
+        #[serde(default)]
+        pub next_bounty_id: u64,
+        #[serde(default)]
+        pub bounties: HashMap<String, BountyRow>,
+    }
+
     // ---- Paths ----
 
     fn vaak_root(dir: &str) -> PathBuf {
@@ -2951,6 +3005,12 @@ pub mod currency {
     }
     pub fn open_disputes_json_path(dir: &str) -> PathBuf {
         vaak_root(dir).join("open_disputes.json")
+    }
+    pub fn bounties_jsonl_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("bounties.jsonl")
+    }
+    pub fn open_bounties_json_path(dir: &str) -> PathBuf {
+        vaak_root(dir).join("open_bounties.json")
     }
 
     // ---- Display helper ----
@@ -3068,6 +3128,61 @@ pub mod currency {
         let id = snap.next_dispute_id;
         snap.next_dispute_id = snap.next_dispute_id.wrapping_add(1);
         format!("disp_{:06x}", id)
+    }
+
+    // ---- Phase 6: Bounty helpers (mirror the dispute helpers above) ----
+
+    pub fn append_bounty_row(dir: &str, row: &BountyRow) -> Result<(), String> {
+        let path = bounties_jsonl_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        let line = serde_json::to_string(row)
+            .map_err(|e| format!("serialize bounty row: {}", e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("open bounties.jsonl: {}", e))?;
+        writeln!(f, "{}", line).map_err(|e| format!("write bounties.jsonl: {}", e))?;
+        Ok(())
+    }
+
+    /// Read the open-bounties snapshot (default-empty when absent).
+    pub fn read_open_bounties_snapshot(dir: &str) -> Result<OpenBountiesSnapshot, String> {
+        let path = open_bounties_json_path(dir);
+        if !path.exists() {
+            return Ok(OpenBountiesSnapshot::default());
+        }
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read open_bounties.json: {}", e))?;
+        serde_json::from_str(&raw).map_err(|e| format!("parse open_bounties.json: {}", e))
+    }
+
+    /// Atomic-write the open-bounties snapshot.
+    pub fn write_open_bounties_snapshot(dir: &str, snap: &OpenBountiesSnapshot) -> Result<(), String> {
+        let path = open_bounties_json_path(dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let body = serde_json::to_vec_pretty(snap)
+            .map_err(|e| format!("serialize open_bounties.json: {}", e))?;
+        atomic_write(&path, &body)
+    }
+
+    /// Latest row per bounty id, replayed from bounties.jsonl (append-only).
+    pub fn read_latest_bounties(dir: &str) -> HashMap<String, BountyRow> {
+        let mut latest: HashMap<String, BountyRow> = HashMap::new();
+        if let Ok(content) = std::fs::read_to_string(bounties_jsonl_path(dir)) {
+            for line in content.lines() {
+                if line.trim().is_empty() { continue; }
+                if let Ok(row) = serde_json::from_str::<BountyRow>(line) {
+                    latest.insert(row.id.clone(), row);
+                }
+            }
+        }
+        latest
     }
 
     /// Add an open dispute to the snapshot's by-target + by-challenger indexes.
@@ -3250,6 +3365,15 @@ pub mod currency {
             "system_dispute_ban" => {
                 seat_entry.system_dispute_ban_until = row.release_turn;
             }
+            // Phase 6: bounty ledger opcodes. Stake/clawback are debits (amount
+            // negative), earn is a credit (amount positive). The global deficit
+            // check below trips timed_out as needed. bounty_expire is audit-only
+            // (the stake was already debited at claim; this documents the burn —
+            // seat is "system:pool", no real balance change).
+            "bounty_stake" | "bounty_earn" | "bounty_clawback" => {
+                seat_entry.balance = seat_entry.balance.saturating_add(row.amount);
+            }
+            "bounty_expire" => {}
             other => {
                 return Err(format!(
                     "currency.replay HARD ERROR: unknown transaction type {:?} (row id {})",

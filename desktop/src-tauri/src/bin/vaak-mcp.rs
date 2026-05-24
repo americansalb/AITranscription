@@ -9364,6 +9364,145 @@ fn record_currency_earn(
 /// penalty row), open a dispute (pool = cost + stake), post a board notice.
 /// Uses existing apply_row txn types (penalty/escrow_release) so replay works
 /// without new handlers. Returns the dispute row JSON.
+/// Phase 6 (a) — post a bounty (human-only). House pool is infinite; no debit
+/// on post (the amount only leaves the house on approval).
+fn handle_currency_post_bounty(description: &str, amount: i64, deadline_turns: u64) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let poster = format!("{}:{}", state.role, state.instance);
+    if !poster.starts_with("human:") {
+        return Err("[Bounty] only human:* can post bounties.".to_string());
+    }
+    if amount <= 0 { return Err("[Bounty] amount must be > 0.".to_string()); }
+    if deadline_turns == 0 { return Err("[Bounty] deadline_turns must be > 0.".to_string()); }
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        let mut bounties = read_open_bounties_snapshot(&dir)?;
+        let id_num = snap.next_bounty_id.max(bounties.next_bounty_id);
+        let bounty_id = format!("bounty_{:06x}", id_num);
+        snap.next_bounty_id = id_num + 1;
+        bounties.next_bounty_id = id_num + 1;
+        let now = collab::iso_now();
+        let deadline_turn = snap.turn_counter + deadline_turns;
+        let row = BountyRow {
+            id: bounty_id.clone(), description: description.to_string(), amount,
+            posted_by: poster.clone(), deadline_turn, status: "open".to_string(),
+            claimant: None, claim_stake: 0, submission_msg: None, approved_by: None,
+            last_rejection_reason: None, posted_at: now.clone(), resolved_at: None,
+            turn_posted: snap.turn_counter,
+        };
+        append_bounty_row(&dir, &row)?;
+        bounties.bounties.insert(bounty_id.clone(), row);
+        write_open_bounties_snapshot(&dir, &bounties)?;
+        write_balances_snapshot(&dir, &snap)?;
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[bounty] new — {} copper", amount),
+            "body": format!("Bounty {}: {} — {} copper, deadline turn {}.", bounty_id, description, amount, deadline_turn),
+            "metadata": { "bounty_id": bounty_id, "amount": amount, "deadline_turn": deadline_turn }
+        }));
+        Ok(serde_json::json!({ "bounty_id": bounty_id, "amount": amount, "deadline_turn": deadline_turn }))
+    })
+}
+
+/// Phase 6 (a) — claim an open bounty, staking 10% of the amount.
+fn handle_currency_claim_bounty(bounty_id: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let claimant = format!("{}:{}", state.role, state.instance);
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut bounties = read_open_bounties_snapshot(&dir)?;
+        let bounty = read_latest_bounties(&dir).get(bounty_id).cloned()
+            .ok_or_else(|| format!("[Bounty] {} not found.", bounty_id))?;
+        if bounty.status != "open" { return Err(format!("[Bounty] {} is {}, not open.", bounty_id, bounty.status)); }
+        if bounty.claimant.is_some() { return Err(format!("[Bounty] {} already claimed.", bounty_id)); }
+        let stake = bounty.amount * BOUNTY_CLAIM_STAKE_PERCENT as i64 / 100;
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        let bal = snap.seats.get(&claimant).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
+        if bal < stake { return Err(format!("[Bounty] insufficient balance for claim stake: need {}, have {}.", stake, bal)); }
+        let now = collab::iso_now();
+        let after = {
+            let e = snap.seats.entry(claimant.clone()).or_insert_with(|| { let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb });
+            e.balance = e.balance.saturating_sub(stake);
+            e.balance
+        };
+        let id = snap.next_txn_id; snap.next_txn_id += 1;
+        append_currency_transaction(&dir, &LedgerRow {
+            id, txn_type: "bounty_stake".to_string(), seat: claimant.clone(),
+            amount: -stake, reason: format!("bounty claim stake ({})", bounty_id),
+            ref_msg: None, balance_after: after, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: Some(ActionKind::BountyStake), linked_edit_msg: None, at: now.clone(),
+        })?;
+        let mut row = bounty;
+        row.status = "claimed".to_string();
+        row.claimant = Some(claimant.clone());
+        row.claim_stake = stake;
+        append_bounty_row(&dir, &row)?;
+        bounties.bounties.insert(bounty_id.to_string(), row);
+        write_open_bounties_snapshot(&dir, &bounties)?;
+        write_balances_snapshot(&dir, &snap)?;
+        Ok(serde_json::json!({ "bounty_id": bounty_id, "claimant": claimant, "stake": stake }))
+    })
+}
+
+/// Phase 6 (a) — claimant abandons a claimed bounty: loses half the stake, gets
+/// half back; bounty reopens.
+fn handle_currency_abandon_bounty(bounty_id: &str) -> Result<serde_json::Value, String> {
+    use collab::currency::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let actor = format!("{}:{}", state.role, state.instance);
+    collab::with_currency_and_board_lock(&dir, || {
+        let mut bounties = read_open_bounties_snapshot(&dir)?;
+        let bounty = read_latest_bounties(&dir).get(bounty_id).cloned()
+            .ok_or_else(|| format!("[Bounty] {} not found.", bounty_id))?;
+        if bounty.status != "claimed" { return Err(format!("[Bounty] {} is {}, not claimed.", bounty_id, bounty.status)); }
+        if bounty.claimant.as_deref() != Some(actor.as_str()) {
+            return Err("[Bounty] only the current claimant can abandon.".to_string());
+        }
+        let stake = bounty.claim_stake;
+        let refund = stake * (100 - BOUNTY_ABANDON_LOSS_PERCENT as i64) / 100;
+        let destroyed = stake - refund;
+        let mut snap = read_balances_snapshot(&dir)?;
+        if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
+        let now = collab::iso_now();
+        let after = {
+            let e = snap.seats.entry(actor.clone()).or_insert_with(|| { let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb });
+            e.balance = e.balance.saturating_add(refund);
+            e.balance
+        };
+        let id = snap.next_txn_id; snap.next_txn_id += 1;
+        append_currency_transaction(&dir, &LedgerRow {
+            id, txn_type: "credit".to_string(), seat: actor.clone(),
+            amount: refund, reason: format!("bounty abandoned — half stake returned ({})", bounty_id),
+            ref_msg: None, balance_after: after, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Credit), linked_edit_msg: None, at: now.clone(),
+        })?;
+        let did = snap.next_txn_id; snap.next_txn_id += 1;
+        append_currency_transaction(&dir, &LedgerRow {
+            id: did, txn_type: "bounty_expire".to_string(), seat: "system:pool".to_string(),
+            amount: -destroyed, reason: format!("bounty abandoned — half stake destroyed ({})", bounty_id),
+            ref_msg: None, balance_after: 0, escrow_id: None, release_turn: None,
+            turn: Some(snap.turn_counter), action_kind: Some(ActionKind::BountyExpire), linked_edit_msg: None, at: now.clone(),
+        })?;
+        let mut row = bounty;
+        row.status = "open".to_string();
+        row.claimant = None;
+        row.claim_stake = 0;
+        append_bounty_row(&dir, &row)?;
+        bounties.bounties.insert(bounty_id.to_string(), row);
+        write_open_bounties_snapshot(&dir, &bounties)?;
+        write_balances_snapshot(&dir, &snap)?;
+        Ok(serde_json::json!({ "bounty_id": bounty_id, "refunded": refund, "destroyed": destroyed }))
+    })
+}
+
 fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_json::Value, String> {
     use collab::currency::*;
     let state = get_or_rejoin_state()?;
@@ -13305,6 +13444,41 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "currency_post_bounty",
+                    "description": "Post a bounty (HUMAN ONLY). Directs effort: agents compete to complete it. Amount comes from the infinite house pool (no debit on post; paid on approval). Returns the bounty id.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "description": { "type": "string", "description": "What needs to be done" },
+                            "amount": { "type": "integer", "description": "Bounty reward in copper (>0)" },
+                            "deadline_turns": { "type": "integer", "description": "Turns from now until the bounty expires (>0)" }
+                        },
+                        "required": ["description", "amount", "deadline_turns"]
+                    }
+                },
+                {
+                    "name": "currency_claim_bounty",
+                    "description": "Claim an open bounty (any agent, one claimant at a time). Stakes 10% of the bounty amount from your balance (refunded on approval, forfeited on reject/expire, half-forfeited on abandon). Rejected if your balance is below the stake.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "bounty_id": { "type": "string", "description": "Bounty id (e.g. \"bounty_000001\")" }
+                        },
+                        "required": ["bounty_id"]
+                    }
+                },
+                {
+                    "name": "currency_abandon_bounty",
+                    "description": "Abandon a bounty you've claimed. You forfeit HALF your claim stake (the other half is returned); the bounty reopens for others.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "bounty_id": { "type": "string", "description": "Bounty id you currently hold the claim on" }
+                        },
+                        "required": ["bounty_id"]
+                    }
+                },
+                {
                     "name": "currency_objection",
                     "description": "Object to another seat's accepted message. Costs 50 copper (always). Captures the target's stake (their escrow if still held, else 90% of their earn clawed back) into a dispute pool. The target must respond (currency_concede or currency_dispute_message) and cannot Pass while disputed. Cannot object to human messages or your own.",
                     "inputSchema": {
@@ -14128,6 +14302,39 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
                         "isError": true
                     }),
+                }
+            } else if tool_name == "currency_post_bounty" {
+                let a = params.get("arguments");
+                let description = a.and_then(|a| a.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let amount = a.and_then(|a| a.get("amount")).and_then(|v| v.as_i64()).unwrap_or(0);
+                let deadline_turns = a.and_then(|a| a.get("deadline_turns")).and_then(|v| v.as_u64()).unwrap_or(0);
+                if description.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_post_bounty requires description (String), amount (int>0), deadline_turns (int>0)" }], "isError": true })
+                } else {
+                    match handle_currency_post_bounty(&description, amount, deadline_turns) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Bounty posted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "currency_claim_bounty" {
+                let bounty_id = params.get("arguments").and_then(|a| a.get("bounty_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if bounty_id.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_claim_bounty requires bounty_id (String)" }], "isError": true })
+                } else {
+                    match handle_currency_claim_bounty(&bounty_id) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Bounty claimed.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "currency_abandon_bounty" {
+                let bounty_id = params.get("arguments").and_then(|a| a.get("bounty_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if bounty_id.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "currency_abandon_bounty requires bounty_id (String)" }], "isError": true })
+                } else {
+                    match handle_currency_abandon_bounty(&bounty_id) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Bounty abandoned.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
                 }
             } else if tool_name == "currency_objection" {
                 // Phase 2 — real impl. Args: target_msg_id (u64), reason (String).
