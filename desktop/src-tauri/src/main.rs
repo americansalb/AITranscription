@@ -3656,6 +3656,102 @@ fn get_currency_balances_cmd(dir: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+/// Human msg 657 (2026-05-24) — read economy settings as JSON for the UI.
+/// Returns the current EconomySettings (file values + defaults for missing
+/// fields), enabling the Settings page to populate inputs with the live
+/// values. Read-only; no audit.
+#[tauri::command]
+fn read_economy_settings_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let settings = collab::currency::read_economy_settings(&dir);
+    serde_json::to_value(&settings).map_err(|e| format!("economy serialize: {}", e))
+}
+
+/// Human msg 657 — write economy settings to .vaak/economy.json + emit an
+/// audit ledger row per evil-arch msg 661 + tester msg 663 #2.
+///
+/// Inputs: the full settings JSON object (UI builds from read_economy_settings_cmd
+/// + applies user edits). Caller is hard-wired to human:0 (only the Vaak UI
+/// can call this; the MCP-side equivalent would require a separate sidecar
+/// tool that this commit does not ship).
+///
+/// On every write:
+///   1. Reads current settings (the previous values) for the diff.
+///   2. Parses the incoming JSON into EconomySettings (rejects malformed
+///      payloads with [EconomyTuneInvalidPayload]).
+///   3. Atomic-writes the new settings to .vaak/economy.json.
+///   4. Emits ONE ledger audit row per field that changed, with
+///      txn_type:"economy_tune", action_kind:EconomyTune, amount=0, and
+///      reason="<field>: <old> → <new>". Fields that didn't change emit
+///      no row (keeps the ledger from bloating on no-op writes).
+///   5. Returns {fields_changed: N, settings: <new>}.
+#[tauri::command]
+fn write_economy_settings_cmd(
+    dir: String,
+    settings: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let new_settings: collab::currency::EconomySettings = serde_json::from_value(settings)
+        .map_err(|e| format!("[EconomyTuneInvalidPayload] {}", e))?;
+    let old_settings = collab::currency::read_economy_settings(&dir);
+
+    // Diff per field — compare via serde Value to enumerate every field generically.
+    let old_v = serde_json::to_value(&old_settings).map_err(|e| format!("economy serialize old: {}", e))?;
+    let new_v = serde_json::to_value(&new_settings).map_err(|e| format!("economy serialize new: {}", e))?;
+    let mut changes: Vec<(String, serde_json::Value, serde_json::Value)> = Vec::new();
+    if let (Some(o), Some(n)) = (old_v.as_object(), new_v.as_object()) {
+        for (k, nv) in n {
+            let ov = o.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            if &ov != nv {
+                changes.push((k.clone(), ov, nv.clone()));
+            }
+        }
+    }
+
+    // Persist under currency lock + emit audit rows atomically.
+    collab::with_currency_lock(&dir, || {
+        collab::currency::write_economy_settings(&dir, &new_settings)?;
+        if !changes.is_empty() {
+            let mut snap = collab::currency::read_balances_snapshot(&dir)?;
+            if snap.seats.is_empty() && collab::currency::currency_jsonl_path(&dir).exists() {
+                snap = collab::currency::replay_balances_from_ledger(&dir)?;
+            }
+            let now = collab::iso_now();
+            for (field, old_value, new_value) in &changes {
+                let id = snap.next_txn_id;
+                snap.next_txn_id += 1;
+                let row = collab::currency::LedgerRow {
+                    id,
+                    txn_type: "economy_tune".to_string(),
+                    // System-level audit: not attributed to a specific seat
+                    // because the change affects every seat. The UI caller
+                    // (always human:0) is implicit.
+                    seat: "human:0".to_string(),
+                    amount: 0,
+                    reason: format!("economy_tune by human:0: {} = {} → {}", field, old_value, new_value),
+                    ref_msg: None,
+                    balance_after: 0,
+                    escrow_id: None,
+                    release_turn: None,
+                    turn: Some(snap.turn_counter),
+                    action_kind: Some(collab::currency::ActionKind::EconomyTune),
+                    linked_edit_msg: None,
+                    at: now.clone(),
+                };
+                collab::currency::append_currency_transaction(&dir, &row)?;
+            }
+            collab::currency::write_balances_snapshot(&dir, &snap)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(serde_json::json!({
+        "fields_changed": changes.len(),
+        "settings": new_v,
+        "changes": changes.iter().map(|(f, o, n)| serde_json::json!({"field": f, "from": o, "to": n})).collect::<Vec<_>>(),
+    }))
+}
+
 /// Human msg 458 (2026-05-24) — Tauri-path human balance adjust. The UI calls
 /// this command directly from within the Vaak webview (no MCP roundtrip). The
 /// `caller` is always hard-wired to "human:0" because only the human is the
@@ -6989,6 +7085,8 @@ fn main() {
             list_active_seats_cmd,
             get_currency_balances_cmd,
             currency_human_adjust_cmd,
+            read_economy_settings_cmd,
+            write_economy_settings_cmd,
             read_currency_feed_cmd,
             read_disputes_cmd,
             read_bounties_cmd,
