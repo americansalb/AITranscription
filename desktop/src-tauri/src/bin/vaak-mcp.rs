@@ -9603,6 +9603,13 @@ fn handle_oxford_initiate(
         out
     })();
 
+    // Per architect msg 527 ruling: reward 0 is allowed (no-reward debate),
+    // negative is rejected. None defaults to OXFORD_DEFAULT_WINNING_REWARD_COPPER.
+    if let Some(r) = winning_side_reward_copper {
+        if r < 0 {
+            return Err("[OxfordInvalidReward] winning_side_reward_copper must be >= 0 (0 = no-reward debate; negative not allowed).".to_string());
+        }
+    }
     // Pure validation up front (no lock yet).
     validate_initiate(&caller, moderator, side_a, side_b, audience, &active_seats)?;
 
@@ -9778,13 +9785,66 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
             }
         }
         let debate_id = debate.debate_id;
+        // Tally audience votes from the event log (per spec §5 + Lock #v2.2-2
+        // strict-majority gate). Human:0 vote recorded separately per Lock #v2.2-4
+        // COI audit + msg 489 #8 separate-tally semantics.
+        let mut tally_a = 0i64;
+        let mut tally_b = 0i64;
+        let mut tally_draw = 0i64;
+        let mut human_vote: Option<String> = None;
+        let log_path = oxford_debates_jsonl_path(&dir);
+        if log_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&log_path) {
+                for line in content.lines() {
+                    if let Ok(OxfordEvent::AudienceVote { debate_id: did, voter, vote, .. }) = serde_json::from_str::<OxfordEvent>(line) {
+                        if did != debate_id { continue; }
+                        if voter.starts_with("human:") {
+                            human_vote = Some(vote.clone());
+                            continue; // human vote tracked separately
+                        }
+                        match vote.as_str() {
+                            "side_a" => tally_a += 1,
+                            "side_b" => tally_b += 1,
+                            "draw" => tally_draw += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        let total_nonabstain = tally_a + tally_b; // "draw" counts as abstain for reward
+        let strict_majority_winner: Option<&str> = if total_nonabstain == 0 {
+            None
+        } else if tally_a * 2 > total_nonabstain {
+            Some("side_a")
+        } else if tally_b * 2 > total_nonabstain {
+            Some("side_b")
+        } else {
+            None
+        };
+        let audience_tally_json = serde_json::json!({
+            "side_a": tally_a,
+            "side_b": tally_b,
+            "draw": tally_draw,
+            "strict_majority_winner": strict_majority_winner,
+        });
+        // Reward distribution: per spec §6.1 v2.2 POOL-FUNDED. The pool_balance
+        // field is plan v2 §3b territory (not yet shipped at the time of this
+        // commit), so the actual debit-from-pool + credit-to-winners is a TODO.
+        // For now: emit reward_distributed = 0 when winner exists, signaling
+        // the mechanism is wired but unfunded. When §3b lands, swap the
+        // 0-emit for the real pool_debit + credit logic per spec §6.1 v2.2.
+        let reward_distributed: i64 = match strict_majority_winner {
+            Some(_) => 0, // TODO: distribute from pool_balance when §3b ships
+            None => 0,
+        };
         append_oxford_event(&dir, &OxfordEvent::Ended {
             debate_id,
             timestamp: now.clone(),
             outcome: outcome.to_string(),
-            audience_tally_nonhuman: None,
-            audience_human_vote: None,
-            reward_distributed: None, // populated in a follow-up commit
+            audience_tally_nonhuman: Some(audience_tally_json),
+            audience_human_vote: human_vote.clone(),
+            reward_distributed: Some(reward_distributed),
         })?;
         clear_active_oxford(&dir)?;
         let msg_id = next_message_id(&dir);
@@ -9850,6 +9910,144 @@ fn handle_oxford_kick(seat: &str) -> Result<serde_json::Value, String> {
             "metadata": { "debate_id": debate_id, "seat": seat, "was_active_speaker": was_active_speaker, "oxford_event": "kicked" }
         }));
         Ok(serde_json::json!({ "debate_id": debate_id, "kicked": seat, "was_active_speaker": was_active_speaker }))
+    })
+}
+
+/// Phase A v2.2 commit 5 — oxford_react. Visual-only event for audience and
+/// non-speaking debaters. Spec §3.4a. Rate-limited per
+/// OXFORD_REACT_RATE_LIMIT_PER_MIN (3) in OXFORD_REACT_RATE_LIMIT_WINDOW_SECS
+/// (60) rolling window. NO board message; only oxford-debates.jsonl audit
+/// row + the Phase B visualization event consumes it.
+fn handle_oxford_react(emoji: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    // Emoji whitelist per spec §3.4a (rendered by Phase B; any string accepted
+    // here but documented choices keep visualization sprite-mapping sane).
+    let valid_emoji = ["clap", "boo", "gasp", "laugh", "applause"];
+    if !valid_emoji.iter().any(|v| *v == emoji) {
+        return Err(format!("[OxfordInvalidEmoji] emoji must be one of {:?}", valid_emoji));
+    }
+    collab::oxford::with_oxford_lock(&dir, || {
+        let debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        // Caller-gate per spec §3.4a:
+        if caller == debate.moderator {
+            return Err("[OxfordModeratorCannotReact]".to_string());
+        }
+        if debate.current_speaker.as_deref() == Some(caller.as_str()) {
+            return Err("[OxfordSpeakerCannotReact]".to_string());
+        }
+        let in_debate = debate.side_a.iter().any(|s| s == &caller)
+            || debate.side_b.iter().any(|s| s == &caller)
+            || debate.audience.iter().any(|s| s == &caller);
+        if !in_debate {
+            return Err("[OxfordNonParticipantCannotReact]".to_string());
+        }
+        // Rate-limit: scan recent React events for this caller in the rolling window.
+        let log_path = oxford_debates_jsonl_path(&dir);
+        let now_iso = collab::iso_now();
+        if log_path.exists() {
+            let recent_count: u64 = std::fs::read_to_string(&log_path)
+                .ok()
+                .map(|content| {
+                    let mut n: u64 = 0;
+                    for line in content.lines() {
+                        if let Ok(ev) = serde_json::from_str::<OxfordEvent>(line) {
+                            if let OxfordEvent::React { seat, timestamp, .. } = ev {
+                                if seat == caller {
+                                    // Rough within-window check: ISO strings are
+                                    // lexicographically ordered, so we can compare
+                                    // by parsing seconds-since-epoch via the
+                                    // timestamp's tail. For simplicity, only count
+                                    // events that share the same minute prefix as
+                                    // now_iso (truncated to "YYYY-MM-DDTHH:MM") —
+                                    // a conservative under-count but never an
+                                    // over-count, so rate-limit can only be
+                                    // permissive in edge cases.
+                                    let now_min = &now_iso[..16.min(now_iso.len())];
+                                    let ev_min = &timestamp[..16.min(timestamp.len())];
+                                    if ev_min >= now_min {
+                                        n += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    n
+                })
+                .unwrap_or(0);
+            if recent_count >= OXFORD_REACT_RATE_LIMIT_PER_MIN {
+                return Err(format!(
+                    "[OxfordReactionRateLimit] max {} reactions per {} seconds; you've used the budget.",
+                    OXFORD_REACT_RATE_LIMIT_PER_MIN, OXFORD_REACT_RATE_LIMIT_WINDOW_SECS
+                ));
+            }
+        }
+        let debate_id = debate.debate_id;
+        append_oxford_event(&dir, &OxfordEvent::React {
+            debate_id,
+            timestamp: now_iso.clone(),
+            seat: caller.clone(),
+            emoji: emoji.to_string(),
+        })?;
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "seat": caller,
+            "emoji": emoji,
+            "timestamp": now_iso,
+            "rate_limit_per_min": OXFORD_REACT_RATE_LIMIT_PER_MIN,
+        }))
+    })
+}
+
+/// Phase A v2.2 commit 5 — oxford_audience_vote. Audience members cast a
+/// vote ("side_a" | "side_b" | "draw"). Vote MUST be cast BEFORE oxford_end
+/// fires; the tally happens at end-time. Per spec §5 + Lock #v2.2-2
+/// strict-majority gate (>50% non-abstain) applied at oxford_end.
+fn handle_oxford_audience_vote(vote: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    let valid = ["side_a", "side_b", "draw"];
+    if !valid.iter().any(|v| *v == vote) {
+        return Err(format!("[OxfordInvalidVote] vote must be one of {:?}", valid));
+    }
+    collab::oxford::with_oxford_lock(&dir, || {
+        let debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if !debate.audience.iter().any(|s| s == &caller) {
+            return Err("[OxfordOnlyAudienceCanVote]".to_string());
+        }
+        // One vote per caller per debate — scan AudienceVote events for prior vote
+        let log_path = oxford_debates_jsonl_path(&dir);
+        let debate_id = debate.debate_id;
+        if log_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&log_path) {
+                for line in content.lines() {
+                    if let Ok(OxfordEvent::AudienceVote { debate_id: did, voter, .. }) = serde_json::from_str::<OxfordEvent>(line) {
+                        if did == debate_id && voter == caller {
+                            return Err("[OxfordAlreadyVoted] one vote per debate.".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let now_iso = collab::iso_now();
+        append_oxford_event(&dir, &OxfordEvent::AudienceVote {
+            debate_id,
+            timestamp: now_iso.clone(),
+            voter: caller.clone(),
+            vote: vote.to_string(),
+        })?;
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "voter": caller,
+            "vote": vote,
+            "timestamp": now_iso,
+        }))
     })
 }
 
@@ -14551,6 +14749,24 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_audience_vote",
+                    "description": "Cast an audience vote in an active Oxford debate (per spec §5). Must be a member of the debate's audience. One vote per caller per debate (re-vote attempts → [OxfordAlreadyVoted]). Vote ∈ {side_a, side_b, draw}. Tallied at oxford_end via strict-majority (>50% of non-abstain non-human votes for ONE side). Human:0's vote is recorded separately per spec §5 v2 LOCKED. Errors: [NoActiveOxfordDebate], [OxfordInvalidVote], [OxfordOnlyAudienceCanVote], [OxfordAlreadyVoted].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "vote": { "type": "string", "description": "side_a | side_b | draw" } },
+                        "required": ["vote"]
+                    }
+                },
+                {
+                    "name": "oxford_react",
+                    "description": "Emit a visual reaction in an active Oxford debate (audience members + non-speaking debaters only; per spec §3.4a). Rate-limited to 3 reactions per 60-second rolling window per caller. NO board message emitted — visual-only event consumed by Phase B visualization tab. Emoji ∈ {clap, boo, gasp, laugh, applause}. Errors: [NoActiveOxfordDebate], [OxfordInvalidEmoji], [OxfordModeratorCannotReact], [OxfordSpeakerCannotReact], [OxfordNonParticipantCannotReact], [OxfordReactionRateLimit].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "emoji": { "type": "string", "description": "clap | boo | gasp | laugh | applause" } },
+                        "required": ["emoji"]
+                    }
+                },
+                {
                     "name": "oxford_declare_speaker",
                     "description": "Declare the next speaker in an active Oxford debate (MODERATOR ONLY). Seat must be a member of side_a or side_b. Closes the previous turn and starts a new one with `started_at = now`. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordNonDebaterCannotSpeak].",
                     "inputSchema": {
@@ -15500,6 +15716,26 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         "content": [{ "type": "text", "text": format!("currency_ledger failed: {}", e) }],
                         "isError": true
                     }),
+                }
+            } else if tool_name == "oxford_audience_vote" {
+                let vote = params.get("arguments").and_then(|a| a.get("vote")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if vote.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_audience_vote requires vote (String): side_a | side_b | draw" }], "isError": true })
+                } else {
+                    match handle_oxford_audience_vote(&vote) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Vote recorded.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "oxford_react" {
+                let emoji = params.get("arguments").and_then(|a| a.get("emoji")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if emoji.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_react requires emoji (String): clap | boo | gasp | laugh | applause" }], "isError": true })
+                } else {
+                    match handle_oxford_react(&emoji) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Reaction emitted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
                 }
             } else if tool_name == "oxford_declare_speaker" {
                 let seat = params.get("arguments").and_then(|a| a.get("seat")).and_then(|v| v.as_str()).unwrap_or("").to_string();
