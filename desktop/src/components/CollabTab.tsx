@@ -1419,6 +1419,11 @@ export function CollabTab() {
   const flowFeedRows = useMemo(() => {
     const out: Array<{ key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }> = [];
     let passiveBatch: { turn: number | undefined; count: number; at?: string } | null = null;
+    // Change #3 (human msg 2262): interest, like passive, fires once per seat
+    // per rotation — six "earned 1 copper interest" lines every turn. Batch it
+    // the same way passive is batched: ONE line per turn. Interest amounts vary
+    // per seat (1c per 10c held), so we sum the copper instead of counting ×1.
+    let interestBatch: { turn: number | undefined; count: number; total: number; at?: string } | null = null;
     const flushPassive = () => {
       if (!passiveBatch) return;
       const turnLabel = passiveBatch.turn != null ? ` (turn ${passiveBatch.turn})` : "";
@@ -1430,8 +1435,20 @@ export function CollabTab() {
       });
       passiveBatch = null;
     };
+    const flushInterest = () => {
+      if (!interestBatch) return;
+      const turnLabel = interestBatch.turn != null ? ` (turn ${interestBatch.turn})` : "";
+      out.push({
+        key: `interest-turn-${interestBatch.turn ?? `idx${out.length}`}`,
+        text: `${interestBatch.count} seat${interestBatch.count === 1 ? "" : "s"} earned ${interestBatch.total.toLocaleString()} copper interest${turnLabel}`,
+        tier: "earn",
+        at: interestBatch.at,
+      });
+      interestBatch = null;
+    };
     for (const row of currencyFeed) {
       if (row.type === "passive") {
+        flushInterest();
         if (passiveBatch && passiveBatch.turn === row.turn) {
           passiveBatch.count += 1;
           passiveBatch.at = row.at;
@@ -1441,11 +1458,26 @@ export function CollabTab() {
         }
         continue;
       }
+      if (row.type === "interest") {
+        flushPassive();
+        const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
+        if (interestBatch && interestBatch.turn === row.turn) {
+          interestBatch.count += 1;
+          interestBatch.total += amt;
+          interestBatch.at = row.at;
+        } else {
+          flushInterest();
+          interestBatch = { turn: row.turn, count: 1, total: amt, at: row.at };
+        }
+        continue;
+      }
       flushPassive();
+      flushInterest();
       const formatted = formatCurrencyLine(row);
       out.push({ key: row.id || `${row.at ?? ""}-${out.length}`, text: formatted.text, tier: formatted.tier, seat: row.seat, at: row.at });
     }
     flushPassive();
+    flushInterest();
     return out.slice(-50);
   }, [currencyFeed]);
 
