@@ -8418,6 +8418,125 @@
 .currency-line--passive .currency-line-text { color: #8b949e; }   /* Gray — passive */
 .currency-line--destroyed .currency-line-text { color: #a371f7; } /* Purple — pool destroyed */
 
+/* --- Phase 5 (human msg 1971): "More Stats" button + popup modal --- */
+.flow-feed-stats-btn {
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #ccd6dd;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.flow-feed-stats-btn:hover { background: rgba(255, 255, 255, 0.12); }
+.flow-feed-stats-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+
+.currency-stats-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.currency-stats-modal {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow-y: auto;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  color: #ccd6dd;
+}
+.currency-stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.currency-stats-title { font-size: 15px; font-weight: 700; margin: 0; color: #e3b341; }
+.currency-stats-close {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.currency-stats-close:hover { color: #f0f6fc; }
+.currency-stats-close:focus-visible { outline: 2px solid #58a6ff; outline-offset: 1px; }
+.currency-stats-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: rgba(227, 179, 65, 0.08);
+  border-radius: 6px;
+  margin-bottom: 14px;
+}
+.currency-stats-total-label { font-size: 12px; color: #8b949e; }
+.currency-stats-total-value { font-size: 16px; font-weight: 700; color: #1dd174; font-variant-numeric: tabular-nums; }
+.currency-stats-section { margin-bottom: 14px; }
+.currency-stats-subhead {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+  margin: 0 0 6px 0;
+}
+.currency-stats-empty { font-size: 12px; color: #556677; font-style: italic; }
+.currency-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.currency-stats-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
+.currency-stats-seat { flex: 0 0 110px; color: #ccd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.currency-stats-bar-track {
+  flex: 1 1 auto;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.currency-stats-bar { display: block; height: 100%; background: #1dd174; border-radius: 4px; }
+.currency-stats-bar--neg { background: #f85149; }
+.currency-stats-amount { flex: 0 0 auto; min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; color: #ccd6dd; }
+.currency-stats-amount--neg { color: #f85149; }
+.currency-stats-escrow { color: #f5a623; font-size: 11px; }
+.currency-stats-dispute {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.currency-stats-dispute-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.currency-stats-dispute-status--open { background: rgba(227, 179, 65, 0.2); color: #e3b341; }
+.currency-stats-dispute-status--resolved { background: rgba(139, 148, 158, 0.2); color: #8b949e; }
+.currency-stats-dispute-parties { color: #ccd6dd; }
+.currency-stats-dispute-pool { color: #8b949e; font-variant-numeric: tabular-nums; }
+.currency-stats-dispute-judge { color: #58a6ff; }
+.currency-stats-feed { display: flex; flex-direction: column; gap: 2px; }
+
 /* --- Surface 2: Judge Seat --- */
 .judge-seat {
   margin: 0 0 8px 0;

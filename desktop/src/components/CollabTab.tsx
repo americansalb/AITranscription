@@ -1084,6 +1084,9 @@ export function CollabTab() {
     setFeedCollapsed((prev) => { const next = !prev; saveJSON("vaak_collab_flow_feed_collapsed", next); return next; });
   const [judgeExpanded, setJudgeExpanded] = useState(false);
   const [balanceExpanded, setBalanceExpanded] = useState(false);
+  // Phase 5 (human msg 1971): "More Stats" popup — deep currency breakdown.
+  // Ephemeral (re-derives from live data on open).
+  const [statsOpen, setStatsOpen] = useState(false);
   const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [editingGroupSlug, setEditingGroupSlug] = useState<string | null>(null);
   const [importRolesStatus, setImportRolesStatus] = useState<string | null>(null);
@@ -5357,12 +5360,23 @@ When multiple instances of this role are active:
             onToggle={toggleFeedCollapsed}
             title="Chitragupta"
             trailing={
-              <span
-                className={`flow-feed-net ${flowNet >= 0 ? "flow-feed-net--up" : "flow-feed-net--down"}`}
-                title="Net flow over recent transactions (earnings minus losses)"
-              >
-                {flowNet >= 0 ? "▲" : "▼"} {Math.abs(flowNet).toLocaleString()} copper
-              </span>
+              <>
+                <span
+                  className={`flow-feed-net ${flowNet >= 0 ? "flow-feed-net--up" : "flow-feed-net--down"}`}
+                  title="Net flow over recent transactions (earnings minus losses)"
+                >
+                  {flowNet >= 0 ? "▲" : "▼"} {Math.abs(flowNet).toLocaleString()} copper
+                </span>
+                <button
+                  type="button"
+                  className="flow-feed-stats-btn"
+                  title="Open detailed currency stats"
+                  aria-label="Open detailed currency stats"
+                  onClick={(e) => { e.stopPropagation(); setStatsOpen(true); }}
+                >
+                  📊 Stats
+                </button>
+              </>
             }
             headerTooltip={{ expand: "Expand the divine ledger", collapse: "Collapse the divine ledger" }}
           >
@@ -5380,6 +5394,113 @@ When multiple instances of this role are active:
               ))}
             </div>
           </CollapsibleSection>
+        )}
+
+        {/* Phase 5 (human msg 1971) — "More Stats" popup. Accessible modal with
+            the deep currency breakdown: total in play, per-seat leaderboard with
+            balance/escrow bars (red below 0), open disputes + pools, and recent
+            transactions. Read-only; derives entirely from already-fetched data. */}
+        {statsOpen && (
+          <div
+            className="currency-stats-overlay"
+            role="presentation"
+            onClick={() => setStatsOpen(false)}
+          >
+            <div
+              className="currency-stats-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Chitragupta — detailed currency stats"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => { if (e.key === "Escape") setStatsOpen(false); }}
+            >
+              <div className="currency-stats-header">
+                <h2 className="currency-stats-title">Chitragupta — Currency Stats</h2>
+                <button
+                  type="button"
+                  className="currency-stats-close"
+                  aria-label="Close currency stats"
+                  autoFocus
+                  onClick={() => setStatsOpen(false)}
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="currency-stats-total">
+                <span className="currency-stats-total-label">Total in play</span>
+                <span className="currency-stats-total-value">
+                  {currencyLeaderboard.total.toLocaleString()} copper
+                </span>
+              </div>
+
+              <div className="currency-stats-section">
+                <h3 className="currency-stats-subhead">Balances ({currencyLeaderboard.seats.length} seats)</h3>
+                {currencyLeaderboard.seats.length === 0 ? (
+                  <div className="currency-stats-empty">No initialized seats yet.</div>
+                ) : (
+                  currencyLeaderboard.seats.map((s) => {
+                    const pct = Math.max(0, Math.min(100, (s.balance / 10000) * 100));
+                    const negative = s.balance < 0;
+                    return (
+                      <div key={s.label} className="currency-stats-row">
+                        <span
+                          className="currency-stats-dot"
+                          style={{ background: getRoleColor(s.label.split(":")[0]) }}
+                          aria-hidden="true"
+                        />
+                        <span className="currency-stats-seat">{s.label}</span>
+                        <span className="currency-stats-bar-track" aria-hidden="true">
+                          <span
+                            className={`currency-stats-bar${negative ? " currency-stats-bar--neg" : ""}`}
+                            style={{ width: `${negative ? 100 : pct}%` }}
+                          />
+                        </span>
+                        <span className={`currency-stats-amount${negative ? " currency-stats-amount--neg" : ""}`}>
+                          {s.balance.toLocaleString()}
+                          {s.escrow > 0 && <span className="currency-stats-escrow"> +{s.escrow.toLocaleString()} esc</span>}
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="currency-stats-section">
+                <h3 className="currency-stats-subhead">Disputes ({openDisputes.length})</h3>
+                {openDisputes.length === 0 ? (
+                  <div className="currency-stats-empty">No disputes recorded.</div>
+                ) : (
+                  openDisputes.map((d) => (
+                    <div key={d.id} className="currency-stats-dispute">
+                      <span className={`currency-stats-dispute-status currency-stats-dispute-status--${d.status}`}>
+                        {d.status}
+                      </span>
+                      <span className="currency-stats-dispute-parties">
+                        {d.challenger} vs {d.target}
+                      </span>
+                      {typeof d.pool === "number" && (
+                        <span className="currency-stats-dispute-pool">{d.pool.toLocaleString()} cu pool</span>
+                      )}
+                      {d.judge != null && <span className="currency-stats-dispute-judge">judge: {d.judge}</span>}
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="currency-stats-section">
+                <h3 className="currency-stats-subhead">Recent transactions</h3>
+                <div className="currency-stats-feed">
+                  {flowFeedRows.slice(-15).reverse().map((line) => (
+                    <div key={line.key} className={`currency-line currency-line--${line.tier}`}>
+                      <span className="currency-line-time">{line.at ? formatRelativeTime(line.at) : ""}</span>
+                      <span className="currency-line-text">{line.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Discussion Mode sidebar card — replaces the inline horizontal
