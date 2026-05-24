@@ -3628,6 +3628,245 @@ pub mod currency {
         Ok(penalized.len() as u64)
     }
 
+    /// Phase 6 (b) — does `msg_id` correspond to the `submission_msg` of a
+    /// currently-approved bounty? Used by:
+    ///   (1) `handle_currency_objection` to short-circuit standard Phase 2
+    ///       stake capture — when objecting to an approved bounty submission,
+    ///       only the 50c objection cost lands in the pool, and the resolution
+    ///       hook (`emit_bounty_clawback`) handles the real economic impact.
+    ///   (2) `emit_bounty_clawback` itself at resolution time to decide
+    ///       whether to fire.
+    /// Reads `.vaak/open_bounties.json` (snapshot) for O(1) lookup.
+    /// Architect ruling msg 2089 #1 ("bounty clawback SUPERSEDES standard
+    /// Phase 2 escrow-clawback"), spec v3 §"Objection on approved bounty".
+    pub fn is_approved_bounty_submission(dir: &str, msg_id: u64) -> Option<BountyRow> {
+        let snap = match read_open_bounties_snapshot(dir) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        for (_id, row) in snap.bounties.iter() {
+            if row.status == "approved" && row.submission_msg == Some(msg_id) {
+                return Some(row.clone());
+            }
+        }
+        None
+    }
+
+    /// Phase 6 (b) — Bounty-objection clawback hook.
+    /// Fires from `currency_judge_ruling` and `currency_concede` when the
+    /// challenger effectively wins AND `dispute.target_msg` matches an
+    /// approved bounty's `submission_msg`. Per spec v3 §"Objection on approved
+    /// bounty" + architect ruling 50/50 split:
+    ///   - Total clawback = bounty.amount × BOUNTY_OBJECTION_CLAWBACK_PERCENT / 100 (90%)
+    ///   - Debit claimant's balance by clawback
+    ///   - Split: 50% credited to challenger, 50% pool-destroyed (audit)
+    ///   - Bounty row appended with status="rejected", last_rejection_reason
+    /// Returns clawback amount (0 if not a bounty submission). Caller holds
+    /// the currency+board lock and writes the snapshot afterward.
+    pub fn emit_bounty_clawback(
+        dir: &str,
+        snap: &mut BalancesSnapshot,
+        target_msg: u64,
+        challenger_seat: &str,
+        dispute_id: &str,
+    ) -> Result<i64, String> {
+        let bounty = match is_approved_bounty_submission(dir, target_msg) {
+            Some(b) => b,
+            None => return Ok(0),
+        };
+        let claimant = match bounty.claimant.as_deref() {
+            Some(c) => c.to_string(),
+            None => return Ok(0), // approved bounty with no claimant is malformed; skip
+        };
+
+        let clawback = bounty.amount.saturating_mul(BOUNTY_OBJECTION_CLAWBACK_PERCENT as i64) / 100;
+        let challenger_share = clawback / 2;
+        let destroyed_share = clawback - challenger_share; // covers odd cents
+
+        let now = super::iso_now();
+
+        // 1. Debit the claimant by full clawback.
+        let claimant_after = {
+            let e = snap.seats.entry(claimant.clone()).or_insert_with(|| {
+                let mut sb = SeatBalance::default();
+                sb.balance = STARTING_BALANCE_COPPER;
+                sb
+            });
+            e.balance = e.balance.saturating_sub(clawback);
+            if e.balance <= DEFICIT_CAP_COPPER {
+                e.timed_out = true;
+            }
+            e.balance
+        };
+        let id = snap.next_txn_id;
+        snap.next_txn_id += 1;
+        append_currency_transaction(dir, &LedgerRow {
+            id,
+            txn_type: "bounty_clawback".to_string(),
+            seat: claimant.clone(),
+            amount: -clawback,
+            reason: format!(
+                "bounty {} clawback ({}% on objection from {})",
+                bounty.id, BOUNTY_OBJECTION_CLAWBACK_PERCENT, dispute_id
+            ),
+            ref_msg: Some(target_msg),
+            balance_after: claimant_after,
+            escrow_id: None,
+            release_turn: None,
+            turn: Some(snap.turn_counter),
+            action_kind: Some(ActionKind::BountyClawback),
+            linked_edit_msg: None,
+            at: now.clone(),
+        })?;
+
+        // 2. Credit the challenger half the clawback.
+        if challenger_share > 0 {
+            let challenger_after = {
+                let e = snap.seats.entry(challenger_seat.to_string()).or_insert_with(|| {
+                    let mut sb = SeatBalance::default();
+                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb
+                });
+                e.balance = e.balance.saturating_add(challenger_share);
+                e.balance
+            };
+            let cid = snap.next_txn_id;
+            snap.next_txn_id += 1;
+            append_currency_transaction(dir, &LedgerRow {
+                id: cid,
+                txn_type: "credit".to_string(),
+                seat: challenger_seat.to_string(),
+                amount: challenger_share,
+                reason: format!(
+                    "bounty {} clawback share ({} of {} from {})",
+                    bounty.id, challenger_share, clawback, dispute_id
+                ),
+                ref_msg: Some(target_msg),
+                balance_after: challenger_after,
+                escrow_id: None,
+                release_turn: None,
+                turn: Some(snap.turn_counter),
+                action_kind: Some(ActionKind::Credit),
+                linked_edit_msg: None,
+                at: now.clone(),
+            })?;
+        }
+
+        // 3. Audit the destroyed share (no balance change; seat="system:pool").
+        if destroyed_share > 0 {
+            let did = snap.next_txn_id;
+            snap.next_txn_id += 1;
+            append_currency_transaction(dir, &LedgerRow {
+                id: did,
+                txn_type: "pool_destroyed".to_string(),
+                seat: "system:pool".to_string(),
+                amount: -destroyed_share,
+                reason: format!(
+                    "bounty {} clawback destroyed share ({} of {} from {})",
+                    bounty.id, destroyed_share, clawback, dispute_id
+                ),
+                ref_msg: Some(target_msg),
+                balance_after: 0,
+                escrow_id: None,
+                release_turn: None,
+                turn: Some(snap.turn_counter),
+                action_kind: Some(ActionKind::PoolDestroyed),
+                linked_edit_msg: None,
+                at: now.clone(),
+            })?;
+        }
+
+        // 4. Append a bounty row marking the bounty rejected via objection. The
+        // bounty does NOT reopen (objection-rejected is terminal; the work was
+        // already paid+clawed-back).
+        let mut updated = bounty.clone();
+        updated.status = "rejected".to_string();
+        updated.last_rejection_reason = Some(format!("objection sustained ({})", dispute_id));
+        updated.resolved_at = Some(now.clone());
+        append_bounty_row(dir, &updated)?;
+        let mut bounties = read_open_bounties_snapshot(dir).unwrap_or_default();
+        bounties.bounties.insert(updated.id.clone(), updated);
+        write_open_bounties_snapshot(dir, &bounties)?;
+
+        Ok(clawback)
+    }
+
+    /// Phase 6 (b) — Bounty expiration sweep called from `process_tick` after
+    /// passive income. For each open or claimed bounty whose `deadline_turn <=
+    /// snap.turn_counter`:
+    ///   - `claimed`: claimant loses FULL stake. Audit `bounty_expire` row
+    ///     against system:pool (balance was already debited at claim; no
+    ///     additional balance change). Status → "expired".
+    ///   - `open`: no penalty; status → "expired".
+    /// Returns count of bounties expired this tick. MUST be called inside the
+    /// currency+board lock; mutates `snap` (only next_txn_id) and writes
+    /// bounties.jsonl + open_bounties.json snapshot.
+    pub fn expire_overdue_bounties(
+        dir: &str,
+        snap: &mut BalancesSnapshot,
+    ) -> Result<u64, String> {
+        let mut bounties = read_open_bounties_snapshot(dir)?;
+        let turn = snap.turn_counter;
+        // Snapshot the keys; we may mutate the map.
+        let candidates: Vec<String> = bounties
+            .bounties
+            .iter()
+            .filter(|(_, b)| {
+                (b.status == "open" || b.status == "claimed") && b.deadline_turn <= turn
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let now = super::iso_now();
+        let mut count: u64 = 0;
+        for id in candidates {
+            let bounty = match bounties.bounties.get(&id).cloned() {
+                Some(b) => b,
+                None => continue,
+            };
+            if bounty.status == "claimed" {
+                let stake = bounty.claim_stake;
+                if stake > 0 {
+                    let tid = snap.next_txn_id;
+                    snap.next_txn_id += 1;
+                    append_currency_transaction(
+                        dir,
+                        &LedgerRow {
+                            id: tid,
+                            txn_type: "bounty_expire".to_string(),
+                            seat: "system:pool".to_string(),
+                            amount: -stake,
+                            reason: format!(
+                                "bounty {} expired @turn {} — claimant {} stake destroyed",
+                                bounty.id,
+                                turn,
+                                bounty.claimant.as_deref().unwrap_or("?")
+                            ),
+                            ref_msg: None,
+                            balance_after: 0,
+                            escrow_id: None,
+                            release_turn: None,
+                            turn: Some(turn),
+                            action_kind: Some(ActionKind::BountyExpire),
+                            linked_edit_msg: None,
+                            at: now.clone(),
+                        },
+                    )?;
+                }
+            }
+            let mut updated = bounty.clone();
+            updated.status = "expired".to_string();
+            updated.resolved_at = Some(now.clone());
+            append_bounty_row(dir, &updated)?;
+            bounties.bounties.insert(updated.id.clone(), updated);
+            count += 1;
+        }
+        write_open_bounties_snapshot(dir, &bounties)?;
+        Ok(count)
+    }
+
     /// Classify a project_send into Pass / Speak / Exempt per spec §
     /// "Pass classification" (ui-architect:2 msg 1073 anchored fix folded
     /// in architect:0 msg 1075 ruling 1):
@@ -3883,6 +4122,13 @@ pub mod currency {
         snap.next_txn_id = next_id;
         for row in &rows {
             append_currency_transaction(dir, row)?;
+        }
+        // Phase 6 (b) — sweep expired bounties (claimed → stake destroyed,
+        // open → just marked expired). Runs after passive income so the same
+        // snapshot write captures everything. Errors are logged but don't
+        // abort the tick (mirroring the tick's overall best-effort posture).
+        if let Err(e) = expire_overdue_bounties(dir, &mut snap) {
+            eprintln!("[currency.process_tick] WARN: expire sweep error: {}", e);
         }
         write_balances_snapshot(dir, &snap)?;
         Ok(())
