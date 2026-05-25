@@ -5580,6 +5580,43 @@ pub mod currency {
             assert!(s.bounty_objection_clawback_percent <= 100, "bounty_objection_clawback_percent must be <=100");
             assert!(s.clawback_percent <= 100, "clawback_percent must be <=100");
         }
+
+        #[test]
+        fn t_economy_defaults_oxford_invariants() {
+            // Tester msg 847 extension for commit 6f31cf8 (dev:1) which added
+            // 6 Oxford fields + 3 new semantic validators in main.rs:
+            //   - oxford_turn_hard_limit_secs >= oxford_turn_soft_limit_secs
+            //   - oxford_default_winning_reward_copper >= 0
+            //   - oxford_audience_vote_window_secs > 0
+            //
+            // Mirrors the consolidated validator list (architect msg 701 +
+            // evil-arch msg 691 + tester msg 693 + evil-arch msg 845).
+            let s = EconomySettings::default();
+            assert!(
+                s.oxford_turn_hard_limit_secs >= s.oxford_turn_soft_limit_secs,
+                "oxford_turn_hard_limit_secs ({}) must be >= oxford_turn_soft_limit_secs ({}) — hard ceiling can't be below soft target",
+                s.oxford_turn_hard_limit_secs, s.oxford_turn_soft_limit_secs
+            );
+            assert!(
+                s.oxford_default_winning_reward_copper >= 0,
+                "oxford_default_winning_reward_copper ({}) must be >= 0",
+                s.oxford_default_winning_reward_copper
+            );
+            assert!(
+                s.oxford_audience_vote_window_secs > 0,
+                "oxford_audience_vote_window_secs ({}) must be > 0 — zero window = no vote possible",
+                s.oxford_audience_vote_window_secs
+            );
+            // Additional sanity (not in main.rs validators but worth pinning):
+            assert!(
+                s.oxford_moderator_vacancy_timeout_secs > 0,
+                "moderator vacancy timeout of 0 would auto-kill any debate the moment a moderator left"
+            );
+            assert!(
+                s.oxford_react_rate_limit_per_min > 0,
+                "react rate limit of 0 would disable all audience reactions"
+            );
+        }
     }
 
     /// Commit (c) — process ONE currency tick. MUST be called inside
