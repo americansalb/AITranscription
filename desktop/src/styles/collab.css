@@ -9226,6 +9226,18 @@
   border-color: rgba(29, 155, 240, 0.4);
 }
 .economy-settings-icon { font-size: 14px; }
+/* Destructive variant — applied to End Oxford Debate when an active debate
+   is detected (human msg 870). Amber accent signals "ends something running"
+   without going full red (no data loss, just abandons the debate). */
+.economy-settings-btn-destructive {
+  background: rgba(217, 119, 6, 0.08);
+  border-color: rgba(217, 119, 6, 0.4);
+  color: #fbbf24;
+}
+.economy-settings-btn-destructive:hover {
+  background: rgba(217, 119, 6, 0.18);
+  border-color: rgba(217, 119, 6, 0.6);
+}
 
 .esm-backdrop {
   position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);

@@ -3800,6 +3800,94 @@ fn oxford_initiate_cmd(
     })
 }
 
+/// Lightweight read-only accessor for the active Oxford debate snapshot.
+/// Returns the JSON object if one exists, or null. Used by the CollabTab to
+/// poll active state so the End Debate button can show/hide and the human
+/// can see the current premise + moderator at-a-glance.
+#[tauri::command]
+fn read_active_oxford_cmd(dir: String) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    match collab::oxford::read_active_oxford(&dir)? {
+        Some(d) => serde_json::to_value(&d).map_err(|e| format!("oxford serialize: {}", e)),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// Human msg 870 (2026-05-25) — force-end the active Oxford debate from the UI.
+/// The MCP handle_oxford_end requires caller == moderator; this Tauri command
+/// is human-authority and bypasses that gate (treats every UI-initiated end as
+/// outcome="abandoned" — no reward distribution, same shape the MCP path uses
+/// when the moderator picks "abandoned"). Closes the human msg 870 UX gap:
+/// previously the only end-path required the moderator to call MCP, leaving
+/// the human stuck if the moderator was idle or unreachable.
+#[tauri::command]
+fn oxford_end_cmd(dir: String) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let dir = validate_project_dir(&dir)?;
+
+    with_oxford_lock(&dir, || {
+        let debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        let now = collab::iso_now();
+        let debate_id = debate.debate_id;
+
+        append_oxford_event(&dir, &OxfordEvent::Ended {
+            debate_id,
+            timestamp: now.clone(),
+            outcome: "abandoned".to_string(),
+            audience_tally_nonhuman: None,
+            audience_human_vote: None,
+            reward_distributed: None,
+        })?;
+        clear_active_oxford(&dir)?;
+
+        // Board broadcast mirroring the initiate path.
+        let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+        let _ = collab::with_board_lock(&dir, || -> Result<(), String> {
+            use std::io::Write;
+            let max_id: u64 = std::fs::read_to_string(&board_path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+                .max()
+                .unwrap_or(0);
+            let msg = serde_json::json!({
+                "id": max_id + 1,
+                "from": "system",
+                "to": "all",
+                "type": "broadcast",
+                "timestamp": now.clone(),
+                "subject": format!("[OxfordDebateEnded] debate {} (force-abandoned by human:0)", debate_id),
+                "body": format!(
+                    "Oxford-style debate {} was force-ended by human:0 via the UI. Outcome: abandoned. No reward distribution. Moderator was {}.",
+                    debate_id, debate.moderator
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "outcome": "abandoned",
+                    "ended_via": "ui_force",
+                    "oxford_event": "ended"
+                }
+            });
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&board_path)
+                .map_err(|e| format!("board open: {}", e))?;
+            writeln!(f, "{}", serde_json::to_string(&msg).unwrap_or_default())
+                .map_err(|e| format!("board write: {}", e))?;
+            Ok(())
+        });
+
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "outcome": "abandoned",
+            "ended_at": now,
+        }))
+    })
+}
+
 /// Human msg 657 (2026-05-24) — read economy settings as JSON for the UI.
 /// Returns the current EconomySettings (file values + defaults for missing
 /// fields), enabling the Settings page to populate inputs with the live
@@ -7363,6 +7451,8 @@ fn main() {
             read_economy_settings_cmd,
             write_economy_settings_cmd,
             oxford_initiate_cmd,
+            oxford_end_cmd,
+            read_active_oxford_cmd,
             read_currency_events_stream,
             read_currency_feed_cmd,
             read_disputes_cmd,

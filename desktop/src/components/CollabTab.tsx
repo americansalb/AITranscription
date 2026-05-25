@@ -987,6 +987,16 @@ export function CollabTab() {
   const [economySettingsOpen, setEconomySettingsOpen] = useState(false);
   // Human msg 706: Oxford debate setup modal.
   const [oxfordSetupOpen, setOxfordSetupOpen] = useState(false);
+  // Human msg 870: active Oxford debate snapshot, polled every 2s. When
+  // non-null an End Debate button replaces the Start button so the human can
+  // force-end a stuck debate via UI without having to delete JSON files.
+  const [activeOxford, setActiveOxford] = useState<{
+    debate_id: number;
+    moderator: string;
+    premise: string;
+    side_a: string[];
+    side_b: string[];
+  } | null>(null);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -2333,6 +2343,30 @@ When multiple instances of this role are active:
     };
     pollAssembly();
     const interval = setInterval(pollAssembly, 1000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [projectDir]);
+
+  // Human msg 870 — poll active oxford debate so the right-rail trigger can
+  // swap between Start / End. Cheap file read; 2s cadence is plenty since
+  // initiate + end are rare events.
+  useEffect(() => {
+    if (!window.__TAURI__ || !projectDir) return;
+    let cancelled = false;
+    const pollActiveOxford = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          debate_id: number;
+          moderator: string;
+          premise: string;
+          side_a: string[];
+          side_b: string[];
+        } | null>("read_active_oxford_cmd", { dir: projectDir });
+        if (!cancelled) setActiveOxford(result ?? null);
+      } catch { /* pre-fix binary — no End button surface */ }
+    };
+    pollActiveOxford();
+    const interval = setInterval(pollActiveOxford, 2000);
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
@@ -5990,18 +6024,46 @@ When multiple instances of this role are active:
 
         {/* Economy Settings + Oxford debate triggers (human msgs 657 + 706).
             Both live in the rail below Discussion Mode; small profile so they
-            don't compete with the primary panels. */}
+            don't compete with the primary panels. The Oxford button swaps to
+            End mode when an active debate is detected (human msg 870). */}
         {projectDir && (
           <div className="economy-settings-trigger rail-section">
-            <button
-              type="button"
-              className="economy-settings-btn"
-              onClick={() => setOxfordSetupOpen(true)}
-              title="Start an Oxford-style debate (Phase A v1)"
-            >
-              <span className="economy-settings-icon" aria-hidden="true">⚖</span>
-              <span>Start Oxford Debate</span>
-            </button>
+            {activeOxford ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  const summary = `${activeOxford.side_a.length} vs ${activeOxford.side_b.length}, moderator ${activeOxford.moderator}`;
+                  const confirmed = window.confirm(
+                    `End debate ${activeOxford.debate_id} (${summary})?\n\nPremise: ${activeOxford.premise}\n\nThis will mark the debate as abandoned and clear active state. No reward will be distributed.`,
+                  );
+                  if (!confirmed) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("oxford_end_cmd", { dir: projectDir });
+                    setActiveOxford(null);
+                    showToast(`Debate ${activeOxford.debate_id} ended.`, "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't end debate — ${msg}`, "error");
+                  }
+                }}
+                title={`End the active Oxford debate (debate ${activeOxford.debate_id}, moderator ${activeOxford.moderator})`}
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Oxford Debate</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={() => setOxfordSetupOpen(true)}
+                title="Start an Oxford-style debate (Phase A v1)"
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⚖</span>
+                <span>Start Oxford Debate</span>
+              </button>
+            )}
             <button
               type="button"
               className="economy-settings-btn"
