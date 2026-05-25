@@ -5314,6 +5314,98 @@ pub mod currency {
             // Even on error, snap state stays at the first init's value.
             assert_eq!(total_system_copper(&snap), STARTING_BALANCE_COPPER);
         }
+
+        #[test]
+        fn t_conservation_bounty_stake_then_earn_full_cycle() {
+            // bounty_stake debits claimant (system loses N).
+            // bounty_earn later credits claimant the full payout amount.
+            // For a 2000c bounty with 10% stake: stake=200, earn=2000+200=2200
+            // (returns stake + bounty amount per Phase 6 spec).
+            // Net seat delta = +2000 (the bounty amount).
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 1000;
+            let baseline = total_system_copper(&snap);
+
+            // bounty_stake: amount=-200 (debit)
+            apply_row(&mut snap, &ledger_row(1, "bounty_stake", "a:0", -200)).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline - 200);
+
+            // bounty_earn: amount=+2200 (returns stake + earn)
+            apply_row(&mut snap, &ledger_row(2, "bounty_earn", "a:0", 2200)).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + 2000);
+        }
+
+        #[test]
+        fn t_conservation_bounty_clawback_destroys() {
+            // bounty_clawback on objection-sustained removes copper from
+            // claimant's balance. Conservation: system shrinks by clawback
+            // amount (offset by challenger credit + pool destroy in real
+            // flow, but apply_row at the per-row level just sees the debit).
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 2200;
+            let baseline = total_system_copper(&snap);
+
+            apply_row(&mut snap, &ledger_row(1, "bounty_clawback", "a:0", -1800)).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline - 1800);
+            assert_eq!(snap.seats.get("a:0").unwrap().balance, 400);
+        }
+
+        #[test]
+        fn t_conservation_reinstate_resets_state() {
+            // Phase 2 (c) — reinstate sets balance to row.amount (0 per
+            // human directive), clears timed_out + escrow_items + ban.
+            // Conservation: system delta = row.amount - prior_total_for_seat.
+            let mut snap = BalancesSnapshot::default();
+            let s = snap.seats.entry("a:0".to_string()).or_default();
+            s.balance = -1500; // deficit
+            s.timed_out = true;
+            s.escrow_held = 500;
+            s.escrow_items.push(EscrowItem {
+                id: "e1".to_string(),
+                amount: 500,
+                release_turn: 10,
+                action: "speak".to_string(),
+                ref_msg: None,
+            });
+            let baseline = total_system_copper(&snap); // -1000
+
+            apply_row(&mut snap, &ledger_row(1, "reinstate", "a:0", 0)).unwrap();
+            let s = snap.seats.get("a:0").unwrap();
+            assert_eq!(s.balance, 0);
+            assert_eq!(s.escrow_held, 0);
+            assert!(s.escrow_items.is_empty());
+            assert!(!s.timed_out);
+            // System delta: was -1000 (=-1500+500), now 0 → delta +1000.
+            assert_eq!(total_system_copper(&snap), baseline + 1000);
+        }
+
+        #[test]
+        fn t_conservation_unknown_txn_type_hard_errors() {
+            // Regression guard on apply_row's wildcard arm. Any
+            // unrecognized txn_type MUST return Err (replay-HARD-ERROR
+            // semantics). Silent-accept on unknown opcodes would let
+            // future schema additions go untested.
+            let mut snap = BalancesSnapshot::default();
+            let row = ledger_row(1, "totally_made_up_opcode", "a:0", 100);
+            let result = apply_row(&mut snap, &row);
+            assert!(result.is_err(), "unknown txn_type must be HARD ERROR");
+            assert_eq!(total_system_copper(&snap), 0);
+        }
+
+        #[test]
+        fn t_conservation_penalty_trips_deficit_cap() {
+            // Penalty arm sets timed_out=true when balance drops to/below
+            // DEFICIT_CAP_COPPER. Conservation: balance still drops by
+            // exactly the penalty amount; the flag is orthogonal.
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = -900;
+            let baseline = total_system_copper(&snap);
+            apply_row(&mut snap, &ledger_row(1, "penalty", "a:0", -200)).unwrap();
+            let s = snap.seats.get("a:0").unwrap();
+            assert!(s.timed_out, "deficit cap should trip timed_out flag");
+            assert_eq!(s.balance, -1100);
+            assert_eq!(total_system_copper(&snap), baseline - 200);
+        }
     }
 
     /// Commit (c) — process ONE currency tick. MUST be called inside
