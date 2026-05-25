@@ -2938,6 +2938,20 @@ pub mod currency {
         pub decay_silver_pct_per_turn_tenths: i64,
         #[serde(default = "default_decay_floor_copper")]
         pub decay_floor_copper: i64,
+
+        // Oxford-debate (commit 2d — completes "every economic constant" per human msg 657)
+        #[serde(default = "default_oxford_default_winning_reward_copper")]
+        pub oxford_default_winning_reward_copper: i64,
+        #[serde(default = "default_oxford_turn_soft_limit_secs")]
+        pub oxford_turn_soft_limit_secs: u64,
+        #[serde(default = "default_oxford_turn_hard_limit_secs")]
+        pub oxford_turn_hard_limit_secs: u64,
+        #[serde(default = "default_oxford_audience_vote_window_secs")]
+        pub oxford_audience_vote_window_secs: u64,
+        #[serde(default = "default_oxford_moderator_vacancy_timeout_secs")]
+        pub oxford_moderator_vacancy_timeout_secs: u64,
+        #[serde(default = "default_oxford_react_rate_limit_per_min")]
+        pub oxford_react_rate_limit_per_min: u64,
     }
 
     // ---- per-field default fns (required by serde(default = "...")) ----
@@ -2976,6 +2990,12 @@ pub mod currency {
     fn default_decay_copper_pct_per_turn_tenths() -> i64 { DECAY_COPPER_PCT_PER_TURN_TENTHS }
     fn default_decay_silver_pct_per_turn_tenths() -> i64 { DECAY_SILVER_PCT_PER_TURN_TENTHS }
     fn default_decay_floor_copper() -> i64 { DECAY_FLOOR_COPPER }
+    fn default_oxford_default_winning_reward_copper() -> i64 { super::oxford::OXFORD_DEFAULT_WINNING_REWARD_COPPER }
+    fn default_oxford_turn_soft_limit_secs() -> u64 { super::oxford::OXFORD_TURN_SOFT_LIMIT_SECS }
+    fn default_oxford_turn_hard_limit_secs() -> u64 { super::oxford::OXFORD_TURN_HARD_LIMIT_SECS }
+    fn default_oxford_audience_vote_window_secs() -> u64 { super::oxford::OXFORD_AUDIENCE_VOTE_WINDOW_SECS }
+    fn default_oxford_moderator_vacancy_timeout_secs() -> u64 { super::oxford::OXFORD_MODERATOR_VACANCY_TIMEOUT_SECS }
+    fn default_oxford_react_rate_limit_per_min() -> u64 { super::oxford::OXFORD_REACT_RATE_LIMIT_PER_MIN }
 
     impl Default for EconomySettings {
         fn default() -> Self {

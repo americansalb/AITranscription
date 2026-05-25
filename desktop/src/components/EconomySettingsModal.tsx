@@ -95,6 +95,17 @@ const GROUPS: Array<{ title: string; fields: Array<{ key: string; label: string;
       { key: "decay_floor_copper", label: "Decay floor (copper)", hint: "Balance below this is not taxed." },
     ],
   },
+  {
+    title: "Oxford debate",
+    fields: [
+      { key: "oxford_default_winning_reward_copper", label: "Default winning-side reward (copper)", hint: "500 = 5 silver. Pool-funded; UI initiate can override per-debate." },
+      { key: "oxford_turn_soft_limit_secs", label: "Turn soft limit (seconds)" },
+      { key: "oxford_turn_hard_limit_secs", label: "Turn hard limit (seconds)" },
+      { key: "oxford_audience_vote_window_secs", label: "Audience vote window (seconds)" },
+      { key: "oxford_moderator_vacancy_timeout_secs", label: "Moderator-vacancy timeout (seconds)" },
+      { key: "oxford_react_rate_limit_per_min", label: "React rate limit per minute" },
+    ],
+  },
 ];
 
 export function EconomySettingsModal(props: {

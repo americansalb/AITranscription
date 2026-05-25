@@ -3703,6 +3703,7 @@ fn oxford_initiate_cmd(
             return Err("[OxfordInvalidReward] winning_side_reward_copper must be >= 0".to_string());
         }
     }
+    let oxford_settings_default_reward = collab::currency::read_economy_settings(&dir).oxford_default_winning_reward_copper;
     validate_initiate(&caller, &moderator, &side_a, &side_b, &audience, &active_seats)?;
 
     with_oxford_lock(&dir, || {
@@ -3711,7 +3712,7 @@ fn oxford_initiate_cmd(
         }
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
-        let reward = winning_side_reward_copper.unwrap_or(OXFORD_DEFAULT_WINNING_REWARD_COPPER);
+        let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
         let debate = ActiveOxfordDebate {
             debate_id,
             moderator: moderator.clone(),
@@ -3857,6 +3858,22 @@ fn write_economy_settings_cmd(
             "all escrow_ticks_* must be > 0 (pass={}, speak={}, edit={}, test={}) — zero ticks = immediate release breaks the time-lock contract",
             s.pass_escrow_ticks, s.speak_escrow_ticks, s.edit_escrow_ticks, s.test_escrow_ticks
         ));
+    }
+    // Oxford-debate constants (commit 2d)
+    if s.oxford_default_winning_reward_copper < 0 {
+        violations.push(format!(
+            "oxford_default_winning_reward_copper ({}) must be >= 0 (0 = no-reward debate)",
+            s.oxford_default_winning_reward_copper
+        ));
+    }
+    if s.oxford_turn_hard_limit_secs < s.oxford_turn_soft_limit_secs {
+        violations.push(format!(
+            "oxford_turn_hard_limit_secs ({}) must be >= oxford_turn_soft_limit_secs ({})",
+            s.oxford_turn_hard_limit_secs, s.oxford_turn_soft_limit_secs
+        ));
+    }
+    if s.oxford_audience_vote_window_secs == 0 {
+        violations.push("oxford_audience_vote_window_secs must be > 0".to_string());
     }
     if s.decay_floor_copper > s.starting_balance_copper {
         violations.push(format!(

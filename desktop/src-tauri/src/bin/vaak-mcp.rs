@@ -9604,12 +9604,14 @@ fn handle_oxford_initiate(
     })();
 
     // Per architect msg 527 ruling: reward 0 is allowed (no-reward debate),
-    // negative is rejected. None defaults to OXFORD_DEFAULT_WINNING_REWARD_COPPER.
+    // negative is rejected. None defaults to economy.json
+    // oxford_default_winning_reward_copper (settings-overridable per commit 2d).
     if let Some(r) = winning_side_reward_copper {
         if r < 0 {
             return Err("[OxfordInvalidReward] winning_side_reward_copper must be >= 0 (0 = no-reward debate; negative not allowed).".to_string());
         }
     }
+    let oxford_settings_default_reward = collab::currency::read_economy_settings(&dir).oxford_default_winning_reward_copper;
     // Pure validation up front (no lock yet).
     validate_initiate(&caller, moderator, side_a, side_b, audience, &active_seats)?;
 
@@ -9640,7 +9642,7 @@ fn handle_oxford_initiate(
         }
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
-        let reward = winning_side_reward_copper.unwrap_or(OXFORD_DEFAULT_WINNING_REWARD_COPPER);
+        let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
 
         // Build and persist snapshot.
         let debate = ActiveOxfordDebate {
