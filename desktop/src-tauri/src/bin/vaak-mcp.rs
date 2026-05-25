@@ -9732,6 +9732,28 @@ fn handle_oxford_initiate(
                 }
             }));
         }
+        // Layer 1 (msg 1005 architect ruling): directed prompt to the
+        // moderator with the literal next action. Closes the "moderator
+        // never auto-prompted" failure mode dev-challenger msg 1000
+        // diagnosed live. Debate sits with empty turn_history until
+        // moderator acts — without this prompt, a fresh/idle moderator
+        // has no signal that they need to open the floor.
+        let opener = side_a.first().cloned().unwrap_or_default();
+        let mod_prompt_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": mod_prompt_id, "from": "system", "to": moderator, "type": "directive",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordModeratorPrompt] debate {} — open the floor", debate_id),
+            "body": format!(
+                "You are the moderator for Oxford debate {}.\n\nNext action: call `oxford_declare_speaker seat=\"{}\"` to open the floor (side_a opens by convention per spec §3.2).\n\nIf no speaker is declared within the opener-grace window, the floor will auto-open with side_a[0] as the opening speaker and broadcast [OxfordAutoOpened]. You may continue moderating subsequent rotations normally.",
+                debate_id, opener
+            ),
+            "metadata": {
+                "debate_id": debate_id,
+                "suggested_opener": opener,
+                "oxford_event": "moderator_prompt"
+            }
+        }));
 
         Ok(serde_json::json!({
             "debate_id": debate_id,
@@ -9765,6 +9787,39 @@ fn handle_oxford_declare_speaker(seat: &str) -> Result<serde_json::Value, String
         if !in_a && !in_b {
             return Err("[OxfordNonDebaterCannotSpeak]".to_string());
         }
+        // Layer 3 of architect msg 1012 ruling: first-writer-wins. If the
+        // current open turn was created by the opener-grace sweeper
+        // (auto_opened=true) and is still in-flight (ended_at=None),
+        // reject this declare so the auto-opener's turn completes
+        // naturally. Moderator retains authority for the NEXT rotation.
+        if let Some(open_turn) = debate.turn_history.last() {
+            if open_turn.ended_at.is_none() && open_turn.auto_opened {
+                let debate_id = debate.debate_id;
+                let current = open_turn.seat.clone();
+                // Best-effort board broadcast so moderator sees why their
+                // declare was rejected (per architect msg 1012 spec).
+                let msg_id = next_message_id(&dir);
+                let _ = append_to_board(&dir, &serde_json::json!({
+                    "id": msg_id, "from": "system", "to": &debate.moderator, "type": "directive",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!(
+                        "[OxfordDeclareDeferred] debate {} — auto-opener {} mid-turn",
+                        debate_id, current
+                    ),
+                    "body": format!(
+                        "Your `oxford_declare_speaker seat=\"{}\"` call was deferred because debate {} is in an auto-opened opening turn ({} currently holds the floor). Per spec, the auto-opener's turn completes first; you retain authority for every subsequent rotation. Re-call oxford_declare_speaker after the current turn yields or hits the per-turn hard limit.",
+                        seat, debate_id, current
+                    ),
+                    "metadata": {
+                        "debate_id": debate_id,
+                        "rejected_seat": seat,
+                        "current_speaker": current,
+                        "oxford_event": "declare_deferred"
+                    }
+                }));
+                return Err("[OxfordDeclareDeferred] auto-opener's turn in flight; re-call after it yields".to_string());
+            }
+        }
         let now = collab::iso_now();
         // Close the previous turn (set ended_at on the last open turn).
         if let Some(prev) = debate.turn_history.last_mut() {
@@ -9776,6 +9831,7 @@ fn handle_oxford_declare_speaker(seat: &str) -> Result<serde_json::Value, String
             seat: seat.to_string(),
             started_at: now.clone(),
             ended_at: None,
+            auto_opened: false,
         });
         debate.current_speaker = Some(seat.to_string());
         let debate_id = debate.debate_id;

@@ -2952,6 +2952,8 @@ pub mod currency {
         pub oxford_moderator_vacancy_timeout_secs: u64,
         #[serde(default = "default_oxford_react_rate_limit_per_min")]
         pub oxford_react_rate_limit_per_min: u64,
+        #[serde(default = "default_oxford_opener_grace_secs")]
+        pub oxford_opener_grace_secs: u64,
     }
 
     // ---- per-field default fns (required by serde(default = "...")) ----
@@ -2996,6 +2998,7 @@ pub mod currency {
     fn default_oxford_audience_vote_window_secs() -> u64 { super::oxford::OXFORD_AUDIENCE_VOTE_WINDOW_SECS }
     fn default_oxford_moderator_vacancy_timeout_secs() -> u64 { super::oxford::OXFORD_MODERATOR_VACANCY_TIMEOUT_SECS }
     fn default_oxford_react_rate_limit_per_min() -> u64 { super::oxford::OXFORD_REACT_RATE_LIMIT_PER_MIN }
+    fn default_oxford_opener_grace_secs() -> u64 { super::oxford::OXFORD_OPENER_GRACE_SECS }
 
     impl Default for EconomySettings {
         fn default() -> Self {
@@ -5939,6 +5942,115 @@ pub mod currency {
             }
         }
 
+        // --- Oxford opener-grace sweeper (Layer 2 of architect msg 1005 ruling) ---
+        // Closes the "moderator never auto-prompts" failure mode dev-challenger
+        // msg 1000 diagnosed live: empty turn_history + no current_speaker +
+        // moderator never called oxford_declare_speaker → debate sits idle
+        // until human complains. Sweeper fires after opener_grace_secs (default
+        // 30s) and auto-declares side_a[0] as the opening speaker.
+        //
+        // First-writer-wins (evil-arch msg 1007 Gap 1): the lock + re-check
+        // means a moderator who declares between snapshot and lock acquire
+        // wins — sweeper no-ops. Moderator may continue moderating subsequent
+        // rotations normally after an auto-open (only the opener is bypassed).
+        //
+        // Setting=0 disables the sweeper (escape hatch). Side_a empty also
+        // skips the sweeper since there's no canonical opener.
+        if let Ok(Some(d_open)) = super::oxford::read_active_oxford(dir) {
+            let grace_secs = settings.oxford_opener_grace_secs;
+            if grace_secs > 0
+                && d_open.current_speaker.is_none()
+                && d_open.turn_history.is_empty()
+                && !d_open.side_a.is_empty()
+            {
+                if let (Some(now_epoch), Some(start_epoch)) = (
+                    super::parse_iso_epoch(&now),
+                    super::parse_iso_epoch(&d_open.started_at),
+                ) {
+                    let elapsed = now_epoch.saturating_sub(start_epoch);
+                    if elapsed > grace_secs {
+                        let target_id = d_open.debate_id;
+                        let opener = d_open.side_a[0].clone();
+                        let _ = super::oxford::with_oxford_lock(dir, || -> Result<(), String> {
+                            // Re-read under lock — first-writer-wins. If a
+                            // moderator declare landed between snapshot and
+                            // lock acquire, current_speaker is now Some and
+                            // we no-op. Same idempotency-by-debate_id pattern
+                            // as the vacancy sweeper above.
+                            if let Some(mut d) = super::oxford::read_active_oxford(dir)? {
+                                if d.debate_id != target_id {
+                                    return Ok(()); // newer debate
+                                }
+                                if d.current_speaker.is_some() || !d.turn_history.is_empty() {
+                                    return Ok(()); // moderator already declared
+                                }
+                                d.turn_history.push(super::oxford::OxfordTurn {
+                                    seat: opener.clone(),
+                                    started_at: now.clone(),
+                                    ended_at: None,
+                                    auto_opened: true,
+                                });
+                                d.current_speaker = Some(opener.clone());
+                                super::oxford::write_active_oxford(dir, &d)?;
+                                super::oxford::append_oxford_event(
+                                    dir,
+                                    &super::oxford::OxfordEvent::SpeakerDeclared {
+                                        debate_id: d.debate_id,
+                                        timestamp: now.clone(),
+                                        seat: opener.clone(),
+                                    },
+                                )?;
+                                let board_path = std::path::Path::new(dir)
+                                    .join(".vaak").join("board.jsonl");
+                                let _ = super::with_board_lock(dir, || -> Result<(), String> {
+                                    use std::io::Write;
+                                    let max_id: u64 = std::fs::read_to_string(&board_path)
+                                        .unwrap_or_default()
+                                        .lines()
+                                        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                                        .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+                                        .max()
+                                        .unwrap_or(0);
+                                    let msg = serde_json::json!({
+                                        "id": max_id + 1,
+                                        "from": "system",
+                                        "to": "all",
+                                        "type": "broadcast",
+                                        "timestamp": now.clone(),
+                                        "subject": format!(
+                                            "[OxfordAutoOpened] debate {} — {} auto-declared as opener (moderator grace {}s expired)",
+                                            d.debate_id, opener, grace_secs
+                                        ),
+                                        "body": format!(
+                                            "Moderator did not call oxford_declare_speaker within the {}s opener-grace window (elapsed {}s). Floor auto-opened with {} (side_a[0]) as opening speaker. Moderator retains authority for all subsequent rotations.",
+                                            grace_secs, elapsed, opener
+                                        ),
+                                        "metadata": {
+                                            "debate_id": d.debate_id,
+                                            "speaker": opener,
+                                            "opened_via": "opener_grace_sweeper",
+                                            "elapsed_secs": elapsed,
+                                            "grace_secs": grace_secs,
+                                            "oxford_event": "auto_opened"
+                                        }
+                                    });
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&board_path)
+                                        .map_err(|e| format!("board open: {}", e))?;
+                                    writeln!(f, "{}", serde_json::to_string(&msg).unwrap_or_default())
+                                        .map_err(|e| format!("board write: {}", e))?;
+                                    Ok(())
+                                });
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+            }
+        }
+
         // --- Oxford per-turn hard-limit enforcer (commit 2d.3) ---
         // Closes 3rd of 3 deferred wirings from commit 2d.
         // If active debate has a current_speaker with an open turn (last
@@ -6122,6 +6234,7 @@ pub mod oxford {
     pub const OXFORD_MODERATOR_VACANCY_TIMEOUT_SECS: u64 = 300; // §6.5 v2 new
     pub const OXFORD_REACT_RATE_LIMIT_PER_MIN: u64 = 3;         // §3.4a
     pub const OXFORD_REACT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+    pub const OXFORD_OPENER_GRACE_SECS: u64 = 30;               // Layer 2 of architect msg 1005 ruling — auto-open if moderator silent past this
 
     /// Append-only event log for an entire debate's lifecycle. Single source
     /// of truth for replay + audit. See spec §4.1 for the row shapes.
@@ -6152,6 +6265,15 @@ pub mod oxford {
         pub started_at: String, // ISO8601
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub ended_at: Option<String>,
+        /// Layer 3 of architect msg 1005/1012 ruling: true when this turn
+        /// was created by the opener-grace sweeper (not by moderator
+        /// declare). While the auto-opened turn is in-flight,
+        /// handle_oxford_declare_speaker rejects with
+        /// [OxfordDeclareDeferred] so the moderator's mid-turn declare
+        /// is deferred to the next rotation. Back-compat: defaults to
+        /// false for any pre-existing turn_history entries.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub auto_opened: bool,
     }
 
     /// Snapshot of the currently-active Oxford debate. Atomically written
