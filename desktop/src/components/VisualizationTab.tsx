@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "../styles/visualization.css";
 import { useProjectDir } from "../contexts/ProjectDirContext";
-import type { ParsedProject, SessionBinding } from "../lib/collabTypes";
+import type { ParsedProject, SessionBinding, BoardMessage } from "../lib/collabTypes";
 import { getRoleColor } from "../utils/roleColors";
 
 /**
@@ -118,6 +118,34 @@ export function VisualizationTab() {
   const seatLabel = (s: SessionBinding) => `${s.role}:${s.instance ?? 0}`;
   const roleTitle = (slug: string) => project?.config.roles?.[slug]?.title ?? slug;
 
+  const RECENT_MESSAGE_COUNT = 20;
+  const recentMessages: BoardMessage[] = (project?.messages ?? []).slice(-RECENT_MESSAGE_COUNT);
+
+  const sidePanelRef = useRef<HTMLDivElement>(null);
+  const lastSeenIdRef = useRef<number>(0);
+  useEffect(() => {
+    const el = sidePanelRef.current;
+    if (!el || recentMessages.length === 0) return;
+    const newestId = recentMessages[recentMessages.length - 1].id;
+    if (newestId === lastSeenIdRef.current) return;
+    lastSeenIdRef.current = newestId;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [recentMessages]);
+
+  const formatSender = (msg: BoardMessage): { name: string; color: string } => {
+    if (msg.from === "human:0" || msg.from === "human") return { name: "human", color: "#f5c518" };
+    if (msg.from === "system" || msg.from.startsWith("system")) return { name: "system", color: "#8899a6" };
+    const slug = msg.from.split(":")[0];
+    return { name: msg.from, color: getRoleColor(slug) };
+  };
+
+  const previewBody = (body: string, max = 110): string => {
+    const stripped = body.replace(/\n+/g, " ").trim();
+    return stripped.length > max ? `${stripped.slice(0, max - 1)}…` : stripped;
+  };
+
   return (
     <div className="viz-tab">
       <header className="viz-tab-header">
@@ -185,12 +213,37 @@ export function VisualizationTab() {
             })}
           </div>
         </div>
-        <aside className="viz-side-panel" aria-label="Active chat and currency events">
-          <header className="viz-side-panel-header">Side panel</header>
-          <div className="viz-side-panel-body">
-            <p className="viz-side-panel-placeholder">
-              Active chat scroll + recent currency events (B1d).
-            </p>
+        <aside className="viz-side-panel" aria-label="Recent team chat">
+          <header className="viz-side-panel-header">
+            Recent chat
+            <span className="viz-side-panel-count">({recentMessages.length})</span>
+          </header>
+          <div className="viz-side-panel-body" ref={sidePanelRef}>
+            {recentMessages.length === 0 ? (
+              <p className="viz-side-panel-placeholder">
+                No messages on the board yet.
+              </p>
+            ) : (
+              <ul className="viz-chat-list">
+                {recentMessages.map((msg) => {
+                  const { name, color } = formatSender(msg);
+                  return (
+                    <li key={msg.id} className="viz-chat-row">
+                      <span
+                        className="viz-chat-sender"
+                        style={{ color, borderLeftColor: color }}
+                      >
+                        {name}
+                      </span>
+                      {msg.subject && (
+                        <span className="viz-chat-subject">{msg.subject}</span>
+                      )}
+                      <span className="viz-chat-body">{previewBody(msg.body)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
         </aside>
       </div>

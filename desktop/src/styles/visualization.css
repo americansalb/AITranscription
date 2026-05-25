@@ -230,3 +230,49 @@
   color: var(--collab-text-muted, rgba(255, 255, 255, 0.45));
   font-style: italic;
 }
+.viz-side-panel-count {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.4));
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+/* Chat scroll — recent messages tinted by sender role color. */
+.viz-chat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.viz-chat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.025);
+  border-radius: 5px;
+}
+.viz-chat-sender {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: lowercase;
+  letter-spacing: 0.3px;
+  font-variant-numeric: tabular-nums;
+  padding-left: 6px;
+  border-left: 2px solid;
+}
+.viz-chat-subject {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--collab-text, rgba(255, 255, 255, 0.92));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viz-chat-body {
+  font-size: 11px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.65));
+  line-height: 1.4;
+}
