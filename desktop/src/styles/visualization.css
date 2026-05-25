@@ -46,23 +46,159 @@
   overflow: hidden;
 }
 
-.viz-canvas-placeholder {
+.viz-canvas {
   flex: 1;
   min-width: 0;
+  position: relative;
+  margin: 14px;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10));
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 30% 25%, rgba(168, 85, 247, 0.06), transparent 50%),
+    radial-gradient(circle at 75% 75%, rgba(29, 155, 240, 0.05), transparent 50%),
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.012) 0,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 24px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.012) 0,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+  overflow: auto;
+}
+.viz-canvas-empty {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 14px;
-  border: 2px dashed var(--collab-border, rgba(255, 255, 255, 0.12));
-  border-radius: 8px;
-  background:
-    radial-gradient(circle at 30% 30%, rgba(168, 85, 247, 0.05), transparent 60%),
-    radial-gradient(circle at 70% 70%, rgba(29, 155, 240, 0.04), transparent 60%);
+  pointer-events: none;
 }
-.viz-canvas-placeholder-text {
+.viz-canvas-empty-text {
   font-size: 12px;
   font-style: italic;
   color: var(--collab-text-muted, rgba(255, 255, 255, 0.4));
+}
+/* Default-roster layout — wrap-flow grid of avatar cards. v1: no
+   role-clustering yet; v2 introduces clade positioning. */
+.viz-roster-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 24px;
+  justify-content: center;
+  align-content: flex-start;
+}
+.viz-avatar-card {
+  position: relative;
+  width: 130px;
+  padding: 14px 10px 10px;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transition: transform 0.12s ease, box-shadow 0.18s ease;
+}
+.viz-avatar-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+}
+.viz-avatar-card-mic {
+  animation: viz-mic-pulse 1.8s ease-in-out infinite;
+}
+@keyframes viz-mic-pulse {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.viz-avatar-puck {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+.viz-avatar-puck-initial {
+  font-size: 20px;
+  font-weight: 700;
+  color: rgba(0, 0, 0, 0.85);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.viz-avatar-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+.viz-avatar-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  text-align: center;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viz-avatar-instance {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.5));
+  font-variant-numeric: tabular-nums;
+}
+.viz-avatar-pip {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+}
+.viz-avatar-pip-working { background: #17bf63; box-shadow: 0 0 6px rgba(23, 191, 99, 0.7); }
+.viz-avatar-pip-standby { background: #1d9bf0; }
+.viz-avatar-pip-idle    { background: rgba(255, 255, 255, 0.3); }
+.viz-avatar-pip-disconnected { background: #b13434; }
+.viz-avatar-mic-flag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 13px;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.4));
+}
+.viz-avatar-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 7px;
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 10px;
+  margin-top: 2px;
+}
+.viz-avatar-coin {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.viz-avatar-coin .coin-icon {
+  width: 9px;
+  height: 9px;
+  vertical-align: 0;
 }
 
 .viz-side-panel {
