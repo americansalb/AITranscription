@@ -5939,6 +5939,106 @@ pub mod currency {
             }
         }
 
+        // --- Oxford per-turn hard-limit enforcer (commit 2d.3) ---
+        // Closes 3rd of 3 deferred wirings from commit 2d.
+        // If active debate has a current_speaker with an open turn (last
+        // turn ended_at = None) and now - started_at > hard_limit, force-
+        // end the turn so the moderator must declare a new speaker.
+        // hard_limit = 0 disables (soft-limit warning not implemented at
+        // v1 to avoid broadcast noise; can be added if tuning demands).
+        if let Ok(Some(d2_snapshot)) = super::oxford::read_active_oxford(dir) {
+            let hard_limit = settings.oxford_turn_hard_limit_secs;
+            if hard_limit > 0 {
+                if let Some(current) = d2_snapshot.current_speaker.as_ref() {
+                    if let Some(open_turn) = d2_snapshot.turn_history.last() {
+                        if open_turn.ended_at.is_none() && &open_turn.seat == current {
+                            if let (Some(now_epoch), Some(start_epoch)) = (
+                                super::parse_iso_epoch(&now),
+                                super::parse_iso_epoch(&open_turn.started_at),
+                            ) {
+                                let elapsed = now_epoch.saturating_sub(start_epoch);
+                                if elapsed > hard_limit {
+                                    let target_id = d2_snapshot.debate_id;
+                                    let speaker = current.clone();
+                                    let _ = super::oxford::with_oxford_lock(dir, || -> Result<(), String> {
+                                        // Re-read under lock + verify same debate
+                                        // + same speaker + still open (avoids races
+                                        // with declare_speaker / end / kick).
+                                        if let Some(mut d) = super::oxford::read_active_oxford(dir)? {
+                                            if d.debate_id != target_id {
+                                                return Ok(());
+                                            }
+                                            if d.current_speaker.as_deref() != Some(speaker.as_str()) {
+                                                return Ok(());
+                                            }
+                                            let still_open = d.turn_history.last()
+                                                .map(|t| t.ended_at.is_none() && t.seat == speaker)
+                                                .unwrap_or(false);
+                                            if !still_open {
+                                                return Ok(());
+                                            }
+                                            if let Some(t) = d.turn_history.last_mut() {
+                                                t.ended_at = Some(now.clone());
+                                            }
+                                            d.current_speaker = None;
+                                            super::oxford::write_active_oxford(dir, &d)?;
+                                            // Best-effort board broadcast (no
+                                            // dedicated OxfordEvent variant for
+                                            // turn-yield; schema unchanged in v1).
+                                            let board_path = std::path::Path::new(dir)
+                                                .join(".vaak").join("board.jsonl");
+                                            let _ = super::with_board_lock(dir, || -> Result<(), String> {
+                                                use std::io::Write;
+                                                let max_id: u64 = std::fs::read_to_string(&board_path)
+                                                    .unwrap_or_default()
+                                                    .lines()
+                                                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                                                    .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+                                                    .max()
+                                                    .unwrap_or(0);
+                                                let msg = serde_json::json!({
+                                                    "id": max_id + 1,
+                                                    "from": "system",
+                                                    "to": "all",
+                                                    "type": "broadcast",
+                                                    "timestamp": now.clone(),
+                                                    "subject": format!(
+                                                        "[OxfordTurnAutoYielded] debate {} speaker {} exceeded hard limit ({}s held, limit {}s)",
+                                                        d.debate_id, speaker, elapsed, hard_limit
+                                                    ),
+                                                    "body": format!(
+                                                        "Speaker {} held the Oxford debate {} floor for {}s, exceeding the hard limit of {}s. Turn auto-yielded; moderator {} must declare next speaker.",
+                                                        speaker, d.debate_id, elapsed, hard_limit, d.moderator
+                                                    ),
+                                                    "metadata": {
+                                                        "debate_id": d.debate_id,
+                                                        "speaker": speaker,
+                                                        "elapsed_secs": elapsed,
+                                                        "hard_limit_secs": hard_limit,
+                                                        "yielded_via": "turn_hard_limit_enforcer",
+                                                        "oxford_event": "turn_auto_yielded"
+                                                    }
+                                                });
+                                                let mut f = std::fs::OpenOptions::new()
+                                                    .create(true)
+                                                    .append(true)
+                                                    .open(&board_path)
+                                                    .map_err(|e| format!("board open: {}", e))?;
+                                                writeln!(f, "{}", serde_json::to_string(&msg).unwrap_or_default())
+                                                    .map_err(|e| format!("board write: {}", e))?;
+                                                Ok(())
+                                            });
+                                        }
+                                        Ok(())
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- Passive income (mic_advance ticks only) ---
         if on_mic_advance {
             for seat in active_seats {
