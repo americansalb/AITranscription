@@ -17,8 +17,15 @@ export function OxfordSetupModal(props: {
   projectDir: string;
   activeSeats: string[]; // labels like "manager:0", "architect:0"
   onClose: () => void;
+  onStarted?: (debate: {
+    debate_id: number;
+    moderator: string;
+    premise: string;
+    side_a: string[];
+    side_b: string[];
+  }) => void;
 }) {
-  const { open, projectDir, activeSeats, onClose } = props;
+  const { open, projectDir, activeSeats, onClose, onStarted } = props;
   const [moderator, setModerator] = useState<string>("");
   const [sideA, setSideA] = useState<Set<string>>(new Set());
   const [sideB, setSideB] = useState<Set<string>>(new Set());
@@ -88,7 +95,13 @@ export function OxfordSetupModal(props: {
     setError(null);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke("oxford_initiate_cmd", {
+      const result = await invoke<{
+        debate_id: number;
+        moderator: string;
+        side_a: string[];
+        side_b: string[];
+        premise: string;
+      }>("oxford_initiate_cmd", {
         dir: projectDir,
         moderator,
         sideA: Array.from(sideA),
@@ -98,6 +111,15 @@ export function OxfordSetupModal(props: {
         winningSideRewardCopper: rewardCopper,
       });
       console.log("[oxford_initiate]", result);
+      if (onStarted && result && typeof result.debate_id === "number") {
+        onStarted({
+          debate_id: result.debate_id,
+          moderator: result.moderator,
+          premise: result.premise,
+          side_a: result.side_a,
+          side_b: result.side_b,
+        });
+      }
       onClose();
     } catch (e: any) {
       setError(String(e?.message ?? e));

@@ -3820,6 +3820,38 @@ fn oxford_initiate_cmd(
                 writeln!(f, "{}", m.to_string()).map_err(|e| format!("board write: {}", e))?;
                 next_id += 1;
             }
+            // SHA-5 (architect msg 1095, human msg 1090/1092 dead-floor fix):
+            // entry-point parity with vaak-mcp.rs:9742-9756 Layer-1 moderator
+            // prompt. Pre-SHA-5 the UI path (this fn, invoked by
+            // OxfordSetupModal) wrote the broadcast + debater pings but never
+            // directed-prompted the moderator with the literal next action.
+            // Fresh/idle moderator had no signal to call oxford_declare_speaker
+            // → dead floor (debate 6 at 22:00:07Z auto-abandoned 24s later
+            // with empty turn_history). Future refactor: extract this helper
+            // + the vaak-mcp.rs twin into collab::oxford to prevent recurrence
+            // per architect msg 1095 spec point 2 (queued, not bundled here).
+            // PARITY: keep in sync with vaak-mcp.rs:9742-9756 — extract to
+            // collab::oxford when SHA-2 lands (evil-arch msg 1112 guard).
+            let opener = side_a.first().cloned().unwrap_or_default();
+            let mod_prompt = serde_json::json!({
+                "id": next_id,
+                "from": "system",
+                "to": moderator.clone(),
+                "type": "directive",
+                "timestamp": collab::iso_now(),
+                "subject": format!("[OxfordModeratorPrompt] debate {} — open the floor", debate_id),
+                "body": format!(
+                    "You are the moderator for Oxford debate {}.\n\nNext action: call `oxford_declare_speaker seat=\"{}\"` to open the floor (side_a opens by convention per spec §3.2).\n\nIf no speaker is declared within the opener-grace window, the floor will auto-open with side_a[0] as the opening speaker and broadcast [OxfordAutoOpened]. You may continue moderating subsequent rotations normally.",
+                    debate_id, opener
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "suggested_opener": opener,
+                    "oxford_event": "moderator_prompt",
+                    "initiated_via": "ui"
+                }
+            });
+            writeln!(f, "{}", mod_prompt.to_string()).map_err(|e| format!("board write: {}", e))?;
             Ok(())
         });
         Ok(serde_json::json!({

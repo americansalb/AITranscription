@@ -990,12 +990,16 @@ export function CollabTab() {
   // Human msg 870: active Oxford debate snapshot, polled every 2s. When
   // non-null an End Debate button replaces the Start button so the human can
   // force-end a stuck debate via UI without having to delete JSON files.
+  // Extended for human msg 1090/1092 — ActiveOxfordPanel needs current_speaker
+  // + turn_count to render the live debate state in the right rail.
   const [activeOxford, setActiveOxford] = useState<{
     debate_id: number;
     moderator: string;
     premise: string;
     side_a: string[];
     side_b: string[];
+    current_speaker: string | null;
+    turn_count: number;
   } | null>(null);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2361,8 +2365,24 @@ When multiple instances of this role are active:
           premise: string;
           side_a: string[];
           side_b: string[];
+          current_speaker?: string | null;
+          turn_history?: Array<unknown>;
         } | null>("read_active_oxford_cmd", { dir: projectDir });
-        if (!cancelled) setActiveOxford(result ?? null);
+        if (!cancelled) {
+          if (result) {
+            setActiveOxford({
+              debate_id: result.debate_id,
+              moderator: result.moderator,
+              premise: result.premise,
+              side_a: result.side_a,
+              side_b: result.side_b,
+              current_speaker: result.current_speaker ?? null,
+              turn_count: Array.isArray(result.turn_history) ? result.turn_history.length : 0,
+            });
+          } else {
+            setActiveOxford(null);
+          }
+        }
       } catch { /* pre-fix binary — no End button surface */ }
     };
     pollActiveOxford();
@@ -6022,6 +6042,68 @@ When multiple instances of this role are active:
           );
         })()}
 
+        {/* Active Oxford Debate panel (human msg 1090/1092 — "Still no UI
+            changes with starting oxford style"). Pre-fix, the only visible
+            signal was the right-rail button label flipping from Start → End
+            after a 2s poll tick. This panel makes the active-debate state
+            unmissable: premise, sides (with current-speaker highlight),
+            moderator, turn count. Renders only when activeOxford is non-null,
+            so the rail collapses to zero pixels when no debate is running. */}
+        {projectDir && activeOxford && (
+          <div className="active-oxford-panel rail-section" role="region" aria-label="Active Oxford debate">
+            <div className="active-oxford-header">
+              <span className="active-oxford-badge" aria-hidden="true">⚖</span>
+              <span className="active-oxford-title">Active Oxford Debate #{activeOxford.debate_id}</span>
+            </div>
+            <div className="active-oxford-premise">
+              <span className="active-oxford-field-label">Premise</span>
+              <span className="active-oxford-premise-text">{activeOxford.premise}</span>
+            </div>
+            <div className="active-oxford-grid">
+              <div className="active-oxford-block">
+                <span className="active-oxford-field-label">Moderator</span>
+                <span className="active-oxford-seat-pill">{activeOxford.moderator}</span>
+              </div>
+              <div className="active-oxford-block">
+                <span className="active-oxford-field-label">Side A ({activeOxford.side_a.length})</span>
+                <div className="active-oxford-seat-row">
+                  {activeOxford.side_a.map((s) => (
+                    <span
+                      key={s}
+                      className={`active-oxford-seat-pill${activeOxford.current_speaker === s ? " active-oxford-seat-pill-speaking" : ""}`}
+                    >
+                      {s}
+                      {activeOxford.current_speaker === s && <span className="active-oxford-mic" aria-label="speaking"> 🎤</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div className="active-oxford-block">
+                <span className="active-oxford-field-label">Side B ({activeOxford.side_b.length})</span>
+                <div className="active-oxford-seat-row">
+                  {activeOxford.side_b.map((s) => (
+                    <span
+                      key={s}
+                      className={`active-oxford-seat-pill${activeOxford.current_speaker === s ? " active-oxford-seat-pill-speaking" : ""}`}
+                    >
+                      {s}
+                      {activeOxford.current_speaker === s && <span className="active-oxford-mic" aria-label="speaking"> 🎤</span>}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="active-oxford-status">
+              {activeOxford.current_speaker
+                ? <span>Current speaker: <strong>{activeOxford.current_speaker}</strong> · turn {activeOxford.turn_count}</span>
+                : activeOxford.turn_count === 0
+                  ? <span className="active-oxford-status-pending">Awaiting opening declare from moderator <strong>{activeOxford.moderator}</strong> (auto-opens in ≤30s)</span>
+                  : <span>Between turns · {activeOxford.turn_count} turn{activeOxford.turn_count === 1 ? "" : "s"} so far</span>
+              }
+            </div>
+          </div>
+        )}
+
         {/* Economy Settings + Oxford debate triggers (human msgs 657 + 706).
             Both live in the rail below Discussion Mode; small profile so they
             don't compete with the primary panels. The Oxford button swaps to
@@ -6868,7 +6950,11 @@ When multiple instances of this role are active:
           onClose={() => setEconomySettingsOpen(false)}
         />
 
-        {/* Oxford-debate setup modal (human msg 706 — Phase A UI trigger) */}
+        {/* Oxford-debate setup modal (human msg 706 — Phase A UI trigger).
+            onStarted: human msg 1090/1092 — surface a toast + seed activeOxford
+            immediately on initiate so the UI gives same-tick feedback instead
+            of waiting on the 2s poll tick (which made the Start click feel
+            like nothing happened — "Still no UI changes" failure). */}
         <OxfordSetupModal
           open={oxfordSetupOpen}
           projectDir={projectDir || ""}
@@ -6878,6 +6964,21 @@ When multiple instances of this role are active:
               .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
           }
           onClose={() => setOxfordSetupOpen(false)}
+          onStarted={(d) => {
+            setActiveOxford({
+              debate_id: d.debate_id,
+              moderator: d.moderator,
+              premise: d.premise,
+              side_a: d.side_a,
+              side_b: d.side_b,
+              current_speaker: null,
+              turn_count: 0,
+            });
+            showToast(
+              `Oxford debate ${d.debate_id} started — moderator ${d.moderator}, ${d.side_a.length} vs ${d.side_b.length}.`,
+              "success",
+            );
+          }}
         />
 
         {/* Human balance-adjust modal (replaces window.prompt per ui-arch msg 626) */}

@@ -9738,6 +9738,8 @@ fn handle_oxford_initiate(
         // diagnosed live. Debate sits with empty turn_history until
         // moderator acts — without this prompt, a fresh/idle moderator
         // has no signal that they need to open the floor.
+        // PARITY: keep in sync with main.rs:3823+ UI-path twin — extract to
+        // collab::oxford when SHA-2 lands (evil-arch msg 1112 guard).
         let opener = side_a.first().cloned().unwrap_or_default();
         let mod_prompt_id = next_message_id(&dir);
         let _ = append_to_board(&dir, &serde_json::json!({
