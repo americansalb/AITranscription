@@ -3846,6 +3846,18 @@ fn write_economy_settings_cmd(
     if s.interest_per_10_copper_held < 0 {
         violations.push("interest_per_10_copper_held must be >= 0".to_string());
     }
+    if s.starting_balance_copper <= 0 {
+        violations.push(format!(
+            "starting_balance_copper ({}) must be > 0 (per evil-arch msg 707 + tester msg 709)",
+            s.starting_balance_copper
+        ));
+    }
+    if s.pass_escrow_ticks == 0 || s.speak_escrow_ticks == 0 || s.edit_escrow_ticks == 0 || s.test_escrow_ticks == 0 {
+        violations.push(format!(
+            "all escrow_ticks_* must be > 0 (pass={}, speak={}, edit={}, test={}) — zero ticks = immediate release breaks the time-lock contract",
+            s.pass_escrow_ticks, s.speak_escrow_ticks, s.edit_escrow_ticks, s.test_escrow_ticks
+        ));
+    }
     if s.decay_floor_copper > s.starting_balance_copper {
         violations.push(format!(
             "decay_floor_copper ({}) must be <= starting_balance_copper ({})",
@@ -3974,6 +3986,48 @@ fn currency_human_adjust_cmd(
 ) -> Result<serde_json::Value, String> {
     let dir = validate_project_dir(&dir)?;
     collab::currency::apply_human_adjust(&dir, "human:0", &seat, amount_copper, &reason)
+}
+
+/// Phase B v1 B1c support (ui-arch msg 795 + dev:1 msg 806). Returns currency
+/// ledger rows newer than a caller-provided txn_id cursor. The Visualization
+/// tab polls this every 1-2s, renders new rows as floating popups near the
+/// affected seat (e.g., "+10c speak" floats up from architect:0's avatar).
+///
+/// Implementation: read currency.jsonl, filter rows with id > since_txn_id,
+/// return them as JSON. Cheap O(N) tail scan; current ledger is ~5K rows so
+/// well within polling budget. If hot, future optimization is a tail index
+/// (track last-N rows in memory) — but for v1, raw scan is fine.
+///
+/// Cap output at 200 rows to prevent UI-flood after long-disconnect
+/// catch-up. Frontend may make multiple calls advancing the cursor to
+/// fully sync.
+#[tauri::command]
+fn read_currency_events_stream(
+    dir: String,
+    since_txn_id: u64,
+) -> Result<serde_json::Value, String> {
+    let dir = validate_project_dir(&dir)?;
+    let path = collab::currency::currency_jsonl_path(&dir);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut last_id: u64 = since_txn_id;
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let id = v.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+            if id > since_txn_id {
+                if id > last_id { last_id = id; }
+                rows.push(v);
+                if rows.len() >= 200 { break; }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "rows": rows,
+        "last_txn_id": last_id,
+        "count": rows.len(),
+        "more": rows.len() == 200, // signal UI to call again for additional rows
+    }))
 }
 
 /// Phase 5 (Chitragupta) Surface 1 — the Flow Feed. Returns the last `count`
@@ -7292,6 +7346,7 @@ fn main() {
             read_economy_settings_cmd,
             write_economy_settings_cmd,
             oxford_initiate_cmd,
+            read_currency_events_stream,
             read_currency_feed_cmd,
             read_disputes_cmd,
             read_bounties_cmd,
