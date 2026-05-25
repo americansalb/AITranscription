@@ -3785,6 +3785,41 @@ fn oxford_initiate_cmd(
                 .create(true).append(true).open(&board_path)
                 .map_err(|e| format!("board open append: {}", e))?;
             writeln!(f, "{}", msg.to_string()).map_err(|e| format!("board write: {}", e))?;
+            // Commit 2d.4: ping each debater with a DIRECTED message so they
+            // wake up and discover their assignment (closes code-interpreter
+            // msg 894 TODO). Audience skipped (observers); moderator skipped
+            // (they were selected by the human in the UI, presumably know).
+            let mut next_id = max_id + 2;
+            let make_ping = |id: u64, target: &str, side: &str| {
+                serde_json::json!({
+                    "id": id,
+                    "from": "system",
+                    "to": target,
+                    "type": "directive",
+                    "timestamp": collab::iso_now(),
+                    "subject": format!("[OxfordDebateAssignment] debate {} — you are on {}", debate_id, side),
+                    "body": format!(
+                        "You have been selected for Oxford debate {} as a {} debater.\n\nPremise: {}\n\nModerator: {} will declare speakers via oxford_declare_speaker. Only the declared speaker can project_send during their turn — wait for the moderator to call on you. Winning side splits {} copper from the pool.\n\nPer spec §6.3, non-speaker debaters can use oxford_react for visual reactions (rate-limited).",
+                        debate_id, side, premise, moderator, reward
+                    ),
+                    "metadata": {
+                        "debate_id": debate_id,
+                        "assigned_side": side,
+                        "oxford_event": "debater_assigned",
+                        "initiated_via": "ui"
+                    }
+                })
+            };
+            for seat in &side_a {
+                let m = make_ping(next_id, seat, "side_a");
+                writeln!(f, "{}", m.to_string()).map_err(|e| format!("board write: {}", e))?;
+                next_id += 1;
+            }
+            for seat in &side_b {
+                let m = make_ping(next_id, seat, "side_b");
+                writeln!(f, "{}", m.to_string()).map_err(|e| format!("board write: {}", e))?;
+                next_id += 1;
+            }
             Ok(())
         });
         Ok(serde_json::json!({

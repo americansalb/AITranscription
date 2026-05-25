@@ -9694,6 +9694,44 @@ fn handle_oxford_initiate(
                 "oxford_event": "initiate"
             }
         }));
+        // Commit 2d.4 (MCP path): directed pings to each debater so they
+        // wake up and discover their assignment (closes code-interpreter
+        // msg 894 TODO). Audience + moderator skipped (observers /
+        // already-engaged respectively).
+        for seat in side_a.iter() {
+            let ping_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": ping_id, "from": "system", "to": seat, "type": "directive",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[OxfordDebateAssignment] debate {} — you are on side_a", debate_id),
+                "body": format!(
+                    "You have been selected for Oxford debate {} as a side_a debater.\n\nPremise: {}\n\nModerator: {} will declare speakers via oxford_declare_speaker. Only the declared speaker can project_send during their turn — wait for the moderator to call on you. Winning side splits {} copper from the pool.\n\nPer spec §6.3, non-speaker debaters can use oxford_react for visual reactions (rate-limited).",
+                    debate_id, premise, moderator, reward
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "assigned_side": "side_a",
+                    "oxford_event": "debater_assigned"
+                }
+            }));
+        }
+        for seat in side_b.iter() {
+            let ping_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": ping_id, "from": "system", "to": seat, "type": "directive",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[OxfordDebateAssignment] debate {} — you are on side_b", debate_id),
+                "body": format!(
+                    "You have been selected for Oxford debate {} as a side_b debater.\n\nPremise: {}\n\nModerator: {} will declare speakers via oxford_declare_speaker. Only the declared speaker can project_send during their turn — wait for the moderator to call on you. Winning side splits {} copper from the pool.\n\nPer spec §6.3, non-speaker debaters can use oxford_react for visual reactions (rate-limited).",
+                    debate_id, premise, moderator, reward
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "assigned_side": "side_b",
+                    "oxford_event": "debater_assigned"
+                }
+            }));
+        }
 
         Ok(serde_json::json!({
             "debate_id": debate_id,
