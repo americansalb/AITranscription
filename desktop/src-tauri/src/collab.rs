@@ -5846,6 +5846,99 @@ pub mod currency {
             }
         }
 
+        // --- Oxford moderator-vacancy sweeper (commit 2d.2) ---
+        // Closes human msg 870 failure mode (debate sat 18min idle) +
+        // wires consumer-side for `oxford_moderator_vacancy_timeout_secs`.
+        // Last-activity = max(started_at, last turn_history.started_at).
+        // Runs every tick (not gated on on_mic_advance) so debates auto-end
+        // even outside mic rotation; in practice, ticks fire every send +
+        // every mic-advance, which is frequent enough for v1.
+        if let Ok(Some(d_snapshot)) = super::oxford::read_active_oxford(dir) {
+            let timeout_secs = settings.oxford_moderator_vacancy_timeout_secs;
+            if timeout_secs > 0 {
+                let last_activity = d_snapshot.turn_history
+                    .last()
+                    .map(|t| t.started_at.as_str())
+                    .unwrap_or(&d_snapshot.started_at);
+                if let (Some(now_epoch), Some(last_epoch)) = (
+                    super::parse_iso_epoch(&now),
+                    super::parse_iso_epoch(last_activity),
+                ) {
+                    let elapsed = now_epoch.saturating_sub(last_epoch);
+                    if elapsed > timeout_secs {
+                        let target_id = d_snapshot.debate_id;
+                        let moderator = d_snapshot.moderator.clone();
+                        let _ = super::oxford::with_oxford_lock(dir, || -> Result<(), String> {
+                            // Re-read under lock to avoid double-end race
+                            // with handle_oxford_end / oxford_end_cmd.
+                            if let Some(d) = super::oxford::read_active_oxford(dir)? {
+                                if d.debate_id != target_id {
+                                    return Ok(()); // newer debate already started
+                                }
+                                super::oxford::append_oxford_event(
+                                    dir,
+                                    &super::oxford::OxfordEvent::Ended {
+                                        debate_id: d.debate_id,
+                                        timestamp: now.clone(),
+                                        outcome: "abandoned".to_string(),
+                                        audience_tally_nonhuman: None,
+                                        audience_human_vote: None,
+                                        reward_distributed: None,
+                                    },
+                                )?;
+                                super::oxford::clear_active_oxford(dir)?;
+                                // Best-effort board broadcast (mirrors oxford_end_cmd shape).
+                                let board_path = std::path::Path::new(dir)
+                                    .join(".vaak").join("board.jsonl");
+                                let _ = super::with_board_lock(dir, || -> Result<(), String> {
+                                    use std::io::Write;
+                                    let max_id: u64 = std::fs::read_to_string(&board_path)
+                                        .unwrap_or_default()
+                                        .lines()
+                                        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                                        .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+                                        .max()
+                                        .unwrap_or(0);
+                                    let msg = serde_json::json!({
+                                        "id": max_id + 1,
+                                        "from": "system",
+                                        "to": "all",
+                                        "type": "broadcast",
+                                        "timestamp": now.clone(),
+                                        "subject": format!(
+                                            "[OxfordDebateEnded] debate {} auto-ended (moderator vacancy, idle {}s)",
+                                            d.debate_id, elapsed
+                                        ),
+                                        "body": format!(
+                                            "Oxford debate {} auto-ended after {}s of moderator inactivity (timeout={}s). Outcome: abandoned. No reward distribution. Moderator was {}.",
+                                            d.debate_id, elapsed, timeout_secs, moderator
+                                        ),
+                                        "metadata": {
+                                            "debate_id": d.debate_id,
+                                            "outcome": "abandoned",
+                                            "ended_via": "moderator_vacancy_sweeper",
+                                            "elapsed_secs": elapsed,
+                                            "timeout_secs": timeout_secs,
+                                            "oxford_event": "ended"
+                                        }
+                                    });
+                                    let mut f = std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&board_path)
+                                        .map_err(|e| format!("board open: {}", e))?;
+                                    writeln!(f, "{}", serde_json::to_string(&msg).unwrap_or_default())
+                                        .map_err(|e| format!("board write: {}", e))?;
+                                    Ok(())
+                                });
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+            }
+        }
+
         // --- Passive income (mic_advance ticks only) ---
         if on_mic_advance {
             for seat in active_seats {
