@@ -5115,6 +5115,205 @@ pub mod currency {
                 ActionKind::Speak
             ));
         }
+
+        // ── Tester msg 790 (2026-05-25): T-conservation property tests ──
+        //
+        // Invariant: total system copper (Σ seat.balance + Σ seat.escrow_held
+        // across all seats) equals starting state plus net per-row deltas
+        // applied via `apply_row`. Catches double-credit, silent-loss, and
+        // wrong-arm-routing bugs in the apply dispatcher that per-action unit
+        // tests (above) miss because they only check single rows in isolation.
+        //
+        // Class of bug these tests target: live ledger empirical (~7.1%
+        // session inflation observed at msg 287) was caused by a divergence
+        // between expected-from-source and runtime-from-binary behavior.
+        // The conservation invariant catches drift the moment it appears
+        // because Σ is a structural property, not a per-call assertion.
+
+        fn total_system_copper(snap: &BalancesSnapshot) -> i64 {
+            snap.seats
+                .values()
+                .map(|s| s.balance + s.escrow_held)
+                .sum()
+        }
+
+        fn ledger_row(id: u64, txn_type: &str, seat: &str, amount: i64) -> LedgerRow {
+            LedgerRow {
+                id,
+                txn_type: txn_type.to_string(),
+                seat: seat.to_string(),
+                amount,
+                reason: String::new(),
+                balance_after: 0,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn t_conservation_init_mints() {
+            let mut snap = BalancesSnapshot::default();
+            assert_eq!(total_system_copper(&snap), 0);
+            let row = ledger_row(1, "init", "a:0", STARTING_BALANCE_COPPER);
+            apply_row(&mut snap, &row).unwrap();
+            assert_eq!(total_system_copper(&snap), STARTING_BALANCE_COPPER);
+        }
+
+        #[test]
+        fn t_conservation_speak_escrow_lifecycle_full_cycle() {
+            // SPEAK lifecycle apply_row effects:
+            //   escrow_hold: balance unchanged, escrow_held += |amount| → system +N
+            //   credit:      balance += amount                          → system +N
+            //   escrow_release: escrow_held -= amount                   → system -N
+            // Net per Speak: system gains exactly SPEAK_EARN_COPPER. The
+            // earn-net should equal the constant the spec promises.
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default();
+            let baseline = total_system_copper(&snap);
+            let n = SPEAK_EARN_COPPER;
+
+            // escrow_hold: amount stored negative, escrow_held += abs(amount)
+            let hold = LedgerRow {
+                id: 1,
+                txn_type: "escrow_hold".to_string(),
+                seat: "a:0".to_string(),
+                amount: -n,
+                escrow_id: Some("e1".to_string()),
+                release_turn: Some(SPEAK_ESCROW_TICKS),
+                ..Default::default()
+            };
+            apply_row(&mut snap, &hold).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + n);
+
+            // credit: balance += amount
+            let credit = ledger_row(2, "credit", "a:0", n);
+            apply_row(&mut snap, &credit).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + 2 * n);
+
+            // escrow_release: escrow_held -= amount
+            let release = LedgerRow {
+                id: 3,
+                txn_type: "escrow_release".to_string(),
+                seat: "a:0".to_string(),
+                amount: n,
+                escrow_id: Some("e1".to_string()),
+                ..Default::default()
+            };
+            apply_row(&mut snap, &release).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + n);
+        }
+
+        #[test]
+        fn t_conservation_penalty_destroys() {
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 1000;
+            let baseline = total_system_copper(&snap);
+            let row = ledger_row(1, "penalty", "a:0", -50);
+            apply_row(&mut snap, &row).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline - 50);
+        }
+
+        #[test]
+        fn t_conservation_pool_destroyed_is_audit_only() {
+            // pool_destroyed rows are audit markers — they MUST NOT mutate
+            // real-seat balances. Regression guard: if a future apply_row
+            // arm accidentally adds the amount to system:pool's balance, the
+            // total-system invariant would falsely shrink even though no
+            // real seat lost copper.
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 1000;
+            let baseline = total_system_copper(&snap);
+
+            let row = LedgerRow {
+                id: 1,
+                txn_type: "pool_destroyed".to_string(),
+                seat: "system:pool".to_string(),
+                amount: -100,
+                ..Default::default()
+            };
+            apply_row(&mut snap, &row).unwrap();
+            assert_eq!(snap.seats.get("a:0").unwrap().balance, 1000);
+            // system:pool seat entry exists with balance 0; conservation
+            // unchanged because no real flow happened.
+            assert_eq!(total_system_copper(&snap), baseline);
+        }
+
+        #[test]
+        fn t_conservation_human_adjust_credit_and_debit() {
+            // Human msg 458 — human-issued credits and debits flow through
+            // apply_row as plain balance mutations. Conservation tracks them
+            // as external-pool flows in either direction.
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 500;
+            let baseline = total_system_copper(&snap);
+
+            apply_row(&mut snap, &ledger_row(1, "human_adjust", "a:0", 1000)).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + 1000);
+
+            apply_row(&mut snap, &ledger_row(2, "human_adjust", "a:0", -300)).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline + 700);
+        }
+
+        #[test]
+        fn t_conservation_decay_destroys() {
+            let mut snap = BalancesSnapshot::default();
+            snap.seats.entry("a:0".to_string()).or_default().balance = 10000;
+            let baseline = total_system_copper(&snap);
+            let row = ledger_row(1, "decay", "a:0", -100);
+            apply_row(&mut snap, &row).unwrap();
+            assert_eq!(total_system_copper(&snap), baseline - 100);
+        }
+
+        #[test]
+        fn t_conservation_multi_seat_speak_session() {
+            // 3 seats each init + 1 SPEAK lifecycle. Verifies the invariant
+            // composes across seats and rows — analogous to a single tick's
+            // worth of live activity. Catches per-seat state leakage between
+            // apply_row calls.
+            let mut snap = BalancesSnapshot::default();
+            let seats = ["a:0", "b:0", "c:0"];
+            let mut id: u64 = 1;
+            for seat in &seats {
+                apply_row(&mut snap, &ledger_row(id, "init", seat, STARTING_BALANCE_COPPER)).unwrap();
+                id += 1;
+            }
+            let after_init = total_system_copper(&snap);
+            assert_eq!(after_init, STARTING_BALANCE_COPPER * seats.len() as i64);
+
+            let n = SPEAK_EARN_COPPER;
+            for (i, seat) in seats.iter().enumerate() {
+                let esc = format!("esc_{:03x}", i);
+                apply_row(&mut snap, &LedgerRow {
+                    id, txn_type: "escrow_hold".to_string(), seat: seat.to_string(),
+                    amount: -n, escrow_id: Some(esc.clone()), ..Default::default()
+                }).unwrap();
+                id += 1;
+                apply_row(&mut snap, &ledger_row(id, "credit", seat, n)).unwrap();
+                id += 1;
+                apply_row(&mut snap, &LedgerRow {
+                    id, txn_type: "escrow_release".to_string(), seat: seat.to_string(),
+                    amount: n, escrow_id: Some(esc), ..Default::default()
+                }).unwrap();
+                id += 1;
+            }
+            // Each seat gained exactly n. Total system: 3 inits + 3 speak earns.
+            assert_eq!(total_system_copper(&snap), after_init + n * seats.len() as i64);
+        }
+
+        #[test]
+        fn t_conservation_init_rejects_double() {
+            // The init invariant is the foundation of the conservation
+            // property: exactly ONE init per seat over the ledger's lifetime.
+            // A duplicate would silently double-mint. This test enforces the
+            // HARD ERROR per dev-challenger:0 msg 1080 nit #2.
+            let mut snap = BalancesSnapshot::default();
+            let row1 = ledger_row(1, "init", "a:0", STARTING_BALANCE_COPPER);
+            apply_row(&mut snap, &row1).unwrap();
+            let row2 = ledger_row(2, "init", "a:0", STARTING_BALANCE_COPPER);
+            let result = apply_row(&mut snap, &row2);
+            assert!(result.is_err(), "duplicate init must be HARD ERROR");
+            // Even on error, snap state stays at the first init's value.
+            assert_eq!(total_system_copper(&snap), STARTING_BALANCE_COPPER);
+        }
     }
 
     /// Commit (c) — process ONE currency tick. MUST be called inside
