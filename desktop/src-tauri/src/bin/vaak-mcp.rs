@@ -9925,6 +9925,11 @@ fn handle_oxford_react(emoji: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
     let dir = state.project_dir.clone();
     let caller = format!("{}:{}", state.role, state.instance);
+    // Commit 2d follow-up: rate-limit-per-min sourced from EconomySettings
+    // (window stays at OXFORD_REACT_RATE_LIMIT_WINDOW_SECS since the field is
+    // named "_per_min" and the window is implicitly 60s).
+    let rate_limit_per_min = collab::currency::read_economy_settings(&dir)
+        .oxford_react_rate_limit_per_min;
     // Emoji whitelist per spec §3.4a (rendered by Phase B; any string accepted
     // here but documented choices keep visualization sprite-mapping sane).
     let valid_emoji = ["clap", "boo", "gasp", "laugh", "applause"];
@@ -9980,10 +9985,10 @@ fn handle_oxford_react(emoji: &str) -> Result<serde_json::Value, String> {
                     n
                 })
                 .unwrap_or(0);
-            if recent_count >= OXFORD_REACT_RATE_LIMIT_PER_MIN {
+            if recent_count >= rate_limit_per_min {
                 return Err(format!(
                     "[OxfordReactionRateLimit] max {} reactions per {} seconds; you've used the budget.",
-                    OXFORD_REACT_RATE_LIMIT_PER_MIN, OXFORD_REACT_RATE_LIMIT_WINDOW_SECS
+                    rate_limit_per_min, OXFORD_REACT_RATE_LIMIT_WINDOW_SECS
                 ));
             }
         }
@@ -9999,7 +10004,7 @@ fn handle_oxford_react(emoji: &str) -> Result<serde_json::Value, String> {
             "seat": caller,
             "emoji": emoji,
             "timestamp": now_iso,
-            "rate_limit_per_min": OXFORD_REACT_RATE_LIMIT_PER_MIN,
+            "rate_limit_per_min": rate_limit_per_min,
         }))
     })
 }
