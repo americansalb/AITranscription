@@ -35,6 +35,47 @@ interface AssemblyState {
   rotation_order: string[];
 }
 
+interface Popup {
+  id: number;
+  text: string;
+  tone: "earn" | "decay" | "loss" | "grant" | "passive" | "tune";
+  born: number;
+}
+
+interface CurrencyEventRow {
+  id: number;
+  type?: string;
+  seat?: string;
+  amount?: number;
+}
+
+const POPUP_TTL_MS = 2000;
+const POPUP_CAP_PER_SEAT = 5;
+
+function classifyEvent(type: string | undefined, amount: number): { text: string; tone: Popup["tone"] } | null {
+  if (!type) return null;
+  const abs = Math.abs(amount);
+  const sign = amount >= 0 ? "+" : "−";
+  switch (type) {
+    case "decay":
+      return { text: `decay −${abs}c`, tone: "decay" };
+    case "human_adjust":
+      return amount >= 0
+        ? { text: `+${abs}c grant`, tone: "grant" }
+        : { text: `−${abs}c grant`, tone: "loss" };
+    case "passive":
+    case "interest":
+      return amount === 0 ? null : { text: `${sign}${abs}c`, tone: "passive" };
+    case "economy_tune":
+      return { text: "tuned", tone: "tune" };
+    default:
+      if (amount === 0) return null;
+      return amount > 0
+        ? { text: `+${abs}c`, tone: "earn" }
+        : { text: `−${abs}c`, tone: "loss" };
+  }
+}
+
 export function VisualizationTab() {
   const { projectDir } = useProjectDir();
   const [project, setProject] = useState<ParsedProject | null>(null);
@@ -112,6 +153,91 @@ export function VisualizationTab() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
+  // B1c — currency event popups. Polls read_currency_events_stream every 1.5s
+  // with a moving cursor. New rows render as floating popups over the
+  // corresponding avatar card; popups expire after POPUP_TTL_MS. The first
+  // call advances the cursor to the current tail so we don't dump the entire
+  // historical ledger as popups on mount.
+  const [popupsBySeat, setPopupsBySeat] = useState<Map<string, Popup[]>>(new Map());
+  const cursorRef = useRef<number>(-1);
+  useEffect(() => {
+    if (!window.__TAURI__ || !projectDir) return;
+    let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const seedCursor = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const resp = await invoke<{ last_txn_id: number }>(
+          "read_currency_events_stream",
+          { dir: projectDir, sinceTxnId: 0 },
+        );
+        if (!cancelled) cursorRef.current = resp.last_txn_id ?? 0;
+      } catch { cursorRef.current = 0; }
+    };
+
+    const poll = async () => {
+      if (cursorRef.current < 0) return;
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const resp = await invoke<{ rows: CurrencyEventRow[]; last_txn_id: number }>(
+          "read_currency_events_stream",
+          { dir: projectDir, sinceTxnId: cursorRef.current },
+        );
+        if (cancelled) return;
+        if (resp.last_txn_id > cursorRef.current) cursorRef.current = resp.last_txn_id;
+        if (!resp.rows || resp.rows.length === 0) return;
+        const now = Date.now();
+        setPopupsBySeat((prev) => {
+          const next = new Map(prev);
+          for (const r of resp.rows) {
+            if (!r.seat) continue;
+            const c = classifyEvent(r.type, r.amount ?? 0);
+            if (!c) continue;
+            const popup: Popup = { id: r.id, text: c.text, tone: c.tone, born: now };
+            const existing = next.get(r.seat) ?? [];
+            const capped = existing.length >= POPUP_CAP_PER_SEAT
+              ? existing.slice(existing.length - POPUP_CAP_PER_SEAT + 1)
+              : existing;
+            next.set(r.seat, [...capped, popup]);
+          }
+          return next;
+        });
+      } catch { /* pre-events-stream binary — no popups */ }
+    };
+
+    (async () => {
+      await seedCursor();
+      if (!cancelled) {
+        interval = setInterval(poll, 1500);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  }, [projectDir]);
+
+  // Cleanup expired popups every 500ms (separate from poll so popups age out
+  // even when no new events fire).
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPopupsBySeat((prev) => {
+        const now = Date.now();
+        const next = new Map<string, Popup[]>();
+        let changed = false;
+        for (const [seat, popups] of prev) {
+          const fresh = popups.filter((p) => now - p.born < POPUP_TTL_MS);
+          if (fresh.length !== popups.length) changed = true;
+          if (fresh.length > 0) next.set(seat, fresh);
+        }
+        return changed ? next : prev;
+      });
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
+
   const activeSessions: SessionBinding[] = (project?.sessions ?? [])
     .filter((s) => s.status === "active" && !!s.role && s.role !== "human");
 
@@ -188,6 +314,16 @@ export function VisualizationTab() {
                   {isMicHolder && (
                     <span className="viz-avatar-mic-flag" aria-hidden="true">🎤</span>
                   )}
+                  {(popupsBySeat.get(label) ?? []).map((p, idx) => (
+                    <span
+                      key={p.id}
+                      className={`viz-popup viz-popup-${p.tone}`}
+                      style={{ animationDelay: `${idx * 80}ms` }}
+                      aria-hidden="true"
+                    >
+                      {p.text}
+                    </span>
+                  ))}
                   {bal && bal.initialized && (
                     <div className="viz-avatar-balance" aria-label={`balance ${bal.balance_copper} copper`}>
                       {bal.display.gold > 0 && (

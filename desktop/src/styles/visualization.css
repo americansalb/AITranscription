@@ -200,6 +200,42 @@
   height: 9px;
   vertical-align: 0;
 }
+/* Currency event popups — floats up + fades over POPUP_TTL_MS (2s). One per
+   transaction row, capped at 5 per seat. Tones map to the event class:
+   earn=green, decay=dim-red, loss=red, grant=gold-sparkle, passive=muted,
+   tune=lavender. */
+.viz-popup {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translate(-50%, 0);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  animation: viz-popup-rise 1.8s ease-out forwards;
+  z-index: 10;
+}
+@keyframes viz-popup-rise {
+  0%   { transform: translate(-50%, 4px); opacity: 0; }
+  12%  { transform: translate(-50%, 0); opacity: 1; }
+  75%  { opacity: 1; }
+  100% { transform: translate(-50%, -38px); opacity: 0; }
+}
+.viz-popup-earn   { color: #17bf63; }
+.viz-popup-decay  { color: #d97706; opacity: 0.85; }
+.viz-popup-loss   { color: #ff5b5b; }
+.viz-popup-grant  {
+  color: #f5c518;
+  text-shadow: 0 0 6px rgba(245, 197, 24, 0.55), 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+.viz-popup-passive { color: rgba(255, 255, 255, 0.5); font-weight: 600; }
+.viz-popup-tune    { color: #a855f7; font-style: italic; }
+@media (prefers-reduced-motion: reduce) {
+  .viz-popup { animation-duration: 0.01s; opacity: 1; transform: translate(-50%, -10px); }
+}
 
 .viz-side-panel {
   width: 28%;
