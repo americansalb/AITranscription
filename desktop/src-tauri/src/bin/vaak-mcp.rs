@@ -10086,13 +10086,14 @@ fn handle_currency_claim_bounty(bounty_id: &str) -> Result<serde_json::Value, St
     let state = get_or_rejoin_state()?;
     let dir = state.project_dir.clone();
     let claimant = format!("{}:{}", state.role, state.instance);
+    let settings = read_economy_settings(&dir);
     collab::with_currency_and_board_lock(&dir, || {
         let mut bounties = read_open_bounties_snapshot(&dir)?;
         let bounty = read_latest_bounties(&dir).get(bounty_id).cloned()
             .ok_or_else(|| format!("[Bounty] {} not found.", bounty_id))?;
         if bounty.status != "open" { return Err(format!("[Bounty] {} is {}, not open.", bounty_id, bounty.status)); }
         if bounty.claimant.is_some() { return Err(format!("[Bounty] {} already claimed.", bounty_id)); }
-        let stake = bounty.amount * BOUNTY_CLAIM_STAKE_PERCENT as i64 / 100;
+        let stake = bounty.amount * settings.bounty_claim_stake_percent as i64 / 100;
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
         let bal = snap.seats.get(&claimant).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
@@ -10138,7 +10139,8 @@ fn handle_currency_abandon_bounty(bounty_id: &str) -> Result<serde_json::Value, 
             return Err("[Bounty] only the current claimant can abandon.".to_string());
         }
         let stake = bounty.claim_stake;
-        let refund = stake * (100 - BOUNTY_ABANDON_LOSS_PERCENT as i64) / 100;
+        let settings = read_economy_settings(&dir);
+        let refund = stake * (100 - settings.bounty_abandon_loss_percent as i64) / 100;
         let destroyed = stake - refund;
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
@@ -10358,13 +10360,14 @@ fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_j
         }
 
         // 2. Load balances; challenger must afford the cost.
+        let settings = read_economy_settings(&dir);
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() {
             snap = replay_balances_from_ledger(&dir)?;
         }
-        let chal_bal = snap.seats.get(&challenger).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
-        if chal_bal < OBJECTION_COST_COPPER {
-            return Err(format!("[Objection] Insufficient balance: need {} copper, have {}.", OBJECTION_COST_COPPER, chal_bal));
+        let chal_bal = snap.seats.get(&challenger).map(|s| s.balance).unwrap_or(settings.starting_balance_copper);
+        if chal_bal < settings.objection_cost_copper {
+            return Err(format!("[Objection] Insufficient balance: need {} copper, have {}.", settings.objection_cost_copper, chal_bal));
         }
         let now = collab::iso_now();
         let mut rows: Vec<LedgerRow> = Vec::new();
@@ -10372,15 +10375,15 @@ fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_j
         // 3. Debit the objection cost from the challenger (penalty row subtracts).
         let chal_after = {
             let e = snap.seats.entry(challenger.clone()).or_insert_with(|| {
-                let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb
+                let mut sb = SeatBalance::default(); sb.balance = settings.starting_balance_copper; sb
             });
-            e.balance = e.balance.saturating_sub(OBJECTION_COST_COPPER);
+            e.balance = e.balance.saturating_sub(settings.objection_cost_copper);
             e.balance
         };
         let id = snap.next_txn_id; snap.next_txn_id += 1;
         rows.push(LedgerRow {
             id, txn_type: "penalty".to_string(), seat: challenger.clone(),
-            amount: -OBJECTION_COST_COPPER, reason: format!("objection filed vs {} @msg {}", target, target_msg_id),
+            amount: -settings.objection_cost_copper, reason: format!("objection filed vs {} @msg {}", target, target_msg_id),
             ref_msg: Some(target_msg_id), balance_after: chal_after, escrow_id: None, release_turn: None,
             turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
         });
@@ -10427,27 +10430,27 @@ fn handle_currency_objection(target_msg_id: u64, reason: &str) -> Result<serde_j
                 turn: Some(snap.turn_counter), action_kind: Some(ActionKind::EscrowRelease), linked_edit_msg: None, at: now.clone(),
             });
         } else {
-            // Escrow already released to balance → claw back 90% of the earn.
-            stake = ((earn * CLAWBACK_PERCENT as i64) + 99) / 100; // ceil(earn*0.9)
+            // Escrow already released to balance → claw back (clawback_percent)% of the earn.
+            stake = ((earn * settings.clawback_percent as i64) + 99) / 100; // ceil(earn*pct)
             let bal = {
                 let e = snap.seats.entry(target.clone()).or_insert_with(|| {
-                    let mut sb = SeatBalance::default(); sb.balance = STARTING_BALANCE_COPPER; sb
+                    let mut sb = SeatBalance::default(); sb.balance = settings.starting_balance_copper; sb
                 });
                 e.balance = e.balance.saturating_sub(stake);
-                if e.balance <= DEFICIT_CAP_COPPER { e.timed_out = true; }
+                if e.balance <= settings.deficit_cap_copper { e.timed_out = true; }
                 e.balance
             };
             let rid = snap.next_txn_id; snap.next_txn_id += 1;
             rows.push(LedgerRow {
                 id: rid, txn_type: "penalty".to_string(), seat: target.clone(),
-                amount: -stake, reason: format!("objection clawback {}% → dispute pool (@msg {})", CLAWBACK_PERCENT, target_msg_id),
+                amount: -stake, reason: format!("objection clawback {}% → dispute pool (@msg {})", settings.clawback_percent, target_msg_id),
                 ref_msg: Some(target_msg_id), balance_after: bal, escrow_id: None, release_turn: None,
                 turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Clawback), linked_edit_msg: None, at: now.clone(),
             });
         }
 
         // 5. Open the dispute.
-        let pool = OBJECTION_COST_COPPER + stake;
+        let pool = settings.objection_cost_copper + stake;
         let mut open = read_open_disputes_snapshot(&dir)?;
         let dispute_id = next_dispute_id(&mut open);
         snapshot_add_open(&mut open, &dispute_id, &challenger, &target);
@@ -10567,24 +10570,25 @@ fn handle_currency_call_judge(dispute_id: &str) -> Result<serde_json::Value, Str
             return Err(format!("[CallJudge] dispute {} already has a judge.", dispute_id));
         }
         let now = collab::iso_now();
+        let settings = read_economy_settings(&dir);
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
         for party in [dispute.challenger.clone(), dispute.target.clone()] {
             let bal = {
-                let e = snap.seats.entry(party.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
-                e.balance = e.balance.saturating_sub(JUDGE_COST_PER_PARTY);
-                if e.balance <= DEFICIT_CAP_COPPER { e.timed_out = true; }
+                let e = snap.seats.entry(party.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = settings.starting_balance_copper; s });
+                e.balance = e.balance.saturating_sub(settings.judge_cost_per_party);
+                if e.balance <= settings.deficit_cap_copper { e.timed_out = true; }
                 e.balance
             };
             let id = snap.next_txn_id; snap.next_txn_id += 1;
             append_currency_transaction(&dir, &LedgerRow {
                 id, txn_type: "penalty".to_string(), seat: party.clone(),
-                amount: -JUDGE_COST_PER_PARTY, reason: format!("call judge for dispute {}", dispute_id),
+                amount: -settings.judge_cost_per_party, reason: format!("call judge for dispute {}", dispute_id),
                 ref_msg: Some(dispute.target_msg), balance_after: bal, escrow_id: None, release_turn: None,
                 turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
             })?;
         }
-        dispute.pool += JUDGE_COST_PER_PARTY * 2;
+        dispute.pool += settings.judge_cost_per_party * 2;
         dispute.judge = Some("human:0".to_string());
         write_balances_snapshot(&dir, &snap)?;
         append_dispute_row(&dir, &dispute)?;
@@ -10619,6 +10623,7 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
             return Err(format!("[Ruling] only the judge ({}) can rule on dispute {}.", judge, dispute_id));
         }
         let now = collab::iso_now();
+        let settings = read_economy_settings(&dir);
         let pool = dispute.pool;
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
@@ -10627,7 +10632,7 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
         // Helper to credit a seat + emit a credit row.
         let mut credit_seat = |snap: &mut BalancesSnapshot, seat: &str, amount: i64, reason: String| -> Result<(), String> {
             let bal = {
-                let e = snap.seats.entry(seat.to_string()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
+                let e = snap.seats.entry(seat.to_string()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = settings.starting_balance_copper; s });
                 e.balance = e.balance.saturating_add(amount);
                 e.balance
             };
@@ -10645,13 +10650,13 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
             // System dispute: filer = challenger, judged correct/incorrect.
             let filer = dispute.challenger.clone();
             if ruling == "challenger_wins" {
-                credit_seat(&mut snap, &filer, SYSTEM_DISPUTE_REWARD, format!("system dispute {} correct — reward", dispute_id))?;
-                outcome = format!("correct: {} rewarded {} copper", filer, SYSTEM_DISPUTE_REWARD);
+                credit_seat(&mut snap, &filer, settings.system_dispute_reward, format!("system dispute {} correct — reward", dispute_id))?;
+                outcome = format!("correct: {} rewarded {} copper", filer, settings.system_dispute_reward);
             } else {
-                // incorrect → additional penalty so total cost = SYSTEM_DISPUTE_PENALTY (filing 50 already paid).
-                let extra = SYSTEM_DISPUTE_PENALTY - SYSTEM_DISPUTE_COST;
+                // incorrect → additional penalty so total cost = system_dispute_penalty (filing already paid).
+                let extra = settings.system_dispute_penalty - settings.system_dispute_cost;
                 credit_seat(&mut snap, &filer, -extra, format!("system dispute {} incorrect — penalty", dispute_id))?;
-                let ban_until = snap.turn_counter + SYSTEM_DISPUTE_BAN_TURNS;
+                let ban_until = snap.turn_counter + settings.system_dispute_ban_turns;
                 if let Some(e) = snap.seats.get_mut(&filer) {
                     e.system_dispute_ban_until = Some(ban_until);
                 }
@@ -10662,12 +10667,12 @@ fn handle_currency_judge_ruling(dispute_id: &str, ruling: &str) -> Result<serde_
                 let bid = snap.next_txn_id; snap.next_txn_id += 1;
                 append_currency_transaction(&dir, &LedgerRow {
                     id: bid, txn_type: "system_dispute_ban".to_string(), seat: filer.clone(),
-                    amount: 0, reason: format!("system dispute {} incorrect — {}-turn ban", dispute_id, SYSTEM_DISPUTE_BAN_TURNS),
+                    amount: 0, reason: format!("system dispute {} incorrect — {}-turn ban", dispute_id, settings.system_dispute_ban_turns),
                     ref_msg: Some(dispute.target_msg), balance_after: snap.seats.get(&filer).map(|e| e.balance).unwrap_or(0),
                     escrow_id: None, release_turn: Some(ban_until), turn: Some(snap.turn_counter),
                     action_kind: None, linked_edit_msg: None, at: now.clone(),
                 })?;
-                outcome = format!("incorrect: {} penalized (total {} cu) + {}-turn system-dispute ban", filer, SYSTEM_DISPUTE_PENALTY, SYSTEM_DISPUTE_BAN_TURNS);
+                outcome = format!("incorrect: {} penalized (total {} cu) + {}-turn system-dispute ban", filer, settings.system_dispute_penalty, settings.system_dispute_ban_turns);
             }
         } else if ruling == "challenger_wins" {
             credit_seat(&mut snap, &dispute.challenger.clone(), pool, format!("dispute {} — judge ruled challenger wins", dispute_id))?;
@@ -10746,11 +10751,12 @@ fn handle_currency_system_dispute(description: &str) -> Result<serde_json::Value
         return Err("[SystemDispute] Human is exempt.".to_string());
     }
     collab::with_currency_and_board_lock(&dir, || {
+        let settings = read_economy_settings(&dir);
         let mut snap = read_balances_snapshot(&dir)?;
         if snap.seats.is_empty() && currency_jsonl_path(&dir).exists() { snap = replay_balances_from_ledger(&dir)?; }
-        let bal = snap.seats.get(&filer).map(|s| s.balance).unwrap_or(STARTING_BALANCE_COPPER);
-        if bal < SYSTEM_DISPUTE_COST {
-            return Err(format!("[SystemDispute] Insufficient balance: need {}, have {}.", SYSTEM_DISPUTE_COST, bal));
+        let bal = snap.seats.get(&filer).map(|s| s.balance).unwrap_or(settings.starting_balance_copper);
+        if bal < settings.system_dispute_cost {
+            return Err(format!("[SystemDispute] Insufficient balance: need {}, have {}.", settings.system_dispute_cost, bal));
         }
         if let Some(until) = snap.seats.get(&filer).and_then(|s| s.system_dispute_ban_until) {
             if until > snap.turn_counter {
@@ -10760,14 +10766,14 @@ fn handle_currency_system_dispute(description: &str) -> Result<serde_json::Value
         let now = collab::iso_now();
         // Debit the filing cost.
         let after = {
-            let e = snap.seats.entry(filer.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = STARTING_BALANCE_COPPER; s });
-            e.balance = e.balance.saturating_sub(SYSTEM_DISPUTE_COST);
+            let e = snap.seats.entry(filer.clone()).or_insert_with(|| { let mut s = SeatBalance::default(); s.balance = settings.starting_balance_copper; s });
+            e.balance = e.balance.saturating_sub(settings.system_dispute_cost);
             e.balance
         };
         let id = snap.next_txn_id; snap.next_txn_id += 1;
         append_currency_transaction(&dir, &LedgerRow {
             id, txn_type: "penalty".to_string(), seat: filer.clone(),
-            amount: -SYSTEM_DISPUTE_COST, reason: "system dispute filed".to_string(),
+            amount: -settings.system_dispute_cost, reason: "system dispute filed".to_string(),
             ref_msg: None, balance_after: after, escrow_id: None, release_turn: None,
             turn: Some(snap.turn_counter), action_kind: Some(ActionKind::Penalty), linked_edit_msg: None, at: now.clone(),
         })?;
@@ -10777,7 +10783,7 @@ fn handle_currency_system_dispute(description: &str) -> Result<serde_json::Value
         snapshot_add_open(&mut open, &dispute_id, &filer, "system");
         let dispute = DisputeRow {
             id: dispute_id.clone(), challenger: filer.clone(), target: "system".to_string(),
-            target_msg: 0, pool: SYSTEM_DISPUTE_COST, status: "open".to_string(), resolution: None,
+            target_msg: 0, pool: settings.system_dispute_cost, status: "open".to_string(), resolution: None,
             messages: vec![DisputeMessage { from: filer.clone(), body: description.to_string(), added_to_pool: 0, at: now.clone() }],
             judge: Some("human:0".to_string()), opened_at: now.clone(), resolved_at: None, turn_opened: snap.turn_counter,
         };
@@ -10787,7 +10793,7 @@ fn handle_currency_system_dispute(description: &str) -> Result<serde_json::Value
         let _ = append_dispute_system_message(&dir,
             &format!("[System dispute] {} filed {}", filer, dispute_id),
             &format!("[System dispute] {} filed system dispute {}: {}. human:0 rules via currency_judge_ruling (challenger_wins=correct → +{}, else → -{} total + {}-turn ban).",
-                filer, dispute_id, description, SYSTEM_DISPUTE_REWARD, SYSTEM_DISPUTE_PENALTY, SYSTEM_DISPUTE_BAN_TURNS),
+                filer, dispute_id, description, settings.system_dispute_reward, settings.system_dispute_penalty, settings.system_dispute_ban_turns),
             serde_json::json!({"dispute_id": dispute_id, "filer": filer, "judge": "human:0"}))?;
         Ok(serde_json::to_value(&dispute).unwrap_or(serde_json::json!({"id": dispute_id})))
     })
@@ -10952,7 +10958,8 @@ fn handle_currency_dispute_message(
                 })
         })
         .unwrap_or(false);
-    let cost = if edit_related { DISPUTE_EDIT_COST_COPPER } else { DISPUTE_SPEECH_COST_COPPER };
+    let settings = collab::currency::read_economy_settings(&dir);
+    let cost = if edit_related { settings.dispute_edit_cost_copper } else { settings.dispute_speech_cost_copper };
 
     collab::with_currency_and_board_lock(&dir, || {
         let mut dispute = read_dispute_by_id(&dir, dispute_id)?
@@ -11052,7 +11059,7 @@ fn handle_currency_dispute_message(
         // judge = "human:0" and post a system notice. Only fires ONCE
         // (the first crossing — judge_already_set check).
         let mut auto_judge_fired = false;
-        if dispute.judge.is_none() && dispute.pool >= JUDGE_AUTO_INVOKE_THRESHOLD {
+        if dispute.judge.is_none() && dispute.pool >= settings.judge_auto_invoke_threshold {
             dispute.judge = Some("human:0".to_string());
             auto_judge_fired = true;
         }
