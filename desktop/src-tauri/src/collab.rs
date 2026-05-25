@@ -4046,7 +4046,10 @@ pub mod currency {
         };
 
         // Window [from_turn..target_turn): inclusive start, exclusive end.
-        let from_turn = target_turn.saturating_sub(RETRO_PASS_SCAN_WINDOW_TURNS);
+        // Per evil-arch msg 808 + dev:1 commit 2c: read from EconomySettings so
+        // retro-Pass penalty magnitude + scan window are live-tunable via UI.
+        let settings = read_economy_settings(dir);
+        let from_turn = target_turn.saturating_sub(settings.retro_pass_scan_window_turns);
         let now = super::iso_now();
         let mut count: u64 = 0;
 
@@ -4062,14 +4065,14 @@ pub mod currency {
             let new_balance = {
                 let e = snap.seats.entry(target_seat.to_string()).or_insert_with(|| {
                     let mut sb = SeatBalance::default();
-                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb.balance = settings.starting_balance_copper;
                     sb
                 });
-                e.balance = e.balance.saturating_sub(RETRO_PASS_PENALTY_COPPER);
+                e.balance = e.balance.saturating_sub(settings.retro_pass_penalty_copper);
                 // Deficit-cap interaction (spec T19): penalty stack that crosses
-                // -1000 trips timed_out. Mirrors apply_row's penalty arm so the
-                // live snapshot stays consistent with a fresh replay.
-                if e.balance <= DEFICIT_CAP_COPPER {
+                // deficit_cap_copper trips timed_out. Mirrors apply_row's penalty
+                // arm so the live snapshot stays consistent with a fresh replay.
+                if e.balance <= settings.deficit_cap_copper {
                     e.timed_out = true;
                 }
                 e.balance
@@ -4081,7 +4084,7 @@ pub mod currency {
                 id,
                 txn_type: "penalty".to_string(),
                 seat: target_seat.to_string(),
-                amount: -RETRO_PASS_PENALTY_COPPER,
+                amount: -settings.retro_pass_penalty_copper,
                 reason: format!("adversarial pass (retro from {})", dispute_id),
                 ref_msg: row.ref_msg.or(Some(target_msg)),
                 balance_after: new_balance,
@@ -4126,6 +4129,9 @@ pub mod currency {
         if !is_edit_target {
             return Ok(0);
         }
+        // Per evil-arch msg 808 + dev:1 commit 2c: read from EconomySettings so
+        // co-liability penalty magnitude is live-tunable via UI.
+        let settings = read_economy_settings(dir);
 
         let now = super::iso_now();
         let mut penalized: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4146,14 +4152,14 @@ pub mod currency {
             let new_balance = {
                 let e = snap.seats.entry(row.seat.clone()).or_insert_with(|| {
                     let mut sb = SeatBalance::default();
-                    sb.balance = STARTING_BALANCE_COPPER;
+                    sb.balance = settings.starting_balance_copper;
                     sb
                 });
-                e.balance = e.balance.saturating_sub(COLIABILITY_TEST_PENALTY_COPPER);
+                e.balance = e.balance.saturating_sub(settings.coliability_test_penalty_copper);
                 // Deficit-cap interaction (spec T11): co-liability stacking past
-                // -1000 trips timed_out, mirroring apply_row's penalty arm so the
-                // live snapshot matches a fresh replay.
-                if e.balance <= DEFICIT_CAP_COPPER {
+                // deficit_cap_copper trips timed_out, mirroring apply_row's penalty
+                // arm so the live snapshot matches a fresh replay.
+                if e.balance <= settings.deficit_cap_copper {
                     e.timed_out = true;
                 }
                 e.balance
@@ -4165,7 +4171,7 @@ pub mod currency {
                 id,
                 txn_type: "penalty".to_string(),
                 seat: row.seat.clone(),
-                amount: -COLIABILITY_TEST_PENALTY_COPPER,
+                amount: -settings.coliability_test_penalty_copper,
                 reason: format!("co-liability — tested bad edit msg #{}", target_msg),
                 ref_msg: Some(target_msg),
                 balance_after: new_balance,
@@ -5405,6 +5411,129 @@ pub mod currency {
             assert!(s.timed_out, "deficit cap should trip timed_out flag");
             assert_eq!(s.balance, -1100);
             assert_eq!(total_system_copper(&snap), baseline - 200);
+        }
+
+        // ── Tester msg 819 (2026-05-25): T-decay-property multi-tick ──
+        //
+        // Decay must monotonically drain balance toward DECAY_FLOOR_COPPER,
+        // never below. Properties verified across simulated 200-tick runs:
+        //   - Floor invariant: balance >= DECAY_FLOOR_COPPER at every tick
+        //   - Monotonicity: balance(t+1) <= balance(t) for all t
+        //   - Eventual convergence: high starting balance reaches floor in
+        //     bounded turns (no infinite tail beyond computed steady-state)
+
+        fn simulate_decay_tick(bal: i64) -> i64 {
+            let (copper_loss, silver_loss) = decay_loss_for_balance(bal);
+            bal - copper_loss - silver_loss
+        }
+
+        #[test]
+        fn t_decay_floor_is_inviolable_across_many_ticks() {
+            // Simulate 500 decay ticks on a starting balance of 10,000c
+            // (1 gold). Floor must hold every tick.
+            let mut bal = 10_000;
+            for _t in 0..500 {
+                bal = simulate_decay_tick(bal);
+                assert!(
+                    bal >= DECAY_FLOOR_COPPER,
+                    "decay drained below floor: bal={}",
+                    bal
+                );
+            }
+        }
+
+        #[test]
+        fn t_decay_is_monotonically_nonincreasing() {
+            // A pure tax mechanism must NEVER increase the seat's balance.
+            // Property: bal(t+1) <= bal(t) for all t.
+            let mut bal = 50_000;
+            for _t in 0..300 {
+                let prev = bal;
+                bal = simulate_decay_tick(bal);
+                assert!(bal <= prev, "decay INCREASED balance: {} -> {}", prev, bal);
+            }
+        }
+
+        #[test]
+        fn t_decay_converges_to_floor_in_bounded_turns() {
+            // A 100,000c balance under 1%-copper + 0.5%-silver decay
+            // (rounded ceiling) should reach the floor in well under
+            // 5000 turns. Regression guard against a future change that
+            // accidentally makes decay too gentle (defeating the
+            // inflation-cap purpose).
+            let mut bal = 100_000;
+            let mut tick = 0u32;
+            while bal > DECAY_FLOOR_COPPER && tick < 5_000 {
+                bal = simulate_decay_tick(bal);
+                tick += 1;
+            }
+            assert!(
+                bal <= DECAY_FLOOR_COPPER,
+                "decay failed to converge in 5000 ticks; bal={}",
+                bal
+            );
+            assert!(
+                bal >= DECAY_FLOOR_COPPER || tick < 5_000,
+                "ended past 5000-tick budget without reaching floor"
+            );
+        }
+
+        #[test]
+        fn t_decay_zero_at_exact_floor() {
+            // At the floor exactly, no further decay fires. Regression
+            // guard for off-by-one in the `bal < DECAY_FLOOR_COPPER`
+            // gate (would drain the floor to floor-1 silently).
+            assert_eq!(decay_loss_for_balance(DECAY_FLOOR_COPPER), (0, 0));
+            let bal = DECAY_FLOOR_COPPER;
+            let after = simulate_decay_tick(bal);
+            assert_eq!(after, bal, "decay drained at-floor balance");
+        }
+
+        // ── Tester msg 819 (2026-05-25): T-economy-defaults-pass-validators ──
+        //
+        // Regression guard: EconomySettings::default() values MUST satisfy
+        // every semantic validator in main.rs::write_economy_settings_cmd
+        // (lines 3845-3905 at the time of this test). If a future default
+        // change drifts out of bounds, this test fails immediately at
+        // cargo test, no UI-submit needed to surface the bug.
+        //
+        // Mirrors the 9 invariants from the consolidated list per
+        // architect msg 701 + evil-arch msg 691 + tester msg 693.
+
+        #[test]
+        fn t_economy_defaults_pass_all_validators() {
+            let s = EconomySettings::default();
+            // 1. interest_per_10_copper_held >= 0
+            assert!(s.interest_per_10_copper_held >= 0,
+                "default interest_per_10_copper_held ({}) violates >=0",
+                s.interest_per_10_copper_held);
+            // 2. starting_balance_copper > 0
+            assert!(s.starting_balance_copper > 0,
+                "default starting_balance_copper ({}) violates >0",
+                s.starting_balance_copper);
+            // 3. all escrow_ticks_* > 0
+            assert!(s.pass_escrow_ticks > 0, "pass_escrow_ticks must be >0");
+            assert!(s.speak_escrow_ticks > 0, "speak_escrow_ticks must be >0");
+            assert!(s.edit_escrow_ticks > 0, "edit_escrow_ticks must be >0");
+            assert!(s.test_escrow_ticks > 0, "test_escrow_ticks must be >0");
+            // 4. decay_floor_copper <= starting_balance_copper
+            assert!(s.decay_floor_copper <= s.starting_balance_copper,
+                "decay_floor_copper ({}) > starting_balance_copper ({}) — fresh seats would start below floor",
+                s.decay_floor_copper, s.starting_balance_copper);
+            // 5. objection_cost_copper <= starting_balance_copper / 5
+            assert!(s.objection_cost_copper <= s.starting_balance_copper / 5,
+                "objection_cost_copper ({}) > starting_balance_copper/5 ({}) — fresh seats can't afford an objection",
+                s.objection_cost_copper, s.starting_balance_copper / 5);
+            // 6. deficit_cap_copper <= 0
+            assert!(s.deficit_cap_copper <= 0,
+                "deficit_cap_copper ({}) must be <=0 (negative threshold for timeout)",
+                s.deficit_cap_copper);
+            // 7-10. percent fields in [0, 100]
+            assert!(s.bounty_claim_stake_percent <= 100, "bounty_claim_stake_percent must be <=100");
+            assert!(s.bounty_abandon_loss_percent <= 100, "bounty_abandon_loss_percent must be <=100");
+            assert!(s.bounty_reject_loss_percent <= 100, "bounty_reject_loss_percent must be <=100");
+            assert!(s.bounty_objection_clawback_percent <= 100, "bounty_objection_clawback_percent must be <=100");
+            assert!(s.clawback_percent <= 100, "clawback_percent must be <=100");
         }
     }
 
