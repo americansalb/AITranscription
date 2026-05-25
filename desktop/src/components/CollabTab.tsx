@@ -3981,49 +3981,14 @@ When multiple instances of this role are active:
               "useless controls" per human direction. Auto-collab + human-
               in-loop modes can return as settings-panel toggles in a
               future commit if needed; the header strip is the wrong
-              place for them per density-first framing in msg 5237. */}
-          {/* Visibility Mode Selector */}
-          {(() => {
-            const currentMode = project?.config?.settings?.discussion_mode || "directed";
-            const modes: Record<string, { label: string; color: string; desc: string }> = {
-              directed: { label: "Directed", color: "#1da1f2", desc: "Agents only see messages addressed to them" },
-              open: { label: "Open", color: "#f5a623", desc: "All agents see all messages" },
-            };
-            const active = modes[currentMode] || modes.directed;
-            return (
-              <div className="discussion-mode-wrapper" ref={discussionModeRef}>
-                <span
-                  className="discussion-mode-badge"
-                  style={{
-                    background: `${active.color}22`,
-                    color: active.color,
-                    borderColor: `${active.color}55`,
-                  }}
-                  onClick={() => setDiscussionModeOpen(!discussionModeOpen)}
-                  title="Visibility — controls whether agents see all messages or only ones addressed to them"
-                >
-                  {active.label}
-                </span>
-                {discussionModeOpen && (
-                  <div className="discussion-mode-dropdown">
-                    {Object.entries(modes).map(([id, m]) => (
-                      <div
-                        key={id}
-                        className={`discussion-mode-dropdown-item${currentMode === id ? " discussion-mode-active" : ""}`}
-                        onClick={() => handleSetDiscussionMode(id)}
-                      >
-                        <span className="discussion-mode-dropdown-dot" style={{ background: m.color }} />
-                        <div className="discussion-mode-dropdown-info">
-                          <span className="discussion-mode-dropdown-label">{m.label}</span>
-                          <span className="discussion-mode-dropdown-desc">{m.desc}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
+              place for them per density-first framing in msg 5237.
+
+              Directed/Open visibility-mode selector previously rendered
+              here; relocated INTO the Discussion Mode sidebar card body
+              per human msg 571 + ui-arch msg 729 — colocation so both
+              controls live under one heading. The trailing badge on the
+              collapsed Discussion Mode bar (dc677e8) preserves the
+              at-a-glance state read. */}
           {/* Currency on/off toggle (human msg 1366) — sibling to the
               visibility-mode badge. Writes settings.currency_enabled via the
               set_currency_enabled Tauri command; the sidecar's
@@ -5950,6 +5915,67 @@ When multiple instances of this role are active:
             className="discussion-mode-section rail-section"
             headerTooltip={{ expand: "Expand discussion mode controls", collapse: "Collapse discussion mode controls" }}
           >
+            {/* Visibility (Directed/Open) selector — relocated from the
+                top header strip per human msg 571 + ui-arch msg 729. Lives
+                above AssemblyControls so the human sees who-sees-what +
+                who-speaks-when under the same heading. */}
+            {(() => {
+              const currentMode = project?.config?.settings?.discussion_mode || "directed";
+              const modes: Record<string, { label: string; color: string; desc: string }> = {
+                directed: { label: "Directed", color: "#1da1f2", desc: "Agents only see messages addressed to them" },
+                open: { label: "Open", color: "#f5a623", desc: "All agents see all messages" },
+              };
+              const active = modes[currentMode] || modes.directed;
+              return (
+                <div className="dm-visibility-block" ref={discussionModeRef}>
+                  <span className="dm-visibility-label">Visibility</span>
+                  <div className="dm-visibility-current">
+                    <span
+                      className="discussion-mode-badge"
+                      role="button"
+                      tabIndex={0}
+                      aria-haspopup="listbox"
+                      aria-expanded={discussionModeOpen}
+                      style={{
+                        background: `${active.color}22`,
+                        color: active.color,
+                        borderColor: `${active.color}55`,
+                      }}
+                      onClick={() => setDiscussionModeOpen(!discussionModeOpen)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setDiscussionModeOpen(!discussionModeOpen);
+                        }
+                      }}
+                      title={active.desc}
+                    >
+                      {active.label}
+                    </span>
+                    <span className="dm-visibility-desc">{active.desc}</span>
+                  </div>
+                  {discussionModeOpen && (
+                    <div className="discussion-mode-dropdown dm-visibility-dropdown" role="listbox">
+                      {Object.entries(modes).map(([id, m]) => (
+                        <div
+                          key={id}
+                          role="option"
+                          aria-selected={currentMode === id}
+                          className={`discussion-mode-dropdown-item${currentMode === id ? " discussion-mode-active" : ""}`}
+                          onClick={() => handleSetDiscussionMode(id)}
+                        >
+                          <span className="discussion-mode-dropdown-dot" style={{ background: m.color }} />
+                          <div className="discussion-mode-dropdown-info">
+                            <span className="discussion-mode-dropdown-label">{m.label}</span>
+                            <span className="discussion-mode-dropdown-desc">{m.desc}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <AssemblyControls
               protocol={twoControlsProtocol}
               mutate={twoControlsMutate}

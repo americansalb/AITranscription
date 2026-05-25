@@ -3207,6 +3207,49 @@
   flex-shrink: 0;
 }
 
+/* Discussion Mode sidebar card — Visibility selector block.
+   Relocated from the top header strip per human msg 571 + ui-arch msg 729.
+   Sits above AssemblyControls inside the CollapsibleSection body. */
+.dm-visibility-block {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 4px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--collab-border, rgba(255, 255, 255, 0.08));
+}
+.dm-visibility-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.5));
+}
+.dm-visibility-current {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dm-visibility-desc {
+  font-size: 10px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.55));
+  flex: 1;
+  min-width: 0;
+}
+/* When the dropdown renders inside the sidebar card, override the
+   header-strip-anchored positioning to fit the narrower rail. */
+.dm-visibility-dropdown {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  min-width: 0;
+  width: 100%;
+  z-index: 25;
+}
+
 .discussion-mode-dropdown-info {
   display: flex;
   flex-direction: column;
