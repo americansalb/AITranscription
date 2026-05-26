@@ -3742,7 +3742,12 @@ fn oxford_initiate_cmd(
         // with_board_lock; the architect-preferred indirect-via-HTTP path
         // is queued as a refactor — for now the locked direct write closes
         // the silent-initiate adversarial vector identified in msg 722.
-        let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+        // SHA-5.1 (human msg 1165 debate 7 root cause): use active-section
+        // path. Pre-5.1 hardcoded `.vaak/board.jsonl` which is the LEGACY
+        // root board — agents on a non-default section (e.g. "5-24") watch
+        // `.vaak/sections/<slug>/board.jsonl` and never saw the prompts.
+        // collab::active_board_path resolves to the right path per section.
+        let board_path = collab::active_board_path(&dir);
         let _ = collab::with_board_lock(&dir, || -> Result<(), String> {
             use std::io::Write;
             // Compute next msg id by scanning existing board for max id + 1.
@@ -3909,7 +3914,11 @@ fn oxford_end_cmd(dir: String) -> Result<serde_json::Value, String> {
         clear_active_oxford(&dir)?;
 
         // Board broadcast mirroring the initiate path.
-        let board_path = std::path::Path::new(&dir).join(".vaak").join("board.jsonl");
+        // SHA-5.1 (human msg 1165 root cause): use active-section path. Same
+        // bug as oxford_initiate_cmd above — the [OxfordDebateEnded] broadcast
+        // was landing in the legacy root board, invisible to agents on a
+        // non-default section.
+        let board_path = collab::active_board_path(&dir);
         let _ = collab::with_board_lock(&dir, || -> Result<(), String> {
             use std::io::Write;
             let max_id: u64 = std::fs::read_to_string(&board_path)

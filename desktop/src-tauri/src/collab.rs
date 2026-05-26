@@ -5891,8 +5891,17 @@ pub mod currency {
                                 )?;
                                 super::oxford::clear_active_oxford(dir)?;
                                 // Best-effort board broadcast (mirrors oxford_end_cmd shape).
-                                let board_path = std::path::Path::new(dir)
-                                    .join(".vaak").join("board.jsonl");
+                                // SHA-5.1 (human msg 1165 root cause): use
+                                // active-section path. Pre-5.1 hardcoded
+                                // `.vaak/board.jsonl` so Oxford broadcasts
+                                // landed in the legacy root board file;
+                                // agents on a non-default section (e.g.
+                                // "5-24") watch `.vaak/sections/<slug>/
+                                // board.jsonl` and never saw them. Mirror
+                                // of the main.rs:3745 fix. THREE Oxford
+                                // emit sites in this file all had the same
+                                // bug — replaced via replace_all.
+                                let board_path = super::active_board_path(dir);
                                 let _ = super::with_board_lock(dir, || -> Result<(), String> {
                                     use std::io::Write;
                                     let max_id: u64 = std::fs::read_to_string(&board_path)
@@ -6000,8 +6009,17 @@ pub mod currency {
                                         seat: opener.clone(),
                                     },
                                 )?;
-                                let board_path = std::path::Path::new(dir)
-                                    .join(".vaak").join("board.jsonl");
+                                // SHA-5.1 (human msg 1165 root cause): use
+                                // active-section path. Pre-5.1 hardcoded
+                                // `.vaak/board.jsonl` so Oxford broadcasts
+                                // landed in the legacy root board file;
+                                // agents on a non-default section (e.g.
+                                // "5-24") watch `.vaak/sections/<slug>/
+                                // board.jsonl` and never saw them. Mirror
+                                // of the main.rs:3745 fix. THREE Oxford
+                                // emit sites in this file all had the same
+                                // bug — replaced via replace_all.
+                                let board_path = super::active_board_path(dir);
                                 let _ = super::with_board_lock(dir, || -> Result<(), String> {
                                     use std::io::Write;
                                     let max_id: u64 = std::fs::read_to_string(&board_path)
