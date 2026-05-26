@@ -74,6 +74,11 @@ pub static VAAK_FINGERPRINT_MCP_SHA10_2: [u8; 59] =
 pub static VAAK_FINGERPRINT_MCP_SHA10_3: [u8; 51] =
     *b"VAAK_FP:SHA-10.3:vaak-mcp.rs:oxford_advance_phase  ";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA10_4: [u8; 53] =
+    *b"VAAK_FP:SHA-10.4:vaak-mcp.rs:oxford_audience_question";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -10082,6 +10087,130 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
     })
 }
 
+/// SHA-10.4 handle_oxford_audience_question — audience seats + human:0
+/// only. Posts a question into the active debate's audience_question_queue.
+/// Gates per architect msg 1280 + ui-architect msg 1411 + evil-arch msg
+/// 1348 watch-1:
+///   - Active debate exists
+///   - Phase MUST be AudienceQ (else [OxfordWrongPhaseForQuestion])
+///   - Caller MUST be in debate.audience OR be "human:0" (else
+///     [OxfordNonAudienceCannotQuestion])
+///   - Queue cap-on-INSERT: 5 max per audience_q phase (evil-arch msg
+///     1348 watch-1; backend HARD cap, frontend SOFT cap per SHA-10.5
+///     drawer state-machine)
+///   - Rate limit: 1 question per OXFORD_AUDIENCE_QUESTION_RATE_LIMIT_SECS
+///     (60s default) per audience seat — checked against most recent
+///     question by this asker in the queue
+///   - Atomic: append + write inside single with_oxford_lock block
+fn handle_oxford_audience_question(question: &str) -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    let q_trimmed = question.trim();
+    if q_trimmed.is_empty() {
+        return Err("[OxfordEmptyQuestion] question text required".to_string());
+    }
+    if q_trimmed.len() > 500 {
+        return Err(format!(
+            "[OxfordQuestionTooLong] {} chars; cap is 500 to keep the queue scannable",
+            q_trimmed.len()
+        ));
+    }
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if debate.phase != OxfordPhase::AudienceQ {
+            return Err(format!(
+                "[OxfordWrongPhaseForQuestion] questions only accepted during AudienceQ phase; current phase is {:?}. Moderator can advance via oxford_advance_phase.",
+                debate.phase
+            ));
+        }
+        // Authorization: audience member OR human:0 (per project spec —
+        // human bypasses participation rules everywhere).
+        let is_audience = debate.audience.iter().any(|s| s == &caller);
+        let is_human = caller == "human:0";
+        if !is_audience && !is_human {
+            return Err(format!(
+                "[OxfordNonAudienceCannotQuestion] caller '{}' is not in debate.audience and not human:0; only audience members may post questions",
+                caller
+            ));
+        }
+        // Queue cap enforcement at INSERT (evil-arch msg 1348 watch-1).
+        let cfg = OxfordPhaseConfig::default();
+        if debate.audience_question_queue.len() >= cfg.audience_question_queue_cap {
+            return Err(format!(
+                "[OxfordAudienceQueueFull] queue at cap of {} questions for this audience_q phase; wait for moderator to advance phase",
+                cfg.audience_question_queue_cap
+            ));
+        }
+        // Rate limit: scan queue for caller's most recent question, reject
+        // if within rate-limit window. Compares ISO timestamps via simple
+        // string-less comparison through epoch parse.
+        let now = collab::iso_now();
+        if let Some(latest) = debate
+            .audience_question_queue
+            .iter()
+            .rev()
+            .find(|q| q.asker == caller)
+        {
+            if let (Some(now_e), Some(prev_e)) = (
+                collab::parse_iso_epoch_pub(&now),
+                collab::parse_iso_epoch_pub(&latest.posted_at),
+            ) {
+                let delta = now_e.saturating_sub(prev_e);
+                if delta < cfg.audience_question_rate_limit_secs {
+                    let remaining = cfg.audience_question_rate_limit_secs - delta;
+                    return Err(format!(
+                        "[OxfordAudienceQuestionRateLimit] you posted a question {}s ago; wait {}s before next question (rate limit: {}s/audience seat per spec §6.5)",
+                        delta, remaining, cfg.audience_question_rate_limit_secs
+                    ));
+                }
+            }
+        }
+        let entry = OxfordAudienceQuestion {
+            asker: caller.clone(),
+            question: q_trimmed.to_string(),
+            posted_at: now.clone(),
+        };
+        debate.audience_question_queue.push(entry.clone());
+        let debate_id = debate.debate_id;
+        let queue_pos = debate.audience_question_queue.len();
+        // ATOMIC per evil-arch msg 1383 atomicity discipline — queue
+        // append + write under single with_oxford_lock acquisition.
+        write_active_oxford(&dir, &debate)?;
+        // Section-aware broadcast (SHA-5.3c lint contract).
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!(
+                "[OxfordAudienceQuestion] debate {} — Q{}/{} from {}",
+                debate_id, queue_pos, cfg.audience_question_queue_cap, caller
+            ),
+            "body": format!(
+                "Audience question {}/{} from {} during audience_q phase of debate {}:\n\n{}\n\nDebaters may respond when moderator calls on them. Moderator advances via oxford_advance_phase when audience_q is done.",
+                queue_pos, cfg.audience_question_queue_cap, caller, debate_id, q_trimmed
+            ),
+            "metadata": {
+                "debate_id": debate_id,
+                "asker": caller,
+                "question": q_trimmed,
+                "queue_position": queue_pos,
+                "queue_cap": cfg.audience_question_queue_cap,
+                "oxford_event": "audience_question"
+            }
+        }));
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "queue_position": queue_pos,
+            "queue_cap": cfg.audience_question_queue_cap,
+            "posted_at": now,
+            "question": q_trimmed
+        }))
+    })
+}
+
 /// Phase A v2.2 commit 3 — oxford_end. Moderator-only. Writes the Ended
 /// event with the moderator's announced outcome, clears active-oxford-
 /// debate.json. Reward distribution per spec §6.1 v2.2 deferred to a
@@ -15236,6 +15365,15 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_audience_question",
+                    "description": "Post a question into the audience-question queue of the active Oxford debate (AUDIENCE SEATS + human:0 ONLY). SHA-10.4 phase-machine controls. Only valid during phase=audience_q. Rate-limited to 1 question per 60s per audience seat. Queue cap-on-INSERT at 5 questions per audience_q phase (evil-arch msg 1348 watch-1; backend HARD cap). Question text ≤500 chars. Errors: [NoActiveOxfordDebate], [OxfordEmptyQuestion], [OxfordQuestionTooLong], [OxfordWrongPhaseForQuestion], [OxfordNonAudienceCannotQuestion], [OxfordAudienceQueueFull], [OxfordAudienceQuestionRateLimit].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "question": { "type": "string", "description": "Question text (≤500 chars)" } },
+                        "required": ["question"]
+                    }
+                },
+                {
                     "name": "oxford_advance_phase",
                     "description": "Advance the Oxford-style debate to its next phase (MODERATOR ONLY). SHA-10.3 phase-machine controls (architect design note `.vaak/design-notes/2026-05-26-oxford-spec-compliance.md`). Transitions: opening_a → opening_b → rebuttal_a → rebuttal_b → audience_q → closing_a → closing_b → ended. Atomically updates active-oxford-debate.json {phase, current_speaker, phase_started_at, turn_history} in one with_oxford_lock block. Auto-declares the new phase's side[0] as the next speaker (per PerSideTotal time-accounting locked by architect msg 1379). Emits `[OxfordPhaseTransition]` broadcast via section-aware path. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordPhaseAlreadyEnded], [OxfordPhaseNoneCannotAdvance].",
                     "inputSchema": {
@@ -16212,6 +16350,16 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 } else {
                     match handle_oxford_react(&emoji) {
                         Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Reaction emitted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "oxford_audience_question" {
+                let question = params.get("arguments").and_then(|a| a.get("question")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if question.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "oxford_audience_question requires question (String, ≤500 chars)" }], "isError": true })
+                } else {
+                    match handle_oxford_audience_question(&question) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Question posted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
                         Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                     }
                 }
