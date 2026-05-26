@@ -6741,6 +6741,30 @@ When multiple instances of this role are active:
                 );
               }
 
+              // SHA-9: system-message visual distinction (human msg 1192 ask A).
+              // System events aren't from a person \u2014 render with neutral
+              // styling, no avatar, italic-muted body, "SYSTEM" pill instead of
+              // a role name. Catches Oxford broadcasts (initiate/declare/end),
+              // system buzz (SHA-5.3a reset-soft rejoin prompt), and any other
+              // non-role-author event not already handled above (mic_landed /
+              // mic_released have their own dedicated dividers).
+              if (msg.from === "system" || msg.from.startsWith("system:")) {
+                const systemTag = msg.from.includes(":") ? msg.from.split(":").slice(1).join(":") : null;
+                return (
+                  <div key={msg.id} className="system-event-card">
+                    <div className="message-card-header">
+                      <span className="message-card-id">#{msg.id}</span>
+                      <span className="system-event-pill" aria-label="System event">SYSTEM</span>
+                      {systemTag && <span className="system-event-tag">{systemTag}</span>}
+                      <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
+                      <button className="message-delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id); }} title="Delete message">&times;</button>
+                    </div>
+                    {msg.subject && <div className="system-event-subject">{msg.subject}</div>}
+                    <MarkdownBody text={msg.body} className="system-event-body" />
+                  </div>
+                );
+              }
+
               const fromRole = msg.from.split(":")[0];
               const borderColor = getRoleColor(fromRole);
               const { slug: fromSlug, instance: fromInstance } = parseSeatInstance(msg.from);

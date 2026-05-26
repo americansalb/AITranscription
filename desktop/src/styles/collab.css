@@ -2095,6 +2095,56 @@
   white-space: pre-wrap;
 }
 
+/* ==================== System-event cards (SHA-9, human msg 1192 ask A) ==================== */
+/* System events ("the system isn't a person") render distinctly: no avatar,
+ * no role-color stripe, neutral muted gray styling, italic body, "SYSTEM"
+ * pill. Used for Oxford broadcasts, system:reset_team_state_soft buzz, and
+ * any non-role-author message not already handled by mic_landed/mic_released
+ * dedicated dividers above. */
+
+.system-event-card {
+  background: rgba(120, 120, 120, 0.05);
+  border-radius: 6px;
+  padding: 6px 12px;
+  border-left: 3px solid var(--collab-text-muted, #657786);
+  margin: 4px 0;
+  opacity: 0.88;
+}
+
+.system-event-pill {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  padding: 1px 6px;
+  background: rgba(120, 120, 120, 0.18);
+  color: var(--collab-text-muted, #8899a6);
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.system-event-tag {
+  font-size: 10px;
+  color: var(--collab-text-muted, #8899a6);
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  opacity: 0.7;
+}
+
+.system-event-subject {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--collab-text-muted, #8899a6);
+  margin: 2px 0;
+  font-weight: 500;
+}
+
+.system-event-body {
+  color: #8899a6;
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 /* ==================== Mic-landed cards (v1.5.1 typed turn) ==================== */
 /* Special-case render of mic_landed system messages that carry typed turn
  * metadata (turn_type + expected_duration_secs from v1.5.1 mic_claim).
