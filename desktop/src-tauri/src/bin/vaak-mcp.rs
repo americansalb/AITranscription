@@ -49,6 +49,11 @@ pub static VAAK_FINGERPRINT_MCP_SHA11_1: [u8; 44] =
 pub static VAAK_FINGERPRINT_MCP_SHA11_2: [u8; 50] =
     *b"VAAK_FP:SHA-11.2:vaak-mcp.rs:floor_view_fresh_read";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA11_1_1: [u8; 57] =
+    *b"VAAK_FP:SHA-11.1.1:vaak-mcp.rs:cooldown_300s_recovery_msg";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11577,7 +11582,21 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     // Stamp is written by main.rs check_assembly_floor_watchdog on
                     // every watchdog release. ui-architect:0 burned 12+ cycles
                     // tonight under the prior no-cooldown logic.
-                    const ZOMBIE_COOLDOWN_MS: u64 = 600_000; // 10 minutes
+                    //
+                    // SHA-11.1.1 tuning (tester msg 1309 + evil-arch msg 1307):
+                    // dropped 600s → 300s after both adversarial reviewers flagged
+                    // the original as too long. Rationale: a seat doing legit slow
+                    // LLM/cargo work hits the 180s stall threshold, gets released,
+                    // and would be muted for ANOTHER 10 min after finishing the
+                    // work — worse than the bug we're fixing. 300s strikes the
+                    // balance: prevents zombie oscillation (same seat re-grabbing
+                    // immediately) while letting legitimate slow workers re-engage
+                    // within one cache-cycle. For true zombies (4+hr stale like
+                    // ui-architect:0 tonight), 300s vs 600s makes no difference —
+                    // they aren't coming back anyway. Future: SHA-11.1b dynamic
+                    // escalation (per evil-arch msg 1307) or process-alive
+                    // detection to distinguish slow-work from process-death.
+                    const ZOMBIE_COOLDOWN_MS: u64 = 300_000; // 5 minutes
                     let from_in_cooldown: Option<u64> = {
                         let sessions = read_sessions(&state.project_dir);
                         let mut parts = from_label.splitn(2, ':');
@@ -11604,11 +11623,24 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                             "[assembly_line] auto-grab BLOCKED: '{}' in zombie cooldown ({}s remaining of {}s window)",
                             from_label, remaining_secs, ZOMBIE_COOLDOWN_MS / 1000
                         );
+                        // SHA-11.1.1 (evil-arch msg 1307 + tester msg 1309):
+                        // recovery-hint expansion. Original error told the seat
+                        // what + why but not how to escape if wrongly classified.
+                        // Now includes: (a) remaining cooldown seconds, (b) wait-
+                        // it-out option, (c) escape hatch for false-positive case
+                        // (CC window relaunch creates fresh sidecar PID with no
+                        // cooldown record). Restores agent autonomy when the
+                        // classification is wrong (e.g., long cargo build).
                         return Err(format!(
                             "[ZombieSeatCooldown] Your seat was watchdog-released {}s ago; cooldown blocks auto-grab for another {}s. \
-                             This prevents the zombie-loop that wedged the team during the 2026-05-26 session. \
-                             Wait, or let another seat send first.",
-                            age_ms / 1000, remaining_secs
+                             This prevents the zombie-loop that wedged the team during the 2026-05-26 session.\n\n\
+                             Options:\n  \
+                               1. Wait {}s and retry — the cooldown will lapse automatically.\n  \
+                               2. Let another active seat send first — they're not in cooldown.\n  \
+                               3. False-positive recovery: if you were wrongly classified (e.g., slow \
+                                  legitimate work like a long cargo build), close + reopen THIS CC window \
+                                  to create a fresh sidecar PID with no cooldown record on it.",
+                            age_ms / 1000, remaining_secs, remaining_secs
                         ));
                     }
                     eprintln!(
