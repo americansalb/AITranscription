@@ -35,6 +35,15 @@
 //! 5. Console window handle (Windows) or TTY path (Unix)
 //! 6. Fallback hash of hostname + parent PID + working directory
 
+// SHA-11.5 runtime fingerprint chain for vaak-mcp.rs (see launcher.rs convention).
+// Module-level `//!` doc comments must come first in the file; this static is
+// placed AFTER them to avoid E0753 "expected outer doc comment".
+// Grep: findstr /C:"VAAK_FP:SHA-11.1" target\debug\vaak-mcp.exe
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA11_1: [u8; 44] =
+    *b"VAAK_FP:SHA-11.1:vaak-mcp.rs:zombie_cooldown";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11534,6 +11543,48 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 };
 
                 if !speaker_is_live {
+                    // SHA-11.1: zombie-seat cooldown. Before auto-grabbing, check
+                    // if from_label was watchdog-released within COOLDOWN_MS. If so,
+                    // reject — the seat that just stalled out should not immediately
+                    // re-grab the mic and trigger the same stall loop. Forces the
+                    // mic to a different sender during the recovery window.
+                    // Stamp is written by main.rs check_assembly_floor_watchdog on
+                    // every watchdog release. ui-architect:0 burned 12+ cycles
+                    // tonight under the prior no-cooldown logic.
+                    const ZOMBIE_COOLDOWN_MS: u64 = 600_000; // 10 minutes
+                    let from_in_cooldown: Option<u64> = {
+                        let sessions = read_sessions(&state.project_dir);
+                        let mut parts = from_label.splitn(2, ':');
+                        let role = parts.next().unwrap_or("");
+                        let inst: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                        sessions.get("bindings").and_then(|b| b.as_array())
+                            .and_then(|arr| arr.iter().find(|b| {
+                                b.get("role").and_then(|r| r.as_str()) == Some(role)
+                                    && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == inst
+                            }))
+                            .and_then(|b| b.get("last_watchdog_release_at_ms").and_then(|v| v.as_u64()))
+                            .and_then(|release_ms| {
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0);
+                                let age = now_ms.saturating_sub(release_ms);
+                                if age < ZOMBIE_COOLDOWN_MS { Some(age) } else { None }
+                            })
+                    };
+                    if let Some(age_ms) = from_in_cooldown {
+                        let remaining_secs = (ZOMBIE_COOLDOWN_MS - age_ms) / 1000;
+                        eprintln!(
+                            "[assembly_line] auto-grab BLOCKED: '{}' in zombie cooldown ({}s remaining of {}s window)",
+                            from_label, remaining_secs, ZOMBIE_COOLDOWN_MS / 1000
+                        );
+                        return Err(format!(
+                            "[ZombieSeatCooldown] Your seat was watchdog-released {}s ago; cooldown blocks auto-grab for another {}s. \
+                             This prevents the zombie-loop that wedged the team during the 2026-05-26 session. \
+                             Wait, or let another seat send first.",
+                            age_ms / 1000, remaining_secs
+                        ));
+                    }
                     eprintln!(
                         "[assembly_line] auto-grab: prior speaker '{}' has no live session; '{}' claims mic (vote-B gate)",
                         if cur.is_empty() { "(none)" } else { cur },

@@ -1,6 +1,16 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// SHA-11.5 runtime fingerprint chain for main.rs (see launcher.rs convention).
+// Note: commit SHA omitted from this fingerprint because main.rs is too
+// frequently edited to keep a per-commit fingerprint per module. The
+// SHA-X.Y feature label is sufficient for "is feature X loaded" verification.
+// Grep: findstr /C:"VAAK_FP:SHA-11.1" target\debug\vaak-desktop.exe
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MAIN_SHA11_1: [u8; 42] =
+    *b"VAAK_FP:SHA-11.1:main.rs:watchdog_cooldown";
+
 mod a11y;
 mod audio;
 mod collab;
@@ -6602,6 +6612,47 @@ fn check_assembly_floor_watchdog(
         "[watchdog] released mic from {} — reason={}, idle={}s, rev_age={}s, section={}",
         speaker, release_reason, idle_secs, rev_age_secs, active_section
     ));
+
+    // SHA-11.1: mark the released seat in sessions.json with a watchdog-
+    // release timestamp. The auto-grab logic in vaak-mcp.rs reads this and
+    // enforces a cooldown (default 600s) before the same seat is allowed
+    // to grab the mic again. Closes the zombie-seat-grabs-its-own-mic loop
+    // — ui-architect:0 burned 12+ watchdog cycles tonight, each followed
+    // immediately by an auto-grab of itself. Cooldown forces the mic to
+    // go to a different sender during the recovery window.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some(mut sessions_val) = std::fs::read_to_string(&sessions_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    {
+        let mut wrote = false;
+        if let Some(arr) = sessions_val.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+            for b in arr.iter_mut() {
+                let matches = b.get("role").and_then(|r| r.as_str()) == Some(speaker_role)
+                    && b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) == speaker_inst;
+                if matches {
+                    if let Some(obj) = b.as_object_mut() {
+                        obj.insert(
+                            "last_watchdog_release_at_ms".to_string(),
+                            serde_json::json!(now_ms),
+                        );
+                        wrote = true;
+                    }
+                }
+            }
+        }
+        if wrote {
+            if let Err(e) = std::fs::write(
+                &sessions_path,
+                serde_json::to_string_pretty(&sessions_val).unwrap_or_default(),
+            ) {
+                log_error(&format!("[watchdog] sessions.json cooldown-stamp write failed: {}", e));
+            }
+        }
+    }
 
     // Push protocol_changed so UI refreshes immediately rather than waiting
     // for the file-watch tick to notice.
