@@ -6121,16 +6121,26 @@ When multiple instances of this role are active:
                 this rail doesn't currently maintain). */}
             {activeOxford.phase && activeOxford.phase !== "none" && (() => {
               const phase = activeOxford.phase;
-              // Phase chip palette per ui-architect msg 1400 CORRECTION 2:
-              //   opening_a/b → teal, rebuttal_a/b → rose,
-              //   audience_q → purple, closing_a/b → slate,
-              //   ended → muted gray.
-              const phaseColor =
+              // SHA-10.5 v1a (ui-architect msg 1411 palette correction per
+              // dev-challenger msg 1402 Find B empirical WCAG measurement):
+              // chip TEXT uses 200-shade for ≥13:1 contrast on dark bg.
+              // Border + bg-tint use 500-shade for identity. Same precedent
+              // as existing .active-oxford-seat-pill-speaking (green-500
+              // border + bg, green-200 text). Pre-v1a used 500-shade for
+              // text → empirically failed AA on 3 of 4 hues (rose ~3.7,
+              // purple ~2.7, slate ~2.1 vs required 4.5).
+              const phase500 =                                              // border + bg-tint
                 phase === "opening_a" || phase === "opening_b" ? "#14b8a6" :
                 phase === "rebuttal_a" || phase === "rebuttal_b" ? "#f43f5e" :
                 phase === "audience_q" ? "#a855f7" :
                 phase === "closing_a" || phase === "closing_b" ? "#64748b" :
                 phase === "ended" ? "#6b7280" : "#9ca3af";
+              const phaseColor =                                            // text (200-shade)
+                phase === "opening_a" || phase === "opening_b" ? "#99f6e4" :
+                phase === "rebuttal_a" || phase === "rebuttal_b" ? "#fecdd3" :
+                phase === "audience_q" ? "#e9d5ff" :
+                phase === "closing_a" || phase === "closing_b" ? "#e2e8f0" :
+                phase === "ended" ? "#e5e7eb" : "#f3f4f6";
               const phaseLabel =
                 phase === "opening_a" ? "Opening · Side A" :
                 phase === "opening_b" ? "Opening · Side B" :
@@ -6176,8 +6186,11 @@ When multiple instances of this role are active:
                   <span
                     className="active-oxford-phase-chip"
                     style={{
-                      background: `${phaseColor}1f`,         /* 12% alpha */
-                      borderLeft: `3px solid ${phaseColor}`,
+                      // Border + bg-tint = 500-shade per existing
+                      // .active-oxford-seat-pill-speaking precedent;
+                      // text = 200-shade for WCAG AAA contrast.
+                      background: `${phase500}2e`,            /* 18% alpha */
+                      borderLeft: `3px solid ${phase500}`,
                       color: phaseColor,
                     }}
                     aria-label={`Phase: ${phaseLabel}`}
