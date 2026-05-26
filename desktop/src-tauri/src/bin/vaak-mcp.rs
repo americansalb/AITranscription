@@ -69,6 +69,11 @@ pub static VAAK_FINGERPRINT_MCP_SHA11_2_1A: [u8; 55] =
 pub static VAAK_FINGERPRINT_MCP_SHA10_2: [u8; 59] =
     *b"VAAK_FP:SHA-10.2:vaak-mcp.rs:oxford_initiate_auto_phase_a  ";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA10_3: [u8; 51] =
+    *b"VAAK_FP:SHA-10.3:vaak-mcp.rs:oxford_advance_phase  ";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -9961,6 +9966,122 @@ fn handle_oxford_declare_speaker(seat: &str) -> Result<serde_json::Value, String
     })
 }
 
+/// SHA-10.3 handle_oxford_advance_phase — moderator-only phase transition.
+/// Atomically advances {phase, current_speaker, phase_started_at, turn_history}
+/// in one with_oxford_lock block (per Flag 1 atomicity requirement).
+/// Auto-declares the next phase's side[0] as the speaker (PerSideTotal time-
+/// accounting per architect msg 1379 lock). Emits [OxfordPhaseTransition]
+/// broadcast via section-aware path. AudienceQ phase has no auto-speaker
+/// (multi-speaker phase per design note §state-machine); current_speaker
+/// becomes None and SHA-10.4's audience_question handler manages turns.
+/// Ended phase terminates — sweeper / oxford_end clear active-oxford state.
+fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        if caller != debate.moderator {
+            return Err("[OxfordModeratorOnly]".to_string());
+        }
+        if debate.phase == OxfordPhase::Ended {
+            return Err("[OxfordPhaseAlreadyEnded] cannot advance past Ended; call oxford_end to clear active state".to_string());
+        }
+        if debate.phase == OxfordPhase::None {
+            return Err("[OxfordPhaseNoneCannotAdvance] debate is in legacy freeform mode (no phase set); use oxford_declare_speaker for turn rotation".to_string());
+        }
+        let prev_phase = debate.phase;
+        let next_phase = prev_phase.next();
+        let now = collab::iso_now();
+        let cfg = OxfordPhaseConfig::default();
+        let (next_soft, next_hard) = next_phase.floors(&cfg).unwrap_or((0, 0));
+        // Close the previous turn (if any).
+        if let Some(prev_turn) = debate.turn_history.last_mut() {
+            if prev_turn.ended_at.is_none() {
+                prev_turn.ended_at = Some(now.clone());
+            }
+        }
+        // Determine next speaker per phase side. AudienceQ + Ended → no speaker.
+        let next_speaker: Option<String> = match next_phase.side() {
+            "side_a" => debate.side_a.first().cloned(),
+            "side_b" => debate.side_b.first().cloned(),
+            _ => None,
+        };
+        if let Some(seat) = next_speaker.as_ref() {
+            debate.turn_history.push(OxfordTurn {
+                seat: seat.clone(),
+                started_at: now.clone(),
+                ended_at: None,
+                auto_opened: true,
+            });
+        }
+        // ATOMICITY (per evil-arch msg 1383 + tester msg 1385 + architect
+        // msg 1391 Flag 1 lock): all three phase-related fields written
+        // inside this single with_oxford_lock block via one
+        // write_active_oxford call. No reader can observe an inconsistent
+        // {phase=next, speaker=prev, phase_started_at=prev} interim state.
+        debate.phase = next_phase;
+        debate.current_speaker = next_speaker.clone();
+        debate.phase_started_at = Some(now.clone());
+        let debate_id = debate.debate_id;
+        write_active_oxford(&dir, &debate)?;
+        // Section-aware broadcast (per SHA-5.3c lint contract):
+        // append_to_board internally routes through board_jsonl_path /
+        // active_board_path. No hardcoded literals here.
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!(
+                "[OxfordPhaseTransition] debate {} — {:?} → {:?}{}",
+                debate_id, prev_phase, next_phase,
+                match next_speaker.as_ref() {
+                    Some(s) => format!(", speaker={}", s),
+                    None => String::new(),
+                }
+            ),
+            "body": format!(
+                "Oxford debate {} phase advanced from {:?} to {:?} via moderator {} (oxford_advance_phase).{}{}",
+                debate_id, prev_phase, next_phase, caller,
+                match next_speaker.as_ref() {
+                    Some(s) => format!(" Next speaker auto-declared: {} (side[0] per PerSideTotal time-accounting).", s),
+                    None => match next_phase {
+                        OxfordPhase::AudienceQ => " AudienceQ phase has no single speaker — audience members post questions via oxford_audience_question (SHA-10.4). Moderator may advance with oxford_advance_phase when ready.".to_string(),
+                        OxfordPhase::Ended => " Debate has ended. Audience vote opens automatically per spec §6.1.".to_string(),
+                        _ => String::new(),
+                    },
+                },
+                match next_phase.floors(&cfg) {
+                    Some((s, h)) if next_phase != OxfordPhase::AudienceQ && next_phase != OxfordPhase::Ended =>
+                        format!(" Equal-time floors: {}s soft / {}s hard.", s, h),
+                    _ => String::new(),
+                }
+            ),
+            "metadata": {
+                "debate_id": debate_id,
+                "prev_phase": format!("{:?}", prev_phase).to_lowercase(),
+                "next_phase": format!("{:?}", next_phase).to_lowercase(),
+                "speaker": next_speaker.clone(),
+                "soft_secs": next_soft,
+                "hard_secs": next_hard,
+                "advanced_by": caller,
+                "oxford_event": "phase_transition"
+            }
+        }));
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "prev_phase": format!("{:?}", prev_phase).to_lowercase(),
+            "next_phase": format!("{:?}", next_phase).to_lowercase(),
+            "current_speaker": next_speaker,
+            "phase_started_at": now,
+            "soft_secs": next_soft,
+            "hard_secs": next_hard,
+        }))
+    })
+}
+
 /// Phase A v2.2 commit 3 — oxford_end. Moderator-only. Writes the Ended
 /// event with the moderator's announced outcome, clears active-oxford-
 /// debate.json. Reward distribution per spec §6.1 v2.2 deferred to a
@@ -15115,6 +15236,15 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_advance_phase",
+                    "description": "Advance the Oxford-style debate to its next phase (MODERATOR ONLY). SHA-10.3 phase-machine controls (architect design note `.vaak/design-notes/2026-05-26-oxford-spec-compliance.md`). Transitions: opening_a → opening_b → rebuttal_a → rebuttal_b → audience_q → closing_a → closing_b → ended. Atomically updates active-oxford-debate.json {phase, current_speaker, phase_started_at, turn_history} in one with_oxford_lock block. Auto-declares the new phase's side[0] as the next speaker (per PerSideTotal time-accounting locked by architect msg 1379). Emits `[OxfordPhaseTransition]` broadcast via section-aware path. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordPhaseAlreadyEnded], [OxfordPhaseNoneCannotAdvance].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                },
+                {
                     "name": "oxford_declare_speaker",
                     "description": "Declare the next speaker in an active Oxford debate (MODERATOR ONLY). Seat must be a member of side_a or side_b. Closes the previous turn and starts a new one with `started_at = now`. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordNonDebaterCannotSpeak].",
                     "inputSchema": {
@@ -16084,6 +16214,11 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Reaction emitted.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
                         Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                     }
+                }
+            } else if tool_name == "oxford_advance_phase" {
+                match handle_oxford_advance_phase() {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Phase advanced.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                 }
             } else if tool_name == "oxford_declare_speaker" {
                 let seat = params.get("arguments").and_then(|a| a.get("seat")).and_then(|v| v.as_str()).unwrap_or("").to_string();
