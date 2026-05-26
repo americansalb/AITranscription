@@ -2163,6 +2163,43 @@
   white-space: pre-wrap;
 }
 
+/* SHA-10.5 v1: Oxford phase indicator in ActiveOxfordPanel (ui-architect
+   msg 1400 spec v2 + dev-challenger msg 1402 Find A/C). Phase chip palette
+   (teal/rose/purple/slate) avoids the panel's amber house color collision;
+   countdown timer uses orange/red gradients (NOT amber) for warning states. */
+
+.active-oxford-phase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.active-oxford-phase-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.active-oxford-phase-timer {
+  font-weight: 700;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-oxford-phase-elapsed {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* SHA-9.2: event-severity hierarchy (dev-challenger msg 1289 find D +
    architect msg 1291). Three tiers visually distinct so an
    oxford_speaker_declared (CRITICAL: take the floor!) doesn't look like

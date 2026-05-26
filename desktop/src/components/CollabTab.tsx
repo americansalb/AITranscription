@@ -992,6 +992,10 @@ export function CollabTab() {
   // force-end a stuck debate via UI without having to delete JSON files.
   // Extended for human msg 1090/1092 — ActiveOxfordPanel needs current_speaker
   // + turn_count to render the live debate state in the right rail.
+  // SHA-10.5 (per ui-architect msg 1400 spec v2 + dev-challenger msg 1402
+  // adversarial review): extended with phase + phase_started_at for the
+  // phase-machine indicator. Defaults to "none" for legacy pre-SHA-10.1
+  // debates (#[serde(default)] back-compat handles read-side).
   const [activeOxford, setActiveOxford] = useState<{
     debate_id: number;
     moderator: string;
@@ -1000,6 +1004,8 @@ export function CollabTab() {
     side_b: string[];
     current_speaker: string | null;
     turn_count: number;
+    phase: string;
+    phase_started_at: string | null;
   } | null>(null);
   const [watching, setWatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2367,6 +2373,8 @@ When multiple instances of this role are active:
           side_b: string[];
           current_speaker?: string | null;
           turn_history?: Array<unknown>;
+          phase?: string;
+          phase_started_at?: string | null;
         } | null>("read_active_oxford_cmd", { dir: projectDir });
         if (!cancelled) {
           if (result) {
@@ -2378,6 +2386,8 @@ When multiple instances of this role are active:
               side_b: result.side_b,
               current_speaker: result.current_speaker ?? null,
               turn_count: Array.isArray(result.turn_history) ? result.turn_history.length : 0,
+              phase: result.phase ?? "none",
+              phase_started_at: result.phase_started_at ?? null,
             });
           } else {
             setActiveOxford(null);
@@ -6101,6 +6111,93 @@ When multiple instances of this role are active:
                   : <span>Between turns · {activeOxford.turn_count} turn{activeOxford.turn_count === 1 ? "" : "s"} so far</span>
               }
             </div>
+            {/* SHA-10.5 v1: phase indicator (architect msg 1280 + ui-architect
+                msg 1400 spec v2 + dev-challenger msg 1402 finds). Renders only
+                when activeOxford.phase != "none" (legacy debates). Phase chip
+                uses distinct hue per category (Find A: not amber, that's the
+                panel's house color). Elapsed time is static-at-render —
+                refreshes on each 2s polling tick. Live countdown is a polish
+                deferred to SHA-10.5.1 (would require a per-second tick that
+                this rail doesn't currently maintain). */}
+            {activeOxford.phase && activeOxford.phase !== "none" && (() => {
+              const phase = activeOxford.phase;
+              // Phase chip palette per ui-architect msg 1400 CORRECTION 2:
+              //   opening_a/b → teal, rebuttal_a/b → rose,
+              //   audience_q → purple, closing_a/b → slate,
+              //   ended → muted gray.
+              const phaseColor =
+                phase === "opening_a" || phase === "opening_b" ? "#14b8a6" :
+                phase === "rebuttal_a" || phase === "rebuttal_b" ? "#f43f5e" :
+                phase === "audience_q" ? "#a855f7" :
+                phase === "closing_a" || phase === "closing_b" ? "#64748b" :
+                phase === "ended" ? "#6b7280" : "#9ca3af";
+              const phaseLabel =
+                phase === "opening_a" ? "Opening · Side A" :
+                phase === "opening_b" ? "Opening · Side B" :
+                phase === "rebuttal_a" ? "Rebuttal · Side A" :
+                phase === "rebuttal_b" ? "Rebuttal · Side B" :
+                phase === "audience_q" ? "Audience Q&A" :
+                phase === "closing_a" ? "Closing · Side A" :
+                phase === "closing_b" ? "Closing · Side B" :
+                phase === "ended" ? "Ended" : phase;
+              // Floor values mirror collab::oxford::OXFORD_PHASE_*_SECS
+              // const defaults (architect msg 1280 lock). Hardcoded
+              // frontend-side for v1; future SHA-10.5.x can fetch from
+              // backend via a new read_oxford_phase_config_cmd.
+              const hardSecs =
+                phase === "opening_a" || phase === "opening_b" ? 180 :
+                phase === "rebuttal_a" || phase === "rebuttal_b" ? 120 :
+                phase === "closing_a" || phase === "closing_b" ? 90 :
+                phase === "audience_q" ? 300 : 0;
+              const startedAt = activeOxford.phase_started_at
+                ? new Date(activeOxford.phase_started_at).getTime()
+                : 0;
+              const elapsedSecs = startedAt > 0
+                ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+                : 0;
+              const remainingSecs = hardSecs > 0
+                ? Math.max(0, hardSecs - elapsedSecs)
+                : 0;
+              // Color shifts per dev-challenger msg 1402 Find A:
+              // orange under 30s, red under 10s — NOT amber (which collides
+              // with the panel's house color).
+              const timerColor =
+                hardSecs === 0 ? "#9ca3af" :
+                remainingSecs <= 10 ? "#dc2626" :
+                remainingSecs <= 30 ? "#f97316" :
+                "#cbd5e1";
+              const mm = Math.floor(remainingSecs / 60);
+              const ss = remainingSecs % 60;
+              const timerLabel = hardSecs > 0
+                ? `${mm}:${ss.toString().padStart(2, "0")}`
+                : "--:--";
+              return (
+                <div className="active-oxford-phase-row" role="group" aria-label="Debate phase">
+                  <span
+                    className="active-oxford-phase-chip"
+                    style={{
+                      background: `${phaseColor}1f`,         /* 12% alpha */
+                      borderLeft: `3px solid ${phaseColor}`,
+                      color: phaseColor,
+                    }}
+                    aria-label={`Phase: ${phaseLabel}`}
+                  >
+                    {phaseLabel}
+                  </span>
+                  <span
+                    className="active-oxford-phase-timer"
+                    style={{ color: timerColor, fontFamily: "ui-monospace, Consolas, monospace" }}
+                    aria-live="polite"
+                    aria-label={`Time remaining: ${mm} minutes ${ss} seconds`}
+                  >
+                    {timerLabel}
+                  </span>
+                  <span className="active-oxford-phase-elapsed" style={{ color: "#9ca3af", fontSize: "11px" }}>
+                    elapsed {elapsedSecs}s / {hardSecs}s hard
+                  </span>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -7031,6 +7128,12 @@ When multiple instances of this role are active:
               side_b: d.side_b,
               current_speaker: null,
               turn_count: 0,
+              // SHA-10.5 — modal-side initial state populates phase
+              // optimistically as opening_a (matching SHA-10.2 backend
+              // auto-declare). Poll-side will overwrite within 2s with
+              // the canonical value from active-oxford-debate.json.
+              phase: "opening_a",
+              phase_started_at: new Date().toISOString(),
             });
             showToast(
               `Oxford debate ${d.debate_id} started — moderator ${d.moderator}, ${d.side_a.length} vs ${d.side_b.length}.`,
