@@ -9659,6 +9659,28 @@ fn handle_oxford_initiate(
     // Pure validation up front (no lock yet).
     validate_initiate(&caller, moderator, side_a, side_b, audience, &active_seats)?;
 
+    // VAAK_FP:SHA-12.1:vaak-mcp.rs:oxford_initiate_liveness_gate
+    // Per debate 10 post-mortem (human msg 1465, 2026-05-26): zombie seats
+    // (dev-challenger:0 + evil-architect:0, stale 11h+) were selected as
+    // debaters with no backend gate. Threshold mirrors the UI moderator
+    // picker (list_active_seats_cmd in main.rs). PARITY: keep in sync
+    // with main.rs:~3722 (UI-path twin).
+    let project_path = std::path::Path::new(&dir);
+    let moderator_seat = moderator.to_string();
+    for seat in std::iter::once(&moderator_seat)
+        .chain(side_a.iter())
+        .chain(side_b.iter())
+        .chain(audience.iter())
+    {
+        if !collab::is_seat_alive(project_path, seat) {
+            return Err(format!(
+                "[OxfordSeatNotAlive] {} heartbeat is stale (> {}s) — cannot initiate Oxford debate with a non-responsive seat. Pick a different seat or wait for the agent to reconnect.",
+                seat,
+                collab::staleness_thresholds::ALIVE_STATE_STALE_MS / 1000
+            ));
+        }
+    }
+
     collab::oxford::with_oxford_lock(&dir, || {
         // Re-check no active debate is in progress (atomic under lock).
         if read_active_oxford(&dir)?.is_some() {

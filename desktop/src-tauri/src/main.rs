@@ -3721,6 +3721,29 @@ fn oxford_initiate_cmd(
     let oxford_settings_default_reward = collab::currency::read_economy_settings(&dir).oxford_default_winning_reward_copper;
     validate_initiate(&caller, &moderator, &side_a, &side_b, &audience, &active_seats)?;
 
+    // VAAK_FP:SHA-12.1:main.rs:oxford_initiate_liveness_gate
+    // Per debate 10 post-mortem (human msg 1465, 2026-05-26): oxford_initiate
+    // selected zombie seats (dev-challenger:0, evil-architect:0 — both
+    // stale 11h+ at initiate time) as debaters. The UI moderator-picker
+    // dropdown already exposes alive_state per seat (list_active_seats_cmd
+    // above) but the backend did not enforce it. Gate here so backend
+    // rejection matches what the picker shows greyed-out. PARITY: keep in
+    // sync with vaak-mcp.rs:~9660 (MCP-path twin).
+    let project_path = std::path::Path::new(&dir);
+    for seat in std::iter::once(&moderator)
+        .chain(side_a.iter())
+        .chain(side_b.iter())
+        .chain(audience.iter())
+    {
+        if !collab::is_seat_alive(project_path, seat) {
+            return Err(format!(
+                "[OxfordSeatNotAlive] {} heartbeat is stale (> {}s) — cannot initiate Oxford debate with a non-responsive seat. Pick a different seat or wait for the agent to reconnect.",
+                seat,
+                collab::staleness_thresholds::ALIVE_STATE_STALE_MS / 1000
+            ));
+        }
+    }
+
     with_oxford_lock(&dir, || {
         if read_active_oxford(&dir)?.is_some() {
             return Err("[OxfordAlreadyActive]".to_string());

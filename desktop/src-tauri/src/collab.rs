@@ -63,6 +63,52 @@ pub mod staleness_thresholds {
     pub const ALIVE_STATE_STALE_MS: u64 = 120_000;
 }
 
+// VAAK_FP:SHA-12.1:collab.rs:is_seat_alive
+/// Liveness probe for a seat label like "developer:0". Reads
+/// `<project_dir>/.vaak/sessions/<role>-<inst>.json:last_alive_at_ms` and
+/// returns true iff the timestamp is within ALIVE_STATE_STALE_MS of now.
+///
+/// Human seats (`human:*`) are always alive — they have no sidecar binding;
+/// the UI itself is the liveness signal.
+///
+/// Missing file, missing field, value == 0, or stale → false.
+///
+/// Per debate 10 post-mortem (human msg 1465, 2026-05-26): oxford_initiate
+/// selected zombie seats (dev-challenger:0 / evil-architect:0, both stale
+/// 11h+) as debaters. This helper is the gate that fix calls before
+/// finalizing initiate; same threshold as the moderator-picker dropdown
+/// already uses so backend rejection matches what the UI shows greyed-out.
+pub fn is_seat_alive(project_dir: &Path, seat: &str) -> bool {
+    if seat.starts_with("human:") { return true; }
+    let (role, instance) = match seat.split_once(':') {
+        Some(pair) => pair,
+        None => return false,
+    };
+    let seat_file = project_dir
+        .join(".vaak")
+        .join("sessions")
+        .join(format!("{}-{}.json", role, instance));
+    let raw = match std::fs::read_to_string(&seat_file) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let last_alive_at_ms = parsed
+        .get("last_alive_at_ms")
+        .and_then(|m| m.as_u64())
+        .unwrap_or(0);
+    if last_alive_at_ms == 0 { return false; }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let stale_ms = now_ms.saturating_sub(last_alive_at_ms);
+    stale_ms <= staleness_thresholds::ALIVE_STATE_STALE_MS
+}
+
 /// Atomic file write: write to .tmp file, fsync, then rename over target.
 /// Protects against partial writes and advisory lock races on macOS.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
