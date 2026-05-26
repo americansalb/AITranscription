@@ -12,6 +12,22 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/tokens.css";
 import "./styles.css";
 
+// SHA-11.5b: frontend fingerprint protocol. vite.config.ts injects these at
+// build time (define plugin); they survive minification as bare string
+// literals. Exposing on `window` makes them inspectable from devtools +
+// grep-able in dist/assets/*.js. Symmetric to the Rust VAAK_FP statics.
+declare const __VAAK_FRONTEND_FP_SHA__: string;
+declare const __VAAK_FRONTEND_FP_BUILT_AT__: string;
+declare const __VAAK_FP_FRONTEND__: string;
+(window as unknown as Record<string, unknown>).__VAAK_FRONTEND_FP = {
+  sha: __VAAK_FRONTEND_FP_SHA__,
+  built_at: __VAAK_FRONTEND_FP_BUILT_AT__,
+  marker: __VAAK_FP_FRONTEND__,
+};
+// Console-log for terminal-tail visibility in dev mode.
+// eslint-disable-next-line no-console
+console.info(__VAAK_FP_FRONTEND__, "built_at=" + __VAAK_FRONTEND_FP_BUILT_AT__);
+
 // Block browser-style shortcuts that conflict with app functionality.
 // Cmd+R / Ctrl+R refreshes the webview, re-initializing all listeners and
 // replaying cached speak events — which looks like a false screen reader trigger.
