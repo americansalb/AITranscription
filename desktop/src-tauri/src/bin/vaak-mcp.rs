@@ -59,6 +59,11 @@ pub static VAAK_FINGERPRINT_MCP_SHA11_1_1: [u8; 57] =
 pub static VAAK_FINGERPRINT_MCP_SHA11_2_1: [u8; 56] =
     *b"VAAK_FP:SHA-11.2.1:vaak-mcp.rs:hoisted_fresh_gate_proto ";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA11_2_1A: [u8; 55] =
+    *b"VAAK_FP:SHA-11.2.1a:vaak-mcp.rs:asm_active_fresh_shadow";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11473,6 +11478,31 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // this in: change #3 becomes always-on, not conditional on
         // human_offline_until_ts. Rule 4 halt-on-yield-to-human + v1.0.5
         // auto-resume become dead code once this gate is in place.
+        //
+        // SHA-11.2.1a (tester msg 1341 sibling-find + architect msg 1344
+        // explicit ratification of the 1-line fix): re-derive asm_active
+        // fresh immediately before its FIRST gate consumer here. The
+        // function-entry derivation at line 11453 may be stale by the
+        // time we hit line 11476's HumanYield gate / line 11505's
+        // halted_for_human gate. This shadow ensures all downstream
+        // asm_active consumers (HumanYield 11476, halted_for_human 11505,
+        // main gate 11552, assembly+delphi mutex 11705+, planning
+        // attestation 11743) see a single fresh value.
+        //
+        // Architecturally redundant with SHA-11.2.1's proto_for_gate_decisions
+        // (which re-reads at line ~11540 for the main gate cluster), but
+        // closes the 4 sites at line 11476, 11505, 11705, 11743 that
+        // SHA-11.2.1 missed because they fire BEFORE the proto_for_gate_
+        // decisions read site. Per architect msg 1344 I/O acceptance.
+        let asm_active = {
+            let fresh = read_protocol_for_section_value(
+                &state.project_dir,
+                &section_for_gate,
+            );
+            fresh.get("preset").and_then(|p| p.as_str())
+                .map(|s| s == PRESET_ASSEMBLY_LINE)
+                .unwrap_or(false)
+        };
         if asm_active && state.role != "human" {
             let target = metadata
                 .as_ref()
