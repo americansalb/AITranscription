@@ -44,6 +44,11 @@
 pub static VAAK_FINGERPRINT_MCP_SHA11_1: [u8; 44] =
     *b"VAAK_FP:SHA-11.1:vaak-mcp.rs:zombie_cooldown";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA11_2: [u8; 50] =
+    *b"VAAK_FP:SHA-11.2:vaak-mcp.rs:floor_view_fresh_read";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11516,7 +11521,28 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             mic_mode == "moderator" && moderator == Some(from_label.as_str())
         };
         if asm_active && state.role != "human" && !caller_is_exempt {
-            let cur = asm.get("current_speaker").and_then(|v| v.as_str()).unwrap_or("");
+            // SHA-11.2: sidecar floor-view sync. Re-read protocol.json
+            // immediately before the gate check. The proto_for_gate read at
+            // line 11430 happens early in the project_send flow; between
+            // that read and reaching here, the watchdog in vaak-desktop.exe
+            // may have released the current_speaker (writing protocol.json
+            // with floor.current_speaker=null). Without this fresh read,
+            // the sidecar's gate uses stale floor-holder data and rejects
+            // sends that should have succeeded. Observed tonight: dev:0
+            // SHA-5.3 ship rejected for 25+ min after watchdog already
+            // released ui-architect:0 (msgs 1216, 1223 visible to dev:0's
+            // project_wait, but the gate kept using the pre-release view).
+            // Cost: one extra disk read per gate evaluation; acceptable
+            // for correctness per architect SHA-11.2 design note.
+            let fresh_proto_for_gate = read_protocol_for_section_value(
+                &state.project_dir,
+                &section_for_gate,
+            );
+            let cur = fresh_proto_for_gate
+                .get("floor")
+                .and_then(|f| f.get("current_speaker"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if cur != from_label {
                 // Gap H — connectedness-based auto-grab (team vote #1340: 5-of-7
                 // option B). Replaces the prior 10-min silence threshold which
