@@ -3723,6 +3723,8 @@ fn oxford_initiate_cmd(
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
         let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
+        // SHA-10.1: phase fields default-initialized; SHA-10.2 will wire
+        // phase=OpeningA + side_a[0] auto-declare on initiate.
         let debate = ActiveOxfordDebate {
             debate_id,
             moderator: moderator.clone(),
@@ -3734,6 +3736,9 @@ fn oxford_initiate_cmd(
             started_at: now.clone(),
             turn_history: Vec::new(),
             winning_side_reward_copper: reward,
+            phase: collab::oxford::OxfordPhase::None,
+            phase_started_at: None,
+            audience_question_queue: Vec::new(),
         };
         write_active_oxford(&dir, &debate)?;
         append_oxford_event(&dir, &OxfordEvent::Initiate {

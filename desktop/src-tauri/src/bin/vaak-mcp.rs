@@ -9669,6 +9669,10 @@ fn handle_oxford_initiate(
         let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
 
         // Build and persist snapshot.
+        // SHA-10.1: phase fields initialized to default (phase=None,
+        // phase_started_at=None, audience_question_queue=[]). No behavior
+        // change at SHA-10.1 — SHA-10.2 will wire oxford_initiate to set
+        // phase=OpeningA + auto-declare side_a[0].
         let debate = ActiveOxfordDebate {
             debate_id,
             moderator: moderator.to_string(),
@@ -9680,6 +9684,9 @@ fn handle_oxford_initiate(
             started_at: now.clone(),
             turn_history: Vec::new(),
             winning_side_reward_copper: reward,
+            phase: collab::oxford::OxfordPhase::None,
+            phase_started_at: None,
+            audience_question_queue: Vec::new(),
         };
         write_active_oxford(&dir, &debate)?;
 

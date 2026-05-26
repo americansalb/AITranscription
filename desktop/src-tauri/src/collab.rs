@@ -9,6 +9,11 @@
 pub static VAAK_FINGERPRINT_COLLAB: [u8; 66] =
     *b"VAAK_FP:7def0ab:SHA-5.3b:collab.rs:oxford_turn_hard_limit_enforcer";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_COLLAB_SHA10_1: [u8; 56] =
+    *b"VAAK_FP:SHA-10.1:collab.rs:oxford_phase_machine_skeleton";
+
 // ============================================================
 // Resilience-stack timer registry (mirror — keep in sync with
 // protocol.rs and vaak-mcp.rs)
@@ -6271,6 +6276,134 @@ pub mod oxford {
     pub const OXFORD_REACT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
     pub const OXFORD_OPENER_GRACE_SECS: u64 = 30;               // Layer 2 of architect msg 1005 ruling — auto-open if moderator silent past this
 
+    // ---- SHA-10.1 phase machine constants (architect msg 1280 locked defaults) ----
+    // Per architect SHA-10 design note + locked defaults at msg 1280.
+    // Equal-time invariant: opening_a == opening_b, rebuttal_a == rebuttal_b,
+    // closing_a == closing_b (hard-coded in OxfordPhaseConfig::default()).
+    pub const OXFORD_PHASE_OPENING_SOFT_SECS: u64 = 120;
+    pub const OXFORD_PHASE_OPENING_HARD_SECS: u64 = 180;
+    pub const OXFORD_PHASE_REBUTTAL_SOFT_SECS: u64 = 90;
+    pub const OXFORD_PHASE_REBUTTAL_HARD_SECS: u64 = 120;
+    pub const OXFORD_PHASE_CLOSING_SOFT_SECS: u64 = 60;
+    pub const OXFORD_PHASE_CLOSING_HARD_SECS: u64 = 90;
+    pub const OXFORD_PHASE_AUDIENCE_Q_CAP_SECS: u64 = 300;        // 5 min cap
+    pub const OXFORD_AUDIENCE_QUESTION_RATE_LIMIT_SECS: u64 = 60; // per audience seat
+    pub const OXFORD_AUDIENCE_QUESTION_QUEUE_CAP: usize = 5;      // per audience_q phase
+
+    /// SHA-10.1 phase enum for the Oxford state machine (architect design
+    /// note: opening_a → opening_b → rebuttal_a → rebuttal_b → audience_q
+    /// → closing_a → closing_b → ended). Default = None covers two cases:
+    ///   (1) Legacy debates pre-SHA-10 stored in oxford-debates.jsonl
+    ///       without a phase field — serde decodes them with phase=None.
+    ///   (2) Brand-new debates in the brief window between oxford_initiate
+    ///       writing the snapshot and the SHA-10.2 auto-advance hook firing.
+    /// Variants use snake_case in JSON to match the design note's spec text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum OxfordPhase {
+        None,
+        OpeningA,
+        OpeningB,
+        RebuttalA,
+        RebuttalB,
+        AudienceQ,
+        ClosingA,
+        ClosingB,
+        Ended,
+    }
+
+    impl Default for OxfordPhase {
+        fn default() -> Self {
+            OxfordPhase::None
+        }
+    }
+
+    /// Per-phase floor configuration (soft warn / hard auto-yield). Loaded
+    /// from EconomySettings at SHA-10.3 ship; v1 uses const defaults below.
+    /// Equal-time invariant baked into the struct shape: opening, rebuttal,
+    /// and closing each have a single (soft, hard) tuple — side_a and
+    /// side_b inherit identical floors automatically.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct OxfordPhaseConfig {
+        pub opening_soft_secs: u64,
+        pub opening_hard_secs: u64,
+        pub rebuttal_soft_secs: u64,
+        pub rebuttal_hard_secs: u64,
+        pub closing_soft_secs: u64,
+        pub closing_hard_secs: u64,
+        pub audience_q_cap_secs: u64,
+        pub audience_question_rate_limit_secs: u64,
+        pub audience_question_queue_cap: usize,
+    }
+
+    impl Default for OxfordPhaseConfig {
+        fn default() -> Self {
+            Self {
+                opening_soft_secs: OXFORD_PHASE_OPENING_SOFT_SECS,
+                opening_hard_secs: OXFORD_PHASE_OPENING_HARD_SECS,
+                rebuttal_soft_secs: OXFORD_PHASE_REBUTTAL_SOFT_SECS,
+                rebuttal_hard_secs: OXFORD_PHASE_REBUTTAL_HARD_SECS,
+                closing_soft_secs: OXFORD_PHASE_CLOSING_SOFT_SECS,
+                closing_hard_secs: OXFORD_PHASE_CLOSING_HARD_SECS,
+                audience_q_cap_secs: OXFORD_PHASE_AUDIENCE_Q_CAP_SECS,
+                audience_question_rate_limit_secs: OXFORD_AUDIENCE_QUESTION_RATE_LIMIT_SECS,
+                audience_question_queue_cap: OXFORD_AUDIENCE_QUESTION_QUEUE_CAP,
+            }
+        }
+    }
+
+    impl OxfordPhase {
+        /// Returns (soft_secs, hard_secs) for the phase. None / Ended /
+        /// AudienceQ are special-cased: None/Ended have no floor; AudienceQ
+        /// uses cap_secs as the hard floor with no soft warning.
+        pub fn floors(self, cfg: &OxfordPhaseConfig) -> Option<(u64, u64)> {
+            match self {
+                OxfordPhase::None | OxfordPhase::Ended => None,
+                OxfordPhase::OpeningA | OxfordPhase::OpeningB => {
+                    Some((cfg.opening_soft_secs, cfg.opening_hard_secs))
+                }
+                OxfordPhase::RebuttalA | OxfordPhase::RebuttalB => {
+                    Some((cfg.rebuttal_soft_secs, cfg.rebuttal_hard_secs))
+                }
+                OxfordPhase::ClosingA | OxfordPhase::ClosingB => {
+                    Some((cfg.closing_soft_secs, cfg.closing_hard_secs))
+                }
+                OxfordPhase::AudienceQ => Some((cfg.audience_q_cap_secs, cfg.audience_q_cap_secs)),
+            }
+        }
+
+        /// Next phase in the design-note sequence. SHA-10.3 will use this
+        /// for automatic advancement on hard-floor expiry. Ended terminates.
+        pub fn next(self) -> OxfordPhase {
+            match self {
+                OxfordPhase::None => OxfordPhase::OpeningA,
+                OxfordPhase::OpeningA => OxfordPhase::OpeningB,
+                OxfordPhase::OpeningB => OxfordPhase::RebuttalA,
+                OxfordPhase::RebuttalA => OxfordPhase::RebuttalB,
+                OxfordPhase::RebuttalB => OxfordPhase::AudienceQ,
+                OxfordPhase::AudienceQ => OxfordPhase::ClosingA,
+                OxfordPhase::ClosingA => OxfordPhase::ClosingB,
+                OxfordPhase::ClosingB | OxfordPhase::Ended => OxfordPhase::Ended,
+            }
+        }
+
+        /// Which side this phase belongs to. Returns "side_a" / "side_b" /
+        /// "multi" (audience_q) / "" (None/Ended). SHA-10.2 uses this to
+        /// auto-declare the side's [0] seat on phase entry.
+        pub fn side(self) -> &'static str {
+            match self {
+                OxfordPhase::OpeningA
+                | OxfordPhase::RebuttalA
+                | OxfordPhase::ClosingA => "side_a",
+                OxfordPhase::OpeningB
+                | OxfordPhase::RebuttalB
+                | OxfordPhase::ClosingB => "side_b",
+                OxfordPhase::AudienceQ => "multi",
+                OxfordPhase::None | OxfordPhase::Ended => "",
+            }
+        }
+    }
+
     /// Append-only event log for an entire debate's lifecycle. Single source
     /// of truth for replay + audit. See spec §4.1 for the row shapes.
     pub fn oxford_debates_jsonl_path(dir: &str) -> PathBuf {
@@ -6332,6 +6465,38 @@ pub mod oxford {
         /// (500 = 5 silver). Distributed pool-funded at end on strict-majority
         /// audience vote.
         pub winning_side_reward_copper: i64,
+        /// SHA-10.1 phase machine state. Defaults to None for back-compat
+        /// with debates 1-8 (no phase field in their snapshots). SHA-10.2
+        /// will wire `oxford_initiate` to set this to OpeningA on creation;
+        /// SHA-10.3 will add the sweeper-driven phase advancement. Until
+        /// those land, all new debates create with phase=None and the rest
+        /// of the codebase ignores this field — pure data-model foundation.
+        #[serde(default)]
+        pub phase: OxfordPhase,
+        /// ISO8601 timestamp marking when the current phase was entered.
+        /// Used by SHA-10.3's sweeper to compute elapsed-time vs soft/hard
+        /// floors. None during phase=None or while the phase hasn't
+        /// transitioned yet. Defaults to None for back-compat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub phase_started_at: Option<String>,
+        /// SHA-10.4 audience-question queue (FIFO, capped at
+        /// OXFORD_AUDIENCE_QUESTION_QUEUE_CAP). Populated only during
+        /// AudienceQ phase. Each entry: (asker_seat, question_text,
+        /// posted_at_iso). Drained by moderator selection or phase timeout.
+        /// Defaults to empty for back-compat.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub audience_question_queue: Vec<OxfordAudienceQuestion>,
+    }
+
+    /// SHA-10.1 audience-question payload for the AudienceQ-phase queue.
+    /// Stored inline on ActiveOxfordDebate.audience_question_queue. SHA-10.4
+    /// will add the `oxford_audience_question` MCP handler that appends to
+    /// this vector under the oxford lock with rate-limit + cap enforcement.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct OxfordAudienceQuestion {
+        pub asker: String,
+        pub question: String,
+        pub posted_at: String, // ISO8601
     }
 
     /// Lifecycle event appended to oxford-debates.jsonl. Tagged union over
