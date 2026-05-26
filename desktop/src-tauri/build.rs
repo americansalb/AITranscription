@@ -57,6 +57,29 @@ fn main() {
     // as "rerun if any descendant file changes."
     println!("cargo:rerun-if-changed=../dist");
 
+    // SHA-11.5d: sidecar-freshness visibility (evil-arch msg 1359 + 1383,
+    // tester msg 1385 endorse). Three pattern-recurrences in 24h
+    // (msg 1090/1144, msg 1224, msg 1350) where sidecar-side fixes were
+    // committed but binaries/vaak-mcp-x86_64-pc-windows-msvc.exe (the
+    // runtime-load path) stayed stale because dev forgot to run
+    // `npm run build-sidecar`. Memory-as-prevention has empirically
+    // failed; structural prevention required.
+    //
+    // v1 scope (this commit): cargo:warning when binaries/vaak-mcp-*.exe
+    // mtime is older than target/debug/vaak-mcp.exe mtime — devs see the
+    // warning at every cargo build until they fix it. Visibility-only,
+    // not blocking, to avoid the chicken-and-egg problem (npm script
+    // internally invokes cargo, which would trigger this lint; build.rs
+    // runs once per package not per bin so we can't easily distinguish
+    // "cargo invoked by npm" from "cargo invoked by dev").
+    //
+    // v2 / SHA-11.5d.1 (deferred): proper error-mode with env-var
+    // skip-flag set by package.json build-sidecar script. Requires
+    // cross-platform env-var handling (cmd vs sh) and a recursion-safe
+    // marker. Bigger design than this session can accommodate; tracked
+    // as carry-forward.
+    lint_sidecar_freshness(&manifest_dir);
+
     // SHA-5.3c board-path lint. Closes the class of bug found by
     // dev-challenger msg 1202 (launcher.rs:835) and tester msg 1209
     // (collab.rs:6118) — both hardcoded `.vaak/board.jsonl` instead of
@@ -185,6 +208,55 @@ fn lint_no_legacy_board_path(src_dir: &PathBuf) {
             test code), add an inline `// LINT_EXEMPT_BOARD_PATH: <category>` comment.\n"
         );
         panic!("SHA-5.3c lint: {} hardcoded board.jsonl path(s)", violations.len());
+    }
+}
+
+/// SHA-11.5d sidecar-freshness check. Compares
+/// `binaries/vaak-mcp-x86_64-pc-windows-msvc.exe` mtime against
+/// `target/{debug,release}/vaak-mcp.exe`. If the bundled copy is older,
+/// emits a `cargo:warning` that appears in every cargo invocation until
+/// the dev runs `npm run build-sidecar` to refresh.
+///
+/// v1 visibility-only per design. v2 error-mode + chicken-and-egg-safe
+/// env-var skip-flag tracked as SHA-11.5d.1 carry-forward.
+fn lint_sidecar_freshness(manifest_dir: &PathBuf) {
+    let bundled = manifest_dir.join("binaries/vaak-mcp-x86_64-pc-windows-msvc.exe");
+    if !bundled.exists() {
+        // First-run / clean clone — no warning, the build.rs placeholder
+        // create-step above will populate a stub.
+        return;
+    }
+    let bundled_mtime = match fs::metadata(&bundled).and_then(|m| m.modified()) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    // Check both debug and release target paths — whichever exists & is
+    // newer than bundled triggers the warning.
+    for target_subdir in ["debug", "release"] {
+        let target_exe = manifest_dir
+            .join("target")
+            .join(target_subdir)
+            .join("vaak-mcp.exe");
+        if !target_exe.exists() {
+            continue;
+        }
+        let target_mtime = match fs::metadata(&target_exe).and_then(|m| m.modified()) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if target_mtime > bundled_mtime {
+            println!(
+                "cargo:warning=SHA-11.5d sidecar-freshness: \
+                 target/{}/vaak-mcp.exe is NEWER than \
+                 binaries/vaak-mcp-x86_64-pc-windows-msvc.exe. \
+                 The bundled sidecar copy that Tauri loads at runtime is \
+                 STALE. Run `npm run build-sidecar` (from desktop/) to \
+                 copy the fresh build into binaries/. \
+                 (Visible every cargo build until fixed.)",
+                target_subdir
+            );
+            return;
+        }
     }
 }
 
