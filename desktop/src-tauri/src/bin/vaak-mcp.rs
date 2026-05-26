@@ -9681,6 +9681,59 @@ fn handle_oxford_initiate(
         }
     }
 
+    // VAAK_FP:SHA-12.6:vaak-mcp.rs:audience_min_and_role_advisory
+    // Per architect msg 1474 Defect 4 + msg 1490 audit item #4 + arch
+    // msg 1497 H decision (advisory not strict): emit warning broadcasts
+    // (NOT reject) at initiate when:
+    //   (a) audience.len() < 2 — small audience reduces debate engagement
+    //   (b) any non-human audience seat has role != "audience" — debate 10
+    //       picked ui-architect:0 as audience because no dedicated
+    //       audience seat was live; the warning surfaces the mismatch
+    //       without blocking the human's choice (advisory per arch 1497)
+    // Warnings land on the board so the human + moderator see them
+    // before the debate runs; they do NOT abort initiate.
+    let advisories: Vec<String> = {
+        let mut out: Vec<String> = Vec::new();
+        if audience.len() < 2 {
+            out.push(format!(
+                "audience size is {} (recommended: 2+ for diverse engagement)",
+                audience.len()
+            ));
+        }
+        for seat in audience.iter() {
+            if seat.starts_with("human:") { continue; }
+            let role_part = seat.split(':').next().unwrap_or("");
+            if role_part != "audience" {
+                out.push(format!(
+                    "audience seat '{}' has role '{}' (recommended: 'audience' role for diverse-persona engagement)",
+                    seat, role_part
+                ));
+            }
+        }
+        out
+    };
+    if !advisories.is_empty() {
+        let advisory_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": advisory_id,
+            "from": "system",
+            "to": "all",
+            "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordInitiateAdvisory] {} advisory note(s)", advisories.len()),
+            "body": format!(
+                "Oxford debate initiate has {} advisory note(s) — debate WILL proceed (advisories are non-blocking per architect msg 1497 H decision):\n\n{}",
+                advisories.len(),
+                advisories.iter().enumerate().map(|(i, a)| format!("{}. {}", i + 1, a)).collect::<Vec<_>>().join("\n")
+            ),
+            "metadata": {
+                "oxford_event": "initiate_advisory",
+                "advisory_count": advisories.len(),
+                "advisories": advisories
+            }
+        }));
+    }
+
     collab::oxford::with_oxford_lock(&dir, || {
         // Re-check no active debate is in progress (atomic under lock).
         if read_active_oxford(&dir)?.is_some() {
