@@ -3728,12 +3728,20 @@ fn oxford_initiate_cmd(
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
         let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
-        // SHA-10.2 (UI-path twin of vaak-mcp.rs:9672+): auto-declare
+        // SHA-10.2 (UI-path twin of vaak-mcp.rs:~9695): auto-declare
         // side_a[0] as opener and enter phase OpeningA. Mirrors the
         // sidecar-path auto-phase-entry per PARITY contract; both paths
         // must construct identical initial-state ActiveOxfordDebate to
         // avoid initiate-source-divergence (which is itself the SHA-5
         // class-of-bug evil-arch msg 1112 guard 1 warned about).
+        //
+        // PARITY: keep in sync with vaak-mcp.rs:~9695 (sidecar-path twin).
+        // Per dev-challenger msg 1389 Flag 2 + architect msg 1391 LOCK:
+        // both twin entry points MUST construct identical initial-state
+        // ActiveOxfordDebate. Future SHA-10.x extensions adding fields
+        // to ActiveOxfordDebate MUST update BOTH twin sites; extract-
+        // helper-to-collab::oxford queued for SHA-2 hygiene to eliminate
+        // this duplication structurally.
         let opener_seat = side_a.first().cloned();
         let (initial_phase, initial_speaker, initial_phase_started_at, initial_turn_history) =
             match opener_seat.as_ref() {

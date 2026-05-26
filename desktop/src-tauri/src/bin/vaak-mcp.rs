@@ -9685,6 +9685,16 @@ fn handle_oxford_initiate(
         // empty defaults to no auto-declare (falls back to None phase +
         // moderator-driven flow — defensive for legacy callers that
         // somehow pass empty sides; validation upstream should reject).
+        //
+        // PARITY: keep in sync with main.rs:~3726 (UI-path twin). Per
+        // dev-challenger msg 1389 Flag 2 + architect msg 1391 LOCK:
+        // both twin entry points MUST construct identical initial-state
+        // ActiveOxfordDebate to avoid initiate-source-divergence (which
+        // is itself the cc500e0/1bb779e/SHA-5.1 sibling-bug class evil-
+        // arch msg 1112 guard 1 warned about). Future SHA-10.x extensions
+        // adding fields to ActiveOxfordDebate MUST update BOTH twin
+        // sites; extract-helper-to-collab::oxford is queued for SHA-2
+        // hygiene to eliminate this duplication structurally.
         let opener_seat = side_a.first().cloned();
         let (initial_phase, initial_speaker, initial_phase_started_at, initial_turn_history) =
             match opener_seat.as_ref() {
