@@ -10175,6 +10175,67 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
                 "oxford_event": "phase_transition"
             }
         }));
+
+        // VAAK_FP:SHA-12.4:vaak-mcp.rs:ended_autovote_wiring
+        // Per debate 10 post-mortem (architect msg 1474 adj-bug 1 + msg 1490
+        // item #7): msg 1461 transitioned ClosingB → Ended at 17:33:51Z, and
+        // the broadcast body claimed "Audience vote opens automatically per
+        // spec §6.1" — but no audience seat received a directed prompt, the
+        // audience didn't vote, and the human force-abandoned at 17:53:53Z
+        // after waiting 20 minutes. The broadcast was misleading.
+        //
+        // Fix: when next_phase == Ended, emit a DIRECTED [OxfordVoteOpen]
+        // prompt to each audience seat so they know voting is open and have
+        // the exact tool signature. The audience role's briefing (audience.md
+        // §4.1 per SHA-12.x local edit) tells them what to do; this prompt
+        // is the trigger.
+        if next_phase == OxfordPhase::Ended {
+            for audience_seat in debate.audience.iter() {
+                let prompt_id = next_message_id(&dir);
+                let _ = append_to_board(&dir, &serde_json::json!({
+                    "id": prompt_id,
+                    "from": "system",
+                    "to": audience_seat,
+                    "type": "directive",
+                    "timestamp": utc_now_iso(),
+                    "subject": format!("[OxfordVoteOpen] debate {} — your vote is now open", debate_id),
+                    "body": format!(
+                        "Debate {} has ended. As an audience member, please vote now via oxford_audience_vote(vote=\"side_a\" | \"side_b\" | \"draw\"). One vote per audience seat per debate. Your tally is rolled up when the moderator calls oxford_end(outcome=...). Voting window stays open until the moderator ends the debate.",
+                        debate_id
+                    ),
+                    "metadata": {
+                        "debate_id": debate_id,
+                        "oxford_event": "vote_open",
+                        "audience_seat": audience_seat,
+                        "vote_required": true
+                    }
+                }));
+            }
+            // Also: emit one consolidated [OxfordVoteOpen] broadcast to "all"
+            // so the moderator + debaters know the window opened (not just
+            // the audience seats). This replaces the bare-promise broadcast
+            // in the phase-transition body with an explicit announcement.
+            let vote_open_all_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": vote_open_all_id,
+                "from": "system",
+                "to": "all",
+                "type": "broadcast",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[OxfordVoteOpen] debate {} — audience voting window opened", debate_id),
+                "body": format!(
+                    "Audience voting for debate {} is now open. Audience seats ({} total) received directed prompts. Moderator: call oxford_end(outcome=...) when ready to finalize the result — outcome is your call based on the audience tally that oxford_end computes from accumulated oxford_audience_vote events. Valid outcomes: side_a_wins | side_b_wins | draw | abandoned.",
+                    debate_id,
+                    debate.audience.len()
+                ),
+                "metadata": {
+                    "debate_id": debate_id,
+                    "oxford_event": "vote_open_all",
+                    "audience_count": debate.audience.len()
+                }
+            }));
+        }
+
         Ok(serde_json::json!({
             "debate_id": debate_id,
             "prev_phase": format!("{:?}", prev_phase).to_lowercase(),
