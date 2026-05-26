@@ -1,3 +1,14 @@
+// SHA-11.5: runtime fingerprint pattern (architect msg 1280 + tester msg 1234).
+// See launcher.rs for the convention rationale (byte-array, not fat-pointer
+// &str, to survive linker dead-stripping). This module's fingerprint chain —
+// appended on each non-pure-substitution commit touching collab.rs runtime
+// code. Grep with:
+//   findstr /C:"VAAK_FP:7def0ab" target\debug\vaak-mcp.exe
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_COLLAB: [u8; 66] =
+    *b"VAAK_FP:7def0ab:SHA-5.3b:collab.rs:oxford_turn_hard_limit_enforcer";
+
 // ============================================================
 // Resilience-stack timer registry (mirror — keep in sync with
 // protocol.rs and vaak-mcp.rs)

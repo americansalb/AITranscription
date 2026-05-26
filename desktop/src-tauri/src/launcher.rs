@@ -4,6 +4,21 @@ use std::process::Command;
 use std::sync::Arc;
 use tauri::State;
 
+// SHA-11.5: runtime fingerprint pattern (architect msg 1280 + tester msg 1234).
+// Rust strips comments at compile, so SHA references in commit messages and
+// docstrings do not survive into the binary. This `static [u8; N]` with
+// `#[used]` + `#[no_mangle]` embeds the SHA chain into the binary's `.rodata`
+// as a directly-stored byte array (NOT a fat-pointer &str, which the linker
+// dead-strips the underlying string data of even when the pointer survives).
+// Convention: append the SHA + brief module-location string for each non-
+// pure-substitution commit that changes runtime behavior in this module.
+// Grep:
+//   findstr /C:"VAAK_FP:cf35b39" target\debug\vaak-desktop.exe
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_LAUNCHER: [u8; 55] =
+    *b"VAAK_FP:cf35b39:SHA-5.3a:launcher.rs:write_buzz_message";
+
 /// A Claude agent spawned from the Team Launcher UI
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct SpawnedAgent {
