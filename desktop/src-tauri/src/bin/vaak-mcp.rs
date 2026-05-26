@@ -9993,6 +9993,84 @@ fn handle_oxford_declare_speaker(seat: &str) -> Result<serde_json::Value, String
     })
 }
 
+// VAAK_FP:SHA-12.2:vaak-mcp.rs:oxford_yield
+/// SHA-12.2 handle_oxford_yield — current speaker voluntarily ends their turn.
+/// Closes the open turn (sets `ended_at` on turn_history.last) and clears
+/// `current_speaker` so the moderator can either declare the next speaker
+/// (e.g., side[1] of the same side within the same phase per PerSideTotal
+/// time-accounting) or advance to the next phase.
+///
+/// Per debate 10 post-mortem (human msg 1465, 2026-05-26): without an
+/// explicit yield, side[0]'s auto-opened turn stays "in flight" (the Layer 3
+/// first-writer-wins gate in handle_oxford_declare_speaker rejects declare
+/// while `ended_at.is_none() && auto_opened`). This left side[1+] with no
+/// path to the mic without a phase advancement. oxford_yield is the
+/// rotation primitive that closes that gap.
+///
+/// Caller must be the current_speaker (not moderator). Emits
+/// `[OxfordSpeakerYielded]` board broadcast so the moderator and audience
+/// see the yield in real time.
+///
+/// Errors:
+/// - `[NoActiveOxfordDebate]` no debate in progress
+/// - `[OxfordYieldNoActiveSpeaker]` debate has no current_speaker (AudienceQ/Ended phases)
+/// - `[OxfordYieldNotCurrentSpeaker]` caller isn't the seat that holds the floor
+fn handle_oxford_yield() -> Result<serde_json::Value, String> {
+    use collab::oxford::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+    collab::oxford::with_oxford_lock(&dir, || {
+        let mut debate = read_active_oxford(&dir)?
+            .ok_or_else(|| "[NoActiveOxfordDebate]".to_string())?;
+        let current = debate.current_speaker.clone()
+            .ok_or_else(|| "[OxfordYieldNoActiveSpeaker] no current_speaker — current phase has no declared speaker (e.g. AudienceQ or Ended)".to_string())?;
+        if caller != current {
+            return Err(format!(
+                "[OxfordYieldNotCurrentSpeaker] caller {} is not the current speaker ({}); only the speaker who holds the floor can yield",
+                caller, current
+            ));
+        }
+        let now = collab::iso_now();
+        // Close the open turn (mark ended_at).
+        if let Some(open_turn) = debate.turn_history.last_mut() {
+            if open_turn.ended_at.is_none() {
+                open_turn.ended_at = Some(now.clone());
+            }
+        }
+        // Clear current_speaker so the next oxford_declare_speaker (for
+        // side[1] mid-phase rotation) or oxford_advance_phase (next phase)
+        // operates on a clean slate. Phase + phase_started_at are unchanged
+        // — we're still inside the same phase, just between speakers.
+        debate.current_speaker = None;
+        let debate_id = debate.debate_id;
+        let phase = debate.phase;
+        write_active_oxford(&dir, &debate)?;
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordSpeakerYielded] debate {} — {} yielded", debate_id, caller),
+            "body": format!(
+                "{} yielded the floor in debate {} (phase {:?}). Moderator may now declare the next speaker via oxford_declare_speaker (e.g., side[1] within the same phase per PerSideTotal time-accounting) or advance via oxford_advance_phase.",
+                caller, debate_id, phase
+            ),
+            "metadata": {
+                "debate_id": debate_id,
+                "yielded_by": caller,
+                "phase": format!("{:?}", phase).to_lowercase(),
+                "oxford_event": "speaker_yielded"
+            }
+        }));
+        Ok(serde_json::json!({
+            "debate_id": debate_id,
+            "yielded_by": caller,
+            "phase": format!("{:?}", phase).to_lowercase(),
+            "yielded_at": now
+        }))
+    })
+}
+
 /// SHA-10.3 handle_oxford_advance_phase — moderator-only phase transition.
 /// Atomically advances {phase, current_speaker, phase_started_at, turn_history}
 /// in one with_oxford_lock block (per Flag 1 atomicity requirement).
@@ -15405,6 +15483,15 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "oxford_yield",
+                    "description": "Voluntarily end your turn in an active Oxford debate (CURRENT SPEAKER ONLY). SHA-12.2 mid-phase rotation primitive. Closes the open turn (sets ended_at on turn_history.last) and clears current_speaker so the moderator can either oxford_declare_speaker the next debater (e.g., side[1] of the same side per PerSideTotal time-accounting) without hitting the Layer 3 [OxfordDeclareDeferred] gate, OR oxford_advance_phase to the next phase. Emits `[OxfordSpeakerYielded]` broadcast. Errors: [NoActiveOxfordDebate], [OxfordYieldNoActiveSpeaker], [OxfordYieldNotCurrentSpeaker].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                },
+                {
                     "name": "oxford_declare_speaker",
                     "description": "Declare the next speaker in an active Oxford debate (MODERATOR ONLY). Seat must be a member of side_a or side_b. Closes the previous turn and starts a new one with `started_at = now`. Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordNonDebaterCannotSpeak].",
                     "inputSchema": {
@@ -16388,6 +16475,11 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
             } else if tool_name == "oxford_advance_phase" {
                 match handle_oxford_advance_phase() {
                     Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Phase advanced.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                }
+            } else if tool_name == "oxford_yield" {
+                match handle_oxford_yield() {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Speaker yielded.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
                     Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                 }
             } else if tool_name == "oxford_declare_speaker" {
