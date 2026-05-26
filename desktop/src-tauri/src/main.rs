@@ -11,6 +11,11 @@
 pub static VAAK_FINGERPRINT_MAIN_SHA11_1: [u8; 42] =
     *b"VAAK_FP:SHA-11.1:main.rs:watchdog_cooldown";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MAIN_SHA10_2: [u8; 51] =
+    *b"VAAK_FP:SHA-10.2:main.rs:oxford_initiate_auto_phase";
+
 mod a11y;
 mod audio;
 mod collab;
@@ -3723,8 +3728,33 @@ fn oxford_initiate_cmd(
         let debate_id = next_debate_id(&dir);
         let now = collab::iso_now();
         let reward = winning_side_reward_copper.unwrap_or(oxford_settings_default_reward);
-        // SHA-10.1: phase fields default-initialized; SHA-10.2 will wire
-        // phase=OpeningA + side_a[0] auto-declare on initiate.
+        // SHA-10.2 (UI-path twin of vaak-mcp.rs:9672+): auto-declare
+        // side_a[0] as opener and enter phase OpeningA. Mirrors the
+        // sidecar-path auto-phase-entry per PARITY contract; both paths
+        // must construct identical initial-state ActiveOxfordDebate to
+        // avoid initiate-source-divergence (which is itself the SHA-5
+        // class-of-bug evil-arch msg 1112 guard 1 warned about).
+        let opener_seat = side_a.first().cloned();
+        let (initial_phase, initial_speaker, initial_phase_started_at, initial_turn_history) =
+            match opener_seat.as_ref() {
+                Some(seat) => (
+                    collab::oxford::OxfordPhase::OpeningA,
+                    Some(seat.clone()),
+                    Some(now.clone()),
+                    vec![collab::oxford::OxfordTurn {
+                        seat: seat.clone(),
+                        started_at: now.clone(),
+                        ended_at: None,
+                        auto_opened: true,
+                    }],
+                ),
+                None => (
+                    collab::oxford::OxfordPhase::None,
+                    None,
+                    None,
+                    Vec::new(),
+                ),
+            };
         let debate = ActiveOxfordDebate {
             debate_id,
             moderator: moderator.clone(),
@@ -3732,12 +3762,12 @@ fn oxford_initiate_cmd(
             side_b: side_b.clone(),
             audience: audience.clone(),
             premise: premise.clone(),
-            current_speaker: None,
+            current_speaker: initial_speaker.clone(),
             started_at: now.clone(),
-            turn_history: Vec::new(),
+            turn_history: initial_turn_history,
             winning_side_reward_copper: reward,
-            phase: collab::oxford::OxfordPhase::None,
-            phase_started_at: None,
+            phase: initial_phase,
+            phase_started_at: initial_phase_started_at,
             audience_question_queue: Vec::new(),
         };
         write_active_oxford(&dir, &debate)?;
@@ -3840,33 +3870,60 @@ fn oxford_initiate_cmd(
                 writeln!(f, "{}", m.to_string()).map_err(|e| format!("board write: {}", e))?;
                 next_id += 1;
             }
-            // SHA-5 (architect msg 1095, human msg 1090/1092 dead-floor fix):
-            // entry-point parity with vaak-mcp.rs:9742-9756 Layer-1 moderator
-            // prompt. Pre-SHA-5 the UI path (this fn, invoked by
-            // OxfordSetupModal) wrote the broadcast + debater pings but never
-            // directed-prompted the moderator with the literal next action.
-            // Fresh/idle moderator had no signal to call oxford_declare_speaker
-            // → dead floor (debate 6 at 22:00:07Z auto-abandoned 24s later
-            // with empty turn_history). Future refactor: extract this helper
-            // + the vaak-mcp.rs twin into collab::oxford to prevent recurrence
-            // per architect msg 1095 spec point 2 (queued, not bundled here).
-            // PARITY: keep in sync with vaak-mcp.rs:9742-9756 — extract to
-            // collab::oxford when SHA-2 lands (evil-arch msg 1112 guard).
-            let opener = side_a.first().cloned().unwrap_or_default();
+            // SHA-10.2 (UI-path twin): emit [OxfordPhaseEntered] for
+            // opening_a + reworded [OxfordModeratorPrompt] to reflect
+            // auto-declare. Mirrors vaak-mcp.rs:9780+ exactly per PARITY
+            // contract. Phase machine sets OpeningA + side_a[0] auto-
+            // declared during the snapshot construction above; this block
+            // notifies the team.
+            let opener = opener_seat.clone().unwrap_or_default();
+            if let Some(speaker) = opener_seat.as_ref() {
+                let (soft, hard) = collab::oxford::OxfordPhase::OpeningA
+                    .floors(&collab::oxford::OxfordPhaseConfig::default())
+                    .unwrap_or((0, 0));
+                let phase_evt = serde_json::json!({
+                    "id": next_id,
+                    "from": "system",
+                    "to": "all",
+                    "type": "broadcast",
+                    "timestamp": collab::iso_now(),
+                    "subject": format!(
+                        "[OxfordPhaseEntered] debate {} — opening_a opened, speaker={}, soft={}s hard={}s",
+                        debate_id, speaker, soft, hard
+                    ),
+                    "body": format!(
+                        "Oxford debate {} entered phase opening_a. Speaker: {} (auto-declared as side_a[0]). Equal-time floors: {}s soft warning, {}s hard auto-yield. Time accounting per-side-total per dev-challenger msg 1353 watch-3 ruling — successive side_a debaters share this budget. SHA-10.3 will add automatic phase advancement; for now this phase persists until moderator calls oxford_advance_phase (SHA-10.3) or oxford_end.",
+                        debate_id, speaker, soft, hard
+                    ),
+                    "metadata": {
+                        "debate_id": debate_id,
+                        "phase": "opening_a",
+                        "speaker": speaker,
+                        "soft_secs": soft,
+                        "hard_secs": hard,
+                        "auto_declared": true,
+                        "oxford_event": "phase_entered",
+                        "initiated_via": "ui"
+                    }
+                });
+                writeln!(f, "{}", phase_evt.to_string()).map_err(|e| format!("board write: {}", e))?;
+                next_id += 1;
+            }
             let mod_prompt = serde_json::json!({
                 "id": next_id,
                 "from": "system",
                 "to": moderator.clone(),
                 "type": "directive",
                 "timestamp": collab::iso_now(),
-                "subject": format!("[OxfordModeratorPrompt] debate {} — open the floor", debate_id),
+                "subject": format!("[OxfordModeratorPrompt] debate {} — opening_a auto-declared", debate_id),
                 "body": format!(
-                    "You are the moderator for Oxford debate {}.\n\nNext action: call `oxford_declare_speaker seat=\"{}\"` to open the floor (side_a opens by convention per spec §3.2).\n\nIf no speaker is declared within the opener-grace window, the floor will auto-open with side_a[0] as the opening speaker and broadcast [OxfordAutoOpened]. You may continue moderating subsequent rotations normally.",
+                    "You are the moderator for Oxford debate {}.\n\nSHA-10.2 phase machine: opening_a phase auto-entered, side_a[0] ({}) is the declared opener. No immediate action required — observe their opening. You may call `oxford_advance_phase` (SHA-10.3) to advance to opening_b when ready, or `oxford_declare_speaker` to override the auto-declared speaker. The phase-advancement sweeper (SHA-10.3) will eventually fire on hard-floor expiry.",
                     debate_id, opener
                 ),
                 "metadata": {
                     "debate_id": debate_id,
                     "suggested_opener": opener,
+                    "phase": "opening_a",
                     "oxford_event": "moderator_prompt",
                     "initiated_via": "ui"
                 }
