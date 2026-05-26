@@ -2113,10 +2113,16 @@
  *   tint, italic body, and "SYSTEM" pill — not opacity. */
 
 .system-event-card {
-  background: rgba(120, 120, 120, 0.06);
+  /* SHA-9.1a (dev-challenger msg 1289 finds A+B):
+     - Find A: 3px vs 4px border was sub-perceptual; bumped to 4px to match
+       role-message cards. Distinction now lives in COLOR (#4d5560 muted vs
+       role-specific) + the SYSTEM pill + no avatar — not border thickness.
+     - Find B: 6%-alpha bg tint was below perceptual threshold on the dark
+       --collab-bg. Bumped to 14% for visible-but-still-distinct-from-roles. */
+  background: rgba(120, 120, 120, 0.14);
   border-radius: 6px;
-  padding: 6px 12px;
-  border-left: 3px solid #4d5560;
+  padding: 8px 12px;
+  border-left: 4px solid #4d5560;
   margin: 4px 0;
 }
 
@@ -2146,10 +2152,14 @@
 }
 
 .system-event-body {
+  /* SHA-9.1a (dev-challenger msg 1289 find C): italic 12px reduces legibility
+     under WCAG 1.4.4 (dyslexia/visual-fatigue). Bumped to 13px to match
+     role-message body. Distinction from roles preserved via italic style +
+     muted color (#9aa3ac vs #ccd6dd) — italic at 13px is still readable. */
   color: #9aa3ac;
-  font-size: 12px;
+  font-size: 13px;
   font-style: italic;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
 }
 
