@@ -82,6 +82,16 @@ fn main() {
 /// `// LINT_EXEMPT_BOARD_PATH: <reason>` comment for the four legitimate
 /// categories: resolver internals, init writes, aggregation reads, test
 /// code (per tester:0 msg 1221 categorization).
+///
+/// Patterns detected (per evil-arch msg 1226 / tester msg 1228 n3 ask):
+///   a) literal: `.vaak/board.jsonl` (slash form)
+///   b) split same-line: `.join(".vaak").join("board.jsonl")`
+///   c) split multi-line: `.join(".vaak")\n    .join("board.jsonl")`
+///
+/// NOT detected (acknowledged limitations — fall back to PR review):
+///   - string constants: `const BOARD: &str = "board.jsonl"; path.join(BOARD)`
+///   - whitespace-inside-parens: `.join( ".vaak" )` (rustfmt collapses these)
+///   - macro-generated paths
 fn lint_no_legacy_board_path(src_dir: &PathBuf) {
     let mut violations: Vec<String> = Vec::new();
     let mut watched_files: Vec<PathBuf> = Vec::new();
@@ -91,26 +101,69 @@ fn lint_no_legacy_board_path(src_dir: &PathBuf) {
             Ok(c) => c,
             Err(_) => return,
         };
+        // Pass 1: line-by-line scan for single-line forms (literal + same-line split).
+        // Strips trailing `//` comments to skip docstrings.
         for (idx, line) in contents.lines().enumerate() {
             if line.contains("LINT_EXEMPT_BOARD_PATH") {
                 continue;
             }
-            // Strip trailing line-comment to avoid false positives on
-            // doc comments and inline notes. Safe for this codebase
-            // because no source string contains `//` (URL-free).
             let code = match line.find("//") {
                 Some(i) => &line[..i],
                 None => line,
             };
             let has_literal = code.contains(".vaak/board.jsonl");
-            let has_split = code.contains(".join(\".vaak\").join(\"board.jsonl\")");
-            if has_literal || has_split {
+            let has_split_same_line = code.contains(".join(\".vaak\").join(\"board.jsonl\")");
+            if has_literal || has_split_same_line {
                 violations.push(format!(
                     "  {}:{}: hardcoded legacy board path",
                     path.display(),
                     idx + 1
                 ));
             }
+        }
+        // Pass 2: full-file lookahead for split multi-line forms.
+        // For each `.join(".vaak")` occurrence, look ahead through whitespace
+        // (including newlines) for `.join("board.jsonl")`. If the literal
+        // appears within the lookahead window AND the originating line lacks
+        // LINT_EXEMPT_BOARD_PATH, flag it. The line-by-line pass already
+        // caught the same-line case; the lookahead specifically catches the
+        // multi-line variant.
+        let vaak_marker = ".join(\".vaak\")";
+        let board_marker = ".join(\"board.jsonl\")";
+        let mut search_start = 0;
+        while let Some(rel) = contents[search_start..].find(vaak_marker) {
+            let abs = search_start + rel;
+            // Resolve line number + line content for exemption + reporting
+            let line_start = contents[..abs].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            let line_end = contents[abs..]
+                .find('\n')
+                .map(|p| abs + p)
+                .unwrap_or(contents.len());
+            let originating_line = &contents[line_start..line_end];
+            let originating_line_num = contents[..abs].matches('\n').count() + 1;
+            // Skip if this occurrence is on a line caught by pass 1 already
+            // (same-line .join(".vaak").join("board.jsonl") — would be a
+            // duplicate report) OR is in an exempt line.
+            let already_caught_same_line = originating_line.contains(
+                ".join(\".vaak\").join(\"board.jsonl\")",
+            );
+            let is_exempt = originating_line.contains("LINT_EXEMPT_BOARD_PATH");
+            if !already_caught_same_line && !is_exempt {
+                // Look ahead through whitespace+newlines for board_marker.
+                // Cap lookahead at 256 chars to bound work.
+                let after = abs + vaak_marker.len();
+                let cap = (after + 256).min(contents.len());
+                let lookahead = &contents[after..cap];
+                let trimmed = lookahead.trim_start();
+                if trimmed.starts_with(board_marker) {
+                    violations.push(format!(
+                        "  {}:{}: hardcoded legacy board path (multi-line split)",
+                        path.display(),
+                        originating_line_num
+                    ));
+                }
+            }
+            search_start = abs + vaak_marker.len();
         }
     });
     // Cargo rerun-if-changed for each .rs source so the lint re-fires
