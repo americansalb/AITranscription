@@ -11661,6 +11661,14 @@ fn handle_currency_dispute_message(
 }
 
 /// Handle project_send: send a message to a role
+// VAAK_FP:SHA-12.3:vaak-mcp.rs:extthink_exempt_helper
+/// Returns true if the caller is exempt from the extended_thinking
+/// body-size gate. Human seats (sovereignty), the "system" pseudo-seat
+/// (harness emits these), and sends TO the system pseudo-seat are exempt.
+fn caller_is_exempt_from_extthink_gate(role: &str, _to: &str) -> bool {
+    role == "human" || role == "system"
+}
+
 fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, metadata: Option<serde_json::Value>, _session_id: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
@@ -11684,6 +11692,38 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             }
         }
     }
+
+    // VAAK_FP:SHA-12.3:vaak-mcp.rs:extended_thinking_body_size_gate
+    // Per human msg 1483 (2026-05-26): extended_thinking must be default
+    // for substantive sends. Body-size heuristic per dev-challenger:0
+    // msg 1488 + architect:0 msg 1490 acceptance:
+    //   - body.len() > 500 chars → metadata.extended_thinking MUST be true
+    //   - body.len() <= 500 → no attestation needed (mic-pass/ack/heartbeat)
+    //   - escape hatch: metadata.extended_thinking_skip_acknowledged: true
+    //     for exceptional long-but-cheap-think sends (release announcements)
+    // Human seats (human:0 sovereignty) bypass the gate entirely.
+    // System seats bypass (the harness emits these, not an agent).
+    if !caller_is_exempt_from_extthink_gate(&state.role, to) {
+        let body_len = body.chars().count();
+        if body_len > 500 {
+            let ext_thinking_true = metadata.as_ref()
+                .and_then(|m| m.get("extended_thinking"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let skip_ack = metadata.as_ref()
+                .and_then(|m| m.get("extended_thinking_skip_acknowledged"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !ext_thinking_true && !skip_ack {
+                return Err(format!(
+                    "[ExtendedThinkingRequired] body is {} chars (>500) — set metadata.extended_thinking: true to attest the deep-think round, OR set metadata.extended_thinking_skip_acknowledged: true if this is a long-but-cheap-think send (release/status). Per human directive msg 1483: extended thinking is default for substantive sends.",
+                    body_len
+                ));
+            }
+        }
+    }
+    // Note: caller binding to state.role + state.instance happens just below;
+    // the helper above only needs the role-slug string to detect "human:".
 
     // Phase A v2.2 §6.3 — Oxford debate speaker-only gate.
     // When an Oxford debate is active, only the currently-declared speaker
