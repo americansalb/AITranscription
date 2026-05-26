@@ -385,6 +385,13 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // confusion that human msg 1447 hit).
   const [micModeHint, setMicModeHint] = useState<string | null>(null);
 
+  // SHA-9.1: ref to the moderator-picker <select> so the mic-mode validation
+  // hint can focus + scroll-into-view the picker when the user attempts
+  // "Moderator picks next" without a moderator set. Per dev-challenger msg
+  // 1278 + architect msg 1280 + human msg 1276 — the prior silent-revert with
+  // generic hint left the user with no actionable next step.
+  const moderatorPickerRef = useRef<HTMLSelectElement | null>(null);
+
   // B.4 Item 7 — moderator-picker dropdown wired to list_active_seats_cmd
   // (developer:0 commit 7abef44). Fetched on mount + when assembly turns on.
   // Dropdown renders only when selfRole === null (human view) AND
@@ -460,9 +467,22 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     const mode = e.target.value;
     if (mode === micMode) return;
     if (mode === 'moderator' && !moderator) {
-      setMicModeHint('"Moderator picks next" requires a moderator. Set one first.');
+      // SHA-9.1: directional hint + auto-focus the moderator-picker so the
+      // user has an actionable next step (human msg 1276 reported being
+      // "unable to set mic passing to moderator"). Pre-fix, the hint just
+      // said "Set one first" with no indication of where.
+      setMicModeHint('"Moderator picks next" requires a moderator. Use the "Moderator:" dropdown below ↓');
       // Revert the select to its prior value so the dropdown reflects actual state.
       e.target.value = micMode;
+      // Focus + scroll the moderator picker into view on the next paint so
+      // the hint render + DOM ref availability are guaranteed.
+      requestAnimationFrame(() => {
+        const picker = moderatorPickerRef.current;
+        if (picker) {
+          picker.focus({ preventScroll: false });
+          picker.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      });
       return;
     }
     setMicModeHint(null);
@@ -689,6 +709,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           <label className="assembly-moderator-picker">
             <span className="assembly-moderator-label">Moderator:</span>
             <select
+              ref={moderatorPickerRef}
               value={moderator ?? ''}
               onChange={handleModeratorChange}
               title="Pick a moderator. Required before switching mic-passing mode to Moderator."
