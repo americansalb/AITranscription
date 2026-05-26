@@ -54,6 +54,11 @@ pub static VAAK_FINGERPRINT_MCP_SHA11_2: [u8; 50] =
 pub static VAAK_FINGERPRINT_MCP_SHA11_1_1: [u8; 57] =
     *b"VAAK_FP:SHA-11.1.1:vaak-mcp.rs:cooldown_300s_recovery_msg";
 
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA11_2_1: [u8; 56] =
+    *b"VAAK_FP:SHA-11.2.1:vaak-mcp.rs:hoisted_fresh_gate_proto ";
+
 use std::io::{self, BufRead, Write};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -11508,14 +11513,33 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
 
         let mut asm_auto_grabbed: Option<serde_json::Value> = None;
+
+        // SHA-11.2.1 (dev-challenger msg 1324 + evil-arch msg 1319 + tester
+        // msg 1321): hoisted single fresh read for ALL gate decisions
+        // downstream. Closes the class-of-bug per tester msg 1321 framing:
+        // "gate decisions MUST read state immediately before deciding."
+        // SHA-11.2 fixed only the `cur` extraction; dev-challenger msg 1324
+        // found two sibling staleness sites in the same function:
+        //   - caller_is_exempt below was reading mic_mode/moderator from
+        //     the line-11440 snapshot
+        //   - phase_now extraction below (line ~11760 area) for
+        //     planning-attestation gate, same stale source
+        // Hoisting the fresh read here AND reusing it across all three
+        // sites amortizes evil-arch msg 1319's I/O concern — one read per
+        // gate-call instead of one per site, no TTL cache needed.
+        let proto_for_gate_decisions = read_protocol_for_section_value(
+            &state.project_dir,
+            &section_for_gate,
+        );
+
         // moderator-authority Item 3 (spec line 49-51): exempt seats bypass the
         // assembly-mode mic-gate. The moderator manages the pipeline; they're
         // not subject to it. is_seat_exempt is true iff mic_passing_mode is
-        // "moderator" AND from_label IS the designated moderator. Read from
-        // proto_for_gate.floor (asm is a synthesized subset that doesn't carry
-        // mic_passing_mode/moderator fields).
+        // "moderator" AND from_label IS the designated moderator.
+        // SHA-11.2.1: uses proto_for_gate_decisions (fresh) instead of stale
+        // proto_for_gate from line 11440.
         let caller_is_exempt = {
-            let floor = proto_for_gate.get("floor");
+            let floor = proto_for_gate_decisions.get("floor");
             let mic_mode = floor
                 .and_then(|f| f.get("mic_passing_mode"))
                 .and_then(|v| v.as_str())
@@ -11526,24 +11550,16 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             mic_mode == "moderator" && moderator == Some(from_label.as_str())
         };
         if asm_active && state.role != "human" && !caller_is_exempt {
-            // SHA-11.2: sidecar floor-view sync. Re-read protocol.json
-            // immediately before the gate check. The proto_for_gate read at
-            // line 11430 happens early in the project_send flow; between
-            // that read and reaching here, the watchdog in vaak-desktop.exe
-            // may have released the current_speaker (writing protocol.json
-            // with floor.current_speaker=null). Without this fresh read,
-            // the sidecar's gate uses stale floor-holder data and rejects
-            // sends that should have succeeded. Observed tonight: dev:0
-            // SHA-5.3 ship rejected for 25+ min after watchdog already
-            // released ui-architect:0 (msgs 1216, 1223 visible to dev:0's
-            // project_wait, but the gate kept using the pre-release view).
-            // Cost: one extra disk read per gate evaluation; acceptable
-            // for correctness per architect SHA-11.2 design note.
-            let fresh_proto_for_gate = read_protocol_for_section_value(
-                &state.project_dir,
-                &section_for_gate,
-            );
-            let cur = fresh_proto_for_gate
+            // SHA-11.2.1 supersedes SHA-11.2's local fresh read here —
+            // proto_for_gate_decisions hoisted above is the single source
+            // of fresh floor state for all three gate decisions in this
+            // function. Original SHA-11.2 explanation preserved for
+            // archaeology: between the line-11440 proto_for_gate read and
+            // this gate check, the watchdog in vaak-desktop.exe can release
+            // current_speaker, leaving a stale snapshot. Using the hoisted
+            // fresh read fixes that AND the sibling sites at caller_is_exempt
+            // (above) and phase_now (below) in one pass.
+            let cur = proto_for_gate_decisions
                 .get("floor")
                 .and_then(|f| f.get("current_speaker"))
                 .and_then(|v| v.as_str())
@@ -11740,7 +11756,13 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         // Honor-system at v1 per spec line 129 — no model-API verification.
         // Round-trip enforcement is v1.6 hardening path.
         let unattested = {
-            let phase_now = proto_for_gate
+            // SHA-11.2.1 (dev-challenger msg 1324 sibling-staleness sweep):
+            // phase_now must use the hoisted fresh read, not the stale
+            // proto_for_gate from line 11440. Pre-fix: a planning→execution
+            // phase transition between line 11440 and here would make this
+            // gate fire planning_unattested warnings on now-execution-phase
+            // messages.
+            let phase_now = proto_for_gate_decisions
                 .get("floor")
                 .and_then(|f| f.get("phase"))
                 .and_then(|v| v.as_str())
