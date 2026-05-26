@@ -10297,7 +10297,13 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
                         "debate_id": debate_id,
                         "oxford_event": "vote_open",
                         "audience_seat": audience_seat,
-                        "vote_required": true
+                        "vote_required": true,
+                        // VAAK_FP:SHA-12.4a:reward_paid_visibility — per architect
+                        // msg 1507 Amend 2 + dev-challenger:0 msg 1505 finding 2:
+                        // surface that the reward path is deferred so the eventual
+                        // ruling broadcast does not silently emit 0 cu.
+                        "reward_paid": false,
+                        "reward_pending_reason": "currency_pool_section_3b_not_shipped"
                     }
                 }));
             }
@@ -10321,7 +10327,11 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
                 "metadata": {
                     "debate_id": debate_id,
                     "oxford_event": "vote_open_all",
-                    "audience_count": debate.audience.len()
+                    "audience_count": debate.audience.len(),
+                    // VAAK_FP:SHA-12.4a:reward_paid_visibility — see directed
+                    // prompt metadata above; same rationale.
+                    "reward_paid": false,
+                    "reward_pending_reason": "currency_pool_section_3b_not_shipped"
                 }
             }));
         }
@@ -11908,6 +11918,47 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                         "[OxfordNotYourTurn] Active debate {} — current speaker is {:?}. Wait for the moderator to declare you, or use oxford_react.",
                         debate.debate_id, debate.current_speaker
                     ));
+                }
+            }
+
+            // VAAK_FP:SHA-12.7:vaak-mcp.rs:message_mode_advocacy_tag
+            // Per architect msg 1479 (proposal) + msg 1502/1507 spec + arch
+            // msg 1490 audit item #5: when caller IS the current speaker in
+            // an active debate phase, auto-set metadata.message_mode =
+            // "advocacy" so downstream consumers (UI, retros, PR-citation
+            // checkers) can distinguish advocacy rhetoric from engineering
+            // ground-truth. Per dev-challenger:0 msg 1477 lesson: msgs
+            // 1442/1447/1458 (architect debate-mode advocacy) must NOT be
+            // cited as engineering audit input — that tag closes by surfacing
+            // the mode at write time.
+            //
+            // Phase set: anything except None/Ended is an active debate
+            // phase where the declared speaker is in advocacy mode.
+            // AudienceQ is included because the moderator may declare a
+            // debater to respond to an audience question — that response
+            // is still advocacy.
+            let is_advocacy_phase = !matches!(
+                debate.phase,
+                collab::oxford::OxfordPhase::None | collab::oxford::OxfordPhase::Ended
+            );
+            let is_current_speaker = debate.current_speaker.as_deref() == Some(caller.as_str());
+            if is_current_speaker && is_advocacy_phase {
+                let meta_obj = metadata.get_or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = meta_obj.as_object_mut() {
+                    if !obj.contains_key("message_mode") {
+                        obj.insert(
+                            "message_mode".to_string(),
+                            serde_json::Value::String("advocacy".to_string()),
+                        );
+                        obj.insert(
+                            "advocacy_debate_id".to_string(),
+                            serde_json::Value::Number(debate.debate_id.into()),
+                        );
+                        obj.insert(
+                            "advocacy_phase".to_string(),
+                            serde_json::Value::String(format!("{:?}", debate.phase).to_lowercase()),
+                        );
+                    }
                 }
             }
         }
