@@ -7979,7 +7979,7 @@ More prose.
         assert!(sessions["bindings"].as_array().unwrap().is_empty());
 
         // Verify board.jsonl exists (empty)
-        let board = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap();
+        let board = std::fs::read_to_string(tmp.join(".vaak/board.jsonl")).unwrap(); // LINT_EXEMPT_BOARD_PATH: test_code — verifies default-section init writes legacy root path
         assert!(board.is_empty(), "board.jsonl should be empty initially");
 
         // Verify role briefings
