@@ -827,12 +827,17 @@ pub(crate) fn classify_binding_for_soft_reset(
     }
 }
 
-/// Append a buzz message to `.vaak/board.jsonl` so the target role's next `project_wait`
-/// return surfaces a rejoin instruction. Mirrors the shape that `mcp__vaak__project_buzz`
-/// produces, with `from = "system"` to indicate harness origin. Time encoded as a UNIX
-/// millisecond integer to avoid pulling chrono into this module.
+/// Append a buzz message to the active section's board.jsonl so the target role's next
+/// `project_wait` return surfaces a rejoin instruction. Mirrors the shape that
+/// `mcp__vaak__project_buzz` produces, with `from = "system"` to indicate harness origin.
+/// Time encoded as a UNIX millisecond integer to avoid pulling chrono into this module.
+///
+/// SHA-5.3 (dev-challenger msg 1202): use `crate::collab::active_board_path` instead of
+/// the legacy hardcoded `.vaak/board.jsonl`. Same class-of-bug as the main.rs:3745 fix
+/// in SHA-5.1 — on a non-default section the rejoin prompt would land in the legacy root
+/// board and the watching agent on the active section would never see it.
 fn write_buzz_message(project_dir: &str, role: &str, instance: u64) -> Result<(), String> {
-    let board_path = std::path::Path::new(project_dir).join(".vaak").join("board.jsonl");
+    let board_path = crate::collab::active_board_path(project_dir);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
