@@ -992,14 +992,41 @@ fn read_board_filtered(project_dir: &str) -> Vec<serde_json::Value> {
 }
 
 /// Get the next message ID (count of existing messages + 1)
+// VAAK_FP:SHA-13.1:vaak-mcp.rs:next_message_id_max_id_semantics
+/// Compute the next board.jsonl message id using max-id-from-rows semantics.
+///
+/// !!! CALLER MUST HOLD `with_file_lock` BEFORE CALLING !!!
+/// (LockFileEx / flock are NOT process-reentrant — self-acquiring here
+/// would deadlock callers that already hold the lock.)
+///
+/// Per multi-writer audit (architect msg 1680, dev:0 msg 1677):
+/// PRIOR implementation used `count(non-empty lines) + 1` which is fragile:
+///   - File compaction → count != max_id, next id collides with existing.
+///   - One row removed → count = max-1 → next collides with prior max.
+///
+/// CURRENT implementation: parse each row's `id` field, return max+1.
+/// Robust against historical row deletion / compaction. Returns 1 for empty/
+/// missing board file (first message id).
+///
+/// Call-site lock audit pending — vaak-mcp.rs:1934 + 5+ other sites flagged
+/// in dev:0 msg 1677. Follow-up SHA-13.2 to audit + wrap any bare callers.
 fn next_message_id(project_dir: &str) -> u64 {
     let path = board_jsonl_path(project_dir);
-    let count = std::fs::read_to_string(&path)
+    let max_id = std::fs::read_to_string(&path)
         .unwrap_or_default()
         .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count();
-    (count + 1) as u64
+        .filter_map(|l| {
+            let trimmed = l.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|i| i.as_u64()))
+        })
+        .max()
+        .unwrap_or(0);
+    max_id + 1
 }
 
 /// Append a message to board.jsonl (caller must hold file lock)
