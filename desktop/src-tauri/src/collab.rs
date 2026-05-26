@@ -6115,8 +6115,14 @@ pub mod currency {
                                             // Best-effort board broadcast (no
                                             // dedicated OxfordEvent variant for
                                             // turn-yield; schema unchanged in v1).
-                                            let board_path = std::path::Path::new(dir)
-                                                .join(".vaak").join("board.jsonl");
+                                            // SHA-5.3b (tester msg 1209): the other two
+                                            // sweepers (lines ~5894 and ~6003) were patched
+                                            // in SHA-5.1 to use active_board_path; this
+                                            // one was missed in the 3-of-3 sweep. Without
+                                            // the fix, the turn-auto-yield broadcast lands
+                                            // in legacy root and section-active agents
+                                            // never see the floor-release signal.
+                                            let board_path = super::active_board_path(dir);
                                             let _ = super::with_board_lock(dir, || -> Result<(), String> {
                                                 use std::io::Write;
                                                 let max_id: u64 = std::fs::read_to_string(&board_path)
