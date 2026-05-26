@@ -10108,10 +10108,47 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
                 prev_turn.ended_at = Some(now.clone());
             }
         }
+        // VAAK_FP:SHA-12.5:vaak-mcp.rs:auto_declare_side_rotation
         // Determine next speaker per phase side. AudienceQ + Ended → no speaker.
+        //
+        // Per debate 10 post-mortem (architect msg 1474 Defect 2, msg 1490
+        // audit item B.2, dev-challenger:0 msg 1495): the previous policy
+        // (always pick side.first()) meant side[1+] never spoke. PerSideTotal
+        // CLAIMS successive debaters share the budget — this commit makes
+        // that real for the auto-declare path.
+        //
+        // Rotation policy: count prior auto_opened turns whose seat is in
+        // THIS side's debater list, modulo side.len(). For side.len()==2
+        // this naturally produces side[0]→side[1]→side[0] across
+        // OpeningX/RebuttalX/ClosingX (the three phases per side). For
+        // side.len()==1 (degenerate but valid), idx is always 0.
+        //
+        // Moderator can still override with oxford_declare_speaker for
+        // explicit picks (handled by Layer 3 first-writer-wins gate already).
+        // Current speaker can still oxford_yield (SHA-12.2) for mid-phase
+        // rotation within the same side budget.
+        let count_side_phases_visited = |side: &[String], history: &[collab::oxford::OxfordTurn]| -> usize {
+            history.iter()
+                .filter(|t| t.auto_opened && side.iter().any(|s| s == &t.seat))
+                .count()
+        };
         let next_speaker: Option<String> = match next_phase.side() {
-            "side_a" => debate.side_a.first().cloned(),
-            "side_b" => debate.side_b.first().cloned(),
+            "side_a" => {
+                if debate.side_a.is_empty() {
+                    None
+                } else {
+                    let visited = count_side_phases_visited(&debate.side_a, &debate.turn_history);
+                    debate.side_a.get(visited % debate.side_a.len()).cloned()
+                }
+            }
+            "side_b" => {
+                if debate.side_b.is_empty() {
+                    None
+                } else {
+                    let visited = count_side_phases_visited(&debate.side_b, &debate.turn_history);
+                    debate.side_b.get(visited % debate.side_b.len()).cloned()
+                }
+            }
             _ => None,
         };
         if let Some(seat) = next_speaker.as_ref() {
@@ -10151,7 +10188,7 @@ fn handle_oxford_advance_phase() -> Result<serde_json::Value, String> {
                 "Oxford debate {} phase advanced from {:?} to {:?} via moderator {} (oxford_advance_phase).{}{}",
                 debate_id, prev_phase, next_phase, caller,
                 match next_speaker.as_ref() {
-                    Some(s) => format!(" Next speaker auto-declared: {} (side[0] per PerSideTotal time-accounting).", s),
+                    Some(s) => format!(" Next speaker auto-declared: {} (PerSideTotal rotation per SHA-12.5).", s),
                     None => match next_phase {
                         OxfordPhase::AudienceQ => " AudienceQ phase has no single speaker — audience members post questions via oxford_audience_question (SHA-10.4). Moderator may advance with oxford_advance_phase when ready.".to_string(),
                         OxfordPhase::Ended => " Debate has ended. Audience vote opens automatically per spec §6.1.".to_string(),
