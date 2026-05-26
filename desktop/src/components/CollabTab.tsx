@@ -6750,11 +6750,45 @@ When multiple instances of this role are active:
               // mic_released have their own dedicated dividers).
               if (msg.from === "system" || msg.from.startsWith("system:")) {
                 const systemTag = msg.from.includes(":") ? msg.from.split(":").slice(1).join(":") : null;
+                // SHA-9.2: event-severity hierarchy (dev-challenger msg 1289
+                // find D + architect msg 1291). Without tiering, an
+                // oxford_speaker_declared directive (next-debater take the
+                // floor \u2014 CRITICAL) renders identically to a keepalive tick
+                // (INFORMATIONAL). Classify and assign a severity modifier
+                // class so each tier gets distinct visual weight:
+                //  - critical: bright amber accent + heavier border, demands
+                //    eye attention (directives, speaker declarations)
+                //  - state-change: blue accent, normal weight (initiations,
+                //    endings, mic releases, resets \u2014 situational awareness)
+                //  - informational: current muted-gray treatment (everything
+                //    else \u2014 fallback)
+                const subj = msg.subject ?? "";
+                let severity: "critical" | "state-change" | "informational";
+                if (
+                  msg.type === "directive" ||
+                  subj.includes("OxfordSpeakerDeclared") ||
+                  subj.includes("OxfordDebateAssignment") ||
+                  subj.includes("OxfordModeratorPrompt") ||
+                  subj.includes("YOUR TURN")
+                ) {
+                  severity = "critical";
+                } else if (
+                  subj.includes("OxfordDebateInitiated") ||
+                  subj.includes("OxfordDebateEnded") ||
+                  subj.includes("OxfordTurnAutoYielded") ||
+                  subj.includes("OxfordAutoOpened") ||
+                  subj.includes("mic_released") ||
+                  subj.includes("Soft reset")
+                ) {
+                  severity = "state-change";
+                } else {
+                  severity = "informational";
+                }
                 return (
-                  <div key={msg.id} className="system-event-card">
+                  <div key={msg.id} className={`system-event-card system-event-card-${severity}`}>
                     <div className="message-card-header">
                       <span className="message-card-id">#{msg.id}</span>
-                      <span className="system-event-pill" aria-label="System event">SYSTEM</span>
+                      <span className={`system-event-pill system-event-pill-${severity}`} aria-label={`System event (${severity})`}>SYSTEM</span>
                       {systemTag && <span className="system-event-tag">{systemTag}</span>}
                       <span className="message-card-time" title={msg.timestamp}>{formatRelativeTime(msg.timestamp)}</span>
                       <button className="message-delete-btn" onClick={(e) => { e.stopPropagation(); handleDeleteMessage(msg.id); }} title="Delete message">&times;</button>

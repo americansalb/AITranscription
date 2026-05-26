@@ -2163,6 +2163,33 @@
   white-space: pre-wrap;
 }
 
+/* SHA-9.2: event-severity hierarchy (dev-challenger msg 1289 find D +
+   architect msg 1291). Three tiers visually distinct so an
+   oxford_speaker_declared (CRITICAL: take the floor!) doesn't look like
+   a keepalive tick (INFORMATIONAL: noise). Border color is the primary
+   tier signal; pill background reinforces. */
+
+.system-event-card-critical {
+  border-left-color: #e8a23a;  /* amber — eye-pulling but not error-red */
+  background: rgba(232, 162, 58, 0.10);
+}
+.system-event-pill-critical {
+  background: rgba(232, 162, 58, 0.30);
+  color: #f4c178;
+}
+
+.system-event-card-state-change {
+  border-left-color: #5d8ab8;  /* muted blue — situational awareness */
+  background: rgba(93, 138, 184, 0.10);
+}
+.system-event-pill-state-change {
+  background: rgba(93, 138, 184, 0.25);
+  color: #8ab2d8;
+}
+
+/* .system-event-card-informational keeps the SHA-9.1a baseline styling
+   (4px #4d5560 border, 14% gray bg) — no override needed here. */
+
 /* ==================== Mic-landed cards (v1.5.1 typed turn) ==================== */
 /* Special-case render of mic_landed system messages that carry typed turn
  * metadata (turn_type + expected_duration_secs from v1.5.1 mic_claim).
