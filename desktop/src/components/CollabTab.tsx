@@ -6543,16 +6543,22 @@ When multiple instances of this role are active:
               {/* SHA-DUI.9 — round-control buttons. Replaces non-clickable plaintext
                   <code> labels with real <button>s invoking Tauri commands directly
                   (bypasses MCP sidecar — works even when CC sidecars are stale).
-                  Gate widened from `humanRole === "moderator"` to `humanRole !== "observer"`
-                  per spec §6.6.1 human-authority bypass (any non-observer human can drive
-                  round-control via Tauri). Adds Close Round button (missing from prior
-                  panel) and converts End-as-Converged plaintext to a button. */}
-              {humanRole !== "observer" && (activeDelphi.phase === "opening" || activeDelphi.phase === "submitting" || activeDelphi.phase === "reviewing") && (
+                  Gate widened to render for ALL human roles (including observer) per
+                  spec §6.6.1 human-authority bypass — the desktop human user is the
+                  canonical Vaak driver regardless of their assigned Delphi role.
+                  Adds Close Round button (missing from prior panel) and converts
+                  End-as-Converged plaintext to a button. "setup" phase included so
+                  Open Round for round 1 is reachable. */}
+              {(activeDelphi.phase === "setup" || activeDelphi.phase === "opening" || activeDelphi.phase === "submitting" || activeDelphi.phase === "reviewing") && (
                 <div className="active-delphi-moderator-controls">
                   <span className="active-delphi-mod-hint">
-                    {humanRole === "moderator" ? "Moderator controls:" : "Human-authority controls (spec §6.6.1):"}
+                    {humanRole === "moderator"
+                      ? "Moderator controls:"
+                      : humanRole === "observer"
+                        ? "Human-authority controls (you're observer — §6.6.1 bypass):"
+                        : `Human-authority controls (you're ${humanRole} — §6.6.1 bypass):`}
                   </span>
-                  {(activeDelphi.phase === "opening" || activeDelphi.phase === "reviewing") && (
+                  {(activeDelphi.phase === "setup" || activeDelphi.phase === "opening" || activeDelphi.phase === "reviewing") && (
                     <button
                       type="button"
                       className="active-delphi-mod-btn"
