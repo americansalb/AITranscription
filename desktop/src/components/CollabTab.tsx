@@ -2413,21 +2413,32 @@ When multiple instances of this role are active:
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
-  // Human msg 1939 — poll active delphi discussion (parallel to Oxford polling
-  // above). Backend Tauri command is `read_active_delphi_cmd` (per Oxford
-  // naming convention); silently no-ops on pre-Delphi-SHA binaries via the
-  // try/catch. Activates transparently once dev:0 ships SHA-D10.x with the
-  // command. Field names mirror DelphiSnapshot from spec §4.2; will switch to
-  // the canonical TS import (collabTypes.ts:DelphiSnapshot) once dev:0 lands
-  // the serde-parity types per spec §5.6.
+  // Human msg 1939 — poll active delphi discussion via dev:0 SHA-D10.2 Tauri
+  // command `delphi_get_state_cmd` (main.rs:4358). Response is wrapped:
+  // `{ active: bool, caller, caller_role, ...ActiveDelphiDebate fields }`.
+  // When `active: false`, set state to null. When active, narrow into the
+  // canonical ActiveDelphiDebate shape per spec §4.2. UI is always called as
+  // human:0 so visibility = moderator_view (full state).
   useEffect(() => {
     if (!window.__TAURI__ || !projectDir) return;
     let cancelled = false;
     const pollActiveDelphi = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const result = await invoke<ActiveDelphiDebate | null>("read_active_delphi_cmd", { dir: projectDir });
-        if (!cancelled) setActiveDelphi(result);
+        const result = await invoke<{
+          active: boolean;
+          caller?: string;
+          caller_role?: string;
+        } & Partial<ActiveDelphiDebate>>("delphi_get_state_cmd", {
+          dir: projectDir,
+          includeUnshuffle: true,
+        });
+        if (cancelled) return;
+        if (result && result.active && result.discussion_id !== undefined) {
+          setActiveDelphi(result as ActiveDelphiDebate);
+        } else {
+          setActiveDelphi(null);
+        }
       } catch { /* pre-Delphi-SHA binary — poll inert; optimistic seed from modal remains */ }
     };
     pollActiveDelphi();
