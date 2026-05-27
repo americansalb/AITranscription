@@ -10809,6 +10809,760 @@ fn handle_oxford_audience_vote(vote: &str) -> Result<serde_json::Value, String> 
     })
 }
 
+// ============================================================
+// Phase D — Delphi Discussion (SHA-D10.2 manual-flow handlers)
+// Spec: .vaak/design-notes/2026-05-27-delphi-discussion-spec.md
+// Composition: every handler that mutates state acquires
+// `collab::delphi_atomic_op` (currency OUTER → board MIDDLE → delphi
+// INNER per spec §5.5 v3 LOCK). Raw `with_delphi_lock` is unreachable
+// outside the collab::delphi module (it's pub(crate) precisely to
+// enforce this). Reverse-order acquisition is a compile error.
+//
+// PARITY: every handler below has a matching Tauri command twin in
+// main.rs::delphi_*_cmd. Spec §5.6 LOCK: PR-review grep both files.
+// ============================================================
+
+// SHA-D10.2 runtime fingerprint — runtime grep verifies the SHA shipped.
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_MCP_SHA_D10_2: [u8; 48] =
+    *b"VAAK_FP:SHA-D10.2:vaak-mcp.rs:delphi_handlers_v1";
+
+/// Generate a per-round unshuffle seed. SHA-D10.2 uses sha256 of nano-time
+/// + pid + discussion_id + round; SHA-D10.3 will upgrade to `getrandom` for
+/// cryptographic-quality entropy. The seed is hex-encoded (64 chars).
+fn delphi_make_unshuffle_seed(discussion_id: u64, round: u32) -> String {
+    use sha2::{Digest, Sha256};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mut hasher = Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(pid.to_le_bytes());
+    hasher.update(discussion_id.to_le_bytes());
+    hasher.update(round.to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Compute sha256 of submission content for tamper-detection. Stored on
+/// the submission row + emitted in the jsonl audit event. Format:
+/// "sha256:<hex>" (matches spec §4.1 example).
+fn delphi_content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// SHA-D10.2 — `delphi_initiate` MCP handler. Per spec §3.1.
+fn handle_delphi_initiate(
+    moderator: &str,
+    participants: &[String],
+    topic: &str,
+    audience: &[String],
+    max_rounds: Option<u32>,
+    convergence_criterion: Option<&str>,
+    convergence_reward_copper: Option<i64>,
+    submission_soft_floor_secs: Option<u32>,
+    submission_hard_floor_secs: Option<u32>,
+    review_floor_secs: Option<u32>,
+    blind_gate_strict: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    // Build active_seats from sessions.json bindings — mirrors Oxford pattern.
+    let active_seats: Vec<String> = (|| -> Vec<String> {
+        let sessions: serde_json::Value = std::fs::read_to_string(sessions_json_path(&dir))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({"bindings": []}));
+        let mut out = Vec::new();
+        if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+            for b in bindings {
+                if b.get("status").and_then(|s| s.as_str()) != Some("active") { continue; }
+                let role = b.get("role").and_then(|s| s.as_str()).unwrap_or("");
+                if role.is_empty() || role == "human" { continue; }
+                let instance = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0);
+                out.push(format!("{}:{}", role, instance));
+            }
+        }
+        out
+    })();
+
+    // Pure validation up front (no lock yet).
+    let conv_reward = convergence_reward_copper.unwrap_or(DELPHI_DEFAULT_CONVERGENCE_REWARD_COPPER);
+    validate_initiate(&caller, moderator, participants, audience, &active_seats, conv_reward)?;
+
+    // Liveness gate — non-human seats must have fresh heartbeats. Mirrors
+    // Oxford SHA-12.1 pattern (vaak-mcp.rs:~9700). PARITY: keep in sync
+    // with main.rs Tauri-twin.
+    let project_path = std::path::Path::new(&dir);
+    let moderator_owned = moderator.to_string();
+    for seat in std::iter::once(&moderator_owned)
+        .chain(participants.iter())
+        .chain(audience.iter())
+    {
+        if seat.starts_with("human:") { continue; }
+        if !collab::is_seat_alive(project_path, seat) {
+            return Err(format!(
+                "[DelphiSeatNotAlive] {} heartbeat is stale (> {}s) — cannot initiate Delphi with a non-responsive seat. Pick a different seat or wait for the agent to reconnect.",
+                seat,
+                collab::staleness_thresholds::ALIVE_STATE_STALE_MS / 1000
+            ));
+        }
+    }
+
+    // Parse convergence criterion (default Moderator).
+    let conv_criterion: ConvergenceMode = match convergence_criterion.unwrap_or("moderator") {
+        "moderator" => ConvergenceMode::Moderator,
+        "max_rounds" => ConvergenceMode::MaxRounds,
+        "hybrid" => ConvergenceMode::Hybrid,
+        other => return Err(format!(
+            "[DelphiInvalidConvergenceCriterion] '{}' — must be moderator | max_rounds | hybrid",
+            other
+        )),
+    };
+
+    // Resolve defaults from spec §6.2 LOCKED constants.
+    let max_rounds_v = max_rounds.unwrap_or(DELPHI_DEFAULT_MAX_ROUNDS);
+    let soft_floor = submission_soft_floor_secs.unwrap_or(DELPHI_SUBMISSION_SOFT_FLOOR_SECS);
+    let hard_floor = submission_hard_floor_secs.unwrap_or(DELPHI_SUBMISSION_HARD_FLOOR_SECS);
+    let review_floor = review_floor_secs.unwrap_or(DELPHI_REVIEW_FLOOR_SECS);
+    let blind_strict = blind_gate_strict.unwrap_or(false);
+
+    // Acquire three-tier composition lock (spec §5.5 v3 LOCK).
+    collab::delphi_atomic_op(&dir, || {
+        // Re-check atomically — no active Delphi already.
+        if read_active_delphi(&dir)?.is_some() {
+            return Err("[DelphiAlreadyActive]".to_string());
+        }
+        // Spec §6.8 LOCK — Oxford active blocks Delphi initiate (rejected,
+        // NOT auto-disabled). Oxford has higher priority as the adversarial-
+        // stakes vehicle; moderator must end Oxford first.
+        if collab::oxford::read_active_oxford(&dir)?.is_some() {
+            return Err("[OxfordDebateActive] An Oxford debate is currently active. End it via `oxford_end` before initiating a Delphi discussion. Per spec §6.8, Oxford has priority over Delphi (asymmetric — Oxford can preempt Delphi, but not vice versa).".to_string());
+        }
+
+        // Auto-disable continuous-review discussion mode if active
+        // (spec §3.1 side effects: "Other discussion modes (Continuous,
+        // legacy start_discussion) auto-disabled on success").
+        let disc_path = std::path::Path::new(&dir).join(".vaak").join("discussion.json");
+        if disc_path.exists() {
+            let prior_mode = std::fs::read_to_string(&disc_path).ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(|s| s.to_string()));
+            if let Some(prior) = prior_mode {
+                if !prior.is_empty() && prior != "null" {
+                    let disabled = serde_json::json!({ "mode": serde_json::Value::Null });
+                    if let Err(e) = std::fs::write(&disc_path, serde_json::to_string_pretty(&disabled).unwrap_or_default()) {
+                        eprintln!("[delphi_initiate] WARN: failed to auto-disable discussion mode '{}': {}", prior, e);
+                    }
+                }
+            }
+        }
+
+        let discussion_id = next_discussion_id(&dir);
+        let now = collab::iso_now();
+
+        // Build initial state: phase=Setup, no rounds yet.
+        let debate = ActiveDelphiDebate {
+            discussion_id,
+            moderator: moderator.to_string(),
+            participants: participants.to_vec(),
+            audience: audience.to_vec(),
+            topic: topic.to_string(),
+            max_rounds: max_rounds_v,
+            convergence_criterion: conv_criterion,
+            convergence_reward_copper: conv_reward,
+            phase: DelphiPhase::Setup,
+            current_round: 0,
+            phase_started_at: Some(now.clone()),
+            blind_gate_active: false,
+            blind_gate_strict: blind_strict,
+            submission_soft_floor_secs: soft_floor,
+            submission_hard_floor_secs: hard_floor,
+            review_floor_secs: review_floor,
+            started_at: now.clone(),
+            rounds: Vec::new(),
+        };
+        write_active_delphi(&dir, &debate)?;
+
+        append_delphi_event(&dir, &DelphiEvent::Initiate {
+            discussion_id,
+            timestamp: now.clone(),
+            moderator: moderator.to_string(),
+            participants: participants.to_vec(),
+            audience: audience.to_vec(),
+            topic: topic.to_string(),
+            max_rounds: max_rounds_v,
+            convergence_criterion: conv_criterion,
+            convergence_reward_copper: conv_reward,
+            submission_soft_floor_secs: soft_floor,
+            submission_hard_floor_secs: hard_floor,
+            review_floor_secs: review_floor,
+            blind_gate_strict: blind_strict,
+        })?;
+
+        // Board broadcast — every team member sees the initiate.
+        let msg_id = next_message_id(&dir);
+        let reward_descr = if conv_reward > 0 {
+            format!("{} copper from pool", conv_reward)
+        } else {
+            "no reward (convergence is its own reward)".to_string()
+        };
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[DelphiDiscussionInitiated] discussion {} by {}", discussion_id, moderator),
+            "body": format!(
+                "Delphi discussion {} initiated by {}.\nTopic: {}\nParticipants: {}\nAudience: {}\nMax rounds: {}\nConvergence criterion: {:?}\nSubmission floors: {}s soft / {}s hard\nReview floor: {}s\nConvergence reward: {}\nBlind gate strict: {}\n\nNext: moderator calls `delphi_open_round` to open round 1. Participants submit independent positions via `delphi_submit(content=\"...\")` once the round is open. Participants CANNOT broadcast to the board during submitting phase — only the submit tool. After all participants submit (or hard-floor expires), moderator calls `delphi_close_round` to publish the anonymized aggregate.",
+                discussion_id, moderator, topic,
+                participants.join(", "),
+                if audience.is_empty() { "(none)".to_string() } else { audience.join(", ") },
+                max_rounds_v,
+                conv_criterion,
+                soft_floor, hard_floor, review_floor,
+                reward_descr,
+                blind_strict,
+            ),
+            "metadata": {
+                "discussion_id": discussion_id,
+                "moderator": moderator,
+                "participants": participants,
+                "audience": audience,
+                "topic": topic,
+                "max_rounds": max_rounds_v,
+                "convergence_reward_copper": conv_reward,
+                "delphi_event": "initiate"
+            }
+        }));
+
+        // Directed prompts to each participant + audience seat. Mirrors
+        // Oxford's per-debater ping pattern (vaak-mcp.rs:~9898+).
+        for seat in participants.iter() {
+            let ping_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": ping_id, "from": "system", "to": seat, "type": "directive",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[DelphiParticipantAssignment] discussion {} — you are a participant", discussion_id),
+                "body": format!(
+                    "You have been selected as a participant in Delphi discussion {}.\n\nTopic: {}\nModerator: {}\nMax rounds: {}\n\nWhen the moderator opens a round, submit your INDEPENDENT position via `delphi_submit(content=\"...\")`. You cannot see other participants' submissions. You cannot broadcast to the board during the submission phase — your only output channel is delphi_submit. After all participants submit, the moderator closes the round and an anonymized aggregate is posted; you may then discuss freely in the reviewing phase. Convergence-oriented: refine YOUR position as you read others' anonymized arguments, not to argue against them.\n\nIMPORTANT (per spec §8.2 v3): your submission's anonymity ends when the discussion ends — the unshuffle map becomes public for audit. If you would not want to be known as the author of your position, do not submit; abstain instead.",
+                    discussion_id, topic, moderator, max_rounds_v
+                ),
+                "metadata": {
+                    "discussion_id": discussion_id,
+                    "assigned_role": "participant",
+                    "delphi_event": "participant_assigned"
+                }
+            }));
+        }
+        for seat in audience.iter() {
+            let ping_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": ping_id, "from": "system", "to": seat, "type": "directive",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[DelphiAudienceAssignment] discussion {} — you are audience", discussion_id),
+                "body": format!(
+                    "You are in the audience for Delphi discussion {}.\n\nTopic: {}\nModerator: {}\n\nDuring rounds: you see only the submission count (anonymity-preserved). When the round closes, you'll see the anonymized aggregate and may post questions via `delphi_audience_question` during the reviewing phase, and react via `delphi_react` at any time. Voting is not part of Delphi (unlike Oxford); your role is to ask sharpening questions that help participants converge.",
+                    discussion_id, topic, moderator
+                ),
+                "metadata": {
+                    "discussion_id": discussion_id,
+                    "assigned_role": "audience",
+                    "delphi_event": "audience_assigned"
+                }
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "discussion_id": discussion_id,
+            "moderator": moderator,
+            "participants": participants,
+            "audience": audience,
+            "topic": topic,
+            "max_rounds": max_rounds_v,
+            "convergence_criterion": conv_criterion,
+            "convergence_reward_copper": conv_reward,
+            "phase": "setup",
+            "submission_soft_floor_secs": soft_floor,
+            "submission_hard_floor_secs": hard_floor,
+            "review_floor_secs": review_floor,
+            "blind_gate_strict": blind_strict,
+            "started_at": now,
+        }))
+    })
+}
+
+/// SHA-D10.2 — `delphi_get_state` MCP handler. Read-only. Per spec §3.11
+/// + §3.11.1 visibility matrix v3 LOCK.
+///
+/// Visibility matrix:
+/// - Moderator: full snapshot incl. unshuffle_map + submissions.from + submitted_at
+/// - Participant: own submission content visible; others stripped to anonymous_id;
+///   unshuffle_map empty unless phase==ended
+/// - Audience: aggregate visible, submission count only (no contents);
+///   unshuffle_map empty unless phase==ended
+/// - Not-in-discussion: meta-only (id, moderator, topic, phase, current_round, max_rounds)
+///
+/// SHA-D10.2 ships moderator + audience + not-in-discussion paths fully;
+/// participant own-content filter is folded into the same logic.
+fn handle_delphi_get_state(include_unshuffle: bool) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    // No lock needed for read — file-system read is atomic at OS level.
+    // (Writers acquire the lock; readers just read the most-recent snapshot.)
+    let active = match read_active_delphi(&dir)? {
+        Some(a) => a,
+        None => return Ok(serde_json::json!({ "active": false })),
+    };
+
+    // Determine caller role for visibility filtering (spec §3.11.1).
+    let is_moderator = caller == active.moderator;
+    let is_participant = active.participants.iter().any(|p| p == &caller);
+    let is_audience = active.audience.iter().any(|a| a == &caller);
+    let is_human = caller.starts_with("human:");
+    let caller_role = if is_human || is_moderator {
+        "moderator_view"
+    } else if is_participant {
+        "participant_view"
+    } else if is_audience {
+        "audience_view"
+    } else {
+        "observer_view"
+    };
+
+    let ended = active.phase == DelphiPhase::Ended;
+    let unshuffle_visible = include_unshuffle && (is_moderator || is_human || ended);
+
+    // Build the per-role filtered snapshot.
+    let rounds_view: Vec<serde_json::Value> = active.rounds.iter().map(|r| {
+        let submissions_view: Vec<serde_json::Value> = r.submissions.iter().map(|s| {
+            // Moderator + human + ended: full content + from + submitted_at
+            // Participant: own content full; others anonymized
+            // Audience + observer: hidden content (count only)
+            if is_moderator || is_human || ended {
+                serde_json::json!({
+                    "from": s.from,
+                    "anonymous_id": s.anonymous_id,
+                    "content": s.content,
+                    "content_hash": s.content_hash,
+                    "submitted_at": s.submitted_at,
+                    "revision_count": s.revision_hash_chain.len(),
+                })
+            } else if is_participant && s.from == caller {
+                serde_json::json!({
+                    "from": s.from,
+                    "anonymous_id": s.anonymous_id,
+                    "content": s.content,
+                    "content_hash": s.content_hash,
+                    "submitted_at": s.submitted_at,
+                    "revision_count": s.revision_hash_chain.len(),
+                    "is_self": true,
+                })
+            } else if is_participant {
+                // Other-participant view during submitting/reviewing: anonymous label only
+                serde_json::json!({
+                    "anonymous_id": s.anonymous_id,
+                    "is_self": false,
+                })
+            } else {
+                // Audience or observer: nothing per-submission until reveal
+                serde_json::json!({ "anonymous_id": s.anonymous_id })
+            }
+        }).collect();
+        let unshuffle_map_view = if unshuffle_visible {
+            serde_json::to_value(&r.unshuffle_map).unwrap_or(serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        serde_json::json!({
+            "number": r.number,
+            "opened_at": r.opened_at,
+            "closed_at": r.closed_at,
+            "prompt": r.prompt,
+            "submissions": submissions_view,
+            "submissions_count": r.submissions.len(),
+            "unshuffle_map": unshuffle_map_view,
+            "aggregate_message_id": r.aggregate_message_id,
+            "non_submitters": r.non_submitters,
+            "audience_questions": r.audience_questions,
+            // unshuffle_seed surfaced only if unshuffle_visible (same gate)
+            "unshuffle_seed": if unshuffle_visible {
+                serde_json::Value::String(r.unshuffle_seed.clone())
+            } else {
+                serde_json::Value::Null
+            },
+        })
+    }).collect();
+
+    Ok(serde_json::json!({
+        "active": true,
+        "caller": caller,
+        "caller_role": caller_role,
+        "discussion_id": active.discussion_id,
+        "moderator": active.moderator,
+        "participants": active.participants,
+        "audience": active.audience,
+        "topic": active.topic,
+        "max_rounds": active.max_rounds,
+        "convergence_criterion": active.convergence_criterion,
+        "convergence_reward_copper": active.convergence_reward_copper,
+        "phase": active.phase,
+        "current_round": active.current_round,
+        "phase_started_at": active.phase_started_at,
+        "blind_gate_active": active.blind_gate_active,
+        "blind_gate_strict": active.blind_gate_strict,
+        "submission_soft_floor_secs": active.submission_soft_floor_secs,
+        "submission_hard_floor_secs": active.submission_hard_floor_secs,
+        "review_floor_secs": active.review_floor_secs,
+        "started_at": active.started_at,
+        "rounds": rounds_view,
+    }))
+}
+
+/// SHA-D10.2 — `delphi_open_round` MCP handler. Per spec §3.2. Moderator-only.
+fn handle_delphi_open_round(round_prompt_override: Option<String>) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    collab::delphi_atomic_op(&dir, || {
+        let mut active = read_active_delphi(&dir)?
+            .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+
+        if caller != active.moderator && !caller.starts_with("human:") {
+            return Err("[DelphiModeratorOnly]".to_string());
+        }
+        if !matches!(active.phase, DelphiPhase::Setup | DelphiPhase::Opening | DelphiPhase::Reviewing) {
+            return Err(format!(
+                "[DelphiCannotOpenFromPhase] current phase is {:?} — open_round requires setup | opening | reviewing",
+                active.phase
+            ));
+        }
+        if active.current_round >= active.max_rounds {
+            return Err("[DelphiMaxRoundsReached]".to_string());
+        }
+
+        let now = collab::iso_now();
+        let new_round_number = active.current_round + 1;
+        let prompt = round_prompt_override
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
+                if new_round_number == 1 {
+                    active.topic.clone()
+                } else {
+                    format!("Round {}: refine your position in light of the prior aggregate. Topic: {}", new_round_number, active.topic)
+                }
+            });
+        let unshuffle_seed = delphi_make_unshuffle_seed(active.discussion_id, new_round_number);
+
+        active.current_round = new_round_number;
+        active.phase = DelphiPhase::Submitting;
+        active.phase_started_at = Some(now.clone());
+        active.blind_gate_active = true;
+        active.rounds.push(DelphiRound {
+            number: new_round_number,
+            opened_at: now.clone(),
+            closed_at: None,
+            prompt: prompt.clone(),
+            submissions: Vec::new(),
+            unshuffle_map: std::collections::BTreeMap::new(),
+            unshuffle_seed: unshuffle_seed.clone(),
+            aggregate_message_id: None,
+            non_submitters: Vec::new(),
+            audience_questions: Vec::new(),
+        });
+        write_active_delphi(&dir, &active)?;
+
+        append_delphi_event(&dir, &DelphiEvent::RoundOpened {
+            discussion_id: active.discussion_id,
+            round: new_round_number,
+            prompt: prompt.clone(),
+            timestamp: now.clone(),
+        })?;
+
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[DelphiRoundOpened] discussion {} round {} — submissions open", active.discussion_id, new_round_number),
+            "body": format!(
+                "Round {} is open on: '{}'.\n\nParticipants ({}): submit your independent position via `delphi_submit(content=\"...\")`. You CANNOT broadcast to the board during this phase — only your submission. Submissions due within {}s soft / {}s hard. Revisions allowed within the round (latest supersedes).\n\nModerator ({}): manual close via `delphi_close_round` once you observe convergence or sufficient input. SHA-D10.4 sweeper will eventually auto-close on quorum / hard-floor; for now (manual flow), the moderator closes.",
+                new_round_number, prompt,
+                active.participants.join(", "),
+                active.submission_soft_floor_secs, active.submission_hard_floor_secs,
+                active.moderator,
+            ),
+            "metadata": {
+                "discussion_id": active.discussion_id,
+                "round": new_round_number,
+                "prompt": prompt,
+                "phase": "submitting",
+                "delphi_event": "round_opened"
+            }
+        }));
+
+        // Per-participant directed nudge — they may be in wait, so a directed
+        // message wakes their sidecar. Mirrors Oxford's per-debater ping pattern.
+        for seat in active.participants.iter() {
+            let ping_id = next_message_id(&dir);
+            let _ = append_to_board(&dir, &serde_json::json!({
+                "id": ping_id, "from": "system", "to": seat, "type": "directive",
+                "timestamp": utc_now_iso(),
+                "subject": format!("[DelphiRoundPrompt] discussion {} round {} — submit your position", active.discussion_id, new_round_number),
+                "body": format!(
+                    "Round {} of Delphi discussion {} is open.\n\nPrompt: {}\n\nCall `delphi_submit(content=\"<your-independent-position>\")` to submit. You CANNOT broadcast to the board during this phase. Submissions due within {}s soft / {}s hard.",
+                    new_round_number, active.discussion_id, prompt,
+                    active.submission_soft_floor_secs, active.submission_hard_floor_secs
+                ),
+                "metadata": {
+                    "discussion_id": active.discussion_id,
+                    "round": new_round_number,
+                    "delphi_event": "round_prompt"
+                }
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "discussion_id": active.discussion_id,
+            "round": new_round_number,
+            "prompt": prompt,
+            "phase": "submitting",
+            "unshuffle_seed": unshuffle_seed,
+            "soft_floor_secs": active.submission_soft_floor_secs,
+            "hard_floor_secs": active.submission_hard_floor_secs,
+            "opened_at": now,
+        }))
+    })
+}
+
+/// SHA-D10.2 — `delphi_submit` MCP handler. Per spec §3.3. Participants only,
+/// during submitting phase. Revisions allowed per spec §6.6 (latest wins;
+/// revision_hash_chain records prior content hashes for tamper-detection).
+fn handle_delphi_submit(content: &str) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    if content.trim().is_empty() {
+        return Err("[DelphiSubmitEmpty] content must be non-empty (whitespace-only is rejected)".to_string());
+    }
+
+    collab::delphi_atomic_op(&dir, || {
+        let mut active = read_active_delphi(&dir)?
+            .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+        if !active.participants.iter().any(|p| p == &caller) {
+            return Err("[DelphiNonParticipantCannotSubmit]".to_string());
+        }
+        if active.phase != DelphiPhase::Submitting {
+            return Err(format!(
+                "[DelphiCannotSubmitInPhase] current phase is {:?} — submit requires submitting",
+                active.phase
+            ));
+        }
+        let now = collab::iso_now();
+        let content_hash = delphi_content_hash(content);
+        let current_round_idx = active.rounds.len().saturating_sub(1);
+        let round = active.rounds.get_mut(current_round_idx)
+            .ok_or_else(|| "[DelphiInternalState] current round index out of bounds".to_string())?;
+
+        // Revision detection — find existing submission by `from` for this round.
+        let existing_idx = round.submissions.iter().position(|s| s.from == caller);
+        let revision_number = match existing_idx {
+            Some(idx) => {
+                let prior = round.submissions[idx].clone();
+                // Append prior content_hash to chain; replace the row.
+                let mut chain = prior.revision_hash_chain.clone();
+                chain.push(prior.content_hash.clone());
+                let new_sub = DelphiSubmission {
+                    from: caller.clone(),
+                    anonymous_id: None,
+                    content: content.to_string(),
+                    content_hash: content_hash.clone(),
+                    revision_hash_chain: chain.clone(),
+                    submitted_at: now.clone(),
+                };
+                round.submissions[idx] = new_sub;
+                (chain.len() as u32) + 1
+            }
+            None => {
+                round.submissions.push(DelphiSubmission {
+                    from: caller.clone(),
+                    anonymous_id: None,
+                    content: content.to_string(),
+                    content_hash: content_hash.clone(),
+                    revision_hash_chain: Vec::new(),
+                    submitted_at: now.clone(),
+                });
+                1
+            }
+        };
+        let total_submitted = round.submissions.len();
+        let total_participants = active.participants.len();
+        let round_number = round.number;
+        write_active_delphi(&dir, &active)?;
+
+        append_delphi_event(&dir, &DelphiEvent::Submission {
+            discussion_id: active.discussion_id,
+            round: round_number,
+            seat: caller.clone(),
+            content_hash: content_hash.clone(),
+            revision_number,
+            timestamp: now.clone(),
+        })?;
+
+        // Note (SHA-D10.2): submission is NOT broadcast to the board — this
+        // is the blind gate's core invariant per spec §3.3. We DO emit a
+        // visual-only nudge to the moderator so they see the M-of-N counter
+        // update without seeing the content. SHA-D10.3 will add the receiver-
+        // side blind gate at append_to_board to reject any participant
+        // broadcast attempt during this phase per spec §5.8.
+        let nudge_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": nudge_id, "from": "system", "to": active.moderator, "type": "status",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[DelphiSubmissionReceived] discussion {} round {} — {}/{}", active.discussion_id, round_number, total_submitted, total_participants),
+            "body": format!(
+                "Submission received from {} (revision {}) for Delphi discussion {} round {}. Total: {} of {} participants submitted.\n\nContent is NOT shown here — only you (moderator) will see contents via `delphi_get_state(include_unshuffle=true)`. When all participants have submitted (or you decide to close), call `delphi_close_round` to advance to reviewing.",
+                caller, revision_number, active.discussion_id, round_number, total_submitted, total_participants
+            ),
+            "metadata": {
+                "discussion_id": active.discussion_id,
+                "round": round_number,
+                "submitted_seat": caller,
+                "revision_number": revision_number,
+                "submitted_count": total_submitted,
+                "total_participants": total_participants,
+                "delphi_event": "submission_received"
+            }
+        }));
+
+        Ok(serde_json::json!({
+            "discussion_id": active.discussion_id,
+            "round": round_number,
+            "from": caller,
+            "content_hash": content_hash,
+            "revision_number": revision_number,
+            "submitted_count": total_submitted,
+            "total_participants": total_participants,
+            "submitted_at": now,
+        }))
+    })
+}
+
+/// SHA-D10.2 — `delphi_close_round` MCP handler. Per spec §3.4. Moderator only
+/// (sweeper-triggered in SHA-D10.4 — for D10.2 it's manual-only).
+///
+/// SHA-D10.2 ships the close + phase-transition + non_submitters recording
+/// + per-round closed broadcast. Fisher-Yates aggregation + anonymized
+/// rendering land in SHA-D10.3.
+fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    collab::delphi_atomic_op(&dir, || {
+        let mut active = read_active_delphi(&dir)?
+            .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+        if caller != active.moderator && !caller.starts_with("human:") {
+            return Err("[DelphiModeratorOnly]".to_string());
+        }
+        if active.phase != DelphiPhase::Submitting {
+            return Err(format!(
+                "[DelphiCannotCloseFromPhase] current phase is {:?} — close requires submitting",
+                active.phase
+            ));
+        }
+
+        let now = collab::iso_now();
+        let current_round_idx = active.rounds.len().saturating_sub(1);
+        // Compute non_submitters in immutable scope before mutating.
+        let (round_number, submissions_count, non_submitters): (u32, usize, Vec<String>) = {
+            let round = active.rounds.get(current_round_idx)
+                .ok_or_else(|| "[DelphiInternalState] current round index out of bounds".to_string())?;
+            let submitted_set: std::collections::HashSet<&String> =
+                round.submissions.iter().map(|s| &s.from).collect();
+            let non_subs: Vec<String> = active.participants.iter()
+                .filter(|p| !submitted_set.contains(p))
+                .cloned()
+                .collect();
+            (round.number, round.submissions.len(), non_subs)
+        };
+        // Mutate.
+        let aggregate_msg_id = next_message_id(&dir);
+        {
+            let round = active.rounds.get_mut(current_round_idx)
+                .ok_or_else(|| "[DelphiInternalState] current round index out of bounds (mut)".to_string())?;
+            round.closed_at = Some(now.clone());
+            round.non_submitters = non_submitters.clone();
+            round.aggregate_message_id = Some(aggregate_msg_id);
+        }
+        active.phase = DelphiPhase::Reviewing;
+        active.phase_started_at = Some(now.clone());
+        active.blind_gate_active = false;
+
+        let unshuffle_seed = active.rounds[current_round_idx].unshuffle_seed.clone();
+        write_active_delphi(&dir, &active)?;
+
+        append_delphi_event(&dir, &DelphiEvent::RoundClosed {
+            discussion_id: active.discussion_id,
+            round: round_number,
+            aggregate_message_id: aggregate_msg_id,
+            submissions_count: submissions_count as u32,
+            non_submitters: non_submitters.clone(),
+            unshuffle_seed: unshuffle_seed.clone(),
+            timestamp: now.clone(),
+        })?;
+
+        // SHA-D10.2 placeholder aggregate broadcast. Fisher-Yates shuffle +
+        // anonymized aggregate landing in SHA-D10.3 — for D10.2 the broadcast
+        // just announces close + submission count + non-submitter list. The
+        // content stays moderator-visible only via `delphi_get_state`.
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": aggregate_msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[DelphiRoundClosed] discussion {} round {} — {} submissions", active.discussion_id, round_number, submissions_count),
+            "body": format!(
+                "Round {} closed. {} of {} participants submitted. Non-submitters: {}.\n\nPhase advanced to `reviewing`. Participants may now discuss the round freely. Audience may post `delphi_audience_question` (SHA-D10.5).\n\nNote: SHA-D10.2 manual-flow ship — anonymized Fisher-Yates aggregate render lands in SHA-D10.3. Until then, the moderator can fetch full submissions via `delphi_get_state(include_unshuffle=true)`.\n\nModerator: call `delphi_open_round` for round {}, or `delphi_end(outcome=...)` to conclude.",
+                round_number, submissions_count, active.participants.len(),
+                if non_submitters.is_empty() { "(none)".to_string() } else { non_submitters.join(", ") },
+                round_number + 1,
+            ),
+            "metadata": {
+                "discussion_id": active.discussion_id,
+                "round": round_number,
+                "submissions_count": submissions_count,
+                "non_submitters": non_submitters,
+                "unshuffle_seed": unshuffle_seed,
+                "phase": "reviewing",
+                "aggregate_pending_sha": "SHA-D10.3",
+                "delphi_event": "round_closed"
+            }
+        }));
+
+        Ok(serde_json::json!({
+            "discussion_id": active.discussion_id,
+            "round": round_number,
+            "submissions_count": submissions_count,
+            "non_submitters": non_submitters,
+            "phase": "reviewing",
+            "aggregate_message_id": aggregate_msg_id,
+            "closed_at": now,
+        }))
+    })
+}
+
 /// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
 /// Thin wrapper around `collab::currency::apply_human_adjust` (shared with
 /// the Tauri-command path in main.rs); this fn adds the per-MCP-tool
@@ -15815,6 +16569,66 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                     }
                 },
                 {
+                    "name": "delphi_initiate",
+                    "description": "Initiate a Delphi discussion (Phase D v3 LOCKED 2026-05-27). Caller must be moderator OR human:0. Designates moderator (1), participants (2+), topic, audience (0+), with optional max_rounds (default 5), convergence_criterion (moderator|max_rounds|hybrid), convergence_reward_copper (default 0 = zero — convergence is its own reward), submission floors (180s/360s soft/hard) and review floor (300s). Auto-disables continuous-review mode. REJECTED if Oxford active (per §6.8: Oxford has priority). Roles are strict mutex (moderator ≠ participants ≠ audience; no duplicates within). Errors: [DelphiAlreadyActive], [OxfordDebateActive], [DelphiRoleConflict], [DelphiRequiresMinTwoParticipants], [DelphiSeatNotInRoster], [DelphiInitiationDenied], [DelphiInvalidReward], [DelphiSeatNotAlive].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "moderator": { "type": "string", "description": "Seat slug for moderator (e.g. \"manager:0\")" },
+                            "participants": { "type": "array", "items": { "type": "string" }, "description": "2+ seat slugs for participants. Mod cannot also be participant." },
+                            "topic": { "type": "string", "description": "Discussion topic / question" },
+                            "audience": { "type": "array", "items": { "type": "string" }, "description": "0+ seat slugs for audience (can include \"human:0\")" },
+                            "max_rounds": { "type": "integer", "description": "Optional. Default 5." },
+                            "convergence_criterion": { "type": "string", "enum": ["moderator", "max_rounds", "hybrid"], "description": "Optional. Default 'moderator' — manual end via delphi_end(outcome='converged')." },
+                            "convergence_reward_copper": { "type": "integer", "description": "Optional override of default 0 (zero) convergence reward from pool. Negative rejected." },
+                            "submission_soft_floor_secs": { "type": "integer", "description": "Optional. Default 180s (3 min) soft warning at expiry." },
+                            "submission_hard_floor_secs": { "type": "integer", "description": "Optional. Default 360s (6 min) hard auto-close." },
+                            "review_floor_secs": { "type": "integer", "description": "Optional. Default 300s (5 min) reviewing-phase soft floor." },
+                            "blind_gate_strict": { "type": "boolean", "description": "Optional. Default false. When true, disables the DM-to-moderator carve-out for stricter blind protocols." }
+                        },
+                        "required": ["moderator", "participants", "topic", "audience"]
+                    }
+                },
+                {
+                    "name": "delphi_get_state",
+                    "description": "Read-only snapshot of the active Delphi discussion. Per spec §3.11 + §3.11.1 visibility matrix LOCK: visibility filtered by caller role (moderator full / participant own-content-only / audience counts-only / observer meta-only). Returns {active:false} if no Delphi is active.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "include_unshuffle": { "type": "boolean", "description": "Request unshuffle_map. Resolved only if caller is moderator/human OR phase==ended (then map is public for audit per spec §5)." }
+                        }
+                    }
+                },
+                {
+                    "name": "delphi_open_round",
+                    "description": "Open the next round of an active Delphi (moderator-only). Advances phase: setup|opening|reviewing → submitting. Activates the blind gate. Generates a per-round unshuffle_seed (persisted for replay-auditing). Errors: [NoActiveDelphi], [DelphiModeratorOnly], [DelphiCannotOpenFromPhase], [DelphiMaxRoundsReached].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "round_prompt_override": { "type": "string", "description": "Optional. Override the auto-generated round prompt (defaults to topic for round 1, refinement-prompt for rounds 2+)." }
+                        }
+                    }
+                },
+                {
+                    "name": "delphi_submit",
+                    "description": "Submit your position for the current Delphi round (participants only, during submitting phase). Revisions allowed per spec §6.6 — latest submission supersedes; revision_hash_chain tracks prior content_hashes for tamper-detection. Submission is NOT broadcast to the board (the blind gate's core invariant). Errors: [NoActiveDelphi], [DelphiNonParticipantCannotSubmit], [DelphiCannotSubmitInPhase], [DelphiSubmitEmpty].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "content": { "type": "string", "description": "Your independent position. Brevity preferred (200-400 words ideal per spec §8.4). Non-empty required." }
+                        },
+                        "required": ["content"]
+                    }
+                },
+                {
+                    "name": "delphi_close_round",
+                    "description": "Close the current Delphi submission round (moderator-only; sweeper-triggered in SHA-D10.4). Advances phase: submitting → reviewing. Deactivates blind gate. Records non_submitters. SHA-D10.2 ships placeholder broadcast; SHA-D10.3 adds the Fisher-Yates anonymized aggregate render. Errors: [NoActiveDelphi], [DelphiModeratorOnly], [DelphiCannotCloseFromPhase].",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
                     "name": "currency_human_adjust",
                     "description": "Adjust a seat's copper balance up or down (HUMAN ONLY). Per human msg 458 — gives the human direct control over the economy as the ultimate authority. Writes a permanent ledger row with mandatory non-empty `reason` for audit. Negative amounts can push a seat below the deficit cap (-1000c) → timed_out. Positive amounts have no cap. Stale-sidecar impersonation is blocked at the MCP layer.",
                     "inputSchema": {
@@ -16813,6 +17627,74 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                         Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Oxford debate initiated.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
                         Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                     }
+                }
+            } else if tool_name == "delphi_initiate" {
+                let a = params.get("arguments");
+                let moderator = a.and_then(|a| a.get("moderator")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let topic = a.and_then(|a| a.get("topic")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let to_str_vec = |key: &str| -> Vec<String> {
+                    a.and_then(|a| a.get(key))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                        .unwrap_or_default()
+                };
+                let participants = to_str_vec("participants");
+                let audience = to_str_vec("audience");
+                let max_rounds = a.and_then(|a| a.get("max_rounds")).and_then(|v| v.as_u64()).map(|n| n as u32);
+                let conv_crit_s = a.and_then(|a| a.get("convergence_criterion")).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let conv_reward = a.and_then(|a| a.get("convergence_reward_copper")).and_then(|v| v.as_i64());
+                let soft = a.and_then(|a| a.get("submission_soft_floor_secs")).and_then(|v| v.as_u64()).map(|n| n as u32);
+                let hard = a.and_then(|a| a.get("submission_hard_floor_secs")).and_then(|v| v.as_u64()).map(|n| n as u32);
+                let review = a.and_then(|a| a.get("review_floor_secs")).and_then(|v| v.as_u64()).map(|n| n as u32);
+                let strict = a.and_then(|a| a.get("blind_gate_strict")).and_then(|v| v.as_bool());
+                if moderator.is_empty() || topic.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "delphi_initiate requires moderator (String) and topic (String)" }], "isError": true })
+                } else {
+                    match handle_delphi_initiate(
+                        &moderator, &participants, &topic, &audience,
+                        max_rounds, conv_crit_s.as_deref(), conv_reward,
+                        soft, hard, review, strict,
+                    ) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Delphi discussion initiated.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "delphi_get_state" {
+                let include_unshuffle = params.get("arguments")
+                    .and_then(|a| a.get("include_unshuffle"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match handle_delphi_get_state(include_unshuffle) {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                }
+            } else if tool_name == "delphi_open_round" {
+                let override_prompt = params.get("arguments")
+                    .and_then(|a| a.get("round_prompt_override"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                match handle_delphi_open_round(override_prompt) {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Round opened.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                }
+            } else if tool_name == "delphi_submit" {
+                let content = params.get("arguments")
+                    .and_then(|a| a.get("content"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if content.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "delphi_submit requires content (String)" }], "isError": true })
+                } else {
+                    match handle_delphi_submit(&content) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Submission received.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
+                }
+            } else if tool_name == "delphi_close_round" {
+                match handle_delphi_close_round() {
+                    Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Round closed.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                    Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
                 }
             } else if tool_name == "currency_human_adjust" {
                 let a = params.get("arguments");
