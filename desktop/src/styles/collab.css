@@ -9695,6 +9695,16 @@
 @media (prefers-reduced-motion: reduce) {
   .active-delphi-phase-progress-fill { transition: none; }
 }
+/* Phase history strip — small timeline of completed rounds (spec §7.1 item 7) */
+.active-delphi-history { margin-top: 10px; padding-top: 8px; border-top: 1px dashed rgba(255, 255, 255, 0.08); }
+.active-delphi-history-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.55)); font-weight: 600; }
+.active-delphi-history-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.active-delphi-history-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: 10px; border-radius: 4px; background: rgba(20, 184, 166, 0.06); border: 1px solid rgba(20, 184, 166, 0.18); font-family: 'DM Mono', ui-monospace, monospace; cursor: default; }
+.active-delphi-history-pill:hover { background: rgba(20, 184, 166, 0.12); border-color: rgba(20, 184, 166, 0.35); }
+.active-delphi-history-round { color: rgba(20, 184, 166, 0.95); font-weight: 700; }
+.active-delphi-history-meta { color: var(--collab-text-muted, rgba(255, 255, 255, 0.65)); }
+.active-delphi-history-time { color: var(--collab-text-muted, rgba(255, 255, 255, 0.55)); }
+.active-delphi-history-msg { color: rgba(20, 184, 166, 0.75); }
 .active-delphi-empty { padding: 16px 12px; text-align: center; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); font-style: italic; }
 /* Self-role chip — tells the human which role they hold in this Delphi */
 .active-delphi-self-role-chip { display: inline-flex; align-items: center; padding: 2px 8px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-radius: 999px; background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.7); border: 1px solid rgba(255, 255, 255, 0.15); margin-left: auto; font-family: 'DM Mono', ui-monospace, monospace; }

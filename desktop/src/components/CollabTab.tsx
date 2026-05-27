@@ -6547,6 +6547,39 @@ When multiple instances of this role are active:
                   {activeDelphi.phase === "reviewing" && <code className="active-delphi-mod-cmd">delphi_end(outcome="converged")</code>}
                 </div>
               )}
+              {/* Phase history strip — spec §7.1 item 7. Renders compact
+                  timeline of CLOSED rounds (closed_at != null). Shows round
+                  number, submission count, elapsed duration, link to the
+                  aggregate message id. Skips the currently-open round. */}
+              {(() => {
+                const closedRounds = activeDelphi.rounds.filter((r) => r.closed_at !== null);
+                if (closedRounds.length === 0) return null;
+                return (
+                  <div className="active-delphi-history" aria-label="Completed rounds history">
+                    <span className="active-delphi-history-label">History</span>
+                    <div className="active-delphi-history-strip">
+                      {closedRounds.map((r) => {
+                        const opened = new Date(r.opened_at).getTime();
+                        const closed = r.closed_at ? new Date(r.closed_at).getTime() : 0;
+                        const durationSecs = closed > opened ? Math.floor((closed - opened) / 1000) : 0;
+                        const mm = Math.floor(durationSecs / 60);
+                        const ss = durationSecs % 60;
+                        const submittedCount = activeDelphi.participants.length - (r.non_submitters?.length ?? 0);
+                        return (
+                          <div key={r.number} className="active-delphi-history-pill" title={`Round ${r.number}: ${submittedCount}/${activeDelphi.participants.length} submitted, ${mm}m${ss}s elapsed, aggregate msg #${r.aggregate_message_id ?? "—"}`}>
+                            <span className="active-delphi-history-round">R{r.number}</span>
+                            <span className="active-delphi-history-meta">{submittedCount}/{activeDelphi.participants.length}</span>
+                            <span className="active-delphi-history-time">{mm > 0 ? `${mm}m${ss}s` : `${ss}s`}</span>
+                            {r.aggregate_message_id !== null && (
+                              <span className="active-delphi-history-msg">#{r.aggregate_message_id}</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           );
         })()}
