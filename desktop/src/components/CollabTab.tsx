@@ -2424,6 +2424,64 @@ When multiple instances of this role are active:
     return () => { cancelled = true; clearInterval(interval); };
   }, [projectDir]);
 
+  // Human msg 1939 — poll active delphi discussion (parallel to Oxford polling
+  // above). Backend Tauri command is `read_active_delphi_cmd` (per Oxford
+  // naming convention); silently no-ops on pre-Delphi-SHA binaries via the
+  // try/catch. Activates transparently once dev:0 ships SHA-D10.x with the
+  // command. Field names mirror DelphiSnapshot from spec §4.2; will switch to
+  // the canonical TS import (collabTypes.ts:DelphiSnapshot) once dev:0 lands
+  // the serde-parity types per spec §5.6.
+  useEffect(() => {
+    if (!window.__TAURI__ || !projectDir) return;
+    let cancelled = false;
+    const pollActiveDelphi = async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{
+          discussion_id: number;
+          moderator: string;
+          topic: string;
+          participants: string[];
+          audience?: string[];
+          current_round: number;
+          max_rounds: number;
+          phase?: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | "paused" | null;
+          phase_started_at?: string | null;
+          submission_soft_floor_secs?: number;
+          submission_hard_floor_secs?: number;
+          review_floor_secs?: number;
+          submitted_seats?: string[];
+          aggregate_message_id?: number | null;
+        } | null>("read_active_delphi_cmd", { dir: projectDir });
+        if (!cancelled) {
+          if (result) {
+            setActiveDelphi({
+              discussion_id: result.discussion_id,
+              moderator: result.moderator,
+              topic: result.topic,
+              participants: result.participants,
+              audience: result.audience ?? [],
+              current_round: result.current_round,
+              max_rounds: result.max_rounds,
+              phase: result.phase ?? null,
+              phase_started_at: result.phase_started_at ?? null,
+              submission_soft_floor_secs: result.submission_soft_floor_secs ?? 180,
+              submission_hard_floor_secs: result.submission_hard_floor_secs ?? 360,
+              review_floor_secs: result.review_floor_secs ?? 300,
+              submitted_seats: result.submitted_seats ?? [],
+              aggregate_message_id: result.aggregate_message_id ?? null,
+            });
+          } else {
+            setActiveDelphi(null);
+          }
+        }
+      } catch { /* pre-Delphi-SHA binary — poll inert; optimistic seed from modal remains */ }
+    };
+    pollActiveDelphi();
+    const interval = setInterval(pollActiveDelphi, 2000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [projectDir]);
+
   // Load settings on mount
   useEffect(() => {
     if (!window.__TAURI__) return;
