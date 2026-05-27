@@ -6642,7 +6642,7 @@ When multiple instances of this role are active:
                   if (!confirmed) return;
                   try {
                     const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("delphi_end_cmd", { dir: projectDir });
+                    await invoke("delphi_end_cmd", { dir: projectDir, outcome: "abandoned" });
                     setActiveDelphi(null);
                     showToast(`Delphi discussion ${activeDelphi.discussion_id} ended.`, "success");
                   } catch (e) {
