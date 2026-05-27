@@ -6474,6 +6474,9 @@ When multiple instances of this role are active:
                       <div
                         id={`delphi-aggregate-body-${aggId}`}
                         className="active-delphi-aggregate-body"
+                        tabIndex={0}
+                        role="region"
+                        aria-label={`Round ${activeDelphi.current_round} aggregate body`}
                       >
                         {aggMsg ? (
                           <pre className="active-delphi-aggregate-text">{aggMsg.body}</pre>
