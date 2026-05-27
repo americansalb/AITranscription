@@ -10813,7 +10813,7 @@ fn handle_oxford_audience_vote(vote: &str) -> Result<serde_json::Value, String> 
 // Phase D — Delphi Discussion (SHA-D10.2 manual-flow handlers)
 // Spec: .vaak/design-notes/2026-05-27-delphi-discussion-spec.md
 // Composition: every handler that mutates state acquires
-// `collab::delphi_atomic_op` (currency OUTER → board MIDDLE → delphi
+// `collab::delphi::delphi_atomic_op` (currency OUTER → board MIDDLE → delphi
 // INNER per spec §5.5 v3 LOCK). Raw `with_delphi_lock` is unreachable
 // outside the collab::delphi module (it's pub(crate) precisely to
 // enforce this). Reverse-order acquisition is a compile error.
@@ -10936,7 +10936,7 @@ fn handle_delphi_initiate(
     let blind_strict = blind_gate_strict.unwrap_or(false);
 
     // Acquire three-tier composition lock (spec §5.5 v3 LOCK).
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         // Re-check atomically — no active Delphi already.
         if read_active_delphi(&dir)?.is_some() {
             return Err("[DelphiAlreadyActive]".to_string());
@@ -11235,7 +11235,7 @@ fn handle_delphi_open_round(round_prompt_override: Option<String>) -> Result<ser
     let dir = state.project_dir.clone();
     let caller = format!("{}:{}", state.role, state.instance);
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
 
@@ -11358,7 +11358,7 @@ fn handle_delphi_submit(content: &str) -> Result<serde_json::Value, String> {
         return Err("[DelphiSubmitEmpty] content must be non-empty (whitespace-only is rejected)".to_string());
     }
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         if !active.participants.iter().any(|p| p == &caller) {
@@ -11472,7 +11472,7 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
     let dir = state.project_dir.clone();
     let caller = format!("{}:{}", state.role, state.instance);
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         if caller != active.moderator && !caller.starts_with("human:") {

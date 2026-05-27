@@ -7220,11 +7220,15 @@ pub mod delphi {
     // ---- Lock primitive ----
 
     /// Project-wide delphi lock. Closure-style; closure auto-LIFO release.
-    /// MARKED `pub(crate)` so callers OUTSIDE this module cannot acquire
-    /// raw delphi.lock — they must compose via `super::delphi_atomic_op`
-    /// which enforces the §5.5 composition order (currency+board OUTER,
-    /// delphi INNER). This is the architectural spine guard from §5.5 LOCK.
-    pub(crate) fn with_delphi_lock<F, R>(dir: &str, f: F) -> Result<R, String>
+    /// **Module-private (no visibility modifier).** Per architect msg 1994
+    /// Path B ruling on evil-arch's F-EA-SHA-D10.1-LOCK-VISIBILITY: the
+    /// only way to acquire delphi.lock is via `delphi_atomic_op` below,
+    /// which is the public composition surface. `pub(crate)` was the
+    /// SHA-D10.1 visibility but it allowed crate-wide bypass of the §5.5
+    /// composition order; the module-private guard converts the soft
+    /// (PR-review) guard into a hard (compile-error) guard, matching
+    /// spec §5.5 v3 "single composition entry point" language.
+    fn with_delphi_lock<F, R>(dir: &str, f: F) -> Result<R, String>
     where
         F: FnOnce() -> Result<R, String>,
     {
@@ -7656,22 +7660,24 @@ pub mod delphi {
             let _ = std::fs::remove_dir_all(&tmp);
         }
     }
-}
 
-/// Composition entry point for ALL Delphi-state writes. Per spec §5.5 v2:
-/// `with_currency_and_board_lock` is OUTER (existing project-wide pattern),
-/// new `with_delphi_lock` is INNER. Single sanctioned function — every
-/// future `delphi_*` MCP handler MUST call through this, never raw
-/// `with_delphi_lock` (which is `pub(crate)` for exactly this reason).
-/// Verified by PR-review grep + future CI lint.
-///
-/// Cross-binary parity: `bin/vaak-mcp.rs::delphi_atomic_op` MUST follow
-/// the same composition order. Sidecar mirror lands with SHA-D10.2 (first
-/// handler that needs it). For SHA-D10.1, this helper exists to be USED
-/// — no caller invokes it yet.
-pub fn delphi_atomic_op<F, R>(dir: &str, f: F) -> Result<R, String>
-where
-    F: FnOnce() -> Result<R, String>,
-{
-    with_currency_and_board_lock(dir, || delphi::with_delphi_lock(dir, f))
+    /// Composition entry point for ALL Delphi-state writes. Per spec §5.5
+    /// v3 LOCK + architect msg 1994 Path B ruling: `with_currency_and_board_lock`
+    /// is OUTER (existing project-wide pattern — currency_lock + board_lock
+    /// nested), new `with_delphi_lock` is INNER. Single sanctioned public
+    /// composition surface — every `delphi_*` MCP handler MUST call through
+    /// this. `with_delphi_lock` is module-private precisely so no other
+    /// path can bypass this composition. Reverse-order acquisition is a
+    /// **compile error** (no external way to reach `with_delphi_lock`).
+    ///
+    /// Cross-binary parity: `bin/vaak-mcp.rs` MUST call this via
+    /// `collab::delphi::delphi_atomic_op`. Sidecar mirror is enforced by
+    /// the shared collab module — both binaries link the same `pub mod
+    /// delphi` and acquire the same on-disk `.vaak/delphi.lock` file.
+    pub fn delphi_atomic_op<F, R>(dir: &str, f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> Result<R, String>,
+    {
+        super::with_currency_and_board_lock(dir, || with_delphi_lock(dir, f))
+    }
 }

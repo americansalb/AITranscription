@@ -4209,7 +4209,7 @@ fn delphi_initiate_cmd(
     let review_floor = review_floor_secs.unwrap_or(DELPHI_REVIEW_FLOOR_SECS);
     let blind_strict = blind_gate_strict.unwrap_or(false);
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         if read_active_delphi(&dir)?.is_some() {
             return Err("[DelphiAlreadyActive]".to_string());
         }
@@ -4439,7 +4439,7 @@ fn delphi_open_round_cmd(
     use collab::delphi::*;
     let dir = validate_project_dir(&dir)?;
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         // Human-authority bypass per §6.6.1 — UI caller doesn't need to be the moderator.
@@ -4552,7 +4552,7 @@ fn delphi_submit_cmd(
         return Err("[DelphiSubmitEmpty] content must be non-empty".to_string());
     }
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         // Human-authority: allow even if caller not in participants (spec §6.6.1).
@@ -4654,7 +4654,7 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
     use collab::delphi::*;
     let dir = validate_project_dir(&dir)?;
 
-    collab::delphi_atomic_op(&dir, || {
+    collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         if active.phase != DelphiPhase::Submitting {
