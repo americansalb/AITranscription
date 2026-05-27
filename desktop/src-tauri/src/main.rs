@@ -4666,7 +4666,8 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
 
         let now = collab::iso_now();
         let current_round_idx = active.rounds.len().saturating_sub(1);
-        let (round_number, submissions_count, non_submitters, unshuffle_seed) = {
+        // SHA-D10.3 — build Fisher-Yates anonymized aggregate.
+        let (round_number, submissions_count, non_submitters, unshuffle_seed, aggregate_markdown, unshuffle_map): (u32, usize, Vec<String>, String, String, std::collections::BTreeMap<String, String>) = {
             let round = active.rounds.get(current_round_idx)
                 .ok_or_else(|| "[DelphiInternalState] round index OOB".to_string())?;
             let submitted_set: std::collections::HashSet<&String> =
@@ -4675,7 +4676,14 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
                 .filter(|p| !submitted_set.contains(p))
                 .cloned()
                 .collect();
-            (round.number, round.submissions.len(), non_subs, round.unshuffle_seed.clone())
+            let (md, map) = collab::delphi::build_aggregate(
+                &active.topic,
+                round.number,
+                &round.submissions,
+                &round.unshuffle_seed,
+                active.participants.len(),
+            );
+            (round.number, round.submissions.len(), non_subs, round.unshuffle_seed.clone(), md, map)
         };
         let aggregate_msg_id = {
             let board_path = collab::active_board_path(&dir);
@@ -4693,6 +4701,18 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
             round.closed_at = Some(now.clone());
             round.non_submitters = non_submitters.clone();
             round.aggregate_message_id = Some(aggregate_msg_id);
+            round.unshuffle_map = unshuffle_map.clone();
+            // Stamp anonymous_id on each submission for get_state consistency.
+            let mut label_for_seat: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (label, seat) in &unshuffle_map {
+                label_for_seat.insert(seat.clone(), label.clone());
+            }
+            for sub in round.submissions.iter_mut() {
+                if let Some(label) = label_for_seat.get(&sub.from) {
+                    sub.anonymous_id = Some(label.clone());
+                }
+            }
         }
         active.phase = DelphiPhase::Reviewing;
         active.phase_started_at = Some(now.clone());
@@ -4707,14 +4727,20 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
             unshuffle_seed: unshuffle_seed.clone(),
             timestamp: now.clone(),
         })?;
+        let non_subs_line = if non_submitters.is_empty() {
+            String::from("(none)")
+        } else {
+            non_submitters.join(", ")
+        };
         let _ = delphi_append_to_board(&dir, &serde_json::json!({
             "from": "system", "to": "all", "type": "broadcast",
             "timestamp": now.clone(),
-            "subject": format!("[DelphiRoundClosed] discussion {} round {} — {} submissions (UI-closed)", active.discussion_id, round_number, submissions_count),
+            "subject": format!("[DelphiRoundClosed] discussion {} round {} — anonymized aggregate ({} submissions, UI-closed)", active.discussion_id, round_number, submissions_count),
             "body": format!(
-                "Round {} closed by human:0 via UI. {} of {} submitted. Non-submitters: {}.\n\nPhase advanced to `reviewing`. SHA-D10.3 will add anonymized Fisher-Yates aggregate; for D10.2, moderator may fetch via `delphi_get_state(include_unshuffle=true)`.",
-                round_number, submissions_count, active.participants.len(),
-                if non_submitters.is_empty() { "(none)".to_string() } else { non_submitters.join(", ") }
+                "{}\n\n---\n\nNon-submitters: {}.\n\nRound {} closed by human:0 via UI. Phase advanced to `reviewing`. Unshuffle map remains moderator-visible until the discussion ends (then public per spec §5).",
+                aggregate_markdown,
+                non_subs_line,
+                round_number,
             ),
             "metadata": {
                 "discussion_id": active.discussion_id,
@@ -4723,7 +4749,6 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
                 "non_submitters": non_submitters,
                 "phase": "reviewing",
                 "closed_via": "ui",
-                "aggregate_pending_sha": "SHA-D10.3",
                 "delphi_event": "round_closed"
             }
         }));

@@ -11487,8 +11487,9 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
 
         let now = collab::iso_now();
         let current_round_idx = active.rounds.len().saturating_sub(1);
-        // Compute non_submitters in immutable scope before mutating.
-        let (round_number, submissions_count, non_submitters): (u32, usize, Vec<String>) = {
+        // Compute non_submitters + anonymized aggregate (SHA-D10.3) in
+        // immutable scope before mutating.
+        let (round_number, submissions_count, non_submitters, unshuffle_seed, aggregate_markdown, unshuffle_map): (u32, usize, Vec<String>, String, String, std::collections::BTreeMap<String, String>) = {
             let round = active.rounds.get(current_round_idx)
                 .ok_or_else(|| "[DelphiInternalState] current round index out of bounds".to_string())?;
             let submitted_set: std::collections::HashSet<&String> =
@@ -11497,7 +11498,14 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
                 .filter(|p| !submitted_set.contains(p))
                 .cloned()
                 .collect();
-            (round.number, round.submissions.len(), non_subs)
+            let (md, map) = collab::delphi::build_aggregate(
+                &active.topic,
+                round.number,
+                &round.submissions,
+                &round.unshuffle_seed,
+                active.participants.len(),
+            );
+            (round.number, round.submissions.len(), non_subs, round.unshuffle_seed.clone(), md, map)
         };
         // Mutate.
         let aggregate_msg_id = next_message_id(&dir);
@@ -11507,12 +11515,23 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
             round.closed_at = Some(now.clone());
             round.non_submitters = non_submitters.clone();
             round.aggregate_message_id = Some(aggregate_msg_id);
+            round.unshuffle_map = unshuffle_map.clone();
+            // Stamp anonymous_id on each submission for get_state consistency.
+            let mut label_for_seat: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (label, seat) in &unshuffle_map {
+                label_for_seat.insert(seat.clone(), label.clone());
+            }
+            for sub in round.submissions.iter_mut() {
+                if let Some(label) = label_for_seat.get(&sub.from) {
+                    sub.anonymous_id = Some(label.clone());
+                }
+            }
         }
         active.phase = DelphiPhase::Reviewing;
         active.phase_started_at = Some(now.clone());
         active.blind_gate_active = false;
 
-        let unshuffle_seed = active.rounds[current_round_idx].unshuffle_seed.clone();
         write_active_delphi(&dir, &active)?;
 
         append_delphi_event(&dir, &DelphiEvent::RoundClosed {
@@ -11525,18 +11544,23 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
             timestamp: now.clone(),
         })?;
 
-        // SHA-D10.2 placeholder aggregate broadcast. Fisher-Yates shuffle +
-        // anonymized aggregate landing in SHA-D10.3 — for D10.2 the broadcast
-        // just announces close + submission count + non-submitter list. The
-        // content stays moderator-visible only via `delphi_get_state`.
+        // SHA-D10.3 — full anonymized aggregate broadcast. Body contains
+        // ONLY `Anonymous <letter>:` labels per spec §3.5; unshuffle_map
+        // persisted to active-delphi-debate.json `rounds[N].unshuffle_map`
+        // (moderator-visible until phase==ended, then public per §5).
+        let non_subs_line = if non_submitters.is_empty() {
+            String::from("(none)")
+        } else {
+            non_submitters.join(", ")
+        };
         let _ = append_to_board(&dir, &serde_json::json!({
             "id": aggregate_msg_id, "from": "system", "to": "all", "type": "broadcast",
             "timestamp": utc_now_iso(),
-            "subject": format!("[DelphiRoundClosed] discussion {} round {} — {} submissions", active.discussion_id, round_number, submissions_count),
+            "subject": format!("[DelphiRoundClosed] discussion {} round {} — anonymized aggregate ({} submissions)", active.discussion_id, round_number, submissions_count),
             "body": format!(
-                "Round {} closed. {} of {} participants submitted. Non-submitters: {}.\n\nPhase advanced to `reviewing`. Participants may now discuss the round freely. Audience may post `delphi_audience_question` (SHA-D10.5).\n\nNote: SHA-D10.2 manual-flow ship — anonymized Fisher-Yates aggregate render lands in SHA-D10.3. Until then, the moderator can fetch full submissions via `delphi_get_state(include_unshuffle=true)`.\n\nModerator: call `delphi_open_round` for round {}, or `delphi_end(outcome=...)` to conclude.",
-                round_number, submissions_count, active.participants.len(),
-                if non_submitters.is_empty() { "(none)".to_string() } else { non_submitters.join(", ") },
+                "{}\n\n---\n\nNon-submitters: {}.\n\nPhase advanced to `reviewing`. Participants may now discuss freely. Audience may post `delphi_audience_question` (SHA-D10.5).\n\nModerator: call `delphi_open_round` for round {}, or `delphi_end(outcome=...)` to conclude. The unshuffle map remains moderator-visible until the discussion ends (then public per spec §5).",
+                aggregate_markdown,
+                non_subs_line,
                 round_number + 1,
             ),
             "metadata": {
@@ -11546,7 +11570,6 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
                 "non_submitters": non_submitters,
                 "unshuffle_seed": unshuffle_seed,
                 "phase": "reviewing",
-                "aggregate_pending_sha": "SHA-D10.3",
                 "delphi_event": "round_closed"
             }
         }));
@@ -13221,6 +13244,71 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 Directed messages to specific roles are still allowed.",
                 moderator
             ));
+        }
+
+        // SHA-D10.3 — NEW Delphi blind gate per spec §6.3 LOCK + §5.8.
+        // This is the sender-side gate; the receiver-side defense-in-depth
+        // gate at the board writer is queued for a follow-up SHA-D10.3.1.
+        // Reads from active-delphi-debate.json (NOT the legacy discussion.json
+        // path checked above) — both gates run; either rejects.
+        //
+        // Allowed exceptions per spec §6.3 LOCK:
+        //   - human:0 (always exempt — see §6.6.1 human-authority bypass)
+        //   - moderator (always exempt — they coordinate the discussion)
+        //   - audience seats (not blocked from broadcasts during submitting)
+        //   - DMs to moderator (`to == "<moderator_seat>"`) of any type
+        //     (clarification channel without breaking blindness for others)
+        //   - `submission` type messages (which delphi_submit doesn't emit,
+        //     but legacy callers may use — preserves compat for the
+        //     LegacyDelphi path)
+        //   - `moderation` type (procedural announcements by moderator)
+        // Strict mode (`blind_gate_strict==true`): disables the DM-to-moderator
+        // carve-out (DMs to moderator are also blocked for participants).
+        if let Ok(Some(active_delphi)) = collab::delphi::read_active_delphi(&state.project_dir) {
+            if active_delphi.blind_gate_active
+                && active_delphi.phase == collab::delphi::DelphiPhase::Submitting
+            {
+                let sender_is_human = state.role == "human" || from_label.starts_with("human:");
+                let sender_is_moderator = from_label == active_delphi.moderator;
+                let sender_is_participant = active_delphi.participants
+                    .iter()
+                    .any(|p| p == &from_label);
+                let is_broadcast_type = matches!(
+                    msg_type,
+                    "answer" | "broadcast" | "status" | "directive"
+                        | "review" | "approval" | "revision" | "question" | "vote"
+                );
+                let to_is_all = to == "all";
+                let to_is_moderator_dm = to == active_delphi.moderator;
+
+                // Participants under blind gate, broadcast-class msg, not human/mod,
+                // and either to-all or strict mode with non-moderator DM.
+                let blocked = sender_is_participant
+                    && !sender_is_human
+                    && !sender_is_moderator
+                    && is_broadcast_type
+                    && (to_is_all
+                        || (active_delphi.blind_gate_strict && !to_is_moderator_dm));
+
+                if blocked {
+                    eprintln!(
+                        "[delphi-blind-gate] Blocked broadcast from participant {} during Delphi discussion {} round {} submitting phase (to: {}, type: {})",
+                        from_label, active_delphi.discussion_id, active_delphi.current_round, to, msg_type
+                    );
+                    return Err(format!(
+                        "[DelphiBlindGateActive] Delphi discussion {} round {} is in submitting phase. \
+                        Participants ({}) may NOT broadcast to the board during this phase. \
+                        Submit your position via `delphi_submit(content=\"...\")`. \
+                        DMs to the moderator ({}) are still allowed for clarification questions. \
+                        The blind gate lifts when the moderator closes the round (`delphi_close_round`) \
+                        and the anonymized aggregate is posted.",
+                        active_delphi.discussion_id,
+                        active_delphi.current_round,
+                        active_delphi.participants.join(", "),
+                        active_delphi.moderator,
+                    ));
+                }
+            }
         }
 
         // V3 Phase 2: stash the yield_to fields so the mic-arrival message

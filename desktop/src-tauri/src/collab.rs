@@ -16,12 +16,21 @@ pub static VAAK_FINGERPRINT_COLLAB_SHA10_1: [u8; 56] =
 
 // SHA-D10.1: Phase D Delphi foundation skeleton (architect spec v2
 // locked 2026-05-27). Schema types + path helpers + lock primitive +
-// initiate validator + composition entry point. MCP wiring lands in
-// SHA-D10.2; blind gate + aggregate in SHA-D10.3.
+// initiate validator + composition entry point.
 #[used]
 #[no_mangle]
 pub static VAAK_FINGERPRINT_COLLAB_SHA_D10_1: [u8; 45] =
     *b"VAAK_FP:SHA-D10.1:collab.rs:delphi_foundation";
+
+// SHA-D10.3: Fisher-Yates anonymization + aggregate render helpers.
+// Spec §3.5 / §5 — deterministic shuffle seeded by per-round
+// unshuffle_seed (sha256-derived). Sender-side blind gate ships in
+// vaak-mcp.rs::project_send; receiver-side defense-in-depth gate
+// queued for SHA-D10.3.1.
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_COLLAB_SHA_D10_3: [u8; 47] =
+    *b"VAAK_FP:SHA-D10.3:collab.rs:delphi_fisher_yates";
 
 // ============================================================
 // Resilience-stack timer registry (mirror — keep in sync with
@@ -7679,5 +7688,221 @@ pub mod delphi {
         F: FnOnce() -> Result<R, String>,
     {
         super::with_currency_and_board_lock(dir, || with_delphi_lock(dir, f))
+    }
+
+    // ============================================================
+    // SHA-D10.3 — Fisher-Yates anonymization + aggregate render
+    // ============================================================
+
+    /// Generate an Anonymous-ID label for the Nth (0-indexed) slot in the
+    /// shuffled order. Spec §5 anonymous-id generation: `Anonymous A`,
+    /// `Anonymous B`, …, `Anonymous Z`, `Anonymous AA`, `Anonymous AB`, …
+    pub fn anonymous_label(index: usize) -> String {
+        let mut idx = index;
+        let mut chars = Vec::new();
+        loop {
+            let rem = idx % 26;
+            chars.push((b'A' + rem as u8) as char);
+            if idx < 26 {
+                break;
+            }
+            idx = idx / 26 - 1;
+        }
+        chars.reverse();
+        format!("Anonymous {}", chars.iter().collect::<String>())
+    }
+
+    /// Deterministic byte stream seeded by the round's `unshuffle_seed`
+    /// (hex-encoded sha256). Produces an unbounded sequence of u64 values
+    /// by hashing seed + counter on each call. NOT a cryptographically-
+    /// secure CSPRNG, but sufficient for Fisher-Yates shuffle with
+    /// replay-auditability: same seed → same byte stream → same permutation.
+    ///
+    /// Note (SHA-D10.3): spec §5 calls for `getrandom`-quality entropy
+    /// FOR THE SEED — which is generated at round-open from sha256(nanos +
+    /// pid + discussion_id + round). The Fisher-Yates RNG itself just
+    /// needs determinism given the seed; sha256-counter satisfies that.
+    /// SHA-D12+ may swap to `rand_chacha::ChaCha20Rng` if external review
+    /// demands stronger guarantees.
+    struct SeededRng {
+        seed_bytes: Vec<u8>,
+        counter: u64,
+    }
+
+    impl SeededRng {
+        fn from_hex_seed(hex_seed: &str) -> Self {
+            // Decode the hex seed; fall back to the literal bytes if hex
+            // parse fails (defensive — bad seed shouldn't panic at runtime).
+            let bytes = hex::decode(hex_seed).unwrap_or_else(|_| hex_seed.as_bytes().to_vec());
+            Self {
+                seed_bytes: bytes,
+                counter: 0,
+            }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&self.seed_bytes);
+            hasher.update(self.counter.to_le_bytes());
+            self.counter += 1;
+            let digest = hasher.finalize();
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&digest[0..8]);
+            u64::from_le_bytes(buf)
+        }
+
+        /// Returns a uniformly random index in [0..n) using rejection
+        /// sampling to avoid modulo bias.
+        fn next_index(&mut self, n: usize) -> usize {
+            if n <= 1 {
+                return 0;
+            }
+            let n_u64 = n as u64;
+            // Largest multiple of n_u64 that fits in u64 — reject samples
+            // above this threshold to remove modulo bias.
+            let threshold = u64::MAX - (u64::MAX % n_u64);
+            loop {
+                let v = self.next_u64();
+                if v < threshold {
+                    return (v % n_u64) as usize;
+                }
+            }
+        }
+    }
+
+    /// Apply Fisher-Yates shuffle to `items` using the seed for determinism.
+    /// Returns a new Vec of the same items in the shuffled order. The
+    /// permutation is replay-auditable: same seed → same output ordering.
+    pub fn fisher_yates_shuffle<T: Clone>(items: &[T], seed: &str) -> Vec<T> {
+        let mut shuffled: Vec<T> = items.to_vec();
+        let mut rng = SeededRng::from_hex_seed(seed);
+        let n = shuffled.len();
+        if n <= 1 {
+            return shuffled;
+        }
+        // Fisher-Yates: for i from n-1 down to 1, swap with random j in [0..=i].
+        for i in (1..n).rev() {
+            let j = rng.next_index(i + 1);
+            shuffled.swap(i, j);
+        }
+        shuffled
+    }
+
+    /// Build the anonymized aggregate markdown for a round per spec §3.5.
+    /// Returns (markdown_body, unshuffle_map). The unshuffle_map is keyed
+    /// by anonymous_id → real_seat for moderator-side audit + post-end
+    /// public reveal.
+    pub fn build_aggregate(
+        topic: &str,
+        round_number: u32,
+        submissions: &[DelphiSubmission],
+        unshuffle_seed: &str,
+        total_participants: usize,
+    ) -> (String, std::collections::BTreeMap<String, String>) {
+        // Shuffle a parallel index vector — preserves original submissions
+        // unchanged on disk while letting us render the anonymized order.
+        let indices: Vec<usize> = (0..submissions.len()).collect();
+        let shuffled_indices = fisher_yates_shuffle(&indices, unshuffle_seed);
+
+        let mut markdown = String::new();
+        markdown.push_str(&format!(
+            "## Round {} Aggregate (topic: \"{}\")\n\n*Anonymized — order randomized. {} of {} participants submitted.*\n\n---\n\n",
+            round_number, topic, submissions.len(), total_participants
+        ));
+
+        let mut unshuffle_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for (display_idx, original_idx) in shuffled_indices.iter().enumerate() {
+            let sub = &submissions[*original_idx];
+            let label = anonymous_label(display_idx);
+            markdown.push_str(&format!("**{}:**\n\n{}\n\n---\n\n", label, sub.content));
+            unshuffle_map.insert(label, sub.from.clone());
+        }
+
+        (markdown, unshuffle_map)
+    }
+
+    #[cfg(test)]
+    mod aggregate_tests {
+        use super::*;
+
+        #[test]
+        fn t_anonymous_label_single_letter() {
+            assert_eq!(anonymous_label(0), "Anonymous A");
+            assert_eq!(anonymous_label(1), "Anonymous B");
+            assert_eq!(anonymous_label(25), "Anonymous Z");
+        }
+
+        #[test]
+        fn t_anonymous_label_two_letters() {
+            assert_eq!(anonymous_label(26), "Anonymous AA");
+            assert_eq!(anonymous_label(27), "Anonymous AB");
+            assert_eq!(anonymous_label(51), "Anonymous AZ");
+            assert_eq!(anonymous_label(52), "Anonymous BA");
+        }
+
+        #[test]
+        fn t_fisher_yates_deterministic() {
+            let items: Vec<i32> = (0..10).collect();
+            let seed = "abc123def456";
+            let a = fisher_yates_shuffle(&items, seed);
+            let b = fisher_yates_shuffle(&items, seed);
+            assert_eq!(a, b, "same seed must produce identical permutation");
+        }
+
+        #[test]
+        fn t_fisher_yates_different_seeds_differ() {
+            let items: Vec<i32> = (0..20).collect();
+            let a = fisher_yates_shuffle(&items, "seed1");
+            let b = fisher_yates_shuffle(&items, "seed2");
+            // Statistically extremely likely to differ for N=20.
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn t_fisher_yates_preserves_multiset() {
+            let items: Vec<i32> = (0..50).collect();
+            let mut sorted_a: Vec<i32> = fisher_yates_shuffle(&items, "x");
+            let mut sorted_orig = items.clone();
+            sorted_a.sort();
+            sorted_orig.sort();
+            assert_eq!(sorted_a, sorted_orig, "shuffle must be a permutation");
+        }
+
+        #[test]
+        fn t_build_aggregate_basic() {
+            let subs = vec![
+                DelphiSubmission {
+                    from: "architect:0".to_string(),
+                    anonymous_id: None,
+                    content: "Position A".to_string(),
+                    content_hash: "sha256:aaa".to_string(),
+                    revision_hash_chain: Vec::new(),
+                    submitted_at: "2026-05-27T07:00:00Z".to_string(),
+                },
+                DelphiSubmission {
+                    from: "developer:0".to_string(),
+                    anonymous_id: None,
+                    content: "Position B".to_string(),
+                    content_hash: "sha256:bbb".to_string(),
+                    revision_hash_chain: Vec::new(),
+                    submitted_at: "2026-05-27T07:01:00Z".to_string(),
+                },
+            ];
+            let (md, map) = build_aggregate("Test topic", 1, &subs, "deadbeef", 2);
+            // Markdown must contain both anonymous labels.
+            assert!(md.contains("Anonymous A"));
+            assert!(md.contains("Anonymous B"));
+            // Markdown must contain both contents.
+            assert!(md.contains("Position A"));
+            assert!(md.contains("Position B"));
+            // Markdown must NOT contain real seat slugs.
+            assert!(!md.contains("architect:0"));
+            assert!(!md.contains("developer:0"));
+            // Unshuffle map must have both labels mapped to real seats.
+            assert_eq!(map.len(), 2);
+            assert!(map.values().any(|v| v == "architect:0"));
+            assert!(map.values().any(|v| v == "developer:0"));
+        }
     }
 }
