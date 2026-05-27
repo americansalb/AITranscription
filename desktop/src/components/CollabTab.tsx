@@ -995,21 +995,37 @@ export function CollabTab() {
   // independently toggled. Defaults to expanded for the latest round.
   const [delphiAggregateExpanded, setDelphiAggregateExpanded] = useState<Record<number, boolean>>({});
   const [delphiRealNamesRevealed, setDelphiRealNamesRevealed] = useState(false);
+  // ActiveDelphiDebate shape — mirrors Rust struct per architect spec v3 msg
+  // 1982 confirmed field names. Will replace this inline type with import from
+  // collabTypes.ts:ActiveDelphiDebate once dev:0 lands SHA-D10.1 serde-parity
+  // types per spec §5.6.
   const [activeDelphi, setActiveDelphi] = useState<{
     discussion_id: number;
     moderator: string;
     topic: string;
     participants: string[];
     audience: string[];
-    current_round: number;
     max_rounds: number;
-    phase: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | "paused" | null;
+    convergence_criterion: "Moderator" | "MaxRounds" | "Hybrid";
+    convergence_reward_copper: number;
+    phase: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | null;
+    current_round: number;
     phase_started_at: string | null;
+    blind_gate_active: boolean;
+    blind_gate_strict: boolean;
+    started_at: string | null;
     submission_soft_floor_secs: number;
     submission_hard_floor_secs: number;
     review_floor_secs: number;
-    submitted_seats: string[];
-    aggregate_message_id: number | null;
+    rounds: Array<{
+      number: number;
+      opened_at: string;
+      closed_at: string | null;
+      prompt: string;
+      submissions: Array<{ anonymous_id: string; content?: string; submitted_at: string }>;
+      aggregate_message_id: number | null;
+      non_submitters: string[];
+    }>;
   } | null>(null);
   // Human msg 870: active Oxford debate snapshot, polled every 2s. When
   // non-null an End Debate button replaces the Start button so the human can
@@ -2443,15 +2459,27 @@ When multiple instances of this role are active:
           topic: string;
           participants: string[];
           audience?: string[];
-          current_round: number;
           max_rounds: number;
-          phase?: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | "paused" | null;
+          convergence_criterion?: "Moderator" | "MaxRounds" | "Hybrid";
+          convergence_reward_copper?: number;
+          phase?: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | null;
+          current_round: number;
           phase_started_at?: string | null;
+          blind_gate_active?: boolean;
+          blind_gate_strict?: boolean;
+          started_at?: string | null;
           submission_soft_floor_secs?: number;
           submission_hard_floor_secs?: number;
           review_floor_secs?: number;
-          submitted_seats?: string[];
-          aggregate_message_id?: number | null;
+          rounds?: Array<{
+            number: number;
+            opened_at: string;
+            closed_at: string | null;
+            prompt: string;
+            submissions: Array<{ anonymous_id: string; content?: string; submitted_at: string }>;
+            aggregate_message_id: number | null;
+            non_submitters: string[];
+          }>;
         } | null>("read_active_delphi_cmd", { dir: projectDir });
         if (!cancelled) {
           if (result) {
@@ -2461,15 +2489,19 @@ When multiple instances of this role are active:
               topic: result.topic,
               participants: result.participants,
               audience: result.audience ?? [],
-              current_round: result.current_round,
               max_rounds: result.max_rounds,
+              convergence_criterion: result.convergence_criterion ?? "Moderator",
+              convergence_reward_copper: result.convergence_reward_copper ?? 0,
               phase: result.phase ?? null,
+              current_round: result.current_round,
               phase_started_at: result.phase_started_at ?? null,
+              blind_gate_active: result.blind_gate_active ?? false,
+              blind_gate_strict: result.blind_gate_strict ?? true,
+              started_at: result.started_at ?? null,
               submission_soft_floor_secs: result.submission_soft_floor_secs ?? 180,
               submission_hard_floor_secs: result.submission_hard_floor_secs ?? 360,
               review_floor_secs: result.review_floor_secs ?? 300,
-              submitted_seats: result.submitted_seats ?? [],
-              aggregate_message_id: result.aggregate_message_id ?? null,
+              rounds: result.rounds ?? [],
             });
           } else {
             setActiveDelphi(null);
@@ -6345,7 +6377,15 @@ When multiple instances of this role are active:
           const inBlindPhase = activeDelphi.phase === "submitting";
           const revealAllowed = humanRole === "moderator" || activeDelphi.phase === "reviewing" || activeDelphi.phase === "ended";
           const showCountOnly = humanRole === "audience" && inBlindPhase;
-          const showAggregate = activeDelphi.aggregate_message_id !== null && activeDelphi.phase !== "submitting" && activeDelphi.phase !== "opening";
+          // Spec v3 §4.2 — submissions/aggregate live inside rounds[N-1], not at top level.
+          // Derive flat shapes for the panel render.
+          const currentRoundData = activeDelphi.current_round > 0
+            ? activeDelphi.rounds[activeDelphi.current_round - 1] ?? null
+            : null;
+          const nonSubmitters = currentRoundData?.non_submitters ?? [];
+          const submitted_seats = activeDelphi.participants.filter((p) => !nonSubmitters.includes(p));
+          const aggregate_message_id = currentRoundData?.aggregate_message_id ?? null;
+          const showAggregate = aggregate_message_id !== null && activeDelphi.phase !== "submitting" && activeDelphi.phase !== "opening";
           return (
             <div
               className={`active-delphi-panel rail-section role-${humanRole}`}
@@ -6375,23 +6415,23 @@ When multiple instances of this role are active:
                   }
                 </span>
                 {inBlindPhase && (
-                  <span>{activeDelphi.submitted_seats.length} / {activeDelphi.participants.length} submitted</span>
+                  <span>{submitted_seats.length} / {activeDelphi.participants.length} submitted</span>
                 )}
               </div>
               {inBlindPhase && (
                 <div
                   className="active-delphi-submissions-bar"
                   role="progressbar"
-                  aria-valuenow={activeDelphi.submitted_seats.length}
+                  aria-valuenow={submitted_seats.length}
                   aria-valuemin={0}
                   aria-valuemax={activeDelphi.participants.length}
-                  aria-label={`${activeDelphi.submitted_seats.length} of ${activeDelphi.participants.length} participants submitted`}
+                  aria-label={`${submitted_seats.length} of ${activeDelphi.participants.length} participants submitted`}
                 >
                   <div
                     className="active-delphi-submissions-fill"
                     style={{
                       width: activeDelphi.participants.length > 0
-                        ? `${(activeDelphi.submitted_seats.length / activeDelphi.participants.length) * 100}%`
+                        ? `${(submitted_seats.length / activeDelphi.participants.length) * 100}%`
                         : "0%",
                     }}
                   />
@@ -6461,15 +6501,15 @@ When multiple instances of this role are active:
                   - observer: same as audience (preserve blind) */}
               {showCountOnly ? (
                 <div className="active-delphi-empty" aria-live="polite">
-                  {activeDelphi.submitted_seats.length === 0
+                  {submitted_seats.length === 0
                     ? "No submissions yet — participants are thinking blind."
-                    : `${activeDelphi.submitted_seats.length} of ${activeDelphi.participants.length} participants have submitted (identities blind until reveal).`}
+                    : `${submitted_seats.length} of ${activeDelphi.participants.length} participants have submitted (identities blind until reveal).`}
                 </div>
               ) : (
                 <div className="active-delphi-seats">
                   <span className="active-delphi-seat-pill moderator" title={`Moderator${humanRole === "moderator" ? " (you)" : ""}`}>{activeDelphi.moderator}</span>
                   {activeDelphi.participants.map((p) => {
-                    const submitted = activeDelphi.submitted_seats.includes(p);
+                    const submitted = submitted_seats.includes(p);
                     const isMe = p === "human:0";
                     if (inBlindPhase && !revealAllowed && submitted && !isMe) {
                       return <span key={p} className="active-delphi-anon-chip" title="Submitted (identity blind until reveal)">Anon</span>;
@@ -6486,9 +6526,9 @@ When multiple instances of this role are active:
                   })}
                 </div>
               )}
-              {showAggregate && activeDelphi.aggregate_message_id !== null && (() => {
-                const aggMsg = project?.messages?.find((m) => m.id === activeDelphi.aggregate_message_id);
-                const aggId = activeDelphi.aggregate_message_id;
+              {showAggregate && aggregate_message_id !== null && (() => {
+                const aggMsg = project?.messages?.find((m) => m.id === aggregate_message_id);
+                const aggId = aggregate_message_id;
                 const expanded = delphiAggregateExpanded[aggId] !== false;
                 const revealAvailable = activeDelphi.phase === "ended";
                 return (
@@ -6542,7 +6582,7 @@ When multiple instances of this role are active:
                   </div>
                 );
               })()}
-              {activeDelphi.submitted_seats.length === 0 && inBlindPhase && !showCountOnly && (
+              {submitted_seats.length === 0 && inBlindPhase && !showCountOnly && (
                 <div className="active-delphi-empty">
                   Waiting for first blind submission…
                 </div>
@@ -6605,8 +6645,13 @@ When multiple instances of this role are active:
                 type="button"
                 className="economy-settings-btn economy-settings-btn-destructive"
                 onClick={async () => {
+                  const roundData = activeDelphi.current_round > 0
+                    ? activeDelphi.rounds[activeDelphi.current_round - 1] ?? null
+                    : null;
+                  const nonSub = roundData?.non_submitters ?? [];
+                  const submittedCount = activeDelphi.participants.length - nonSub.length;
                   const confirmed = window.confirm(
-                    `End Delphi discussion ${activeDelphi.discussion_id}?\n\nTopic: ${activeDelphi.topic}\n\nRound ${activeDelphi.current_round} of ${activeDelphi.max_rounds}, ${activeDelphi.submitted_seats.length}/${activeDelphi.participants.length} submitted this round.\n\nThis abandons the discussion. No convergence reward will be distributed.`,
+                    `End Delphi discussion ${activeDelphi.discussion_id}?\n\nTopic: ${activeDelphi.topic}\n\nRound ${activeDelphi.current_round} of ${activeDelphi.max_rounds}, ${submittedCount}/${activeDelphi.participants.length} submitted this round.\n\nThis abandons the discussion. No convergence reward will be distributed.`,
                   );
                   if (!confirmed) return;
                   try {
@@ -7545,21 +7590,26 @@ When multiple instances of this role are active:
           }
           onClose={() => setDelphiSetupOpen(false)}
           onStarted={(d) => {
+            const nowIso = new Date().toISOString();
             setActiveDelphi({
               discussion_id: d.discussion_id,
               moderator: d.moderator,
               topic: d.topic,
               participants: d.participants,
               audience: [],
-              current_round: 0,
               max_rounds: d.max_rounds,
+              convergence_criterion: "Moderator",
+              convergence_reward_copper: 0,
               phase: "opening",
-              phase_started_at: new Date().toISOString(),
+              current_round: 0,
+              phase_started_at: nowIso,
+              blind_gate_active: false,
+              blind_gate_strict: true,
+              started_at: nowIso,
               submission_soft_floor_secs: 180,
               submission_hard_floor_secs: 360,
               review_floor_secs: 300,
-              submitted_seats: [],
-              aggregate_message_id: null,
+              rounds: [],
             });
             showToast(
               `Delphi discussion ${d.discussion_id} started — moderator ${d.moderator}, ${d.participants.length} participants, ${d.max_rounds} rounds max.`,
