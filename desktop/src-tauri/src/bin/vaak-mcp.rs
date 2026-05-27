@@ -992,24 +992,21 @@ fn read_board_filtered(project_dir: &str) -> Vec<serde_json::Value> {
 }
 
 /// Get the next message ID (count of existing messages + 1)
-// VAAK_FP:SHA-13.1:vaak-mcp.rs:next_message_id_max_id_semantics
-/// Compute the next board.jsonl message id using max-id-from-rows semantics.
+// VAAK_FP:SHA-13.2:vaak-mcp.rs:next_message_id_function_split
+/// Compute the next board.jsonl message id via max-id semantics.
 ///
 /// !!! CALLER MUST HOLD `with_file_lock` BEFORE CALLING !!!
-/// (LockFileEx / flock are NOT process-reentrant — self-acquiring here
-/// would deadlock callers that already hold the lock.)
+/// (LockFileEx / flock are NOT process-reentrant — self-acquiring would
+/// deadlock the many existing call sites that wrap this in `with_file_lock`
+/// e.g. vaak-mcp.rs:2168, 3210.)
 ///
-/// Per multi-writer audit (architect msg 1680, dev:0 msg 1677):
-/// PRIOR implementation used `count(non-empty lines) + 1` which is fragile:
-///   - File compaction → count != max_id, next id collides with existing.
-///   - One row removed → count = max-1 → next collides with prior max.
+/// Per dev-challenger msg 1683 secondary attack: tail-scan must skip rows
+/// lacking an `.id` field — the `filter_map` below already does this by
+/// only yielding rows where `get("id").as_u64()` succeeds.
 ///
-/// CURRENT implementation: parse each row's `id` field, return max+1.
-/// Robust against historical row deletion / compaction. Returns 1 for empty/
-/// missing board file (first message id).
-///
-/// Call-site lock audit pending — vaak-mcp.rs:1934 + 5+ other sites flagged
-/// in dev:0 msg 1677. Follow-up SHA-13.2 to audit + wrap any bare callers.
+/// Per architect msg 1680 + dev-challenger msg 1683 Option A function-split:
+/// callers that do NOT already hold the lock should use the
+/// `next_message_id_with_lock` variant defined just below.
 fn next_message_id(project_dir: &str) -> u64 {
     let path = board_jsonl_path(project_dir);
     let max_id = std::fs::read_to_string(&path)
@@ -1027,6 +1024,20 @@ fn next_message_id(project_dir: &str) -> u64 {
         .max()
         .unwrap_or(0);
     max_id + 1
+}
+
+/// Self-locking variant of `next_message_id`.
+///
+/// USE THIS from contexts that do NOT already hold `with_file_lock`. The
+/// function acquires the lock, calls `next_message_id` under it, releases.
+///
+/// USE `next_message_id` directly from inside an existing `with_file_lock`
+/// block — calling THIS function inside an existing lock would deadlock
+/// because LockFileEx (Windows) and flock (Unix) are NOT process-reentrant.
+#[allow(dead_code)]
+fn next_message_id_with_lock(project_dir: &str) -> u64 {
+    with_file_lock(project_dir, || Ok(next_message_id(project_dir)))
+        .unwrap_or(1)
 }
 
 /// Append a message to board.jsonl (caller must hold file lock)
