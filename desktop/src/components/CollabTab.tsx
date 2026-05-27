@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useRef, useMemo, useCallback, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup } from "../lib/collabTypes";
+import type { ParsedProject, BoardMessage, RoleStatus, SessionBinding, QuestionChoice, FileClaim, DiscussionState, Section, RosterSlot, RoleConfig, RoleGroup, ActiveDelphiDebate } from "../lib/collabTypes";
+import { DELPHI_DEFAULTS } from "../lib/collabTypes";
 import { BUILTIN_ROLE_GROUPS } from "../utils/roleGroupPresets";
 import { RoleBriefingModal } from "./RoleBriefingModal";
 import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
@@ -995,38 +996,10 @@ export function CollabTab() {
   // independently toggled. Defaults to expanded for the latest round.
   const [delphiAggregateExpanded, setDelphiAggregateExpanded] = useState<Record<number, boolean>>({});
   const [delphiRealNamesRevealed, setDelphiRealNamesRevealed] = useState(false);
-  // ActiveDelphiDebate shape — mirrors Rust struct per architect spec v3 msg
-  // 1982 confirmed field names. Will replace this inline type with import from
-  // collabTypes.ts:ActiveDelphiDebate once dev:0 lands SHA-D10.1 serde-parity
-  // types per spec §5.6.
-  const [activeDelphi, setActiveDelphi] = useState<{
-    discussion_id: number;
-    moderator: string;
-    topic: string;
-    participants: string[];
-    audience: string[];
-    max_rounds: number;
-    convergence_criterion: "Moderator" | "MaxRounds" | "Hybrid";
-    convergence_reward_copper: number;
-    phase: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | null;
-    current_round: number;
-    phase_started_at: string | null;
-    blind_gate_active: boolean;
-    blind_gate_strict: boolean;
-    started_at: string | null;
-    submission_soft_floor_secs: number;
-    submission_hard_floor_secs: number;
-    review_floor_secs: number;
-    rounds: Array<{
-      number: number;
-      opened_at: string;
-      closed_at: string | null;
-      prompt: string;
-      submissions: Array<{ anonymous_id: string; content?: string; submitted_at: string }>;
-      aggregate_message_id: number | null;
-      non_submitters: string[];
-    }>;
-  } | null>(null);
+  // ActiveDelphiDebate — canonical type from collabTypes.ts:298 per spec §5.6
+  // serde-parity contract. Rust source: collab.rs:delphi module per SHA-D10.1
+  // (commit 4a18a03).
+  const [activeDelphi, setActiveDelphi] = useState<ActiveDelphiDebate | null>(null);
   // Human msg 870: active Oxford debate snapshot, polled every 2s. When
   // non-null an End Debate button replaces the Start button so the human can
   // force-end a stuck debate via UI without having to delete JSON files.
@@ -2453,60 +2426,8 @@ When multiple instances of this role are active:
     const pollActiveDelphi = async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const result = await invoke<{
-          discussion_id: number;
-          moderator: string;
-          topic: string;
-          participants: string[];
-          audience?: string[];
-          max_rounds: number;
-          convergence_criterion?: "Moderator" | "MaxRounds" | "Hybrid";
-          convergence_reward_copper?: number;
-          phase?: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | null;
-          current_round: number;
-          phase_started_at?: string | null;
-          blind_gate_active?: boolean;
-          blind_gate_strict?: boolean;
-          started_at?: string | null;
-          submission_soft_floor_secs?: number;
-          submission_hard_floor_secs?: number;
-          review_floor_secs?: number;
-          rounds?: Array<{
-            number: number;
-            opened_at: string;
-            closed_at: string | null;
-            prompt: string;
-            submissions: Array<{ anonymous_id: string; content?: string; submitted_at: string }>;
-            aggregate_message_id: number | null;
-            non_submitters: string[];
-          }>;
-        } | null>("read_active_delphi_cmd", { dir: projectDir });
-        if (!cancelled) {
-          if (result) {
-            setActiveDelphi({
-              discussion_id: result.discussion_id,
-              moderator: result.moderator,
-              topic: result.topic,
-              participants: result.participants,
-              audience: result.audience ?? [],
-              max_rounds: result.max_rounds,
-              convergence_criterion: result.convergence_criterion ?? "Moderator",
-              convergence_reward_copper: result.convergence_reward_copper ?? 0,
-              phase: result.phase ?? null,
-              current_round: result.current_round,
-              phase_started_at: result.phase_started_at ?? null,
-              blind_gate_active: result.blind_gate_active ?? false,
-              blind_gate_strict: result.blind_gate_strict ?? true,
-              started_at: result.started_at ?? null,
-              submission_soft_floor_secs: result.submission_soft_floor_secs ?? 180,
-              submission_hard_floor_secs: result.submission_hard_floor_secs ?? 360,
-              review_floor_secs: result.review_floor_secs ?? 300,
-              rounds: result.rounds ?? [],
-            });
-          } else {
-            setActiveDelphi(null);
-          }
-        }
+        const result = await invoke<ActiveDelphiDebate | null>("read_active_delphi_cmd", { dir: projectDir });
+        if (!cancelled) setActiveDelphi(result);
       } catch { /* pre-Delphi-SHA binary — poll inert; optimistic seed from modal remains */ }
     };
     pollActiveDelphi();
@@ -7598,7 +7519,7 @@ When multiple instances of this role are active:
               participants: d.participants,
               audience: [],
               max_rounds: d.max_rounds,
-              convergence_criterion: "Moderator",
+              convergence_criterion: "moderator",
               convergence_reward_copper: 0,
               phase: "opening",
               current_round: 0,
@@ -7606,9 +7527,9 @@ When multiple instances of this role are active:
               blind_gate_active: false,
               blind_gate_strict: true,
               started_at: nowIso,
-              submission_soft_floor_secs: 180,
-              submission_hard_floor_secs: 360,
-              review_floor_secs: 300,
+              submission_soft_floor_secs: DELPHI_DEFAULTS.SUBMISSION_SOFT_FLOOR_SECS,
+              submission_hard_floor_secs: DELPHI_DEFAULTS.SUBMISSION_HARD_FLOOR_SECS,
+              review_floor_secs: DELPHI_DEFAULTS.REVIEW_FLOOR_SECS,
               rounds: [],
             });
             showToast(

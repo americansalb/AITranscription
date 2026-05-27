@@ -9623,6 +9623,20 @@
 .dsm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .dsm-btn-submit:not(:disabled) { background: #14b8a6; border-color: #14b8a6; color: white; }
 .dsm-btn-submit:not(:disabled):hover { background: #0f9488; }
+.dsm-advanced { margin-bottom: 14px; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12)); border-radius: 4px; }
+.dsm-advanced-summary { padding: 8px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.65)); font-weight: 600; cursor: pointer; user-select: none; list-style: none; }
+.dsm-advanced-summary::-webkit-details-marker { display: none; }
+.dsm-advanced-summary::before { content: "▸ "; display: inline-block; transition: transform 0.12s ease; }
+.dsm-advanced[open] > .dsm-advanced-summary::before { content: "▾ "; }
+.dsm-advanced-summary:hover { color: var(--collab-text, rgba(255, 255, 255, 0.85)); background: rgba(255, 255, 255, 0.02); }
+.dsm-advanced-summary:focus-visible { outline: 2px solid #14b8a6; outline-offset: -2px; }
+.dsm-advanced-body { padding: 8px 12px 4px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.06)); }
+.dsm-toggle-field { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; font-size: 12px; cursor: pointer; user-select: none; }
+.dsm-toggle-field input { margin-top: 2px; accent-color: #14b8a6; }
+.dsm-toggle-label { font-weight: 600; color: var(--collab-text, rgba(255, 255, 255, 0.92)); }
+@media (prefers-reduced-motion: reduce) {
+  .dsm-advanced-summary::before { transition: none; }
+}
 
 /* ---- Active Delphi panel (rail section, parallel to .active-oxford-panel) ---- */
 .active-delphi-panel { border-left: 3px solid #14b8a6; }

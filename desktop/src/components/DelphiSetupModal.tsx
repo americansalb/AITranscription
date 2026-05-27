@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useModalA11y } from "../hooks/useModalA11y";
+import { DELPHI_DEFAULTS, type DelphiConvergenceMode } from "../lib/collabTypes";
 
 export function DelphiSetupModal(props: {
   open: boolean;
@@ -19,10 +20,15 @@ export function DelphiSetupModal(props: {
   const [participants, setParticipants] = useState<Set<string>>(new Set());
   const [audience, setAudience] = useState<Set<string>>(new Set());
   const [topic, setTopic] = useState<string>("");
-  const [maxRounds, setMaxRounds] = useState<string>("3");
-  const [timeoutMinutes, setTimeoutMinutes] = useState<string>("15");
-  const [reward, setReward] = useState<string>("0");
-  const [rewardDenom, setRewardDenom] = useState<"copper" | "silver" | "gold">("silver");
+  const [maxRounds, setMaxRounds] = useState<string>(String(DELPHI_DEFAULTS.MAX_ROUNDS));
+  const [convergenceCriterion, setConvergenceCriterion] = useState<DelphiConvergenceMode>("moderator");
+  const [reward, setReward] = useState<string>(String(DELPHI_DEFAULTS.CONVERGENCE_REWARD_COPPER));
+  const [rewardDenom, setRewardDenom] = useState<"copper" | "silver" | "gold">("copper");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [submissionSoftFloorSecs, setSubmissionSoftFloorSecs] = useState<string>(String(DELPHI_DEFAULTS.SUBMISSION_SOFT_FLOOR_SECS));
+  const [submissionHardFloorSecs, setSubmissionHardFloorSecs] = useState<string>(String(DELPHI_DEFAULTS.SUBMISSION_HARD_FLOOR_SECS));
+  const [reviewFloorSecs, setReviewFloorSecs] = useState<string>(String(DELPHI_DEFAULTS.REVIEW_FLOOR_SECS));
+  const [blindGateStrict, setBlindGateStrict] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -34,10 +40,15 @@ export function DelphiSetupModal(props: {
       setParticipants(new Set());
       setAudience(new Set());
       setTopic("");
-      setMaxRounds("3");
-      setTimeoutMinutes("15");
-      setReward("0");
-      setRewardDenom("silver");
+      setMaxRounds(String(DELPHI_DEFAULTS.MAX_ROUNDS));
+      setConvergenceCriterion("moderator");
+      setReward(String(DELPHI_DEFAULTS.CONVERGENCE_REWARD_COPPER));
+      setRewardDenom("copper");
+      setAdvancedOpen(false);
+      setSubmissionSoftFloorSecs(String(DELPHI_DEFAULTS.SUBMISSION_SOFT_FLOOR_SECS));
+      setSubmissionHardFloorSecs(String(DELPHI_DEFAULTS.SUBMISSION_HARD_FLOOR_SECS));
+      setReviewFloorSecs(String(DELPHI_DEFAULTS.REVIEW_FLOOR_SECS));
+      setBlindGateStrict(true);
       setError(null);
       setBusy(false);
       const t = setTimeout(() => topicRef.current?.focus(), 0);
@@ -71,16 +82,22 @@ export function DelphiSetupModal(props: {
   const maxRoundsParsed = parseInt(maxRounds, 10);
   const maxRoundsValid = Number.isInteger(maxRoundsParsed) && maxRoundsParsed >= 1 && maxRoundsParsed <= 20;
 
-  const timeoutParsed = parseInt(timeoutMinutes, 10);
-  const timeoutValid = Number.isInteger(timeoutParsed) && timeoutParsed >= 1 && timeoutParsed <= 120;
+  const softParsed = parseInt(submissionSoftFloorSecs, 10);
+  const hardParsed = parseInt(submissionHardFloorSecs, 10);
+  const reviewParsed = parseInt(reviewFloorSecs, 10);
+  const softValid = Number.isInteger(softParsed) && softParsed >= 30 && softParsed <= 1800;
+  const hardValid = Number.isInteger(hardParsed) && hardParsed >= 30 && hardParsed <= 3600 && hardParsed >= softParsed;
+  const reviewValid = Number.isInteger(reviewParsed) && reviewParsed >= 30 && reviewParsed <= 3600;
 
   const valid =
     moderator !== "" &&
-    participants.size >= 2 &&
+    participants.size >= DELPHI_DEFAULTS.MIN_PARTICIPANTS &&
     topic.trim().length > 0 &&
     rewardValid &&
     maxRoundsValid &&
-    timeoutValid;
+    softValid &&
+    hardValid &&
+    reviewValid;
 
   const submit = async () => {
     if (!valid || busy) return;
@@ -100,9 +117,13 @@ export function DelphiSetupModal(props: {
         topic: topic.trim(),
         participants: Array.from(participants),
         audience: Array.from(audience),
-        maxRounds: maxRoundsParsed,
-        timeoutMinutes: timeoutParsed,
-        winningRewardCopper: rewardCopper,
+        max_rounds: maxRoundsParsed,
+        convergence_criterion: convergenceCriterion,
+        convergence_reward_copper: rewardCopper,
+        submission_soft_floor_secs: softParsed,
+        submission_hard_floor_secs: hardParsed,
+        review_floor_secs: reviewParsed,
+        blind_gate_strict: blindGateStrict,
       });
       console.log("[delphi_initiate]", result);
       if (onStarted && result && typeof result.discussion_id === "number") {
@@ -198,8 +219,8 @@ export function DelphiSetupModal(props: {
           </select>
         </div>
 
-        {renderRolePicker("Participants", "Submit blind each round (min 2)", participants, setParticipants)}
-        {renderRolePicker("Audience", "Optional — votes after final round", audience, setAudience)}
+        {renderRolePicker("Participants", `Submit blind each round (min ${DELPHI_DEFAULTS.MIN_PARTICIPANTS})`, participants, setParticipants)}
+        {renderRolePicker("Audience", "Optional — observes + asks questions during reviewing phase", audience, setAudience)}
 
         <div className="dsm-field-row">
           <label className="dsm-field dsm-field-half">
@@ -215,25 +236,29 @@ export function DelphiSetupModal(props: {
               aria-label="maximum number of rounds"
             />
           </label>
-          <label className="dsm-field dsm-field-half">
-            <span className="dsm-field-label">Timeout / round <span className="dsm-hint">(min)</span></span>
-            <input
-              className="dsm-input"
-              type="number"
-              min={1}
-              max={120}
-              step={1}
-              value={timeoutMinutes}
-              onChange={(e) => setTimeoutMinutes(e.target.value)}
-              aria-label="round timeout in minutes"
-            />
-          </label>
+          <div className="dsm-field dsm-field-half">
+            <span className="dsm-field-label">Convergence end</span>
+            <div className="dsm-denoms" role="radiogroup" aria-label="convergence criterion">
+              {(["moderator", "max_rounds", "hybrid"] as const).map((c) => (
+                <label key={c} className={`dsm-denom-pill${convergenceCriterion === c ? " dsm-denom-pill-active" : ""}`}>
+                  <input
+                    type="radio"
+                    name="dsm-convergence-criterion"
+                    value={c}
+                    checked={convergenceCriterion === c}
+                    onChange={() => setConvergenceCriterion(c)}
+                  />
+                  <span className="dsm-denom-label">{c === "max_rounds" ? "max" : c}</span>
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
 
         <label className="dsm-field">
           <span className="dsm-field-label">
             Convergence reward
-            <span className="dsm-hint"> Pool-funded. 0 = no reward.</span>
+            <span className="dsm-hint"> Pool-funded (delphi_pool). 0 = no reward channel.</span>
           </span>
           <div className="dsm-reward-row">
             <div className="dsm-denoms" role="radiogroup" aria-label="reward denomination">
@@ -270,6 +295,69 @@ export function DelphiSetupModal(props: {
           )}
         </label>
 
+        <details
+          className="dsm-advanced"
+          open={advancedOpen}
+          onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+        >
+          <summary className="dsm-advanced-summary">Advanced — timing + blind gate</summary>
+          <div className="dsm-advanced-body">
+            <div className="dsm-field-row">
+              <label className="dsm-field dsm-field-half">
+                <span className="dsm-field-label">Submission soft floor <span className="dsm-hint">(s, 30–1800)</span></span>
+                <input
+                  className="dsm-input"
+                  type="number"
+                  min={30}
+                  max={1800}
+                  step={10}
+                  value={submissionSoftFloorSecs}
+                  onChange={(e) => setSubmissionSoftFloorSecs(e.target.value)}
+                  aria-label="submission soft floor in seconds"
+                />
+                <span className="dsm-hint">After this, phase advances if quorum (≥½ participants) submitted</span>
+              </label>
+              <label className="dsm-field dsm-field-half">
+                <span className="dsm-field-label">Submission hard floor <span className="dsm-hint">(s, ≥ soft)</span></span>
+                <input
+                  className="dsm-input"
+                  type="number"
+                  min={30}
+                  max={3600}
+                  step={10}
+                  value={submissionHardFloorSecs}
+                  onChange={(e) => setSubmissionHardFloorSecs(e.target.value)}
+                  aria-label="submission hard floor in seconds"
+                />
+                <span className="dsm-hint">Forced close even without quorum; non-submitters timeout</span>
+              </label>
+            </div>
+            <label className="dsm-field">
+              <span className="dsm-field-label">Review floor <span className="dsm-hint">(s, 30–3600)</span></span>
+              <input
+                className="dsm-input"
+                type="number"
+                min={30}
+                max={3600}
+                step={10}
+                value={reviewFloorSecs}
+                onChange={(e) => setReviewFloorSecs(e.target.value)}
+                aria-label="review phase floor in seconds"
+              />
+              <span className="dsm-hint">Min time aggregate stays visible before moderator can advance/end</span>
+            </label>
+            <label className="dsm-toggle-field">
+              <input
+                type="checkbox"
+                checked={blindGateStrict}
+                onChange={(e) => setBlindGateStrict(e.target.checked)}
+              />
+              <span className="dsm-toggle-label">Strict blind gate</span>
+              <span className="dsm-hint">When on, even DMs to moderator from participants are blocked during submitting (default: on for stronger anonymity)</span>
+            </label>
+          </div>
+        </details>
+
         <div className="dsm-summary" aria-live="polite">
           <strong>Lineup:</strong>{" "}
           {moderator ? `1 moderator (${moderator})` : <em>no moderator</em>}
@@ -279,6 +367,8 @@ export function DelphiSetupModal(props: {
           {audience.size > 0 ? `${audience.size} audience` : "no audience"}
           {", "}
           {maxRoundsValid ? `${maxRoundsParsed} max rounds` : <em>invalid round count</em>}
+          {", "}
+          {convergenceCriterion === "max_rounds" ? "auto-end at max" : convergenceCriterion === "hybrid" ? "moderator or max-rounds" : "moderator ends"}
         </div>
 
         <div className="dsm-actions">
