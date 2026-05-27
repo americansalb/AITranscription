@@ -6540,12 +6540,132 @@ When multiple instances of this role are active:
                   Waiting for first blind submission…
                 </div>
               )}
-              {humanRole === "moderator" && (activeDelphi.phase === "opening" || activeDelphi.phase === "reviewing") && (
+              {/* SHA-DUI.9 — round-control buttons. Replaces non-clickable plaintext
+                  <code> labels with real <button>s invoking Tauri commands directly
+                  (bypasses MCP sidecar — works even when CC sidecars are stale).
+                  Gate widened from `humanRole === "moderator"` to `humanRole !== "observer"`
+                  per spec §6.6.1 human-authority bypass (any non-observer human can drive
+                  round-control via Tauri). Adds Close Round button (missing from prior
+                  panel) and converts End-as-Converged plaintext to a button. */}
+              {humanRole !== "observer" && (activeDelphi.phase === "opening" || activeDelphi.phase === "submitting" || activeDelphi.phase === "reviewing") && (
                 <div className="active-delphi-moderator-controls">
-                  <span className="active-delphi-mod-hint">Moderator controls (via MCP):</span>
-                  <code className="active-delphi-mod-cmd">delphi_open_round()</code>
-                  {activeDelphi.phase === "reviewing" && <code className="active-delphi-mod-cmd">delphi_end(outcome="converged")</code>}
+                  <span className="active-delphi-mod-hint">
+                    {humanRole === "moderator" ? "Moderator controls:" : "Human-authority controls (spec §6.6.1):"}
+                  </span>
+                  {(activeDelphi.phase === "opening" || activeDelphi.phase === "reviewing") && (
+                    <button
+                      type="button"
+                      className="active-delphi-mod-btn"
+                      onClick={async () => {
+                        try {
+                          const { invoke } = await import("@tauri-apps/api/core");
+                          await invoke("delphi_open_round_cmd", { dir: projectDir });
+                          showToast(`Round opened.`, "success");
+                        } catch (e) {
+                          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                          showToast(`Couldn't open round — ${msg}`, "error");
+                        }
+                      }}
+                      title="Open the next blind-submission round (Tauri direct, no MCP dependency)"
+                    >
+                      ▶ Open Round
+                    </button>
+                  )}
+                  {activeDelphi.phase === "submitting" && (
+                    <button
+                      type="button"
+                      className="active-delphi-mod-btn"
+                      onClick={async () => {
+                        try {
+                          const { invoke } = await import("@tauri-apps/api/core");
+                          await invoke("delphi_close_round_cmd", { dir: projectDir });
+                          showToast(`Round closed; aggregate publishing.`, "success");
+                        } catch (e) {
+                          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                          showToast(`Couldn't close round — ${msg}`, "error");
+                        }
+                      }}
+                      title="Close the current round and publish the anonymized aggregate"
+                    >
+                      ⏸ Close Round
+                    </button>
+                  )}
+                  {activeDelphi.phase === "reviewing" && (
+                    <button
+                      type="button"
+                      className="active-delphi-mod-btn active-delphi-mod-btn-converged"
+                      onClick={async () => {
+                        const confirmed = window.confirm(
+                          `End Delphi #${activeDelphi.discussion_id} as CONVERGED?\n\nTopic: ${activeDelphi.topic}\n\nThis declares convergence and distributes any convergence reward (currently ${activeDelphi.convergence_reward_copper} copper).`,
+                        );
+                        if (!confirmed) return;
+                        try {
+                          const { invoke } = await import("@tauri-apps/api/core");
+                          await invoke("delphi_end_cmd", { dir: projectDir, outcome: "converged" });
+                          setActiveDelphi(null);
+                          showToast(`Delphi #${activeDelphi.discussion_id} ended as converged.`, "success");
+                        } catch (e) {
+                          const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                          showToast(`Couldn't end as converged — ${msg}`, "error");
+                        }
+                      }}
+                      title="End discussion declaring convergence (distributes convergence reward)"
+                    >
+                      ✓ End as Converged
+                    </button>
+                  )}
                 </div>
+              )}
+              {/* SHA-DUI.10 — participant Submit form. Renders when human is a
+                  participant in the current Delphi AND phase is `submitting`.
+                  Invokes `delphi_submit_cmd` (Tauri direct, no MCP dependency).
+                  Per spec §6.6.1 the human can always submit; this is the canonical
+                  UI surface for blind submissions. Uncontrolled <form> + FormData
+                  (no extra useState) to keep the diff small. */}
+              {humanRole === "participant" && activeDelphi.phase === "submitting" && (
+                <form
+                  className="active-delphi-submit-form"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const formData = new FormData(form);
+                    const content = ((formData.get("content") as string) ?? "").trim();
+                    if (content.length === 0) {
+                      showToast("Submission is empty — type something first.", "error");
+                      return;
+                    }
+                    try {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      await invoke("delphi_submit_cmd", { dir: projectDir, content });
+                      showToast(`Submission recorded (blind, round ${activeDelphi.current_round}).`, "success");
+                      form.reset();
+                    } catch (err) {
+                      const msg = typeof err === "string" ? err : (err instanceof Error ? err.message : String(err));
+                      showToast(`Couldn't submit — ${msg}`, "error");
+                    }
+                  }}
+                >
+                  <label className="active-delphi-submit-label" htmlFor="active-delphi-submit-textarea">
+                    Blind submission — round {activeDelphi.current_round}
+                  </label>
+                  <textarea
+                    id="active-delphi-submit-textarea"
+                    name="content"
+                    className="active-delphi-submit-textarea"
+                    rows={4}
+                    required
+                    minLength={1}
+                    placeholder="Your blind position on the topic. Identity hidden until discussion ends."
+                  />
+                  <div className="active-delphi-submit-row">
+                    <span className="active-delphi-submit-hint">
+                      Anonymity lifts when the discussion ends. Other participants cannot see your submission until the moderator closes the round.
+                    </span>
+                    <button type="submit" className="active-delphi-submit-btn">
+                      ▲ Submit Blind
+                    </button>
+                  </div>
+                </form>
               )}
               {/* Phase history strip — spec §7.1 item 7. Renders compact
                   timeline of CLOSED rounds (closed_at != null). Shows round
