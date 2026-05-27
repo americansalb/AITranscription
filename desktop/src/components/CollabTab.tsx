@@ -6,6 +6,7 @@ import { RoleBriefingModal } from "./RoleBriefingModal";
 import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
 import { EconomySettingsModal } from "./EconomySettingsModal";
 import { OxfordSetupModal } from "./OxfordSetupModal";
+import { DelphiSetupModal } from "./DelphiSetupModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -987,6 +988,29 @@ export function CollabTab() {
   const [economySettingsOpen, setEconomySettingsOpen] = useState(false);
   // Human msg 706: Oxford debate setup modal.
   const [oxfordSetupOpen, setOxfordSetupOpen] = useState(false);
+  // Human msg 1939: Delphi discussion setup modal (Oxford-parity build).
+  const [delphiSetupOpen, setDelphiSetupOpen] = useState(false);
+  // Per spec §7.1 item 5 — aggregate render with collapse/expand affordance.
+  // Keyed by aggregate_message_id so multi-round Delphi reveals can be
+  // independently toggled. Defaults to expanded for the latest round.
+  const [delphiAggregateExpanded, setDelphiAggregateExpanded] = useState<Record<number, boolean>>({});
+  const [delphiRealNamesRevealed, setDelphiRealNamesRevealed] = useState(false);
+  const [activeDelphi, setActiveDelphi] = useState<{
+    discussion_id: number;
+    moderator: string;
+    topic: string;
+    participants: string[];
+    audience: string[];
+    current_round: number;
+    max_rounds: number;
+    phase: "setup" | "opening" | "submitting" | "aggregating" | "reviewing" | "ended" | "paused" | null;
+    phase_started_at: string | null;
+    submission_soft_floor_secs: number;
+    submission_hard_floor_secs: number;
+    review_floor_secs: number;
+    submitted_seats: string[];
+    aggregate_message_id: number | null;
+  } | null>(null);
   // Human msg 870: active Oxford debate snapshot, polled every 2s. When
   // non-null an End Debate button replaces the Start button so the human can
   // force-end a stuck debate via UI without having to delete JSON files.
@@ -6248,6 +6272,234 @@ When multiple instances of this role are active:
           </div>
         )}
 
+        {/* Active Delphi Discussion panel — parallel to active-oxford-panel.
+            Renders the live Delphi state (round counter, phase, submission
+            progress, anonymized aggregate when ready). Per human msg 1939
+            (Delphi-to-Oxford-parity build) + spec §7.1/§7.2 per-role branching.
+            Human-role categorized from activeDelphi role assignment; preserves
+            self-imposed blind when human is participant or audience. */}
+        {projectDir && activeDelphi && (() => {
+          const humanRole: "moderator" | "participant" | "audience" | "observer" =
+            activeDelphi.moderator === "human:0" ? "moderator" :
+            activeDelphi.participants.includes("human:0") ? "participant" :
+            activeDelphi.audience.includes("human:0") ? "audience" :
+            "observer";
+          const inBlindPhase = activeDelphi.phase === "submitting";
+          const revealAllowed = humanRole === "moderator" || activeDelphi.phase === "reviewing" || activeDelphi.phase === "ended";
+          const showCountOnly = humanRole === "audience" && inBlindPhase;
+          const showAggregate = activeDelphi.aggregate_message_id !== null && activeDelphi.phase !== "submitting" && activeDelphi.phase !== "opening";
+          return (
+            <div
+              className={`active-delphi-panel rail-section role-${humanRole}`}
+              role="region"
+              aria-label={`Active Delphi discussion (your role: ${humanRole})`}
+            >
+              <div className="active-delphi-header">
+                <span aria-hidden="true">🔮</span>
+                <span className="active-delphi-title">Delphi Discussion #{activeDelphi.discussion_id}</span>
+                {activeDelphi.phase && (
+                  <span className={`active-delphi-phase-pill phase-${activeDelphi.phase}`} aria-label={`Phase: ${activeDelphi.phase}`}>
+                    {activeDelphi.phase}
+                  </span>
+                )}
+                <span className={`active-delphi-self-role-chip role-${humanRole}`} title={`Your role in this discussion: ${humanRole}`}>
+                  you: {humanRole}
+                </span>
+              </div>
+              <div className="active-delphi-topic">
+                <span className="active-delphi-topic-text">{activeDelphi.topic}</span>
+              </div>
+              <div className="active-delphi-round-row">
+                <span>
+                  {activeDelphi.current_round === 0
+                    ? <span className="active-delphi-round-label">Awaiting round 1</span>
+                    : <><span className="active-delphi-round-label">Round {activeDelphi.current_round}</span> of {activeDelphi.max_rounds}</>
+                  }
+                </span>
+                {inBlindPhase && (
+                  <span>{activeDelphi.submitted_seats.length} / {activeDelphi.participants.length} submitted</span>
+                )}
+              </div>
+              {inBlindPhase && (
+                <div
+                  className="active-delphi-submissions-bar"
+                  role="progressbar"
+                  aria-valuenow={activeDelphi.submitted_seats.length}
+                  aria-valuemin={0}
+                  aria-valuemax={activeDelphi.participants.length}
+                  aria-label={`${activeDelphi.submitted_seats.length} of ${activeDelphi.participants.length} participants submitted`}
+                >
+                  <div
+                    className="active-delphi-submissions-fill"
+                    style={{
+                      width: activeDelphi.participants.length > 0
+                        ? `${(activeDelphi.submitted_seats.length / activeDelphi.participants.length) * 100}%`
+                        : "0%",
+                    }}
+                  />
+                </div>
+              )}
+              {/* Phase progress bar with soft/hard floor markers + live countdown.
+                  Per spec §7.1 item 3. Floor defaults hardcoded frontend-side to
+                  match spec §3.1 (180s soft / 360s hard submitting; 300s reviewing).
+                  Mirrors Oxford pattern at CollabTab.tsx ~6191; refreshes on 2s
+                  poll tick once delphi_get_state_cmd is wired. */}
+              {(activeDelphi.phase === "submitting" || activeDelphi.phase === "reviewing") && activeDelphi.phase_started_at && (() => {
+                const startedAt = new Date(activeDelphi.phase_started_at).getTime();
+                const elapsedSecs = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+                const isSubmitting = activeDelphi.phase === "submitting";
+                const softFloor = isSubmitting ? activeDelphi.submission_soft_floor_secs : activeDelphi.review_floor_secs;
+                const hardFloor = isSubmitting ? activeDelphi.submission_hard_floor_secs : activeDelphi.review_floor_secs;
+                const ceiling = Math.max(hardFloor, elapsedSecs);
+                const elapsedPct = ceiling > 0 ? (elapsedSecs / ceiling) * 100 : 0;
+                const softMarkerPct = ceiling > 0 ? (softFloor / ceiling) * 100 : 0;
+                const hardMarkerPct = ceiling > 0 ? (hardFloor / ceiling) * 100 : 0;
+                const remainingHard = Math.max(0, hardFloor - elapsedSecs);
+                const remainingSoft = Math.max(0, softFloor - elapsedSecs);
+                const mm = Math.floor(remainingHard / 60);
+                const ss = remainingHard % 60;
+                const overSoft = elapsedSecs >= softFloor;
+                const overHard = elapsedSecs >= hardFloor;
+                const timerColor = overHard ? "#dc2626" : overSoft ? "#f97316" : "#cbd5e1";
+                const phaseLabel = isSubmitting ? "Submission window" : "Review window";
+                return (
+                  <div className="active-delphi-phase-progress" role="group" aria-label={`${phaseLabel} timing`}>
+                    <div className="active-delphi-phase-progress-header">
+                      <span className="active-delphi-phase-progress-label">{phaseLabel}</span>
+                      <span
+                        className="active-delphi-phase-progress-timer"
+                        style={{ color: timerColor }}
+                        aria-live="polite"
+                        aria-label={overHard ? "Past hard floor" : `${mm} minutes ${ss} seconds until hard floor`}
+                      >
+                        {overHard ? "hard floor passed" : `${mm}:${ss.toString().padStart(2, "0")} until hard`}
+                      </span>
+                    </div>
+                    <div className="active-delphi-phase-progress-bar" aria-hidden="true">
+                      <div className="active-delphi-phase-progress-fill" style={{ width: `${Math.min(100, elapsedPct)}%` }} />
+                      {!isSubmitting || softFloor !== hardFloor ? (
+                        <div className="active-delphi-phase-progress-marker soft" style={{ left: `${softMarkerPct}%` }} title={`Soft floor: ${softFloor}s`} />
+                      ) : null}
+                      <div className="active-delphi-phase-progress-marker hard" style={{ left: `${hardMarkerPct}%` }} title={`Hard floor: ${hardFloor}s`} />
+                    </div>
+                    <div className="active-delphi-phase-progress-legend">
+                      <span>elapsed {elapsedSecs}s</span>
+                      {isSubmitting && softFloor !== hardFloor && (
+                        <span style={{ color: overSoft ? "#fbbf24" : "rgba(255,255,255,0.4)" }}>
+                          soft @ {softFloor}s {overSoft && remainingSoft === 0 ? "(passed)" : ""}
+                        </span>
+                      )}
+                      <span style={{ color: overHard ? "#dc2626" : "rgba(255,255,255,0.4)" }}>
+                        hard @ {hardFloor}s {overHard ? "(passed)" : ""}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+              {/* Seat rendering — branched per humanRole.
+                  - moderator: per-seat names + submission status (COI auditing)
+                  - participant: own seat + anonymized count for others during blind
+                  - audience: count-only during blind, names after reveal
+                  - observer: same as audience (preserve blind) */}
+              {showCountOnly ? (
+                <div className="active-delphi-empty" aria-live="polite">
+                  {activeDelphi.submitted_seats.length === 0
+                    ? "No submissions yet — participants are thinking blind."
+                    : `${activeDelphi.submitted_seats.length} of ${activeDelphi.participants.length} participants have submitted (identities blind until reveal).`}
+                </div>
+              ) : (
+                <div className="active-delphi-seats">
+                  <span className="active-delphi-seat-pill moderator" title={`Moderator${humanRole === "moderator" ? " (you)" : ""}`}>{activeDelphi.moderator}</span>
+                  {activeDelphi.participants.map((p) => {
+                    const submitted = activeDelphi.submitted_seats.includes(p);
+                    const isMe = p === "human:0";
+                    if (inBlindPhase && !revealAllowed && submitted && !isMe) {
+                      return <span key={p} className="active-delphi-anon-chip" title="Submitted (identity blind until reveal)">Anon</span>;
+                    }
+                    return (
+                      <span
+                        key={p}
+                        className={`active-delphi-seat-pill${submitted ? " submitted" : ""}${isMe ? " is-self" : ""}`}
+                        title={`${p}${isMe ? " (you)" : ""}${submitted ? " — submitted" : " — pending"}`}
+                      >
+                        {p}{isMe && " (you)"}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+              {showAggregate && activeDelphi.aggregate_message_id !== null && (() => {
+                const aggMsg = project?.messages?.find((m) => m.id === activeDelphi.aggregate_message_id);
+                const aggId = activeDelphi.aggregate_message_id;
+                const expanded = delphiAggregateExpanded[aggId] !== false;
+                const revealAvailable = activeDelphi.phase === "ended";
+                return (
+                  <div className="active-delphi-aggregate">
+                    <div className="active-delphi-aggregate-header">
+                      <span className="active-delphi-aggregate-label">
+                        Round {activeDelphi.current_round} aggregate
+                        {revealAvailable && delphiRealNamesRevealed && " · identities revealed"}
+                      </span>
+                      <button
+                        type="button"
+                        className="active-delphi-aggregate-toggle"
+                        onClick={() => setDelphiAggregateExpanded((prev) => ({ ...prev, [aggId]: !expanded }))}
+                        aria-expanded={expanded}
+                        aria-controls={`delphi-aggregate-body-${aggId}`}
+                        title={expanded ? "Collapse aggregate" : "Expand aggregate"}
+                      >
+                        {expanded ? "▾" : "▸"}
+                      </button>
+                    </div>
+                    {expanded && (
+                      <div
+                        id={`delphi-aggregate-body-${aggId}`}
+                        className="active-delphi-aggregate-body"
+                      >
+                        {aggMsg ? (
+                          <pre className="active-delphi-aggregate-text">{aggMsg.body}</pre>
+                        ) : (
+                          <span className="active-delphi-aggregate-pending">
+                            Loading aggregate (msg #{aggId})…
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {revealAvailable && (
+                      <div className="active-delphi-aggregate-reveal-row">
+                        <button
+                          type="button"
+                          className="active-delphi-reveal-btn"
+                          onClick={() => setDelphiRealNamesRevealed((v) => !v)}
+                          title="Toggle anonymous IDs vs real seat names (only available after discussion ends)"
+                          aria-pressed={delphiRealNamesRevealed}
+                        >
+                          {delphiRealNamesRevealed ? "🔒 Hide real names" : "🔓 Show real names"}
+                        </button>
+                        <span className="active-delphi-reveal-hint">
+                          Unshuffle map archived in `.vaak/delphi-discussions.jsonl` for post-hoc audit.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              {activeDelphi.submitted_seats.length === 0 && inBlindPhase && !showCountOnly && (
+                <div className="active-delphi-empty">
+                  Waiting for first blind submission…
+                </div>
+              )}
+              {humanRole === "moderator" && (activeDelphi.phase === "opening" || activeDelphi.phase === "reviewing") && (
+                <div className="active-delphi-moderator-controls">
+                  <span className="active-delphi-mod-hint">Moderator controls (via MCP):</span>
+                  <code className="active-delphi-mod-cmd">delphi_open_round()</code>
+                  {activeDelphi.phase === "reviewing" && <code className="active-delphi-mod-cmd">delphi_end(outcome="converged")</code>}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Economy Settings + Oxford debate triggers (human msgs 657 + 706).
             Both live in the rail below Discussion Mode; small profile so they
             don't compete with the primary panels. The Oxford button swaps to
@@ -6288,6 +6540,41 @@ When multiple instances of this role are active:
               >
                 <span className="economy-settings-icon" aria-hidden="true">⚖</span>
                 <span>Start Oxford Debate</span>
+              </button>
+            )}
+            {activeDelphi ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  const confirmed = window.confirm(
+                    `End Delphi discussion ${activeDelphi.discussion_id}?\n\nTopic: ${activeDelphi.topic}\n\nRound ${activeDelphi.current_round} of ${activeDelphi.max_rounds}, ${activeDelphi.submitted_seats.length}/${activeDelphi.participants.length} submitted this round.\n\nThis abandons the discussion. No convergence reward will be distributed.`,
+                  );
+                  if (!confirmed) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("delphi_end_cmd", { dir: projectDir });
+                    setActiveDelphi(null);
+                    showToast(`Delphi discussion ${activeDelphi.discussion_id} ended.`, "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't end discussion — ${msg}`, "error");
+                  }
+                }}
+                title={`End the active Delphi discussion (#${activeDelphi.discussion_id}, moderator ${activeDelphi.moderator})`}
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Delphi Discussion</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={() => setDelphiSetupOpen(true)}
+                title="Start a Delphi discussion (blind submissions + anonymized aggregation)"
+              >
+                <span className="economy-settings-icon" aria-hidden="true">🔮</span>
+                <span>Start Delphi Discussion</span>
               </button>
             )}
             <button
@@ -7184,6 +7471,40 @@ When multiple instances of this role are active:
             });
             showToast(
               `Oxford debate ${d.debate_id} started — moderator ${d.moderator}, ${d.side_a.length} vs ${d.side_b.length}.`,
+              "success",
+            );
+          }}
+        />
+
+        {/* Delphi discussion setup modal (human msg 1939 — parity build). */}
+        <DelphiSetupModal
+          open={delphiSetupOpen}
+          projectDir={projectDir || ""}
+          activeSeats={
+            (project?.sessions ?? [])
+              .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
+              .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
+          }
+          onClose={() => setDelphiSetupOpen(false)}
+          onStarted={(d) => {
+            setActiveDelphi({
+              discussion_id: d.discussion_id,
+              moderator: d.moderator,
+              topic: d.topic,
+              participants: d.participants,
+              audience: [],
+              current_round: 0,
+              max_rounds: d.max_rounds,
+              phase: "opening",
+              phase_started_at: new Date().toISOString(),
+              submission_soft_floor_secs: 180,
+              submission_hard_floor_secs: 360,
+              review_floor_secs: 300,
+              submitted_seats: [],
+              aggregate_message_id: null,
+            });
+            showToast(
+              `Delphi discussion ${d.discussion_id} started — moderator ${d.moderator}, ${d.participants.length} participants, ${d.max_rounds} rounds max.`,
               "success",
             );
           }}

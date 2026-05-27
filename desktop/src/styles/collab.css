@@ -9552,3 +9552,147 @@
 .osm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .osm-btn-submit:not(:disabled) { background: #a855f7; border-color: #a855f7; color: white; }
 .osm-btn-submit:not(:disabled):hover { background: #9333ea; }
+
+/* ---- DelphiSetupModal (human msg 1939 — Delphi-to-Oxford-parity) ---- */
+.dsm-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1500; animation: abm-fade 0.12s ease;
+}
+.dsm-dialog {
+  background: var(--collab-bg-elevated, #1e1f24);
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-top: 3px solid #14b8a6;
+  border-radius: 8px;
+  width: 540px; max-width: 94vw; max-height: 88vh;
+  display: flex; flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.dsm-title { margin: 0 0 4px; font-size: 15px; }
+.dsm-subtitle { margin: 0 0 16px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.dsm-error { padding: 8px 12px; background: rgba(255, 107, 107, 0.10); border-left: 3px solid #ff6b6b; color: #ff6b6b; font-size: 12px; border-radius: 4px; margin-bottom: 12px; }
+.dsm-field { display: block; margin-bottom: 14px; font-size: 12px; }
+.dsm-field-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.dsm-hint { text-transform: none; letter-spacing: normal; font-size: 10px; font-style: italic; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); }
+.dsm-input, .dsm-select, .dsm-textarea {
+  display: block; width: 100%; padding: 6px 10px;
+  font: inherit; font-size: 12px;
+  background: var(--collab-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 4px; color: inherit; box-sizing: border-box;
+}
+.dsm-textarea { resize: vertical; min-height: 50px; font-family: inherit; }
+.dsm-input:focus, .dsm-select:focus, .dsm-textarea:focus {
+  outline: 2px solid #14b8a6; outline-offset: 1px; border-color: transparent;
+}
+.dsm-field-row { display: flex; gap: 12px; }
+.dsm-field-half { flex: 1; }
+.dsm-role-block { margin-bottom: 14px; }
+.dsm-role-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.dsm-count { color: rgba(20, 184, 166, 0.9); font-weight: 600; }
+.dsm-seat-grid { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsm-seat-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px; font-size: 11px;
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 999px; background: transparent; cursor: pointer; user-select: none;
+  font-family: 'DM Mono', ui-monospace, monospace;
+}
+.dsm-seat-pill input { width: 0; height: 0; opacity: 0; position: absolute; }
+.dsm-seat-pill-active {
+  background: rgba(20, 184, 166, 0.20);
+  border-color: rgba(20, 184, 166, 0.55);
+  color: white;
+}
+.dsm-reward-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.dsm-denoms { display: inline-flex; gap: 6px; }
+.dsm-denom-pill { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18)); border-radius: 999px; font-size: 12px; cursor: pointer; user-select: none; background: transparent; color: var(--collab-text, rgba(255, 255, 255, 0.85)); }
+.dsm-denom-pill input { width: 0; height: 0; opacity: 0; position: absolute; }
+.dsm-denom-pill-active { background: rgba(20, 184, 166, 0.16); border-color: rgba(20, 184, 166, 0.5); color: white; }
+.dsm-denom-label { text-transform: capitalize; }
+.dsm-denom-pill .coin-icon { width: 12px; height: 12px; vertical-align: -1px; }
+.dsm-reward-preview { display: block; margin-top: 6px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.dsm-summary { margin-top: 12px; padding: 8px 10px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.7)); background: rgba(20, 184, 166, 0.06); border-left: 3px solid rgba(20, 184, 166, 0.55); border-radius: 4px; }
+.dsm-summary em { color: var(--collab-text-muted, rgba(255, 255, 255, 0.4)); font-style: italic; }
+.dsm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10)); }
+.dsm-btn { padding: 8px 18px; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2)); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; transition: background 0.12s ease; }
+.dsm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.dsm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.dsm-btn-submit:not(:disabled) { background: #14b8a6; border-color: #14b8a6; color: white; }
+.dsm-btn-submit:not(:disabled):hover { background: #0f9488; }
+
+/* ---- Active Delphi panel (rail section, parallel to .active-oxford-panel) ---- */
+.active-delphi-panel { border-left: 3px solid #14b8a6; }
+.active-delphi-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.active-delphi-title { font-weight: 600; font-size: 13px; color: var(--collab-text, rgba(255, 255, 255, 0.95)); }
+.active-delphi-phase-pill { display: inline-flex; align-items: center; padding: 2px 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-radius: 999px; background: rgba(20, 184, 166, 0.18); color: #14b8a6; border: 1px solid rgba(20, 184, 166, 0.4); }
+.active-delphi-phase-pill.phase-opening { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.35); }
+.active-delphi-phase-pill.phase-submitting { background: rgba(251, 191, 36, 0.18); color: #fde68a; border-color: rgba(251, 191, 36, 0.45); }
+.active-delphi-phase-pill.phase-submitting::before { content: "🔒 "; font-size: 9px; vertical-align: middle; }
+.active-delphi-phase-pill.phase-aggregating { background: rgba(59, 130, 246, 0.18); color: #bfdbfe; border-color: rgba(59, 130, 246, 0.45); }
+.active-delphi-phase-pill.phase-reviewing { background: rgba(34, 197, 94, 0.18); color: #bbf7d0; border-color: rgba(34, 197, 94, 0.45); }
+.active-delphi-phase-pill.phase-ended { background: rgba(107, 114, 128, 0.18); color: #d1d5db; border-color: rgba(107, 114, 128, 0.4); }
+.active-delphi-phase-pill.phase-complete { background: rgba(74, 222, 128, 0.18); color: #bbf7d0; border-color: rgba(74, 222, 128, 0.4); }
+.active-delphi-phase-pill.phase-paused { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); border-color: rgba(255, 255, 255, 0.18); }
+.active-delphi-topic { padding: 6px 10px; background: rgba(20, 184, 166, 0.06); border-radius: 4px; font-size: 12px; color: var(--collab-text, rgba(255, 255, 255, 0.85)); margin-bottom: 8px; }
+.active-delphi-topic-text { font-style: italic; }
+.active-delphi-round-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.7)); }
+.active-delphi-round-label { color: var(--collab-text, rgba(255, 255, 255, 0.85)); font-weight: 600; }
+.active-delphi-submissions-bar { position: relative; height: 6px; background: rgba(255, 255, 255, 0.06); border-radius: 999px; overflow: hidden; margin: 6px 0 10px; }
+.active-delphi-submissions-fill { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #14b8a6, #0ea5e9); transition: width 0.3s ease; }
+.active-delphi-seats { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.active-delphi-seat-pill { padding: 2px 8px; font-size: 10px; border-radius: 999px; font-family: 'DM Mono', ui-monospace, monospace; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.15)); color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.active-delphi-seat-pill.submitted { background: rgba(20, 184, 166, 0.18); border-color: rgba(20, 184, 166, 0.55); color: white; }
+.active-delphi-seat-pill.submitted::before { content: "✓ "; color: rgba(20, 184, 166, 0.9); }
+.active-delphi-seat-pill.moderator { border-color: rgba(168, 85, 247, 0.55); color: #a855f7; }
+.active-delphi-seat-pill.moderator::before { content: "★ "; }
+/* Anonymized chip — used in reveal phase before identity is shown */
+.active-delphi-anon-chip { padding: 2px 8px; font-size: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); border: 1px dashed rgba(255, 255, 255, 0.25); color: var(--collab-text-muted, rgba(255, 255, 255, 0.65)); font-family: 'DM Mono', ui-monospace, monospace; }
+.active-delphi-aggregate { padding: 10px 12px; margin-top: 8px; background: rgba(20, 184, 166, 0.04); border: 1px solid rgba(20, 184, 166, 0.25); border-radius: 6px; font-size: 12px; }
+.active-delphi-aggregate-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.active-delphi-aggregate-label { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: rgba(20, 184, 166, 0.85); font-weight: 600; }
+.active-delphi-aggregate-toggle { background: transparent; border: 1px solid rgba(20, 184, 166, 0.4); color: rgba(20, 184, 166, 0.9); cursor: pointer; padding: 2px 8px; border-radius: 4px; font-size: 12px; line-height: 1; transition: background 0.12s ease; }
+.active-delphi-aggregate-toggle:hover { background: rgba(20, 184, 166, 0.1); }
+.active-delphi-aggregate-toggle:focus-visible { outline: 2px solid #14b8a6; outline-offset: 1px; }
+.active-delphi-aggregate-body { max-height: 360px; overflow-y: auto; padding: 8px 10px; background: rgba(0, 0, 0, 0.18); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.06); }
+.active-delphi-aggregate-text { margin: 0; font-family: inherit; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--collab-text, rgba(255, 255, 255, 0.92)); }
+.active-delphi-aggregate-pending { font-style: italic; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); }
+.active-delphi-aggregate-reveal-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed rgba(255, 255, 255, 0.08); flex-wrap: wrap; }
+.active-delphi-reveal-btn { padding: 4px 12px; font-size: 11px; font-weight: 600; background: rgba(20, 184, 166, 0.14); border: 1px solid rgba(20, 184, 166, 0.45); color: #99f6e4; cursor: pointer; border-radius: 999px; transition: background 0.12s ease; }
+.active-delphi-reveal-btn:hover { background: rgba(20, 184, 166, 0.25); }
+.active-delphi-reveal-btn[aria-pressed="true"] { background: rgba(20, 184, 166, 0.32); }
+.active-delphi-reveal-btn:focus-visible { outline: 2px solid #14b8a6; outline-offset: 2px; }
+.active-delphi-reveal-hint { font-size: 10px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.45)); flex: 1; min-width: 180px; }
+/* Phase progress bar — soft + hard floor markers with live countdown */
+.active-delphi-phase-progress { margin: 8px 0 10px; padding: 8px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.06); }
+.active-delphi-phase-progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.active-delphi-phase-progress-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.55)); font-weight: 600; }
+.active-delphi-phase-progress-timer { font-size: 11px; font-family: ui-monospace, Consolas, monospace; font-weight: 600; }
+.active-delphi-phase-progress-bar { position: relative; height: 8px; background: rgba(255, 255, 255, 0.04); border-radius: 4px; overflow: visible; }
+.active-delphi-phase-progress-fill { position: absolute; top: 0; bottom: 0; left: 0; background: linear-gradient(90deg, rgba(20, 184, 166, 0.7), rgba(14, 165, 233, 0.7)); border-radius: 4px; transition: width 0.3s ease; }
+.active-delphi-phase-progress-marker { position: absolute; top: -2px; bottom: -2px; width: 2px; border-radius: 1px; }
+.active-delphi-phase-progress-marker.soft { background: rgba(251, 191, 36, 0.8); }
+.active-delphi-phase-progress-marker.hard { background: rgba(220, 38, 38, 0.9); }
+.active-delphi-phase-progress-legend { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 4px; font-size: 10px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); font-family: ui-monospace, Consolas, monospace; }
+@media (prefers-reduced-motion: reduce) {
+  .active-delphi-phase-progress-fill { transition: none; }
+}
+.active-delphi-empty { padding: 16px 12px; text-align: center; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); font-style: italic; }
+/* Self-role chip — tells the human which role they hold in this Delphi */
+.active-delphi-self-role-chip { display: inline-flex; align-items: center; padding: 2px 8px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; border-radius: 999px; background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.7); border: 1px solid rgba(255, 255, 255, 0.15); margin-left: auto; font-family: 'DM Mono', ui-monospace, monospace; }
+.active-delphi-self-role-chip.role-moderator { background: rgba(168, 85, 247, 0.18); color: #e9d5ff; border-color: rgba(168, 85, 247, 0.45); }
+.active-delphi-self-role-chip.role-participant { background: rgba(20, 184, 166, 0.18); color: #99f6e4; border-color: rgba(20, 184, 166, 0.45); }
+.active-delphi-self-role-chip.role-audience { background: rgba(251, 191, 36, 0.14); color: #fde68a; border-color: rgba(251, 191, 36, 0.4); }
+.active-delphi-self-role-chip.role-observer { background: rgba(148, 163, 184, 0.14); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.3); }
+/* Highlight current viewer's seat */
+.active-delphi-seat-pill.is-self { outline: 1px solid rgba(20, 184, 166, 0.7); outline-offset: 1px; font-weight: 600; }
+/* Moderator-only controls hint */
+.active-delphi-moderator-controls { margin-top: 8px; padding: 6px 8px; background: rgba(168, 85, 247, 0.05); border-left: 3px solid rgba(168, 85, 247, 0.5); border-radius: 4px; font-size: 11px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.active-delphi-mod-hint { color: rgba(168, 85, 247, 0.9); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.active-delphi-mod-cmd { font-family: 'DM Mono', ui-monospace, monospace; font-size: 10px; padding: 1px 6px; background: rgba(255, 255, 255, 0.05); border-radius: 3px; color: rgba(255, 255, 255, 0.85); border: 1px solid rgba(255, 255, 255, 0.1); }
+@media (prefers-reduced-motion: reduce) {
+  .active-delphi-submissions-fill { transition: none; }
+}
