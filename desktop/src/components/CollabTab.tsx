@@ -5285,6 +5285,11 @@ When multiple instances of this role are active:
                       : seatAliveMap.get(cardKey);
                     const isSeatStale = seatAliveState === "stale";
                     const isSeatUnknown = seatAliveState === "unknown";
+                    // Tier 0.0 MW6/MW6.1 cross-tracker divergence indicator.
+                    // Surfaces MW6 corruption only — does NOT detect MW10 lockstep-
+                    // fresh-dead-agent. Fires when per-seat file says stale but
+                    // sessions.json-derived status says active.
+                    const isMW6Divergent = isSeatStale && (card.status === "working" || card.status === "ready");
                     const aliveSuffix = isSeatStale
                       ? " (reconnecting…)"
                       : isSeatUnknown
@@ -5335,6 +5340,7 @@ When multiple instances of this role are active:
                         >
                           {isMicHolder && <span className="role-chip-mic-glyph" aria-hidden="true">🎙</span>}
                           {isModeratorCard && <span className="role-chip-moderator-glyph" aria-hidden="true">★</span>}
+                          {isMW6Divergent && <span className="role-chip-mw6-divergent-glyph" aria-hidden="true" title="MW6/MW6.1 cross-tracker drift (sessions.json active but per-seat file stale). Does NOT detect MW10 lockstep-fresh-dead-agent.">⚠</span>}
                           <span className={`${getStatusDotClass(card.status)}${isSeatStale ? " alive-stale" : ""}${isSeatUnknown ? " alive-unknown" : ""}`} />
                           <span className="role-chip-name">{card.title}{aliveSuffix}</span>
                           {rotationIdx >= 0 && !isMicHolder && !isModeratorCard && (
@@ -5369,6 +5375,9 @@ When multiple instances of this role are active:
                         )}
                         {isModeratorCard && (
                           <span className="role-card-moderator-glyph" aria-hidden="true" title={`${card.title} is moderator`}>★</span>
+                        )}
+                        {isMW6Divergent && (
+                          <span className="role-card-mw6-divergent-glyph" aria-hidden="true" title={`MW6/MW6.1 cross-tracker drift: sessions.json says active but per-seat file says stale. Does NOT detect lockstep-fresh-dead-agent (MW10) — both trackers can be fresh while agent is silent. For MW10, await tri-dot UR4 post-chain.`}>⚠</span>
                         )}
                         {rotationIdx >= 0 && !isMicHolder && !isModeratorCard && (
                           <span className="role-card-rotation-idx" aria-hidden="true" title={`Rotation position ${rotationIdx + 1}`} style={{ color: card.roleColor }}>{rotationIdx + 1}</span>
