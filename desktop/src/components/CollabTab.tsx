@@ -6463,6 +6463,24 @@ When multiple instances of this role are active:
                 const aggId = aggregate_message_id;
                 const expanded = delphiAggregateExpanded[aggId] !== false;
                 const revealAvailable = activeDelphi.phase === "ended";
+                const unshuffleMap = currentRoundData?.unshuffle_map ?? {};
+                // Substitute "Anonymous A:" → "real_seat:" when reveal toggle is
+                // ON. Per spec §5 the unshuffle_map is populated at round-close
+                // (rounds[].unshuffle_map = { anonymous_id → real_seat }).
+                // The aggregate markdown body (built by collab::build_aggregate)
+                // uses labels of the form `Anonymous <ID>:` — so the substitution
+                // is a per-mapping `replaceAll` on the body string.
+                const renderedBody = (() => {
+                  if (!aggMsg) return null;
+                  if (!revealAvailable || !delphiRealNamesRevealed) return aggMsg.body;
+                  let body = aggMsg.body;
+                  for (const [anon, real] of Object.entries(unshuffleMap)) {
+                    // Replace both label forms ("Anonymous A:" and "Anonymous A" sans colon, in case markdown variants exist)
+                    body = body.split(`Anonymous ${anon}:`).join(`${real}:`);
+                    body = body.split(`Anonymous ${anon}`).join(real);
+                  }
+                  return body;
+                })();
                 return (
                   <div className="active-delphi-aggregate">
                     <div className="active-delphi-aggregate-header">
@@ -6487,10 +6505,10 @@ When multiple instances of this role are active:
                         className="active-delphi-aggregate-body"
                         tabIndex={0}
                         role="region"
-                        aria-label={`Round ${activeDelphi.current_round} aggregate body`}
+                        aria-label={`Round ${activeDelphi.current_round} aggregate body${revealAvailable && delphiRealNamesRevealed ? " — identities revealed" : ""}`}
                       >
-                        {aggMsg ? (
-                          <pre className="active-delphi-aggregate-text">{aggMsg.body}</pre>
+                        {renderedBody !== null ? (
+                          <pre className="active-delphi-aggregate-text">{renderedBody}</pre>
                         ) : (
                           <span className="active-delphi-aggregate-pending">
                             Loading aggregate (msg #{aggId})…
