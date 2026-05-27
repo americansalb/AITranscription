@@ -14,6 +14,15 @@ pub static VAAK_FINGERPRINT_COLLAB: [u8; 66] =
 pub static VAAK_FINGERPRINT_COLLAB_SHA10_1: [u8; 56] =
     *b"VAAK_FP:SHA-10.1:collab.rs:oxford_phase_machine_skeleton";
 
+// SHA-D10.1: Phase D Delphi foundation skeleton (architect spec v2
+// locked 2026-05-27). Schema types + path helpers + lock primitive +
+// initiate validator + composition entry point. MCP wiring lands in
+// SHA-D10.2; blind gate + aggregate in SHA-D10.3.
+#[used]
+#[no_mangle]
+pub static VAAK_FINGERPRINT_COLLAB_SHA_D10_1: [u8; 45] =
+    *b"VAAK_FP:SHA-D10.1:collab.rs:delphi_foundation";
+
 // ============================================================
 // Resilience-stack timer registry (mirror — keep in sync with
 // protocol.rs and vaak-mcp.rs)
@@ -6910,4 +6919,759 @@ where
     F: FnOnce() -> Result<R, String>,
 {
     with_currency_lock(dir, || with_board_lock(dir, f))
+}
+
+// ============================================================
+// Phase D — Delphi Discussion (spec v2 LOCKED 2026-05-27, architect:0)
+// SHA-D10.1: schema + path helpers + lock primitive + I/O + validator
+// + composition entry point. Serde-parity TS interface twin in
+// `desktop/src/lib/collabTypes.ts` (mandatory per spec §5.6).
+// NO MCP wiring yet; NO behavior change. Pure foundation.
+// Spec: .vaak/design-notes/2026-05-27-delphi-discussion-spec.md
+// ============================================================
+pub mod delphi {
+    use super::atomic_write;
+    use serde::{Deserialize, Serialize};
+    use std::path::{Path, PathBuf};
+
+    // ---- Constants (spec v2 §6.1 + §6.2 LOCKED defaults) ----
+
+    /// LOCKED — convergence reward default is ZERO. Adversarial competition
+    /// is the Oxford lane; convergence-for-payout is the anti-pattern Delphi
+    /// exists to avoid. Human may override per-initiate.
+    pub const DELPHI_DEFAULT_CONVERGENCE_REWARD_COPPER: i64 = 0;
+
+    /// LOCKED defaults — spec §6.2. Adjustable per-initiate.
+    pub const DELPHI_DEFAULT_MAX_ROUNDS: u32 = 5;
+    pub const DELPHI_SUBMISSION_SOFT_FLOOR_SECS: u32 = 180;
+    pub const DELPHI_SUBMISSION_HARD_FLOOR_SECS: u32 = 360;
+    pub const DELPHI_REVIEW_FLOOR_SECS: u32 = 300;
+
+    /// LOCKED — spec §3.7 audience-question rate-limit + queue cap.
+    pub const DELPHI_AUDIENCE_QUESTION_RATE_LIMIT_SECS: u32 = 60;
+    pub const DELPHI_AUDIENCE_QUESTION_QUEUE_CAP: usize = 5;
+
+    /// LOCKED — spec §3.8 react rate-limit.
+    pub const DELPHI_REACT_RATE_LIMIT_PER_MIN: u32 = 3;
+    pub const DELPHI_REACT_RATE_LIMIT_WINDOW_SECS: u32 = 60;
+
+    /// LOCKED — spec §6.5 moderator-vacancy timeout.
+    pub const DELPHI_MODERATOR_VACANCY_TIMEOUT_SECS: u32 = 300;
+
+    /// LOCKED — spec §6.1 minimum participant gate.
+    pub const DELPHI_MIN_PARTICIPANTS: usize = 2;
+
+    // ---- DelphiPhase enum (spec §2 state machine) ----
+
+    /// Phase machine state. Default = None covers (1) legacy
+    /// delphi-discussions.jsonl rows pre-SHA-D10.1 (none exist yet, but
+    /// reserved for back-compat), and (2) brief windows during initiate
+    /// before the snapshot is written. Variants use snake_case in JSON
+    /// to match the spec text.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DelphiPhase {
+        None,
+        Setup,
+        Opening,
+        Submitting,
+        Aggregating,
+        Reviewing,
+        Ended,
+    }
+
+    impl Default for DelphiPhase {
+        fn default() -> Self {
+            DelphiPhase::None
+        }
+    }
+
+    /// Spec §3.1 convergence-end semantics. Hybrid + SimilarityThreshold
+    /// are SHA-D12+ territory; v1 keeps Moderator + MaxRounds.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ConvergenceMode {
+        Moderator,
+        MaxRounds,
+        Hybrid,
+    }
+
+    impl Default for ConvergenceMode {
+        fn default() -> Self {
+            ConvergenceMode::Moderator
+        }
+    }
+
+    /// Spec §3.10 outcome values, sealed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum DelphiOutcome {
+        Converged,
+        MaxRoundsReached,
+        Abandoned,
+        AbortedQuorumLoss,
+        HumanOverride,
+        OxfordPreemption,
+    }
+
+    // ---- Path helpers (spec §4.1 / §4.2 / §4.4) ----
+
+    /// Append-only event log for an entire Delphi discussion's lifecycle.
+    /// Single source of truth for replay + audit (spec §4.1).
+    pub fn delphi_discussions_jsonl_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("delphi-discussions.jsonl")
+    }
+
+    /// Snapshot of the CURRENT active Delphi (one at a time per project
+    /// per spec §6.4). Archived to delphi-completed/<id>.json on end.
+    pub fn active_delphi_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("active-delphi-debate.json")
+    }
+
+    /// Project-wide delphi lock — gates all writes to
+    /// active-delphi-debate.json and delphi-discussions.jsonl. Composition
+    /// rule (spec §5.5): delphi.lock is INNER; currency.lock + board.lock
+    /// are OUTER — see `super::delphi_atomic_op`.
+    pub fn delphi_lock_path(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("delphi.lock")
+    }
+
+    /// Spec §4.2 — completed-discussions archive directory. When a Delphi
+    /// ends, active-delphi-debate.json is RENAMED here (NOT deleted) so
+    /// the unshuffle map remains available for post-debate audit.
+    pub fn delphi_completed_dir(dir: &str) -> PathBuf {
+        Path::new(dir).join(".vaak").join("delphi-completed")
+    }
+
+    pub fn delphi_completed_archive_path(dir: &str, discussion_id: u64) -> PathBuf {
+        delphi_completed_dir(dir).join(format!("{}.json", discussion_id))
+    }
+
+    // ---- Schema types (spec §4.2) ----
+
+    /// A single submission within a Delphi round. Anonymous label is
+    /// assigned by the aggregator (Fisher-Yates shuffle); pre-aggregation
+    /// it's None. Content_hash chains across revisions per spec §6.6 —
+    /// `revision_hash_chain` records hashes of prior revisions for
+    /// tamper-detection across submit cycles.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DelphiSubmission {
+        /// Seat slug — moderator-visible only. Stripped before any
+        /// participant-or-audience-readable view per spec §5 privacy.
+        pub from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub anonymous_id: Option<String>,
+        pub content: String,
+        /// sha256:<hex> of `content`. Detects tampering between submit
+        /// and aggregate broadcast.
+        pub content_hash: String,
+        /// Earlier-revision hashes (oldest first). Empty on first submit.
+        #[serde(default)]
+        pub revision_hash_chain: Vec<String>,
+        /// ISO8601. Moderator-visible only per spec §5 timing-leak
+        /// mitigation — stripped from participant/audience snapshots.
+        pub submitted_at: String,
+    }
+
+    /// A single round within a Delphi discussion.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DelphiRound {
+        pub number: u32,
+        pub opened_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub closed_at: Option<String>,
+        pub prompt: String,
+        #[serde(default)]
+        pub submissions: Vec<DelphiSubmission>,
+        /// `{anonymous_id → real_seat}`. Empty until aggregate runs. After
+        /// debate ends, public via archived completed-file per spec §5.
+        #[serde(default)]
+        pub unshuffle_map: std::collections::BTreeMap<String, String>,
+        /// Hex-encoded cryptographic seed. Generated at round-open;
+        /// persisted for replay-auditing per spec §5.
+        pub unshuffle_seed: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub aggregate_message_id: Option<u64>,
+        /// Participants who did not submit by close — recorded for audit.
+        #[serde(default)]
+        pub non_submitters: Vec<String>,
+        #[serde(default)]
+        pub audience_questions: Vec<DelphiAudienceQuestion>,
+    }
+
+    /// Spec §3.7 — audience-question entry, queued during `reviewing`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct DelphiAudienceQuestion {
+        pub asker: String,
+        pub question: String,
+        pub posted_at: String,
+    }
+
+    /// Snapshot of the currently-active Delphi discussion. Atomically
+    /// written after each state-changing MCP tool call. Archived (NOT
+    /// deleted) when discussion ends.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ActiveDelphiDebate {
+        pub discussion_id: u64,
+        pub moderator: String,
+        pub participants: Vec<String>,
+        #[serde(default)]
+        pub audience: Vec<String>,
+        pub topic: String,
+        pub max_rounds: u32,
+        #[serde(default)]
+        pub convergence_criterion: ConvergenceMode,
+        pub convergence_reward_copper: i64,
+        #[serde(default)]
+        pub phase: DelphiPhase,
+        #[serde(default)]
+        pub current_round: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub phase_started_at: Option<String>,
+        #[serde(default)]
+        pub blind_gate_active: bool,
+        /// LOCKED v2 §6.3 — default false (normal mode); true disables
+        /// the DM-to-moderator carve-out for stricter blind protocols.
+        #[serde(default)]
+        pub blind_gate_strict: bool,
+        pub submission_soft_floor_secs: u32,
+        pub submission_hard_floor_secs: u32,
+        pub review_floor_secs: u32,
+        pub started_at: String,
+        #[serde(default)]
+        pub rounds: Vec<DelphiRound>,
+    }
+
+    /// Lifecycle event appended to delphi-discussions.jsonl. Tagged union
+    /// over the event kinds in spec §4.1.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(tag = "event", rename_all = "snake_case")]
+    pub enum DelphiEvent {
+        Initiate {
+            discussion_id: u64,
+            timestamp: String,
+            moderator: String,
+            participants: Vec<String>,
+            audience: Vec<String>,
+            topic: String,
+            max_rounds: u32,
+            convergence_criterion: ConvergenceMode,
+            convergence_reward_copper: i64,
+            submission_soft_floor_secs: u32,
+            submission_hard_floor_secs: u32,
+            review_floor_secs: u32,
+            blind_gate_strict: bool,
+        },
+        RoundOpened {
+            discussion_id: u64,
+            round: u32,
+            prompt: String,
+            timestamp: String,
+        },
+        Submission {
+            discussion_id: u64,
+            round: u32,
+            seat: String,
+            /// sha256:<hex> of content. Content itself is NOT logged
+            /// (spec §4.1 note — privacy).
+            content_hash: String,
+            /// 1 for original submit; increments on each revision per §6.6.
+            revision_number: u32,
+            timestamp: String,
+        },
+        RoundClosed {
+            discussion_id: u64,
+            round: u32,
+            aggregate_message_id: u64,
+            submissions_count: u32,
+            non_submitters: Vec<String>,
+            unshuffle_seed: String,
+            timestamp: String,
+        },
+        AudienceQuestion {
+            discussion_id: u64,
+            round: u32,
+            from: String,
+            question: String,
+            timestamp: String,
+        },
+        React {
+            discussion_id: u64,
+            caller: String,
+            emoji: String,
+            timestamp: String,
+        },
+        Kicked {
+            discussion_id: u64,
+            seat: String,
+            reason: String,
+            timestamp: String,
+        },
+        Ended {
+            discussion_id: u64,
+            outcome: DelphiOutcome,
+            rounds_completed: u32,
+            convergence_reward_distributed_copper: i64,
+            reward_recipients: Vec<String>,
+            timestamp: String,
+        },
+    }
+
+    // ---- Lock primitive ----
+
+    /// Project-wide delphi lock. Closure-style; closure auto-LIFO release.
+    /// MARKED `pub(crate)` so callers OUTSIDE this module cannot acquire
+    /// raw delphi.lock — they must compose via `super::delphi_atomic_op`
+    /// which enforces the §5.5 composition order (currency+board OUTER,
+    /// delphi INNER). This is the architectural spine guard from §5.5 LOCK.
+    pub(crate) fn with_delphi_lock<F, R>(dir: &str, f: F) -> Result<R, String>
+    where
+        F: FnOnce() -> Result<R, String>,
+    {
+        let lock_path = delphi_lock_path(dir);
+        if let Some(parent) = lock_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("Failed to open delphi lock file: {}", e))?;
+
+        const LOCK_TIMEOUT_MS: u64 = 10_000;
+        const LOCK_RETRY_MS: u64 = 50;
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let handle = lock_file.as_raw_handle();
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let locked = unsafe {
+                LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+            };
+            if locked == 0 {
+                let start = std::time::Instant::now();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+                    let retry = unsafe {
+                        LockFileEx(handle as _, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, u32::MAX, u32::MAX, &mut overlapped)
+                    };
+                    if retry != 0 { break; }
+                    if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                        return Err(format!(
+                            "delphi.lock held for >{}s — stale lock from hung process. Lock file: {}",
+                            LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                        ));
+                    }
+                }
+            }
+            let result = f();
+            let mut ov2: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let _ = unsafe { UnlockFileEx(handle as _, 0, u32::MAX, u32::MAX, &mut ov2) };
+            return result;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let fd = lock_file.as_raw_fd();
+            let start = std::time::Instant::now();
+            loop {
+                let r = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+                if r == 0 { break; }
+                if start.elapsed().as_millis() as u64 > LOCK_TIMEOUT_MS {
+                    return Err(format!(
+                        "delphi.lock held for >{}s — stale lock. Lock file: {}",
+                        LOCK_TIMEOUT_MS / 1000, lock_path.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(LOCK_RETRY_MS));
+            }
+            let result = f();
+            unsafe { libc::flock(fd, libc::LOCK_UN); }
+            return result;
+        }
+
+        #[allow(unreachable_code)]
+        {
+            let _ = lock_file;
+            f()
+        }
+    }
+
+    // ---- I/O primitives ----
+
+    pub fn read_active_delphi(dir: &str) -> Result<Option<ActiveDelphiDebate>, String> {
+        let path = active_delphi_path(dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(&path).map_err(|e| format!("delphi read: {}", e))?;
+        if raw.trim().is_empty() || raw.trim() == "{}" {
+            return Ok(None);
+        }
+        serde_json::from_str::<ActiveDelphiDebate>(&raw)
+            .map(Some)
+            .map_err(|e| format!("delphi parse: {}", e))
+    }
+
+    pub fn write_active_delphi(dir: &str, debate: &ActiveDelphiDebate) -> Result<(), String> {
+        let path = active_delphi_path(dir);
+        let json = serde_json::to_string_pretty(debate)
+            .map_err(|e| format!("delphi serialize: {}", e))?;
+        atomic_write(&path, json.as_bytes())
+    }
+
+    /// Spec §4.2: on discussion end, the active state file is RENAMED
+    /// (archived) to `.vaak/delphi-completed/<id>.json`, NOT deleted.
+    /// This preserves the unshuffle map for post-debate audit per the
+    /// privacy invariant.
+    pub fn archive_active_delphi(dir: &str, discussion_id: u64) -> Result<(), String> {
+        let active = active_delphi_path(dir);
+        if !active.exists() {
+            return Ok(());
+        }
+        let archive_dir = delphi_completed_dir(dir);
+        std::fs::create_dir_all(&archive_dir).map_err(|e| format!("delphi archive mkdir: {}", e))?;
+        let dest = delphi_completed_archive_path(dir, discussion_id);
+        std::fs::rename(&active, &dest)
+            .map_err(|e| format!("delphi archive rename: {}", e))
+    }
+
+    /// Test-only cleanup + aborted-initiate rollback. Production end path
+    /// uses `archive_active_delphi` instead.
+    pub fn clear_active_delphi(dir: &str) -> Result<(), String> {
+        let path = active_delphi_path(dir);
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("delphi clear: {}", e))?;
+        }
+        Ok(())
+    }
+
+    pub fn append_delphi_event(dir: &str, event: &DelphiEvent) -> Result<(), String> {
+        use std::io::Write;
+        let path = delphi_discussions_jsonl_path(dir);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("delphi mkdir: {}", e))?;
+        }
+        let line = serde_json::to_string(event).map_err(|e| format!("delphi serialize event: {}", e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("delphi open append: {}", e))?;
+        writeln!(f, "{}", line).map_err(|e| format!("delphi append write: {}", e))?;
+        Ok(())
+    }
+
+    /// Compute the next discussion_id by scanning delphi-discussions.jsonl
+    /// for the highest `Initiate` event. Returns 1 if no discussions yet.
+    pub fn next_discussion_id(dir: &str) -> u64 {
+        let path = delphi_discussions_jsonl_path(dir);
+        if !path.exists() {
+            return 1;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return 1,
+        };
+        let mut max_id: u64 = 0;
+        for line in raw.lines() {
+            if let Ok(event) = serde_json::from_str::<DelphiEvent>(line) {
+                if let DelphiEvent::Initiate { discussion_id, .. } = event {
+                    if discussion_id > max_id {
+                        max_id = discussion_id;
+                    }
+                }
+            }
+        }
+        max_id + 1
+    }
+
+    /// Pure validation helper (spec §3.1 gates). Returns Err with specific
+    /// gate-error strings for the caller to surface. Caller is responsible
+    /// for lock acquisition + side effects.
+    pub fn validate_initiate(
+        caller: &str,
+        moderator: &str,
+        participants: &[String],
+        audience: &[String],
+        active_seats: &[String],
+        convergence_reward_copper: i64,
+    ) -> Result<(), String> {
+        // Caller must be the moderator OR human:0.
+        if caller != moderator && !caller.starts_with("human:") {
+            return Err("[DelphiInitiationDenied]".to_string());
+        }
+        // Minimum participant count (spec §6.1).
+        if participants.len() < DELPHI_MIN_PARTICIPANTS {
+            return Err("[DelphiRequiresMinTwoParticipants]".to_string());
+        }
+        // No duplicates within participants.
+        for (i, p) in participants.iter().enumerate() {
+            if participants[i + 1..].iter().any(|q| q == p) {
+                return Err("[DelphiRoleConflict]".to_string());
+            }
+        }
+        // Moderator cannot also be a participant or audience.
+        if participants.iter().any(|p| p == moderator) || audience.iter().any(|a| a == moderator) {
+            return Err("[DelphiRoleConflict]".to_string());
+        }
+        // No seat may appear in both participants and audience.
+        for p in participants {
+            if audience.iter().any(|a| a == p) {
+                return Err("[DelphiRoleConflict]".to_string());
+            }
+        }
+        // All non-human seats must be in the active roster.
+        let in_roster = |seat: &str| seat.starts_with("human:") || active_seats.iter().any(|r| r == seat);
+        if !in_roster(moderator) {
+            return Err("[DelphiSeatNotInRoster]".to_string());
+        }
+        for s in participants.iter().chain(audience.iter()) {
+            if !in_roster(s) {
+                return Err("[DelphiSeatNotInRoster]".to_string());
+            }
+        }
+        // convergence_reward_copper: zero allowed (per §6.1 v2 LOCK); negative rejected.
+        if convergence_reward_copper < 0 {
+            return Err("[DelphiInvalidReward]".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn s(v: &[&str]) -> Vec<String> {
+            v.iter().map(|x| x.to_string()).collect()
+        }
+
+        #[test]
+        fn t_validate_caller_not_moderator_or_human_rejected() {
+            let active = s(&["architect:0", "developer:0", "tester:0"]);
+            let err = validate_initiate(
+                "developer:0",
+                "manager:0",
+                &s(&["architect:0", "tester:0"]),
+                &[],
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiInitiationDenied]");
+        }
+
+        #[test]
+        fn t_validate_human_can_initiate() {
+            let active = s(&["architect:0", "developer:0", "tester:0", "manager:0"]);
+            let result = validate_initiate(
+                "human:0",
+                "manager:0",
+                &s(&["architect:0", "tester:0"]),
+                &[],
+                &active,
+                0,
+            );
+            assert!(result.is_ok(), "got: {:?}", result);
+        }
+
+        #[test]
+        fn t_validate_one_participant_rejected() {
+            let active = s(&["architect:0", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0"]),
+                &[],
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiRequiresMinTwoParticipants]");
+        }
+
+        #[test]
+        fn t_validate_moderator_in_participants_rejected() {
+            let active = s(&["architect:0", "manager:0", "tester:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["manager:0", "architect:0"]),
+                &[],
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiRoleConflict]");
+        }
+
+        #[test]
+        fn t_validate_seat_in_both_rejected() {
+            let active = s(&["architect:0", "manager:0", "tester:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0", "tester:0"]),
+                &s(&["tester:0"]),
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiRoleConflict]");
+        }
+
+        #[test]
+        fn t_validate_duplicate_participants_rejected() {
+            let active = s(&["architect:0", "tester:0", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0", "architect:0", "tester:0"]),
+                &[],
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiRoleConflict]");
+        }
+
+        #[test]
+        fn t_validate_seat_not_in_roster_rejected() {
+            let active = s(&["architect:0", "manager:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0", "ghost:0"]),
+                &[],
+                &active,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiSeatNotInRoster]");
+        }
+
+        #[test]
+        fn t_validate_negative_reward_rejected() {
+            let active = s(&["architect:0", "manager:0", "tester:0"]);
+            let err = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0", "tester:0"]),
+                &[],
+                &active,
+                -1,
+            )
+            .unwrap_err();
+            assert_eq!(err, "[DelphiInvalidReward]");
+        }
+
+        #[test]
+        fn t_validate_zero_reward_accepted() {
+            let active = s(&["architect:0", "manager:0", "tester:0"]);
+            let result = validate_initiate(
+                "manager:0",
+                "manager:0",
+                &s(&["architect:0", "tester:0"]),
+                &[],
+                &active,
+                0,
+            );
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn t_phase_default_is_none() {
+            assert_eq!(DelphiPhase::default(), DelphiPhase::None);
+        }
+
+        #[test]
+        fn t_convergence_mode_default_is_moderator() {
+            assert_eq!(ConvergenceMode::default(), ConvergenceMode::Moderator);
+        }
+
+        #[test]
+        fn t_roundtrip_active_delphi() {
+            let state = ActiveDelphiDebate {
+                discussion_id: 7,
+                moderator: "manager:0".to_string(),
+                participants: vec!["architect:0".to_string(), "tester:0".to_string()],
+                audience: vec!["human:0".to_string()],
+                topic: "Will the team converge?".to_string(),
+                max_rounds: 5,
+                convergence_criterion: ConvergenceMode::Moderator,
+                convergence_reward_copper: 0,
+                phase: DelphiPhase::Submitting,
+                current_round: 2,
+                phase_started_at: Some("2026-05-27T07:00:00Z".to_string()),
+                blind_gate_active: true,
+                blind_gate_strict: false,
+                submission_soft_floor_secs: 180,
+                submission_hard_floor_secs: 360,
+                review_floor_secs: 300,
+                started_at: "2026-05-27T06:55:00Z".to_string(),
+                rounds: vec![],
+            };
+            let json = serde_json::to_string_pretty(&state).unwrap();
+            let parsed: ActiveDelphiDebate = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.discussion_id, 7);
+            assert_eq!(parsed.phase, DelphiPhase::Submitting);
+            assert_eq!(parsed.current_round, 2);
+            assert!(parsed.blind_gate_active);
+            assert!(!parsed.blind_gate_strict);
+        }
+
+        #[test]
+        fn t_roundtrip_delphi_event_initiate() {
+            let ev = DelphiEvent::Initiate {
+                discussion_id: 1,
+                timestamp: "2026-05-27T07:00:00Z".to_string(),
+                moderator: "manager:0".to_string(),
+                participants: vec!["architect:0".to_string(), "tester:0".to_string()],
+                audience: vec![],
+                topic: "T".to_string(),
+                max_rounds: 5,
+                convergence_criterion: ConvergenceMode::Moderator,
+                convergence_reward_copper: 0,
+                submission_soft_floor_secs: DELPHI_SUBMISSION_SOFT_FLOOR_SECS,
+                submission_hard_floor_secs: DELPHI_SUBMISSION_HARD_FLOOR_SECS,
+                review_floor_secs: DELPHI_REVIEW_FLOOR_SECS,
+                blind_gate_strict: false,
+            };
+            let json = serde_json::to_string(&ev).unwrap();
+            assert!(json.contains("\"event\":\"initiate\""), "got: {}", json);
+            let _parsed: DelphiEvent = serde_json::from_str(&json).unwrap();
+        }
+
+        #[test]
+        fn t_next_discussion_id_empty() {
+            let tmp = std::env::temp_dir().join(format!("delphi_test_id_{}", std::process::id()));
+            let _ = std::fs::create_dir_all(tmp.join(".vaak"));
+            let dir_str = tmp.to_string_lossy().to_string();
+            assert_eq!(next_discussion_id(&dir_str), 1);
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+}
+
+/// Composition entry point for ALL Delphi-state writes. Per spec §5.5 v2:
+/// `with_currency_and_board_lock` is OUTER (existing project-wide pattern),
+/// new `with_delphi_lock` is INNER. Single sanctioned function — every
+/// future `delphi_*` MCP handler MUST call through this, never raw
+/// `with_delphi_lock` (which is `pub(crate)` for exactly this reason).
+/// Verified by PR-review grep + future CI lint.
+///
+/// Cross-binary parity: `bin/vaak-mcp.rs::delphi_atomic_op` MUST follow
+/// the same composition order. Sidecar mirror lands with SHA-D10.2 (first
+/// handler that needs it). For SHA-D10.1, this helper exists to be USED
+/// — no caller invokes it yet.
+pub fn delphi_atomic_op<F, R>(dir: &str, f: F) -> Result<R, String>
+where
+    F: FnOnce() -> Result<R, String>,
+{
+    with_currency_and_board_lock(dir, || delphi::with_delphi_lock(dir, f))
 }

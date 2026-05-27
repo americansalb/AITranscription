@@ -212,6 +212,209 @@ export interface DiscussionState {
   settings: DiscussionSettings;
 }
 
+// ==================== Phase D — Delphi Discussion (spec v2 LOCKED 2026-05-27) ====================
+//
+// Serde-parity twins of `desktop/src-tauri/src/collab.rs::pub mod delphi`.
+// Per spec §5.6: every field declared here MUST appear in the corresponding
+// Rust struct AND the JSON schema on disk. Mismatch → silent strip on read
+// → fields become undefined with no compile error. This burned the currency
+// toggle (c9d4825) and multiple Oxford fields. PR-review acceptance: every
+// PR that adds a Delphi field must show the TS interface + Rust struct
+// diff side-by-side.
+//
+// State file: .vaak/active-delphi-debate.json
+// Event log:  .vaak/delphi-discussions.jsonl
+// Archive:    .vaak/delphi-completed/<discussion_id>.json (on end)
+
+/** Spec §2 phase machine state. Variants are snake_case in JSON. */
+export type DelphiPhase =
+  | "none"
+  | "setup"
+  | "opening"
+  | "submitting"
+  | "aggregating"
+  | "reviewing"
+  | "ended";
+
+/** Spec §3.1 convergence-end semantics. */
+export type DelphiConvergenceMode = "moderator" | "max_rounds" | "hybrid";
+
+/** Spec §3.10 outcome values. */
+export type DelphiOutcome =
+  | "converged"
+  | "max_rounds_reached"
+  | "abandoned"
+  | "aborted_quorum_loss"
+  | "human_override"
+  | "oxford_preemption";
+
+/**
+ * Spec §4.2 — a single submission within a Delphi round. `anonymous_id` is
+ * set post-shuffle. `from` and `submitted_at` are moderator-visible only;
+ * participant/audience views strip these fields per spec §5 privacy.
+ */
+export interface DelphiSubmission {
+  from: string;
+  anonymous_id?: string | null;
+  content: string;
+  /** sha256:<hex> of `content`. */
+  content_hash: string;
+  /** Earlier-revision hashes (oldest first). Empty on first submit. */
+  revision_hash_chain: string[];
+  submitted_at: string;
+}
+
+/** Spec §3.7 — audience-question queued during `reviewing`. */
+export interface DelphiAudienceQuestion {
+  asker: string;
+  question: string;
+  posted_at: string;
+}
+
+/** Spec §4.2 — a single round within a Delphi discussion. */
+export interface DelphiRound {
+  number: number;
+  opened_at: string;
+  closed_at: string | null;
+  prompt: string;
+  submissions: DelphiSubmission[];
+  /**
+   * `{anonymous_id → real_seat}`. Empty until aggregate runs. After debate
+   * ends, public via the archived completed-file per spec §5.
+   */
+  unshuffle_map: Record<string, string>;
+  /** Hex-encoded cryptographic seed. Generated at round-open. */
+  unshuffle_seed: string;
+  aggregate_message_id: number | null;
+  /** Participants who did not submit by close. */
+  non_submitters: string[];
+  audience_questions: DelphiAudienceQuestion[];
+}
+
+/**
+ * Spec §4.2 — snapshot of the currently-active Delphi. Atomically written
+ * after each state-changing MCP tool call. Archived (not deleted) on end.
+ */
+export interface ActiveDelphiDebate {
+  discussion_id: number;
+  moderator: string;
+  participants: string[];
+  audience: string[];
+  topic: string;
+  max_rounds: number;
+  convergence_criterion: DelphiConvergenceMode;
+  convergence_reward_copper: number;
+  phase: DelphiPhase;
+  current_round: number;
+  phase_started_at: string | null;
+  blind_gate_active: boolean;
+  /**
+   * LOCKED v2 §6.3 — default false (normal mode); true disables the
+   * DM-to-moderator carve-out for stricter blind protocols.
+   */
+  blind_gate_strict: boolean;
+  submission_soft_floor_secs: number;
+  submission_hard_floor_secs: number;
+  review_floor_secs: number;
+  started_at: string;
+  rounds: DelphiRound[];
+}
+
+/**
+ * Spec §4.1 — lifecycle event in delphi-discussions.jsonl. Tagged union by
+ * `event` discriminant. Mirrors Rust `DelphiEvent` enum's serde
+ * (tag = "event", rename_all = "snake_case").
+ */
+export type DelphiEvent =
+  | {
+      event: "initiate";
+      discussion_id: number;
+      timestamp: string;
+      moderator: string;
+      participants: string[];
+      audience: string[];
+      topic: string;
+      max_rounds: number;
+      convergence_criterion: DelphiConvergenceMode;
+      convergence_reward_copper: number;
+      submission_soft_floor_secs: number;
+      submission_hard_floor_secs: number;
+      review_floor_secs: number;
+      blind_gate_strict: boolean;
+    }
+  | {
+      event: "round_opened";
+      discussion_id: number;
+      round: number;
+      prompt: string;
+      timestamp: string;
+    }
+  | {
+      event: "submission";
+      discussion_id: number;
+      round: number;
+      seat: string;
+      content_hash: string;
+      revision_number: number;
+      timestamp: string;
+    }
+  | {
+      event: "round_closed";
+      discussion_id: number;
+      round: number;
+      aggregate_message_id: number;
+      submissions_count: number;
+      non_submitters: string[];
+      unshuffle_seed: string;
+      timestamp: string;
+    }
+  | {
+      event: "audience_question";
+      discussion_id: number;
+      round: number;
+      from: string;
+      question: string;
+      timestamp: string;
+    }
+  | {
+      event: "react";
+      discussion_id: number;
+      caller: string;
+      emoji: string;
+      timestamp: string;
+    }
+  | {
+      event: "kicked";
+      discussion_id: number;
+      seat: string;
+      reason: string;
+      timestamp: string;
+    }
+  | {
+      event: "ended";
+      discussion_id: number;
+      outcome: DelphiOutcome;
+      rounds_completed: number;
+      convergence_reward_distributed_copper: number;
+      reward_recipients: string[];
+      timestamp: string;
+    };
+
+/** LOCKED constants — keep in sync with Rust `pub mod delphi` consts. */
+export const DELPHI_DEFAULTS = {
+  CONVERGENCE_REWARD_COPPER: 0,
+  MAX_ROUNDS: 5,
+  SUBMISSION_SOFT_FLOOR_SECS: 180,
+  SUBMISSION_HARD_FLOOR_SECS: 360,
+  REVIEW_FLOOR_SECS: 300,
+  AUDIENCE_QUESTION_RATE_LIMIT_SECS: 60,
+  AUDIENCE_QUESTION_QUEUE_CAP: 5,
+  REACT_RATE_LIMIT_PER_MIN: 3,
+  REACT_RATE_LIMIT_WINDOW_SECS: 60,
+  MODERATOR_VACANCY_TIMEOUT_SECS: 300,
+  MIN_PARTICIPANTS: 2,
+} as const;
+
 // ==================== Team Roster Types ====================
 
 /** Computed status for a roster slot */
