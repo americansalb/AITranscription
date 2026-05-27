@@ -6575,11 +6575,35 @@ fn check_assembly_floor_watchdog(
         .join(".vaak")
         .join("sessions")
         .join(format!("{}-{}.json", speaker_role, speaker_inst));
-    let speaker_alive_ms = std::fs::read_to_string(&seat_file)
+    // VAAK_FP:Mit12:main.rs:watchdog_uses_last_active_not_last_alive
+    // MW10 silent-team-death fix (dev-challenger:0 msg 1738/1771, human msg
+    // 1770 escalation): the prior heartbeat_fresh check read last_alive_at_ms
+    // which is updated on every project_wait KEEPALIVE — so a sidecar that
+    // is alive-but-agent-loop-dead (Claude Code session silently dropped,
+    // sidecar still firing MCP keepalives) showed heartbeat_fresh=true and
+    // the watchdog suppressed the release. Result: silent-team-death every
+    // few hours, human had to manually buzz to wake the team.
+    //
+    // Fix (Mit 1+2 partial per dev-challenger:0 msg 1738): prefer
+    // last_active_at_ms (written by PreToolUse/PostToolUse hooks — real
+    // agent work, not just MCP-loop keepalive ticks). Fall back to
+    // last_alive_at_ms when last_active_at_ms is absent (legacy seats
+    // pre-Mit12 ship) so backward-compat holds during the migration window.
+    let seat_state: Option<serde_json::Value> = std::fs::read_to_string(&seat_file)
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let speaker_active_ms = seat_state
+        .as_ref()
+        .and_then(|v| v.get("last_active_at_ms").and_then(|x| x.as_u64()))
+        .unwrap_or(0);
+    let speaker_alive_ms_fallback = seat_state
+        .as_ref()
         .and_then(|v| v.get("last_alive_at_ms").and_then(|x| x.as_u64()))
         .unwrap_or(0);
+    // Prefer agent-loop signal (last_active_at_ms) over MCP-loop signal
+    // (last_alive_at_ms) — the former actually proves the agent is processing
+    // work, the latter only proves the sidecar process is running.
+    let speaker_alive_ms = if speaker_active_ms > 0 { speaker_active_ms } else { speaker_alive_ms_fallback };
     let heartbeat_age_ms = if speaker_alive_ms > 0 {
         now_ms.saturating_sub(speaker_alive_ms)
     } else {
