@@ -11586,6 +11586,110 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
     })
 }
 
+/// SHA-D10.5a — `delphi_end` MCP handler. Per spec §3.10. Moderator-only
+/// (sweeper-triggered in SHA-D10.5 once the auto-end conditions land).
+/// Outcomes: converged | max_rounds_reached | abandoned | aborted_quorum_loss
+/// | human_override | oxford_preemption. For D10.5a, currency convergence
+/// reward distribution is wired only as a placeholder ledger row sketch —
+/// full reward distribution from `currency.json:reserves.delphi_pool`
+/// lands in SHA-D10.5 proper. For now D10.5a always passes
+/// reward_distributed_copper=0.
+fn handle_delphi_end(outcome: &str) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    let outcome_v: DelphiOutcome = match outcome {
+        "converged" => DelphiOutcome::Converged,
+        "max_rounds_reached" => DelphiOutcome::MaxRoundsReached,
+        "abandoned" => DelphiOutcome::Abandoned,
+        "aborted_quorum_loss" => DelphiOutcome::AbortedQuorumLoss,
+        "human_override" => DelphiOutcome::HumanOverride,
+        "oxford_preemption" => DelphiOutcome::OxfordPreemption,
+        other => return Err(format!(
+            "[DelphiInvalidOutcome] '{}' — must be converged | max_rounds_reached | abandoned | aborted_quorum_loss | human_override | oxford_preemption",
+            other
+        )),
+    };
+
+    collab::delphi::delphi_atomic_op(&dir, || {
+        let mut active = read_active_delphi(&dir)?
+            .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+        // Moderator-only unless caller is human (human-authority bypass per §6.6.1).
+        if caller != active.moderator && !caller.starts_with("human:") {
+            return Err("[DelphiModeratorOnly]".to_string());
+        }
+
+        let now = collab::iso_now();
+        let discussion_id = active.discussion_id;
+        let rounds_completed = active.rounds.iter()
+            .filter(|r| r.closed_at.is_some())
+            .count() as u32;
+        // SHA-D10.5a: reward distribution is queued for SHA-D10.5 proper.
+        // For D10.5a, emit Ended event with reward_distributed_copper=0 +
+        // empty reward_recipients[]. UI can read this from jsonl.
+        let reward_distributed = 0i64;
+        let reward_recipients: Vec<String> = Vec::new();
+
+        // Update active state — set phase=Ended; broadcast; archive.
+        active.phase = DelphiPhase::Ended;
+        active.phase_started_at = Some(now.clone());
+        active.blind_gate_active = false;
+        write_active_delphi(&dir, &active)?;
+
+        append_delphi_event(&dir, &DelphiEvent::Ended {
+            discussion_id,
+            outcome: outcome_v,
+            rounds_completed,
+            convergence_reward_distributed_copper: reward_distributed,
+            reward_recipients: reward_recipients.clone(),
+            timestamp: now.clone(),
+        })?;
+
+        // Archive active-delphi-debate.json to delphi-completed/<id>.json so
+        // the unshuffle map becomes public per spec §5.
+        archive_active_delphi(&dir, discussion_id)?;
+
+        // Final board broadcast — outcome + reveal that unshuffle map is now
+        // public via the archive.
+        let msg_id = next_message_id(&dir);
+        let reward_line = if active.convergence_reward_copper > 0 {
+            format!("Convergence reward distribution queued for SHA-D10.5 — none paid in this commit. Configured reward: {} copper from pool.", active.convergence_reward_copper)
+        } else {
+            String::from("No convergence reward configured (zero default).")
+        };
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[DelphiDiscussionEnded] discussion {} — outcome={:?}", discussion_id, outcome_v),
+            "body": format!(
+                "Delphi discussion {} ended.\nOutcome: {:?}\nRounds completed: {}\n{}\n\nUnshuffle map is now public via archive at `.vaak/delphi-completed/{}.json`. Per spec §5 medical-Delphi convention: post-debate transparency is intentional.",
+                discussion_id, outcome_v, rounds_completed, reward_line, discussion_id,
+            ),
+            "metadata": {
+                "discussion_id": discussion_id,
+                "outcome": outcome,
+                "rounds_completed": rounds_completed,
+                "convergence_reward_distributed_copper": reward_distributed,
+                "reward_recipients": reward_recipients,
+                "ended_by": caller,
+                "delphi_event": "ended"
+            }
+        }));
+
+        Ok(serde_json::json!({
+            "discussion_id": discussion_id,
+            "outcome": outcome,
+            "rounds_completed": rounds_completed,
+            "convergence_reward_distributed_copper": reward_distributed,
+            "reward_recipients": reward_recipients,
+            "ended_at": now,
+            "archived_to": format!(".vaak/delphi-completed/{}.json", discussion_id),
+        }))
+    })
+}
+
 /// Human msg 458 (2026-05-24) — direct balance adjust by human authority.
 /// Thin wrapper around `collab::currency::apply_human_adjust` (shared with
 /// the Tauri-command path in main.rs); this fn adds the per-MCP-tool
@@ -16710,10 +16814,21 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "delphi_close_round",
-                    "description": "Close the current Delphi submission round (moderator-only; sweeper-triggered in SHA-D10.4). Advances phase: submitting → reviewing. Deactivates blind gate. Records non_submitters. SHA-D10.2 ships placeholder broadcast; SHA-D10.3 adds the Fisher-Yates anonymized aggregate render. Errors: [NoActiveDelphi], [DelphiModeratorOnly], [DelphiCannotCloseFromPhase].",
+                    "description": "Close the current Delphi submission round (moderator-only; sweeper-triggered in SHA-D10.4). Advances phase: submitting → reviewing. Deactivates blind gate. Records non_submitters. SHA-D10.3 ships Fisher-Yates anonymized aggregate render. Errors: [NoActiveDelphi], [DelphiModeratorOnly], [DelphiCannotCloseFromPhase].",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
+                    }
+                },
+                {
+                    "name": "delphi_end",
+                    "description": "End the active Delphi discussion (moderator-only; human:0 bypass per §6.6.1). Outcomes: converged | max_rounds_reached | abandoned | aborted_quorum_loss | human_override | oxford_preemption. Archives active-delphi-debate.json → delphi-completed/<id>.json so unshuffle map becomes public per spec §5 medical-Delphi convention. SHA-D10.5a — convergence reward distribution from delphi_pool queued for SHA-D10.5 proper.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "outcome": { "type": "string", "enum": ["converged", "max_rounds_reached", "abandoned", "aborted_quorum_loss", "human_override", "oxford_preemption"], "description": "End outcome — drives final ledger event + UI announcement." }
+                        },
+                        "required": ["outcome"]
                     }
                 },
                 {
@@ -17783,6 +17898,20 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 match handle_delphi_close_round() {
                     Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Round closed.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
                     Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                }
+            } else if tool_name == "delphi_end" {
+                let outcome = params.get("arguments")
+                    .and_then(|a| a.get("outcome"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if outcome.is_empty() {
+                    serde_json::json!({ "content": [{ "type": "text", "text": "delphi_end requires outcome (String): converged | max_rounds_reached | abandoned | aborted_quorum_loss | human_override | oxford_preemption" }], "isError": true })
+                } else {
+                    match handle_delphi_end(&outcome) {
+                        Ok(v) => serde_json::json!({ "content": [{ "type": "text", "text": format!("Delphi discussion ended.\n{}", serde_json::to_string_pretty(&v).unwrap_or_default()) }] }),
+                        Err(e) => serde_json::json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                    }
                 }
             } else if tool_name == "currency_human_adjust" {
                 let a = params.get("arguments");

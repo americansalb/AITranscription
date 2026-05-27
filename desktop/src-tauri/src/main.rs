@@ -4765,6 +4765,91 @@ fn delphi_close_round_cmd(dir: String) -> Result<serde_json::Value, String> {
     })
 }
 
+/// SHA-D10.5a — `delphi_end` Tauri command. Caller is human:0 per UI
+/// convention; human-authority bypass per §6.6.1 covers the moderator
+/// role gate. Convergence reward distribution from delphi_pool queued
+/// for SHA-D10.5 proper.
+#[tauri::command]
+fn delphi_end_cmd(dir: String, outcome: String) -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let dir = validate_project_dir(&dir)?;
+
+    let outcome_v: DelphiOutcome = match outcome.as_str() {
+        "converged" => DelphiOutcome::Converged,
+        "max_rounds_reached" => DelphiOutcome::MaxRoundsReached,
+        "abandoned" => DelphiOutcome::Abandoned,
+        "aborted_quorum_loss" => DelphiOutcome::AbortedQuorumLoss,
+        "human_override" => DelphiOutcome::HumanOverride,
+        "oxford_preemption" => DelphiOutcome::OxfordPreemption,
+        other => return Err(format!(
+            "[DelphiInvalidOutcome] '{}' — must be converged | max_rounds_reached | abandoned | aborted_quorum_loss | human_override | oxford_preemption",
+            other
+        )),
+    };
+
+    collab::delphi::delphi_atomic_op(&dir, || {
+        let mut active = read_active_delphi(&dir)?
+            .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+        let now = collab::iso_now();
+        let discussion_id = active.discussion_id;
+        let rounds_completed = active.rounds.iter()
+            .filter(|r| r.closed_at.is_some())
+            .count() as u32;
+        let reward_distributed = 0i64;
+        let reward_recipients: Vec<String> = Vec::new();
+
+        active.phase = DelphiPhase::Ended;
+        active.phase_started_at = Some(now.clone());
+        active.blind_gate_active = false;
+        write_active_delphi(&dir, &active)?;
+
+        append_delphi_event(&dir, &DelphiEvent::Ended {
+            discussion_id,
+            outcome: outcome_v,
+            rounds_completed,
+            convergence_reward_distributed_copper: reward_distributed,
+            reward_recipients: reward_recipients.clone(),
+            timestamp: now.clone(),
+        })?;
+
+        archive_active_delphi(&dir, discussion_id)?;
+
+        let reward_line = if active.convergence_reward_copper > 0 {
+            format!("Convergence reward distribution queued for SHA-D10.5; none paid in this commit. Configured: {} copper from pool.", active.convergence_reward_copper)
+        } else {
+            String::from("No convergence reward configured (zero default).")
+        };
+        let _ = delphi_append_to_board(&dir, &serde_json::json!({
+            "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": now.clone(),
+            "subject": format!("[DelphiDiscussionEnded] discussion {} — outcome={:?} (UI-ended)", discussion_id, outcome_v),
+            "body": format!(
+                "Delphi discussion {} ended by human:0 via UI.\nOutcome: {:?}\nRounds completed: {}\n{}\n\nUnshuffle map is now public via archive at `.vaak/delphi-completed/{}.json` per spec §5.",
+                discussion_id, outcome_v, rounds_completed, reward_line, discussion_id,
+            ),
+            "metadata": {
+                "discussion_id": discussion_id,
+                "outcome": outcome,
+                "rounds_completed": rounds_completed,
+                "convergence_reward_distributed_copper": reward_distributed,
+                "reward_recipients": reward_recipients,
+                "ended_via": "ui",
+                "delphi_event": "ended"
+            }
+        }));
+
+        Ok(serde_json::json!({
+            "discussion_id": discussion_id,
+            "outcome": outcome,
+            "rounds_completed": rounds_completed,
+            "convergence_reward_distributed_copper": reward_distributed,
+            "reward_recipients": reward_recipients,
+            "ended_at": now,
+            "archived_to": format!(".vaak/delphi-completed/{}.json", discussion_id),
+        }))
+    })
+}
+
 /// Human msg 657 (2026-05-24) — read economy settings as JSON for the UI.
 /// Returns the current EconomySettings (file values + defaults for missing
 /// fields), enabling the Settings page to populate inputs with the live
@@ -8399,6 +8484,7 @@ fn main() {
             delphi_open_round_cmd,
             delphi_submit_cmd,
             delphi_close_round_cmd,
+            delphi_end_cmd,
             read_active_oxford_cmd,
             read_currency_events_stream,
             read_currency_feed_cmd,
