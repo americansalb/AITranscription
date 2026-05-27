@@ -7793,7 +7793,14 @@ pub mod delphi {
     /// Returns (markdown_body, unshuffle_map). The unshuffle_map is keyed
     /// by anonymous_id → real_seat for moderator-side audit + post-end
     /// public reveal.
-    pub fn build_aggregate(
+    ///
+    /// SHA-D10.3.1a — visibility tightened to `pub(crate)` per evil-arch
+    /// msg 2026 F-EA-SHA-D10.3-OPTIONAL + architect msg 2028 ratification.
+    /// `pub(crate)` is the tightest visibility that still allows binary-
+    /// crate callers (vaak-mcp + main) to reach this; `pub(super)` would
+    /// confine it to the `collab` module, making the cross-binary callers
+    /// fail to compile. Outside the binary crate this is fully private.
+    pub(crate) fn build_aggregate(
         topic: &str,
         round_number: u32,
         submissions: &[DelphiSubmission],

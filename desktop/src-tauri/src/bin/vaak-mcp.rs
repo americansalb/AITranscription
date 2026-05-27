@@ -13377,10 +13377,19 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 let sender_is_participant = active_delphi.participants
                     .iter()
                     .any(|p| p == &from_label);
+                // SHA-D10.3.1a — handoff bypass fix per evil-arch msg 2026
+                // F-EA-SHA-D10.3-BLIND-GATE-HANDOFF-BYPASS + architect msg 2028
+                // ratification. Original D10.3 set was off-by-one: included
+                // "vote" (NOT a valid project_send type) and missed "handoff"
+                // (valid project_send type) — participant could trivially bypass
+                // the gate via type="handoff" and post submission content to
+                // the board, breaking anonymity. Set now matches the project_send
+                // type universe: directive, question, answer, status, handoff,
+                // review, approval, revision, broadcast.
                 let is_broadcast_type = matches!(
                     msg_type,
                     "answer" | "broadcast" | "status" | "directive"
-                        | "review" | "approval" | "revision" | "question" | "vote"
+                        | "review" | "approval" | "revision" | "question" | "handoff"
                 );
                 let to_is_all = to == "all";
                 let to_is_moderator_dm = to == active_delphi.moderator;
