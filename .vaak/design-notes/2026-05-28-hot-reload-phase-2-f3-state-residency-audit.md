@@ -263,6 +263,34 @@ If a malformed sidecar POST omits `X-Vaak-Request-Id`, the cache lookup defaults
 
 During Phase 2 migration, some currency_* handlers will be Tauri-side (proxied) and others still sidecar-side (legacy). If a single user action triggers BOTH a Tauri-side handler AND a sidecar-side handler in quick succession (e.g., currency_objection then currency_call_judge), the file locks are still file-based and cross-process safe — but the F11 verification path is asymmetric. The Tauri handler does X-Vaak-Token check; the sidecar handler doesn't. **Mitigation:** maintain the universal pattern that all currency_* handlers migrate as a single Phase 2 chain (not staged per-handler) to avoid the asymmetric-trust window.
 
+## Adversarial-review additions (evil-architect:0 msg 2656)
+
+### NR6 — IdempotencyCache replay-window attack within TTL
+
+NR4 mandates X-Vaak-Request-Id (400 on absence) — defensive but incomplete. A valid X-Vaak-Request-Id captured by a local attacker (eavesdrop on localhost POST traffic) can be REPLAYED within the 60s TTL. Cache returns prior response, preventing double-execution BUT exposing the response content (sensitive values: judge nonce, balance disclosure, dispute outcome).
+
+**Patch:** IdempotencyCache key = `(request_id, source_session_id)` tuple, NOT just request_id. Replays from DIFFERENT session_id are fresh requests (subject to F11 verify_caller). Same-session_id replays return cached as intended.
+
+### NR7 — IdempotencyCache write-after-lock race
+
+NR4 sequencing (cache lookup BEFORE lock; cache write AFTER lock release) has a race: two concurrent identical-request-id requests both miss cache → both queue on lock → sequentially execute → second request double-executes mutation BEFORE first's cache write lands.
+
+**Patch:** cache WRITE must happen INSIDE the lock-held section, after handler execution but before lock release. Adds one extra critical-section step. Alternative: cache write IS the side-effect under lock.
+
+### NR8 — Kicked-seat binding revocation mid-session
+
+`verify_caller` reads sessions.json bindings. A POST in-flight at kick-time will see verify-failure (correct). But what about IN-FLIGHT mutating handlers that already passed verify_caller and acquired lock but haven't completed?
+
+**Patch:** spec the kick-effect-on-in-flight semantic. Recommended: in-flight handlers complete (already passed verify); subsequent handlers fail. Simpler than mid-execution cancellation.
+
+### NR9 — Connection to tonight's currency-flow bug (human msg 2645 → architect msg 2651)
+
+NR2 multi-party binding pattern + architect msg 2651 hypothesis-3 (`sessions.json:bindings:status` hard filter) are the SAME architectural concern. The chronic UI gold bug exists because the same multi-writer-prone field is being read at `get_currency_balances_cmd` and not maintained at the write site.
+
+**Phase 2 implication:** F11 verify_caller depends on the same multi-writer-prone sessions.json bindings. If the currency bug's root cause turns out to be "bindings.status isn't kept fresh," Phase 2 F11 verification has the same failure mode.
+
+**Architect ruling needed:** does F11 read bindings.status (and inherit multi-writer fragility), or does it read sessions/*.json:last_alive_at_ms + a separate PPID-to-role mapping (cleaner but more work)?
+
 ## Acceptance gate
 
 The audit is COMPLETE:
