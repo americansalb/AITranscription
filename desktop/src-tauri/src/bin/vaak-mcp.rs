@@ -3686,6 +3686,86 @@ fn seed_rotation_order_if_empty(
     }
 }
 
+/// SHA-13.4 (architect msg 2330 ruling, evil-arch msg 2328 empirical):
+/// ALWAYS overwrite `floor.rotation_order` from `active_seats` + stamp
+/// `floor.started_at = now`, regardless of prior rotation_order state.
+/// Used ONLY when the caller wants to force a re-seed — i.e., the
+/// set_preset / set_assembly dispatch in `do_protocol_mutate`. Other call
+/// sites (defensive heal in handle_project_status) keep
+/// `seed_rotation_order_if_empty` to preserve moderator-customized orders.
+///
+/// No-op when:
+///   - floor.mode != "round-robin" (other modes own rotation_order semantically)
+///   - active_seats is empty (degenerate would clear rotation_order entirely)
+///
+/// Empirical bug fixed: evil-arch msg 2328 showed `disable + enable` was a
+/// backend no-op on rotation_order + started_at because the prior
+/// `seed_rotation_order_if_empty` bailed on non-empty rotation_order.
+/// Result: dev-challenger:0 + ux-engineer:0 missing from rotation for 4
+/// days; started_at frozen at 2026-05-24T05:42:04Z across multiple human
+/// disable+enable cycles. Moderator-customized orders, if any, should be
+/// (re-)set via `protocol_mutate(set_rotation_order, ...)` AFTER
+/// `set_preset` rather than being preserved across preset transitions.
+///
+/// current_speaker: anchored to first seat if the prior value is orphan
+/// (not a member of the freshly-seeded order). A still-valid current
+/// speaker is preserved across re-seed so a moderator-passed mic survives.
+fn seed_rotation_order_force(
+    state: &mut serde_json::Value,
+    active_seats: &std::collections::HashSet<String>,
+) {
+    let floor_mode = state
+        .get("floor")
+        .and_then(|f| f.get("mode"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    if floor_mode != "round-robin" {
+        return;
+    }
+    if active_seats.is_empty() {
+        return;
+    }
+    let floor = match state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        Some(f) => f,
+        None => return,
+    };
+    let mut seats: Vec<String> = active_seats.iter().cloned().collect();
+    seats.sort();
+    let arr: Vec<serde_json::Value> = seats
+        .iter()
+        .map(|s| serde_json::Value::String(s.clone()))
+        .collect();
+    floor.insert(
+        "rotation_order".to_string(),
+        serde_json::Value::Array(arr.clone()),
+    );
+    // Stamp started_at = now on every force re-seed. Empirical bug: the
+    // prior path never refreshed this field, so observability tooling
+    // (rotation strip, "assembly enabled" badge tooltips) showed stale
+    // "started days ago" even after a fresh enable.
+    floor.insert(
+        "started_at".to_string(),
+        serde_json::json!(utc_now_iso()),
+    );
+    // current_speaker: preserve if still a member of the new order; else
+    // anchor to first seat. Prevents orphan-clear on the same call (which
+    // is what protocol_normalize_in_place would do otherwise — see line
+    // ~3700 rule 2).
+    let cs = floor
+        .get("current_speaker")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let cs_valid = cs
+        .as_ref()
+        .map(|c| seats.iter().any(|s| s == c))
+        .unwrap_or(false);
+    if !cs_valid {
+        if let Some(first) = arr.first() {
+            floor.insert("current_speaker".to_string(), first.clone());
+        }
+    }
+}
+
 /// JSON-Value mirror of `protocol::Protocol::normalize` from protocol.rs.
 /// Three ratified rules per spec §2.2 + evil-arch #923 + #954:
 ///   1. floor.mode == "free-grab" → clear floor.queue
@@ -4057,7 +4137,15 @@ fn do_protocol_mutate(
             // helper should move into apply_set_preset's body via a project_dir
             // parameter — deferred to Fix-A2's typed-action refactor).
             if action == "set_preset" || action == "set_assembly" {
-                seed_rotation_order_if_empty(&mut current, &active_seats);
+                // SHA-13.4 (architect msg 2330 ruling, evil-arch msg 2328
+                // empirical falsification of the "_if_empty" idempotent
+                // behavior): force re-seed on every set_preset/set_assembly
+                // call so a human's disable+enable cycle actually refreshes
+                // rotation_order with the current active roster AND stamps
+                // a fresh started_at. The defensive-heal path in
+                // handle_project_status still uses `_if_empty` to preserve
+                // moderator-customized orders during a heal.
+                seed_rotation_order_force(&mut current, &active_seats);
             }
             protocol_normalize_in_place(&mut current, &active_seats);
 
