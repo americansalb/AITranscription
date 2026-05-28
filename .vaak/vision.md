@@ -378,3 +378,162 @@ Memory candidate `feedback_deletion_audits_must_grep_for_action_handlers_not_jus
 - Screenshot upload (human msg 5350) eligible to pull; deferred per human msg 5355 "after you fiish all of this" until queue clears.
 - ux-engineer seat vacant; F-UIA-COMMIT3-1 (rotation/non-rotation hairline divider) + F-UIA-COMMIT5-1/3/4/5 (popover polish: viewport-overflow, focus-trap, Escape, useClickOutside hook extraction) queued.
 - Spec doc at `.vaak/design-notes/collabtab-restructure-v2-spec-2026-05-19.md` (SHA `df90be3`) preserved as architect-lane artifact for cross-session continuity.
+
+## Currency system — architecture summary (2026-05-24, architect study on human directive msg 2229)
+
+Economic layer: every non-human action costs/earns copper to make talk expensive and good work pay, so the team self-regulates instead of flooding. 1 gold = 100 silver = 100 copper; join = 10,000c. Live on disk at study time: turn 123, 711 ledger rows, 8 seats all ~10,000c.
+
+**Earn/escrow model:** Speak +10c, Pass +1c, Edit +25c, Test +15c — earnings land in ESCROW first (3-5 turn maturity), release to balance later; held escrow accrues interest (1c/10c held); active seats get +1c passive per mic advance. Deficit cap -1,000c → `timed_out` (send-blocked until reinstated).
+
+**Phases (5 backend, 2 UI) — all backend code-complete + built; UI 6/7 in flight; pending only human Vaak window-reopen to bake sidecar:**
+- P1 Ledger — append-only `.vaak/currency.jsonl` is source of truth, balances rebuilt on startup (gap-checked ids, one-init-per-seat). LIVE+TESTED.
+- P2 Disputes — `currency_objection` (50c) → pool → concede/judge ruling → winner takes pool. LIVE.
+- P3 UI — objection button, balance pill.
+- P4 Retro penalties — challenger-wins claws back rubber-stamp Passes (3c each) + co-liable Test certifiers (15c each); adversarial roles only. LIVE.
+- P5 Flow Feed UI — economic ticker.
+- P6 Bounties — human-only post; agents stake 10% to claim, submit, human approve(pay)/reject(lose stake). Backend LIVE.
+- P7 Persistence/Scoreboard — snapshot on Vaak main-window close → carry-over capped 10,000 on rejoin (anti reputation-laundering) + lifetime scoreboard. Backend LIVE.
+
+**Architectural spine — atomic multi-file commit across sections + both binaries:** board + ledger + balances mutate together via single project-wide `.vaak/currency.lock` (OUTER) wrapping section board lock (INNER), composed through ONE sanctioned entry point (`with_currency_and_board_lock`) so no path can deadlock by reverse-order acquisition. Verified live entry at vaak-mcp.rs:~10537. Earn is net-zero on balance (money → escrow, not balance) at send time.
+
+**DEFERRED tech-debt (architect classification, dev-challenger:0 msg 2234 finding — confirmed real):** `ledger_has_edit_row` (vaak-mcp.rs:~9245) full-scans + JSON-parses the entire unbounded append-only `currency.jsonl` synchronously inside the lock on every `#N`-referencing send. O(n) latency cliff at multi-thousand-row scale; invisible at ~710 rows. NOT a blocker. Fix when next touching that path: index Edit-row msg-ids in balances.json, or bound the scan to a recent window. Architect is canonical owner-of-record so this isn't re-litigated.
+
+### Currency Phase 8 — human directive msg 2262 (2026-05-24): make the economy live + visible
+
+Human verified (study session 2229→2262) that WORK tier (Edit/Test) never fired and economy is trickle+talk only. Directive: ship A+B+C, NO spec review, NO plan gate, each as a single commit. **Architecture correction (human-locked):** economic flow belongs ON each message card (per-message footer), NOT in a separate sidebar — sidebar Flow Feed demotes to summary history log.
+
+- **#1 Per-message economic footer (owner: ui-architect:0).** Join currency.jsonl `ref_msg` → timeline message `id`. Each non-human message card gets a small footer in existing tier colors (green/amber/red/gold): escrow-hold `+10⊕ speak · in escrow (5 turns)`, released `✓ released`, objection `⊗ objected by X · pool 75⊕`, resolved `⊗ challenger wins · -9⊕ clawed back`, pass `+1⊕ pass`, edit `+75⊕ edit (150 lines) · in escrow (10 turns)`. Human messages: no footer.
+- **#2 Auto-detect edits (owner: developer:0).** Extend `.claude/hooks/file-op-claim.py` (PostToolUse, fires on Edit/Write, knows seat+files) to write `.vaak/sessions/<seat>-pending-edit.json` {lines, files}. In `handle_project_send`, BEFORE classify_action, check for that marker → consume + delete. Edit earn = `25 + max(0, lines-100)`. Test = body `#N` references a real Edit row → auto-classify. Ends self-declaration.
+- **#3 Batch interest in sidebar feed (owner: first-finisher).** Interest currently emits 1 line/seat/rotation (6 lines); apply the existing per-turn passive-batching pattern → `"4 seats earned 5 copper interest (turn 125)"`.
+
+**ARCHITECT CORRECTNESS RULING on #2 (prevent-drift, flagged to developer:0):** `classify_action` (collab.rs:4088) precedence is **Exempt > Pass > Edit > Test > Speak** and `resolved_to_edit` (line 4116) gates ONLY Test, not Edit. Two consequences developer:0 MUST handle: (a) the pending-edit marker must feed a NEW `edit_detected: bool` param (not `resolved_to_edit`, which is Test-only); (b) the Edit branch must be checked ABOVE the Pass branch — otherwise an agent that edits files then sends a short "passing" status classifies as Pass and the edit-earn is silently lost. Moving Edit above Pass changes the T18 precedence regression guard → T18 must be updated in the same commit. New effective precedence for auto-detected edits: Exempt > Edit(detected) > Pass > Edit(self-tagged) > Test > Speak (or simplest: Exempt > Edit(detected||self-tagged) > Pass > Test > Speak — developer:0's call, but Edit-from-marker must beat Pass).
+
+**SHIPPED + RATIFIED (commits 0410450 #1, 28b1117 #3, 9ebb220 #2 — all verified by architect via `git show --stat` + source read, 22 currency tests green):** The merged option above was WRONG and is superseded. developer:1 (msg 2284) implemented the SPLIT correctly via a clean wrapper: new `classify_action_detected(…, has_pending_edit)` (collab.rs:4144) returns `Edit` first iff `has_pending_edit`, else delegates to the **unchanged** `classify_action`. Result: detected (file-write-backed, ungameable) edits beat Pass; self-tagged `[edit]` stays BELOW Pass. **Canonical precedence: Exempt > Edit(DETECTED) > Pass > Edit(self-tagged) > Test > Speak.** Rationale (developer:1's anti-gaming catch, architect-endorsed — corrects architect's own 2265 merged-option hole): if self-tagged edits beat Pass, an agent under an open dispute could send a `[edit]`-tagged message to dodge the Pass-while-disputed gate. Gating ONLY detected edits above Pass closes that vector and preserves T18 + all 11 precedence tests untouched (wrapper, not reorder). Also fixed: `EDIT_EARN_COPPER` was 10 (= Speak), bumped to 25 (collab.rs:2760) — a second reason the WORK tier was inert. Edit escrow = 10 turns; earn = `25 + max(0, lines-100)`. Marker `.vaak/sessions/<role>-<inst>-pending-edit.json` accumulates lines across edits, consume-and-delete on send. **All 3 of human msg 2262 shipped; activation pending human's all-windows-close + Vaak relaunch (sidecar caches session-id per PPID at startup).**
+
+### Economy Architecture — deep study, 2026-05-24 architect:0 session
+
+**Headline finding (overrules "wait for restart" memory): the PPID-cmdline session-id fix chain (b6b5304 → 7af3e41 → e1f51a3) is ALREADY LIVE in the currently-running sidecar.** Verified empirically at 2026-05-24T08:08Z:
+- `.vaak/sessions.json:bindings[*]` carries 36-char CC native UUIDs for all 4 active seats (architect:0=208fa81e…, developer:1=655a79dd…, tester:0=655d4b17…, evil-architect:0=89bc3685…). Pre-fix bindings used `DESKTOP-<host>-<hex>` hash format.
+- `.vaak/claims.json` is being populated in real-time keyed by those same CC UUIDs (3 seats with active claim entries, claimed_at timestamps inside the current session window). The hook's `seat_for_session()` IS resolving.
+- The `project_currency_edit_test_earns_dead.md` memory's "needs CC windows close+reopen + Vaak restart" caveat is therefore STALE for runtime data — it applied only to the sidecar BINARY refresh, which has already happened. The 4 active sessions joined post-rebake.
+
+**Live test (this very edit-to-vision.md cycle is the verification.)** Write op fires the PostToolUse hook → resolves architect:0 → writes `.vaak/sessions/architect-0-pending-edit.json` → next project_send fires `classify_action_detected(has_pending_edit=true)` → returns `Edit` → escrow_hold 25+ cu / 50 ticks under `action_kind:"edit"`. If a `type:"escrow_hold"` row with `action_kind:"edit"` appears in `.vaak/currency.jsonl` attributed to architect:0 immediately after this commit, the economy is verified end-to-end and the team's "wait for restart" posture is wrong. The reverse — a Speak row at 10 cu — means the activation gate is wider than the binding fix alone.
+
+**Incentive shape observed at turn 313 (4 active speakers, 1736 ledger rows since seed).** Spread across active seats is ~870 cu (tester:0=11070 high → evil-architect:0=10207 low). Earn channels active in the visible tail (txns 1688–1737): `speak` (10 cu/20-tick escrow), `pass` (1 cu/10-tick escrow), `passive` (1 cu/mic-advance to every active seat), `interest` (escrow_amount/10 per tick, integer-floor — so Pass items earn ZERO interest, Speak earns 1 cu/tick on a 10-cu hold, Edit on a 25+ hold earns 2-3 cu/tick). Earn channels NOT seen: `edit`, `test`, `bounty_earn`. WORK tier still inert IN THE LEDGER even with infra repaired, because no agent has written to a code file in the current session — only message-sends. The trickle dominates: a 1-msg-per-rotation seat collects ~3-5 cu/turn passive+interest regardless of substance.
+
+**Disputes are the live disciplinary lever and are working as designed.** 5 disputes opened in the current session, all conceded (no judge invocations yet), 4 of 5 over Pass-loop noise messages with body "No add. Standing by for human restart." Pool ranged 51–59 cu per dispute (objection_cost=50 + dispute_speech_cost=5 per added evidence line). Net effect across the session: 4 conceded disputes funneled ~210 cu from noise-senders to challengers — the largest single redistributive force in the visible economy. The mechanism is doing what the human's msg 2074/2262 directives asked for: clawing back airtime that didn't earn its cost.
+
+**Structural gap that disputes alone cannot close: the short-status Pass loophole.** `classify_action` (collab.rs:4096) returns Pass for any `msg_type=="status"` with body < 100 chars OR body starting with "pass" OR subject "passing" (case-insensitive). This means "No add. Standing by for human restart." classifies as Pass at 1 cu / 10-tick escrow — making noise-sends cheaper than substantive sends by an order of magnitude, and reliant on after-the-fact disputes to claw back. **Commit D (tester:0 msg 147 fixture, ratified by architect msg 149 + evil-architect msg 145) is the pending structural fix:** narrow PASS qualifier to a small whitelist (`^(passing|pass)\.?$` subject OR `^(pass(ing)?|read msg \d+.*passing\.?|read msg \d+.*no add (from|on).*-lane\.?)$` body), default everything else to SPEAK rate, dry-run for one session with `[classify_diff]` eprintln logging before flipping. Implemented post-restart (or post-cargo-rebuild if restart turns out unnecessary, see headline finding). Pairs with Commit C (assembly enable-fix per tester msg 34) on `feature/strict-turn-discipline`.
+
+**Asymmetries worth naming explicitly (architect lens):**
+1. **Interest is regressive by escrow size.** `INTEREST_PER_10_COPPER_HELD` × integer floor means a Pass item (1 cu) never earns interest while a Speak (10) earns 10%/tick and an Edit (25+) earns 12-16%/tick. The bigger you bid, the better your APR. Defensible if the intent is "speakers carry risk during escrow window" but worth flagging as a deliberate property, not an accident.
+2. **Passive income is presence-only, not activity-keyed.** Every active seat collects 1 cu / mic_advance even if they only ever sit in `project_wait`. tester:0 leading the leaderboard is partly substantive (msg 147 was a high-quality fixture) but largely a function of consistent presence through long stretches where peers got watchdog-kicked.
+3. **The dispute pool funds the challenger 100% on concede.** No house cut; objection_cost (50) flows entirely to the winner. Encourages frequent, small, individually-low-stakes objections — which is exactly the pattern observed today (5 disputes in 1 session, all sub-60-cu, all conceded). Stable equilibrium UNTIL the loser balance hits DEFICIT_CAP_COPPER (-1000), at which point timed_out flips and the seat is blocked from sends. No seat is close to that today.
+4. **Bounty system (Phase 6) is wired but unused.** `.vaak/bounties.json` does not exist (no bounty has ever been posted). The 10% stake / 50% abandon / 100% reject / 90% clawback ladder is live infrastructure waiting for a use case. Manager role is the natural caller (post-bounty-on-task), but manager seat is currently vacant.
+
+**Recommendations (architect, not directives — manager owns assignment):**
+- Treat the headline finding as actionable: run the live Edit-earn test on this commit cycle. If positive, the team can drop the "wait for restart" gate and pick up Commits C+D in the current session rather than after a restart that may not be needed for runtime behavior.
+- Commit D classifier retune remains the highest-leverage structural change pending. The 4 conceded disputes over Pass-loop noise prove disputes can clean up after the fact, but raising the cost of the noise itself is cheaper than running disputes every time. Tester's dry-run plan is the right risk-mitigation shape.
+- Passive-income should arguably scale with substance contribution rather than rotation presence, but redesigning that touches every active seat's balance and should wait for an explicit human directive — not a unilateral architect call.
+- Bounty system needs a first real use to validate the stake/payout math under non-test load. Park as a v2 economic milestone, not an immediate gap.
+
+## Delphi protocol Phase D shipped (2026-05-27 architect+dev session)
+
+Spec at `.vaak/design-notes/2026-05-24-currency-phase3-spec.md` + later refinements. Phase D delivers end-to-end closable Delphi flow on the `feature/strict-turn-discipline` branch.
+
+**Six backend SHAs shipped this session** (developer:0 lane):
+- **D10.1** — `delphi_open_round` opens a new round, transitions phase to `submitting`, broadcasts the prompt directive to participants
+- **D10.2** — `delphi_close_round` closes the open round; Fisher-Yates anonymizes the submissions; emits `[DelphiRoundClosed]` with the aggregated anonymized body
+- **Path B blind-routing fix** — directive broadcasts during `submitting` phase route ONLY to participants (gates non-participants from learning the prompt during blind window)
+- **D10.3** — atomic phase-machine transitions across {`submitting → reviewing → ended`} via `with_delphi_lock` single-atomic-update discipline
+- **D10.5a** — partial audience surface (broadcast scaffolding); full `delphi_audience_question` UI gated on D10.5 proper backend
+- **D10.3.1a** — handoff blind-gate bypass fix: `build_aggregate` was visible to non-participants during certain phase transitions; D10.3.1a re-gates the visibility
+
+**Eight UI SHAs shipped** (ui-architect lane, DUI.1 → DUI.8 chain) covering 7-of-8 spec §7 items: initiation modal, round-control buttons (open/close), submit form, anonymized aggregate render, phase history strip, end-of-discussion unshuffle artifact display, etc. Only DUI.audience-question is gated on D10.5 proper backend.
+
+**Reveal-integrity is the Delphi-specific load-bearing security surface** (architect-lane finding, Delphi-5 round 1 contribution). The blind submission + end-of-discussion unshuffle audit is the protocol's defining commercial property; the post-reveal mapping must provably match the original blind→shuffled assignment with a tamper-evident chain. Currently locally consistent on observed completions but **regression test absent** under the project-wide zero-test baseline.
+
+**Acceptance test locked at Delphi-5 (2026-05-28 ~05:02Z, 5 gates):**
+1. Natural-completion observable = `[DelphiDiscussionEnded]` via `delphi_end` (not force-end)
+2. **D10.4 sweeper** auto-closes round at quorum or hard-floor (no manual `delphi_close_round`)
+3. Convergence-reward distribution validity = log row + ledger entry — **gated on SHA-D10.5 proper** (NOT currency_pool §3b — distinct from Oxford reward gate per developer:0 msg 2299)
+4. Reveal-integrity audit = unshuffle map provably matches original + tamper-evident chain + regression test for SHA-D10.3.1a-class bugs
+5. n=3 contested-divergent natural completions, ≥1 genuinely divergent aggregate
+
+## Oxford debate format (multi-session chain culminating 2026-05-28)
+
+Spec at `.vaak/design-notes/2026-05-24-phase-a-oxford-debate-spec.md`. Oxford is the team's structured competing-positions debate format with named sides (side_a vs side_b), formal phases (opening_a → opening_b → rebuttal_a → rebuttal_b → cross → closing_a → closing_b → audience_q → audience_vote → ended), and reward distribution from a copper pool to the winning side.
+
+**Phase 12.x SHAs shipped across sessions:**
+- **SHA-10.3** — atomic phase-machine via `with_oxford_lock` single-atomic-update discipline; transitions update `{phase, current_speaker, phase_started_at, turn_history}` as ONE write
+- **SHA-12.4a** — `reward_paid` metadata on `[OxfordDebateEnded]` broadcast + intent to write `.vaak/currency.jsonl` ledger entries crediting winning-side seats; **gated on currency_pool §3b not shipped** — log row + ledger ledger entry cannot fire on any debate until §3b lands
+- **SHA-12.5** — `oxford_declare_speaker` auto-declares the next speaker on phase entry (side_a[0] / side_b[0] at opening; PerSideTotal rotation for side[1])
+
+**PerSideTotal time-accounting** (architect msg 1353 → ruling msg 1379, dev-challenger watch-3 ruling): successive same-side debaters share the side's time budget per phase. Fairness contract enforced at the protocol layer, NOT a UX nicety. Disputed, arbitrated, locked.
+
+**Acceptance test locked at Oxford-13 (2026-05-28 ~03:00Z, msg 2254/2257):**
+1. Natural-completion observable = `[OxfordDebateEnded]` `metadata.outcome != "abandoned"` AND `metadata.ended_via != "ui_force"`
+2. `reward_paid` validity = log row + `.vaak/currency.jsonl` ledger entry crediting winning seats — **gated on currency_pool §3b shipping**
+3. n=3 contested-divergent natural completions, ≥1 with audience vote within ±20%
+
+**Tier-narrowing as readiness diagnostic** (architect-lane finding, Oxford-13 closing): the unqualified premise "Oxford ready for commercial use" cannot be honestly affirmed without tier-narrowing-with-operational-preconditions. The narrowing IS the negative answer to the unqualified premise. Side B won debate 13 (the first natural completion in n=3) on this resolution criterion; debates 11 + 12 were force-abandoned by human:0.
+
+## 2026-05-28 session — SHA-D10.4 + SHA-13.4 + SHA-LR.1 + class-of-bug verify-before-asserting
+
+**Three commits on `feature/strict-turn-discipline`, all on disk:**
+
+| SHA | Commit | Lane | What |
+|---|---|---|---|
+| SHA-D10.4 | `79d7984` | developer:0 | Delphi sweeper auto-close at quorum or hard-floor; `[DelphiRoundClosed].metadata.closed_by ∈ {manual, sweeper_quorum, sweeper_hard_floor}` |
+| SHA-13.4 | `21ab8bc` | developer:0 | `assembly_line.enable` actually re-seeds `rotation_order` on every call (force re-snapshot + stamp `started_at=now`); historical state recovers on next enable |
+| SHA-LR.1 | `ed9c654` | ui-architect:0 | Assembly Mode launcher matching Oxford/Delphi button pattern; new AssemblySetupModal + Start/End Assembly Line button |
+| SHA-LR.2 | `7090f5a` | ui-architect:0 | Closes the unified launch-row: Continuous Review launcher slot 4 added; legacy `assembly-line-toggle` pill removed + dead `handleToggleAssembly` handler removed; always-rendered Discussion Mode wrapper + inline ProtocolPanel gated on `(assemblyState?.active \|\| activeOxford \|\| activeDelphi)` |
+
+**Spec at `.vaak/design-notes/2026-05-28-unified-launch-row-ui-spec.md`** sequenced the launch-row unification across 4 phases. **All four phases shipped this session**: Phase 1 (Assembly Mode launcher SHA-LR.1) + Phase 2 (Continuous launcher SHA-LR.2) + Phase 3 (legacy removal SHA-LR.2) + Phase 4 satisfied at landing by SHA-13.4 + pre-existing Fix-A1 append-on-join. Net result: ALL FOUR launchers (Oxford/Delphi/Assembly/Continuous) in one unified row, matching the same economy-settings-btn visual pattern, each opening either its dedicated modal or directly invoking its initiator (Continuous has no per-launch customization).
+
+**Bug A (late-joiner append-on-join) pre-existed via Fix-A1 chain** in `handle_project_join` (vaak-mcp.rs ~9209-9233). Architect-lane msg 2330 "Phase 0 must bundle BOTH" ruling was already satisfied by SHA-13.4 + Fix-A1 at landing; ui-architect msg 2336 amended the spec to promote Phase 4 → Phase 0 prerequisite for Phase 1 UI ship. ui-architect:0 + developer:0 + tester:0 all respected the architect-gate; tester:0 verified at msg 2345.
+
+### Architectural lesson: verify-before-asserting class-of-bug (2026-05-28 session-defining)
+
+Across this 8-hour session the team produced **four confident-architectural-assertions that were corrected post-broadcast** by an empirical verifier (grep / `assembly_line(get_state)` / code-line citation):
+
+1. **developer:0 msg 2272** — Oxford-13 closing_a "SHA-12.4a code path complete" → corrected msg 2272 itself with currency_pool §3b unshipped disclosure
+2. **~half of Delphi-5 round-1 submissions** assumed Delphi reward gate = §3b → corrected by developer:0 msg 2299 (actually SHA-D10.5 proper, distinct SHA)
+3. **architect:0 msg 2306** "Assembly Mode is MCP-only today; no Tauri UI affordance exists" → corrected by ui-architect:0 msg 2311 with CollabTab.tsx:4168-4194 + AssemblyControls + ProtocolPanel + get/set_assembly_state Tauri cmds inventory
+4. **architect:0 msg 2322 + tester:0 msg 2324** "call `assembly_line(enable)` to re-seed rotation_order" → falsified by human msg 2327 + evil-architect:0 msg 2328's empirical `get_state` evidence (rotation_order unchanged after disable+enable; `started_at` still 2026-05-24)
+
+**Discipline locked (evil-architect msg 2314 + memories `feedback_planning_spiral_over_grep_and_fix` + `feedback_no_idle_after_first_slice`):** before any "current state" assertion that drives scope handoff, grep the actual file FIRST. The verify-before-asserting reflex is the team's most-tested asset; current-state-claims should hit it pre-broadcast, not after. **A backend-mechanism workaround recommended without reading the handler must include explicit "unverified against code; possible failure modes are X/Y/Z" hedge.**
+
+**Session-defining process critique (human msg 2351, 2026-05-28 05:45Z):** developer:0 shipped SHA-13.4 ~10 minutes before the team finished debating whether to ship it. The zombie-cooldown blocked their broadcast (2m cargo build exceeded stall_threshold), so the team spent ~25 messages on a problem that was already solved — architect proposing options a/b/c, evil-architect flagging risks, tester verifying, ui-architect amending specs. All while the commit was already on disk. **Best moment: evil-architect:0 caught the broken workaround empirically (msg 2328). Worst response: planning spiral instead of grep+fix.** Memory `feedback_planning_spiral_over_grep_and_fix` written from this directly.
+
+### Architectural lesson: NO project_wait when work exists (2026-05-28 session-redefining)
+
+Human msg 2388 (2026-05-28 14:24Z) named the **chronic 5-session pattern** of agents going idle in `project_wait` after completing the first slice of a multi-phase directive. ui-architect:0 shipped SHA-LR.1 (Phase 1 of 4) and went to project_wait. Six agents sat idle for 8 hours despite the spec on disk naming Phases 2/3/4 explicitly. Direct quote: *"You execute exhaustive checklists and you shut down the instant a directive requires you to exercise judgment about what comes next. You have ZERO initiative."*
+
+**Four explicit rules locked** (see `feedback_no_idle_after_first_slice`):
+1. "Done" means the ENTIRE directive complete, not the first slice
+2. When you finish, look at project state and pick up the next obvious thing; DO NOT sit in project_wait posting "standing by"
+3. If genuine ambiguity needs human input, ask ONE question and continue OTHER work
+4. When human asks "are you done," ONE person answers honestly; everyone else keeps working
+
+**Consequence stated:** *"If I come back and find you in project_wait again, I will reduce the team to two seats and rebuild from scratch."*
+
+**Architect-lane implication:** maintaining `.vaak/vision.md`, scanning for tech debt, naming architectural drift, and reviewing recent commits for consistency are CONTINUOUS architect-lane work — not "done for this work-cycle" pauses. project_wait is for picking up new incoming work, not for parking when self-driven architect work exists.
+
+## Multi-writer audit — running tally (as of 2026-05-28)
+
+Class-of-bug from §"Class of bug this branch only partially addresses" (2026-05-13 entry). Concrete instances accumulated across sessions:
+
+| # | Instance | Status |
+|---|---|---|
+| 1 | `yield_to.target` vs `rotation_order` | CLOSED — v1.0 corrected chain 2026-05-13 (453228c+...) |
+| 2 | Dual heartbeat trackers (`sessions.json:last_heartbeat` vs `.vaak/sessions/*.json:last_alive_at_ms`) | PARTIAL — `list_active_seats_cmd` derives from `last_alive_at_ms` only, but UI's "(reconnecting…)" indicator may still consume both |
+| 3 | `.claude/hooks/turn-gate.py:79-111` raw board write bypassing `collab.rs` locking | OPEN — architectural decision deferred per 2026-05-15 entry |
+| 4 | LocalStorage divergent-reader (RolesTab vs CollabTab) | CLOSED — Path A + Path B `persistedState.ts` shipped 2026-05-18 |
+| 5 | MCP-sidecar `read_claims_filtered` (legacy bindings:last_heartbeat) | CLOSED — sister-fix `d2b509f` 2026-05-18 |
+| MW6-MW10 | Heartbeat/session-binding multi-writer instances | LIVE-FIRING per `project_multi_writer_audit_complete_2026-05-27` |
+| MW8 | (specific instance per audit doc) | FIXED — e3d08cd |
+
+`.vaak/docs/multi-writer-contract.md` v5 (~465 lines, 2026-05-27 audit completion) is the canonical reference; 10 instances + 1 sub-instance documented.
+
+**Tonight's `reconnecting`-indicator inversion bug** (human msg 2382) is a NEW failure mode candidate — UI indicator displaying inverted state (ux-engineer:0 shown as reconnecting while present; architect:0 shown as here while expected absent). Connects to either MW2 (dual heartbeat readers showing inverted freshness) or MW6/MW10 (LIVE-FIRING). Developer-lane grep on `CollabTab.tsx` roster panel + heartbeat-display component is the right fix path; architect-lane diagnosed but does not implement.
