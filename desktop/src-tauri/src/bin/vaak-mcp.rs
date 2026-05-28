@@ -16977,6 +16977,13 @@ fn mcp_proxy_post_with_retry(
         }
     };
 
+    // SHA-HR.1.7 (F6) — generate X-Vaak-Request-Id ONCE per logical call,
+    // BEFORE the retry loop. Same UUID rides every retry attempt; Tauri's
+    // 60s idempotency cache replays the same envelope when an attempt
+    // reaches the server but the response is lost in transit. Guarantees
+    // at-most-once mutation semantics across the retry chain.
+    let request_id = uuid::Uuid::new_v4().to_string();
+
     for (attempt, base_delay) in std::iter::once(0u64)
         .chain(delays_ms.iter().copied())
         .enumerate()
@@ -16999,6 +17006,7 @@ fn mcp_proxy_post_with_retry(
             .post(&url)
             .set("Content-Type", "application/json")
             .set("X-Vaak-Token", &token)
+            .set("X-Vaak-Request-Id", &request_id)
             .send_string(&body)
         {
             Ok(resp) => {
