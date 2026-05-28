@@ -9739,3 +9739,47 @@
 @media (prefers-reduced-motion: reduce) {
   .active-delphi-submissions-fill { transition: none; }
 }
+
+/* ---- AssemblySetupModal (human msg 2305+2313 — Assembly Mode launcher parity with Oxford/Delphi) ---- */
+.asm-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1500; animation: abm-fade 0.12s ease;
+}
+.asm-dialog {
+  background: var(--collab-bg-elevated, #1e1f24);
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-top: 3px solid #137333;
+  border-radius: 8px;
+  width: 480px; max-width: 94vw; max-height: 88vh;
+  display: flex; flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.asm-title { margin: 0 0 4px; font-size: 15px; }
+.asm-subtitle { margin: 0 0 16px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.asm-error { padding: 8px 12px; background: rgba(255, 107, 107, 0.10); border-left: 3px solid #ff6b6b; color: #ff6b6b; font-size: 12px; border-radius: 4px; margin-bottom: 12px; }
+.asm-field { display: block; margin-bottom: 14px; font-size: 12px; }
+.asm-field-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.asm-hint { text-transform: none; letter-spacing: normal; font-size: 10px; font-style: italic; color: var(--collab-text-muted, rgba(255, 255, 255, 0.5)); }
+.asm-required { text-transform: none; letter-spacing: normal; font-size: 10px; color: #ff6b6b; }
+.asm-select {
+  display: block; width: 100%; padding: 6px 10px;
+  font: inherit; font-size: 12px;
+  background: var(--collab-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 4px; color: inherit; box-sizing: border-box;
+}
+.asm-select:focus { outline: 2px solid #137333; outline-offset: 1px; border-color: transparent; }
+.asm-select:disabled { opacity: 0.4; cursor: not-allowed; }
+.asm-select[aria-invalid="true"] { border-color: #ff6b6b; }
+.asm-summary { margin-top: 12px; padding: 8px 10px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.7)); background: rgba(19, 115, 51, 0.08); border-left: 3px solid rgba(19, 115, 51, 0.55); border-radius: 4px; }
+.asm-summary em { color: var(--collab-text-muted, rgba(255, 255, 255, 0.4)); font-style: italic; }
+.asm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10)); }
+.asm-btn { padding: 8px 18px; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2)); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; transition: background 0.12s ease; }
+.asm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.asm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.asm-btn-submit:not(:disabled) { background: #137333; border-color: #137333; color: white; }
+.asm-btn-submit:not(:disabled):hover { background: #0f5a28; }

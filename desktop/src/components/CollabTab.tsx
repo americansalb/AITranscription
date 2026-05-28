@@ -8,6 +8,7 @@ import { AdjustBalanceModal, type AdjustDirection } from "./AdjustBalanceModal";
 import { EconomySettingsModal } from "./EconomySettingsModal";
 import { OxfordSetupModal } from "./OxfordSetupModal";
 import { DelphiSetupModal } from "./DelphiSetupModal";
+import { AssemblySetupModal } from "./AssemblySetupModal";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -991,6 +992,11 @@ export function CollabTab() {
   const [oxfordSetupOpen, setOxfordSetupOpen] = useState(false);
   // Human msg 1939: Delphi discussion setup modal (Oxford-parity build).
   const [delphiSetupOpen, setDelphiSetupOpen] = useState(false);
+  // Human msg 2305+2313: Assembly Mode launcher parity with Oxford/Delphi —
+  // single button row + per-mode config popup. Replaces the always-rendered
+  // sidebar Discussion Mode card pattern the human called "isolated and
+  // inefficient."
+  const [assemblySetupOpen, setAssemblySetupOpen] = useState(false);
   // Per spec §7.1 item 5 — aggregate render with collapse/expand affordance.
   // Keyed by aggregate_message_id so multi-round Delphi reveals can be
   // independently toggled. Defaults to expanded for the latest round.
@@ -6792,6 +6798,58 @@ When multiple instances of this role are active:
                 <span>Start Delphi Discussion</span>
               </button>
             )}
+            {/* Assembly Mode launcher — human msg 2305+2313 parity with Oxford/Delphi.
+                Active state shows End button (parallel to End Oxford/Delphi);
+                inactive state opens AssemblySetupModal. Reads assemblyState
+                from the existing get_assembly_state poll (lines ~2351+). */}
+            {assemblyState?.active ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  if (assemblyToggling || !projectDir) return;
+                  const confirmed = window.confirm(
+                    `End Assembly Line?\n\nCurrent speaker: ${assemblyState.current_speaker ?? "(none)"}\n${assemblyState.rotation_order.length} seats in rotation.\n\nReturns the team to simultaneous-send mode.`,
+                  );
+                  if (!confirmed) return;
+                  setAssemblyToggling(true);
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    const result = await invoke<{
+                      active: boolean;
+                      current_speaker: string | null;
+                      rotation_order: string[];
+                    }>("set_assembly_state", { dir: projectDir, action: "disable" });
+                    setAssemblyState({
+                      active: result.active,
+                      current_speaker: result.current_speaker ?? null,
+                      rotation_order: result.rotation_order ?? [],
+                    });
+                    showToast("Assembly Line disabled.", "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't disable Assembly Line — ${msg}`, "error");
+                  } finally {
+                    setAssemblyToggling(false);
+                  }
+                }}
+                disabled={assemblyToggling}
+                title={`End Assembly Line (current speaker ${assemblyState.current_speaker ?? "(none)"}, ${assemblyState.rotation_order.length} in rotation)`}
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Assembly Line</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={() => setAssemblySetupOpen(true)}
+                title="Start one-speaker-at-a-time mic control with rotation, hand-raise, or moderator-picks mode"
+              >
+                <span className="economy-settings-icon" aria-hidden="true">🔁</span>
+                <span>Start Assembly Line</span>
+              </button>
+            )}
             <button
               type="button"
               className="economy-settings-btn"
@@ -7729,6 +7787,36 @@ When multiple instances of this role are active:
             );
           }}
         />
+
+        {/* Assembly Mode setup modal — human msg 2305+2313 parity build. */}
+        {projectDir && (
+          <AssemblySetupModal
+            open={assemblySetupOpen}
+            projectDir={projectDir}
+            activeSeats={
+              (project?.sessions ?? [])
+                .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
+                .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
+            }
+            currentMicMode={twoControlsProtocol?.floor?.mic_passing_mode as "rotation" | "hand_raise" | "moderator" | undefined}
+            currentModerator={twoControlsProtocol?.floor?.moderator ?? null}
+            currentPreset={twoControlsProtocol?.preset as string | undefined}
+            onClose={() => setAssemblySetupOpen(false)}
+            onStarted={(cfg) => {
+              showToast(
+                `Assembly Line activated — mic=${cfg.mic_passing_mode}${cfg.moderator ? `, moderator=${cfg.moderator}` : ""}.`,
+                "success",
+              );
+              // Optimistic local state; the existing get_assembly_state poll
+              // (lines ~2351) will overwrite with canonical state on next tick.
+              setAssemblyState((prev) => ({
+                active: true,
+                current_speaker: prev?.current_speaker ?? null,
+                rotation_order: prev?.rotation_order ?? [],
+              }));
+            }}
+          />
+        )}
 
         {/* Human balance-adjust modal (replaces window.prompt per ui-arch msg 626) */}
         <AdjustBalanceModal
