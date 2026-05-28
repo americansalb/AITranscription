@@ -3203,13 +3203,28 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     // CAS read current rev from protocol.json.
     let cur_proto = read_protocol_for_section_value(&pd, &section);
     let cur_rev = cur_proto.get("rev").and_then(|v| v.as_u64()).unwrap_or(0);
-    let new_state = do_protocol_mutate(
-        &pd,
-        &actor,
-        &section,
-        "set_preset",
-        serde_json::json!({"name": preset_name}),
-        Some(cur_rev),
+
+    // SHA-HR.1.5 — Phase 1 hot-reload architecture per
+    // `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`.
+    // Replace the sidecar's own do_protocol_mutate call with an HTTP POST to
+    // the Tauri-side endpoint at SHA-HR.1.4 (commit 3588f70). The Tauri
+    // handler at main.rs:do_protocol_mutate_inner set_preset arm (SHA-HR.1.3
+    // commit 48709c0) executes the same dispatch chain via mcp_handlers::
+    // assembly_line. Net effect: behavior change ships via Vaak restart only,
+    // without rebaking this sidecar.
+    //
+    // Retry-with-backoff per architect msg 2426 Q3 + F8 cold-start fold per
+    // dev-challenger msg 2459 + architect msg 2461. Delays
+    // [100ms, 200ms, 500ms, 1s, 2s, 5s, 10s, 10s] with jitter (multiplier
+    // 0.5..1.5). Only ECONNREFUSED retries; 5xx with body does NOT (real
+    // panic path from the Tauri handler is the dispatch error).
+    let new_state = mcp_proxy_post_with_retry(
+        "/mcp/assembly_line",
+        serde_json::json!({
+            "action": "set_preset",
+            "args": { "name": preset_name },
+            "rev": cur_rev,
+        }),
     )?;
     // Project the new protocol.json state back into the legacy shape so
     // old callers' result-handling code keeps working through the
@@ -16893,6 +16908,100 @@ fn get_session_id() -> String {
     generate_fallback_id()
 }
 
+
+/// SHA-HR.1.5 — Phase 1 hot-reload architecture per
+/// `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`.
+///
+/// POST a JSON payload to the Tauri-side `/mcp/<tool>` endpoint at
+/// `127.0.0.1:7865`, retry-with-backoff on ECONNREFUSED, parse the
+/// `{ok, result, error}` envelope, return `result` on success.
+///
+/// Retry delays per architect msg 2426 Q3 + F8 cold-start fold per
+/// dev-challenger msg 2459 + architect msg 2461: `[100ms, 200ms, 500ms, 1s,
+/// 2s, 5s, 10s, 10s]` with jitter (uniform multiplier 0.5..1.5). Only
+/// ECONNREFUSED retries; HTTP 4xx/5xx with body returns the error to the
+/// caller without retry (real Tauri-side dispatch error, not a transient).
+///
+/// Token-ACL auth header (`X-Vaak-Token`) deferred to SHA-HR.1.4.token
+/// follow-on — endpoint ships AUTH-OFF tonight per main.rs strong-warn
+/// comment.
+fn mcp_proxy_post_with_retry(
+    path: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let url = format!("http://127.0.0.1:7865{}", path);
+    let body = payload.to_string();
+    let delays_ms: [u64; 8] = [100, 200, 500, 1000, 2000, 5000, 10000, 10000];
+    let mut last_err: String = String::new();
+
+    for (attempt, base_delay) in std::iter::once(0u64)
+        .chain(delays_ms.iter().copied())
+        .enumerate()
+    {
+        if base_delay > 0 {
+            // Jitter: uniform 0.5..1.5 multiplier on base_delay.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            let jitter_pct = 50 + (nanos % 100); // 50..149
+            let actual = base_delay.saturating_mul(jitter_pct) / 100;
+            std::thread::sleep(std::time::Duration::from_millis(actual));
+        }
+        let client = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_millis(500))
+            .timeout(std::time::Duration::from_secs(30))
+            .build();
+        match client
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .send_string(&body)
+        {
+            Ok(resp) => {
+                let resp_body = resp.into_string().unwrap_or_default();
+                let env: serde_json::Value = match serde_json::from_str(&resp_body) {
+                    Ok(v) => v,
+                    Err(e) => return Err(format!("[VaakAppMalformedResponse] {}", e)),
+                };
+                let ok = env.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                if ok {
+                    return Ok(env.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                } else {
+                    let err = env
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no error message)")
+                        .to_string();
+                    return Err(err);
+                }
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let resp_body = resp.into_string().unwrap_or_default();
+                // 5xx with body = real Tauri-side panic / dispatch error.
+                // Do NOT retry per architect msg 2461 ruling. Per Q2
+                // namespacing the error.
+                return Err(format!("[VaakAppError:{}] {}", code, resp_body));
+            }
+            Err(ureq::Error::Transport(t)) => {
+                // ECONNREFUSED + other transport errors retry per Q3.
+                last_err = format!("{}", t);
+                eprintln!(
+                    "[mcp_proxy] attempt {}/{} transport error: {} — retrying",
+                    attempt + 1,
+                    delays_ms.len() + 1,
+                    last_err
+                );
+                continue;
+            }
+        }
+    }
+
+    Err(format!(
+        "[VaakAppDown] after {} retries (~28.8s + jitter): {}",
+        delays_ms.len(),
+        last_err
+    ))
+}
 
 /// Send a heartbeat to register this session with the Vaak app
 fn send_heartbeat(session_id: &str) -> Result<(), String> {
