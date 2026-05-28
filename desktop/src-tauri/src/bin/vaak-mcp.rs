@@ -11117,6 +11117,13 @@ fn handle_delphi_get_state(include_unshuffle: bool) -> Result<serde_json::Value,
     let dir = state.project_dir.clone();
     let caller = format!("{}:{}", state.role, state.instance);
 
+    // SHA-D10.4 — opportunistic hard-floor sweeper. get_state is the UI's
+    // 2s-poll entry, so this is where hard-floor expiry catches up between
+    // submissions. Quorum is handled inline in handle_delphi_submit. Errors
+    // swallowed: if the round is closing right now we'll just see fresh
+    // reviewing-phase state on the read below.
+    let _ = delphi_sweeper_maybe_close(&dir);
+
     // No lock needed for read — file-system read is atomic at OS level.
     // (Writers acquire the lock; readers just read the most-recent snapshot.)
     let active = match read_active_delphi(&dir)? {
@@ -11358,7 +11365,7 @@ fn handle_delphi_submit(content: &str) -> Result<serde_json::Value, String> {
         return Err("[DelphiSubmitEmpty] content must be non-empty (whitespace-only is rejected)".to_string());
     }
 
-    collab::delphi::delphi_atomic_op(&dir, || {
+    let submit_result = collab::delphi::delphi_atomic_op(&dir, || {
         let mut active = read_active_delphi(&dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
         if !active.participants.iter().any(|p| p == &caller) {
@@ -11457,27 +11464,34 @@ fn handle_delphi_submit(content: &str) -> Result<serde_json::Value, String> {
             "total_participants": total_participants,
             "submitted_at": now,
         }))
-    })
+    })?;
+
+    // SHA-D10.4 — post-submit sweeper check (outside the atomic_op to avoid
+    // lock reentrancy). Quorum trigger fires here when this submission was
+    // the Nth-of-N. Errors are swallowed — the submission already landed and
+    // a benign race with another caller closing first is fine.
+    let _ = delphi_sweeper_maybe_close(&dir);
+
+    Ok(submit_result)
 }
 
-/// SHA-D10.2 — `delphi_close_round` MCP handler. Per spec §3.4. Moderator only
-/// (sweeper-triggered in SHA-D10.4 — for D10.2 it's manual-only).
+/// SHA-D10.4 — auth-free close core. Used by both:
+///   - handle_delphi_close_round (manual moderator-triggered, closed_by="manual")
+///   - delphi_sweeper_maybe_close (auto-triggered; closed_by="sweeper_quorum" or "sweeper_hard_floor")
 ///
-/// SHA-D10.2 ships the close + phase-transition + non_submitters recording
-/// + per-round closed broadcast. Fisher-Yates aggregation + anonymized
-/// rendering land in SHA-D10.3.
-fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
+/// `closed_by` is recorded in the [DelphiRoundClosed] broadcast metadata so
+/// the team can distinguish manual close vs sweeper-triggered close. The
+/// aggregate body also gets a short auto-close annotation when sweeper fires.
+///
+/// History: SHA-D10.2 shipped the close + phase-transition + non_submitters
+/// recording + per-round closed broadcast. SHA-D10.3 added Fisher-Yates
+/// anonymized aggregate. SHA-D10.4 extracts the core so the sweeper can call
+/// it without the moderator auth gate.
+fn delphi_close_round_core(dir: &str, closed_by: &str) -> Result<serde_json::Value, String> {
     use collab::delphi::*;
-    let state = get_or_rejoin_state()?;
-    let dir = state.project_dir.clone();
-    let caller = format!("{}:{}", state.role, state.instance);
-
-    collab::delphi::delphi_atomic_op(&dir, || {
-        let mut active = read_active_delphi(&dir)?
+    collab::delphi::delphi_atomic_op(dir, || {
+        let mut active = read_active_delphi(dir)?
             .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
-        if caller != active.moderator && !caller.starts_with("human:") {
-            return Err("[DelphiModeratorOnly]".to_string());
-        }
         if active.phase != DelphiPhase::Submitting {
             return Err(format!(
                 "[DelphiCannotCloseFromPhase] current phase is {:?} — close requires submitting",
@@ -11508,7 +11522,7 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
             (round.number, round.submissions.len(), non_subs, round.unshuffle_seed.clone(), md, map)
         };
         // Mutate.
-        let aggregate_msg_id = next_message_id(&dir);
+        let aggregate_msg_id = next_message_id(dir);
         {
             let round = active.rounds.get_mut(current_round_idx)
                 .ok_or_else(|| "[DelphiInternalState] current round index out of bounds (mut)".to_string())?;
@@ -11532,9 +11546,9 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
         active.phase_started_at = Some(now.clone());
         active.blind_gate_active = false;
 
-        write_active_delphi(&dir, &active)?;
+        write_active_delphi(dir, &active)?;
 
-        append_delphi_event(&dir, &DelphiEvent::RoundClosed {
+        append_delphi_event(dir, &DelphiEvent::RoundClosed {
             discussion_id: active.discussion_id,
             round: round_number,
             aggregate_message_id: aggregate_msg_id,
@@ -11548,18 +11562,25 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
         // ONLY `Anonymous <letter>:` labels per spec §3.5; unshuffle_map
         // persisted to active-delphi-debate.json `rounds[N].unshuffle_map`
         // (moderator-visible until phase==ended, then public per §5).
+        // SHA-D10.4 — annotate body + metadata when sweeper-triggered.
         let non_subs_line = if non_submitters.is_empty() {
             String::from("(none)")
         } else {
             non_submitters.join(", ")
         };
-        let _ = append_to_board(&dir, &serde_json::json!({
+        let auto_close_line = match closed_by {
+            "sweeper_quorum" => "\n\n*Round auto-closed by SHA-D10.4 sweeper: all participants submitted (quorum).*",
+            "sweeper_hard_floor" => "\n\n*Round auto-closed by SHA-D10.4 sweeper: submission hard-floor reached.*",
+            _ => "",
+        };
+        let _ = append_to_board(dir, &serde_json::json!({
             "id": aggregate_msg_id, "from": "system", "to": "all", "type": "broadcast",
             "timestamp": utc_now_iso(),
             "subject": format!("[DelphiRoundClosed] discussion {} round {} — anonymized aggregate ({} submissions)", active.discussion_id, round_number, submissions_count),
             "body": format!(
-                "{}\n\n---\n\nNon-submitters: {}.\n\nPhase advanced to `reviewing`. Participants may now discuss freely. Audience may post `delphi_audience_question` (SHA-D10.5).\n\nModerator: call `delphi_open_round` for round {}, or `delphi_end(outcome=...)` to conclude. The unshuffle map remains moderator-visible until the discussion ends (then public per spec §5).",
+                "{}{}\n\n---\n\nNon-submitters: {}.\n\nPhase advanced to `reviewing`. Participants may now discuss freely. Audience may post `delphi_audience_question` (SHA-D10.5).\n\nModerator: call `delphi_open_round` for round {}, or `delphi_end(outcome=...)` to conclude. The unshuffle map remains moderator-visible until the discussion ends (then public per spec §5).",
                 aggregate_markdown,
+                auto_close_line,
                 non_subs_line,
                 round_number + 1,
             ),
@@ -11570,7 +11591,8 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
                 "non_submitters": non_submitters,
                 "unshuffle_seed": unshuffle_seed,
                 "phase": "reviewing",
-                "delphi_event": "round_closed"
+                "delphi_event": "round_closed",
+                "closed_by": closed_by
             }
         }));
 
@@ -11582,8 +11604,81 @@ fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
             "phase": "reviewing",
             "aggregate_message_id": aggregate_msg_id,
             "closed_at": now,
+            "closed_by": closed_by,
         }))
     })
+}
+
+/// SHA-D10.4 — manual close handler. Per spec §3.4. Moderator-only
+/// (human:0 bypass). Delegates to `delphi_close_round_core` with closed_by="manual".
+fn handle_delphi_close_round() -> Result<serde_json::Value, String> {
+    use collab::delphi::*;
+    let state = get_or_rejoin_state()?;
+    let dir = state.project_dir.clone();
+    let caller = format!("{}:{}", state.role, state.instance);
+
+    // Auth check (read-only, outside atomic_op so the error path is cheap).
+    let active = read_active_delphi(&dir)?
+        .ok_or_else(|| "[NoActiveDelphi]".to_string())?;
+    if caller != active.moderator && !caller.starts_with("human:") {
+        return Err("[DelphiModeratorOnly]".to_string());
+    }
+    delphi_close_round_core(&dir, "manual")
+}
+
+/// SHA-D10.4 — sweeper. Check if currently-active Delphi should auto-close,
+/// and close if so. Returns `Ok(true)` if a close was triggered.
+///
+/// **Quorum trigger:** all participants have submitted.
+/// **Hard-floor trigger:** elapsed since `round.opened_at` >= `submission_hard_floor_secs`.
+///
+/// Call sites (opportunistic — no background tick infrastructure needed):
+///   - `handle_delphi_submit` (after atomic_op closes; quorum fires here)
+///   - `handle_delphi_get_state` (at entry; hard-floor catches up on next poll)
+///
+/// Auth-free by design — sweeper acts on behalf of the protocol, not a caller.
+/// Errors from the core close are swallowed silently — a race where another
+/// caller closes first lands a benign `[DelphiCannotCloseFromPhase]` here.
+fn delphi_sweeper_maybe_close(dir: &str) -> Result<bool, String> {
+    use collab::delphi::*;
+    let active = match read_active_delphi(dir)? {
+        Some(a) => a,
+        None => return Ok(false),
+    };
+    if active.phase != DelphiPhase::Submitting {
+        return Ok(false);
+    }
+    let current_round_idx = active.rounds.len().saturating_sub(1);
+    let round = match active.rounds.get(current_round_idx) {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+
+    // Quorum trigger.
+    let submitted_count = round.submissions.len();
+    let total_participants = active.participants.len();
+    let quorum_reached = total_participants > 0 && submitted_count >= total_participants;
+
+    // Hard-floor trigger via collab::parse_iso_epoch_pub.
+    let hard_floor_reached = {
+        let now_secs = collab::parse_iso_epoch_pub(&collab::iso_now());
+        let opened_secs = collab::parse_iso_epoch_pub(&round.opened_at);
+        match (now_secs, opened_secs) {
+            (Some(n), Some(o)) if n >= o => {
+                (n - o) >= active.submission_hard_floor_secs as u64
+            }
+            _ => false,
+        }
+    };
+
+    if !quorum_reached && !hard_floor_reached {
+        return Ok(false);
+    }
+
+    let trigger = if quorum_reached { "sweeper_quorum" } else { "sweeper_hard_floor" };
+    // Swallow benign race errors (e.g., already closed by another caller).
+    let _ = delphi_close_round_core(dir, trigger);
+    Ok(true)
 }
 
 /// SHA-D10.5a — `delphi_end` MCP handler. Per spec §3.10. Moderator-only
