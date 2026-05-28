@@ -181,6 +181,27 @@ When the LaunchRow shell extraction lands (Phase 2/3 of the unified-row migratio
 
 Re-implementing any of these in a per-mode body risks dropping state-machine invariants (e.g., Oxford's optimistic-phase=opening_a seed in setActiveOxford onStarted at CollabTab.tsx:7684).
 
+## Dual-heartbeat composition rule (per dev-challenger:0 msg 2390 Finding 3 + architect:0 msg 2391 ruling)
+
+`project_dual_heartbeat_trackers` cited above identifies two parallel liveness sources but does NOT specify a composition rule. The rule for ANY UI consumer of liveness state (including AssemblyControl late-joiner warning, roster panel "(reconnecting…)" suffix, and any future LaunchRow body that needs liveness):
+
+**Rule: MAX-of-both.** A seat is treated as alive if EITHER `sessions.json:bindings:last_heartbeat` OR `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms` is within the freshness threshold. Stale only if BOTH sources are past the threshold.
+
+Rationale (dev-challenger:0 msg 2390 reasoning, architect:0 ratified msg 2391):
+- **False-alive self-corrects** via observable absence of board activity (operator sees no broadcasts; trusts ground truth over UI label)
+- **False-reconnecting does NOT self-correct** — user-disruptive UX with no recovery path; operator must trust the UI label or manually verify
+- Bias toward the less-disruptive failure mode
+
+Empirical validation 2026-05-28 architect msg 2391: ux-engineer:0's `.vaak/sessions/ux-engineer-0.json` had `last_alive_at_ms` stale 9h while `sessions.json:bindings:status` still read "active". The `list_active_seats_cmd` derivation correctly returned stale (per main.rs:3520) — single source today. If a future surface adds a second source, it MUST compose via MAX-of-both.
+
+Memory candidate: `feedback_dual_source_liveness_max_not_and`.
+
+## Continuous category resolution (per dev-challenger:0 msg 2390 Finding 4 + architect:0 msg 2391 close)
+
+SHA-LR.2 (`7090f5a`) shipped Continuous Review as event-based — Start/End Continuous Review button calls `start_discussion(mode="continuous")`. The launcher pattern fits because Continuous DOES have a discrete "start one continuous review session" semantic at the discussion-mode layer.
+
+Finding 4 CLOSED at landing — spec correct as implemented. The alternative interpretation (Continuous as always-on config toggle) is not what shipped and is not the architectural direction. No further action.
+
 ## Out of scope for Phase 1
 
 - Drag-to-reorder rotation_order
