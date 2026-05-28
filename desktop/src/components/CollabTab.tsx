@@ -12,6 +12,7 @@ import { AssemblySetupModal } from "./AssemblySetupModal";
 import { ContinuousSetupModal } from "./ContinuousSetupModal";
 import { ShipModal } from "./ShipModal";
 import { ReviewWindow } from "./ReviewWindow";
+import { ReviewOutcomeChip } from "./ReviewOutcomeChip";
 import { buildFlowFeedRows } from "../lib/flowFeedBatcher";
 import { buildReviewWindowByCommit } from "../lib/reviewWindowAggregator";
 import { useToast } from "./Toast";
@@ -7430,17 +7431,20 @@ When multiple instances of this role are active:
                       )}
                     </div>
                   )}
-                  {/* SHA-CR.5: ReviewWindow render on ship messages per
-                      architect spec §UI item 3. Looks up the
-                      reviewWindowByCommit Map; renders the review panel
-                      with current named-reviewer status + viewer-
-                      appropriate APPROVE/BLOCK/COMMENT actions. */}
+                  {/* SHA-CR.5 + SHA-CR.6: review panel on ship messages
+                      per architect spec §UI item 3 + 4. Open windows show
+                      the full ReviewWindow with action buttons; closed
+                      windows show the compact ReviewOutcomeChip with
+                      ✓/✗ + reviewer summary or block reason. */}
                   {msg.type === "ship" && projectDir && (() => {
                     const md: any = msg.metadata ?? {};
                     const commitSha = typeof md.commit_sha === "string" ? md.commit_sha : null;
                     if (!commitSha) return null;
                     const state = reviewWindowByCommit.get(commitSha);
                     if (!state) return null;
+                    if (state.outcome) {
+                      return <ReviewOutcomeChip state={state} />;
+                    }
                     return (
                       <ReviewWindow
                         state={state}
