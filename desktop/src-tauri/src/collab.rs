@@ -222,7 +222,7 @@ impl SessionRegistry {
             .as_millis() as u64;
 
         self.sessions.values()
-            .filter(|s| (now - s.last_heartbeat) < 120_000)
+            .filter(|s| (now - s.last_heartbeat) < staleness_thresholds::ALIVE_STATE_STALE_MS)
             .collect()
     }
 }
