@@ -5330,11 +5330,24 @@ When multiple instances of this role are active:
                     const isDrowsy = (card.status === "working" || card.status === "ready")
                       && lastBroadcastMs !== undefined
                       && (Date.now() - lastBroadcastMs > 5 * 60 * 1000);
-                    const aliveSuffix = isSeatStale
-                      ? " (reconnecting…)"
-                      : isSeatUnknown
-                        ? " (joining…)"
-                        : "";
+                    // Human msg 2382/2388 item 3 — "reconnecting" indicator was
+                    // lying: showed (reconnecting…) on seats whose per-seat
+                    // file was stale but whose sessions.json-derived status was
+                    // ACTIVE (the documented MW6/MW10 dual-tracker divergence
+                    // class). Mitigation: when the two trackers disagree
+                    // (isMW6Divergent), show (checking…) instead of asserting
+                    // either tracker's verdict. Only assert "(reconnecting…)"
+                    // when BOTH trackers agree the seat is stale — i.e.,
+                    // isSeatStale AND card.status is NOT working/ready (i.e.
+                    // sessions.json side also says not-active). This stops the
+                    // UI from confidently misattributing the offline seat.
+                    const aliveSuffix = isMW6Divergent
+                      ? " (checking…)"
+                      : isSeatStale
+                        ? " (reconnecting…)"
+                        : isSeatUnknown
+                          ? " (joining…)"
+                          : "";
                     // Track D v1 (per human msg 88) — assembly-mode visuals.
                     // Mic-holder gets an accent border + 🎙 glyph; moderator gets
                     // a gold ★. Rotation index (1)(2)(3)… on cards in
