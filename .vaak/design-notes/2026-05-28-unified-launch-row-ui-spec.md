@@ -182,20 +182,15 @@ When the LaunchRow shell extraction lands (Phase 2/3 of the unified-row migratio
 
 Re-implementing any of these in a per-mode body risks dropping state-machine invariants (e.g., Oxford's optimistic-phase=opening_a seed in setActiveOxford onStarted at CollabTab.tsx:7684).
 
-## Dual-heartbeat composition rule (per dev-challenger:0 msg 2390 Finding 3 + architect:0 msg 2391 ruling)
+## Dual-heartbeat composition rule (per dev-challenger:0 msg 2390 Finding 3)
 
-`project_dual_heartbeat_trackers` cited above identifies two parallel liveness sources but does NOT specify a composition rule. The rule for ANY UI consumer of liveness state (including AssemblyControl late-joiner warning, roster panel "(reconnecting…)" suffix, and any future LaunchRow body that needs liveness):
+ui-architect:0 earlier-landed commit `f5d0f6c` (and SHA-RC.1 `14ef026` UI implementation) chose the canonical composition rule. Architect-lane endorses ui-arch's 3-state composition as STRICTLY BETTER than the architect's initial MAX-of-both proposal (msg 2391):
 
-**Rule: MAX-of-both.** A seat is treated as alive if EITHER `sessions.json:bindings:last_heartbeat` OR `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms` is within the freshness threshold. Stale only if BOTH sources are past the threshold.
+**Canonical rule (ui-arch `f5d0f6c` / SHA-RC.1):** 3-state composition. "(checking…)" when trackers disagree; "(reconnecting…)" only when BOTH agree stale; alive otherwise. Exposes ambiguity instead of forcing a binary verdict.
 
-Rationale (dev-challenger:0 msg 2390 reasoning, architect:0 ratified msg 2391):
-- **False-alive self-corrects** via observable absence of board activity (operator sees no broadcasts; trusts ground truth over UI label)
-- **False-reconnecting does NOT self-correct** — user-disruptive UX with no recovery path; operator must trust the UI label or manually verify
-- Bias toward the less-disruptive failure mode
+Why this beats MAX-of-both: ui-arch's choice surfaces the genuine ambiguity of divergence as a third UX state, rather than collapsing it into a confident "alive" verdict that empirical evidence (ux-engineer:0 stale 9h while bindings still "active") shows can lie. Defense-in-depth alongside tester:0 SHA-MW6.fix-2 `e851569` which closes the BACKEND root cause.
 
-Empirical validation 2026-05-28 architect msg 2391: ux-engineer:0's `.vaak/sessions/ux-engineer-0.json` had `last_alive_at_ms` stale 9h while `sessions.json:bindings:status` still read "active". The `list_active_seats_cmd` derivation correctly returned stale (per main.rs:3520) — single source today. If a future surface adds a second source, it MUST compose via MAX-of-both.
-
-Memory candidate: `feedback_dual_source_liveness_max_not_and`.
+Architect-lane retracts the MAX-of-both proposal. Canonical = ui-arch 3-state. Memory candidate: `feedback_dual_source_liveness_3_state_not_max`.
 
 ## Continuous category resolution (per dev-challenger:0 msg 2390 Finding 4 + architect:0 msg 2391 close)
 
