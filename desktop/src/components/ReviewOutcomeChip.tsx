@@ -12,29 +12,10 @@
  */
 
 import type { ReviewWindowState } from "./ReviewWindow";
-
-function formatBlockReason(state: ReviewWindowState): string {
-  const blocker = state.responses.find(
-    (r) => r.response_type === "BLOCK" && r.was_named,
-  );
-  if (!blocker) return "";
-  const seat = blocker.seat;
-  const text = blocker.text?.trim();
-  return text ? `BLOCKED by @${seat}: ${text}` : `BLOCKED by @${seat}`;
-}
-
-function formatAcceptedSummary(state: ReviewWindowState): string {
-  const namedResponses = state.named_reviewers.map((seat) => {
-    const r = state.responses.find((x) => x.seat === seat);
-    if (!r) return `@${seat} (silence=APPROVE)`;
-    if (r.response_type === "APPROVE") return `@${seat} (APPROVE)`;
-    if (r.response_type === "COMMENT") return `@${seat} (COMMENT)`;
-    return `@${seat} (${r.response_type})`;
-  });
-  return namedResponses.length > 0
-    ? `reviewed by ${namedResponses.join(" ")}`
-    : "reviewed — no named reviewers";
-}
+import {
+  formatBlockReason,
+  formatAcceptedSummary,
+} from "../lib/reviewOutcomeFormat";
 
 export function ReviewOutcomeChip(props: {
   state: ReviewWindowState;
