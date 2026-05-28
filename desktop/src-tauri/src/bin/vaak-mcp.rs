@@ -15040,6 +15040,19 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
                 }).to_string());
             }
 
+            // SHA-MW6.fix-2 — backend root cause of human msg 2382/2388 item 3
+            // ("reconnecting fundamentally broken"): a seat that receives
+            // messages every <30s never reaches the 10-poll heartbeat trigger
+            // at line ~14986, so its `.vaak/sessions/<role>-<inst>.json:
+            // last_alive_at_ms` goes stale even though the seat is actively
+            // working. SHA-MW6.fix at line ~1195 made update_session_heartbeat
+            // _in_file cascade to update_seat_alive_at_ms; this line wires the
+            // cascade into the message-arrived early-return path so busy seats
+            // keep their per-seat heartbeat fresh. The UI safety net in
+            // SHA-RC.1 (commit 14ef026) papered over the divergence; this
+            // fixes its writer-side cause.
+            update_session_heartbeat_in_file();
+
             return Ok(serde_json::json!({
                 "status": "messages_received",
                 "messages": new_messages,
