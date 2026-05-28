@@ -157,7 +157,17 @@ Three new MCP tools:
 
 3. **`review_get_state(commit_sha)`** — read-only. Returns the current state of a review window (open/closed, responses so far, timer remaining).
 
-The 60s timer is server-driven (Tauri-side via the same opportunistic-tick pattern as Delphi's SHA-D10.4 sweeper). On every `review_respond` or `review_get_state` call, check if timer expired → if yes, close window with current responses + treat silent named-reviewers as APPROVE.
+The 60s timer is server-driven (Tauri-side via the same opportunistic-tick pattern as Delphi's SHA-D10.4 sweeper). Per human msg 2583 directive ("the review window timer must auto-close, not wait for moderator intervention. Same sweeper pattern as D10.4 but for review windows"), the sweeper fires on:
+
+1. Every `review_respond` MCP call (post-atomic) — check if window timer expired OR all named reviewers responded → close
+2. Every `review_get_state` MCP call (pre-read) — same check; catches UI-poll cadence
+3. Every `project_send` and `project_check` and `project_wait` keepalive_tick — same check; catches broader board polling pattern
+
+Why all three: review windows have lower traffic than Delphi rounds; relying only on `review_respond` (Delphi's per-submission analog) would orphan a window with zero responses for the full timer. Adding broader board-event triggers ensures the close fires within timer + epsilon for any board-active seat.
+
+**Close-event metadata:** `close_reason ∈ {"sweeper_quorum", "sweeper_timer_expired", "manual_close"}`. Same race-handling as D10.4 per architect msg 2461 Q4 envelope: swallow benign `[ReviewWindowAlreadyClosed]` errors from concurrent sweeper calls. Atomic close via single-write under `with_reviews_lock` (analog to `delphi_atomic_op`).
+
+**Empirical motivation (msg 2582):** Review #5 (msg 2580/2581) took ~73 min to aggregate because the existing Continuous-discussion auto-aggregator at `discussion_control(mode=continuous)` is moderator-driven — close fires only when the moderator role's sidecar processes its tick. With moderator role-silent (per role design) AND active seats not invoking moderator-equivalent code paths, the aggregator was orphaned. Time-based events shouldn't depend on a specific role's polling. The opportunistic-broad-trigger sweeper closes this gap structurally.
 
 ## UI surface additions
 
