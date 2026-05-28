@@ -20,6 +20,11 @@ mod a11y;
 mod audio;
 mod collab;
 mod collab_v2;
+// Phase 1 hot-reload architecture per `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`
+// (architect commit 184d10d, human msg 2415). Each handler in this module is
+// the Tauri-side authoritative implementation of an MCP tool the sidecar
+// used to own; behavior changes ship via Vaak restart only.
+mod mcp_handlers;
 mod database;
 mod keyboard_hook;
 mod launcher;
