@@ -153,10 +153,33 @@ Avoid: ONE 800-LOC LaunchRow.tsx. The per-mode bodies must be separate files so 
 
 - `project_assembly_enable_drops_late_joiners` — passive late-joiner warning in Phase 1 (Refresh button DEFERRED to post-Commit-C per evil-arch:0 msg 2328 empirical finding that enable-when-already-enabled is a no-op); Commit C (Phase 4) bundles both the append-on-join fix AND the enable-actually-re-seeds fix
 - `project_assembly_mode_gaps_2026_05_04` — current-speaker badge in AssemblyControl popup body MUST render heartbeat-freshness (red border if `stale_ms > stall_threshold_secs * 1000`)
-- `project_dual_heartbeat_trackers` — read BOTH heartbeat sources (sessions.json:bindings:last_heartbeat AND .vaak/sessions/*.json:last_alive_at_ms) when rendering liveness
+- `project_dual_heartbeat_trackers` — read BOTH heartbeat sources (sessions.json:bindings:last_heartbeat AND .vaak/sessions/*.json:last_alive_at_ms) when rendering liveness.
+  - **Composition rule (per dev-challenger:0 msg 2390 Finding 3):** when the two trackers disagree, show "(checking…)" — neither source's verdict is asserted in isolation. Only when BOTH agree the seat is stale do we surface "(reconnecting…)". Rationale: dev-challenger:0 msg 2390 empirically confirmed the divergence is real (ux-engineer's per-seat file 9h stale while bindings 30s fresh), so a single-source verdict is empirically known to lie. This bias is TOWARD "(checking…)" over "(reconnecting…)" because false-reconnecting is user-disruptive UX, while false-checking surfaces the actual ambiguity. Shipped as SHA-RC.1 commit `14ef026`.
+  - **seatAliveMap ownership (per dev-challenger:0 msg 2390 Finding 5):** CollabTab.tsx remains the SOLE owner of the 30s `list_active_seats_cmd` poll. The LaunchRow shell + per-mode bodies consume the resolved `seatAliveMap` via props (lifted state pattern), never running their own poll. Rationale: one poll, one truth, no race-to-write between component trees.
 - `project_assembly_v1_corrected_2026_05_13` — Phase 1 must NOT regress the rotation_order discipline; canonical enable path is the only mutator
 - `project_ts_change_needs_tauri_rebuild_and_restart` — Phase 1 is TS-only; ship via `npm run build` but expect activation only after `cargo build --release` if any Tauri command surface extension is needed
 - `project_tauri_rust_struct_strips_undeclared_fields` — if Phase 1 adds new ProtocolPanel fields, declare them on the Rust side (`ProjectSettings` / `Protocol.floor` structs) before they'll round-trip
+
+## Mode exclusivity gate location (per dev-challenger:0 msg 2390 Finding 2)
+
+The BUSINESS LOGIC that prevents `oxford_initiate_cmd` from firing when `delphi.is_active === true` lives in the **LaunchRow shell** (centralized), NOT in each `*Config.tsx` body (decentralized).
+
+Rationale:
+- Centralized gating means one place to enforce + audit the exclusivity contract
+- Decentralized gating risks each per-mode body re-implementing slightly different rules and drifting (the kind of multi-writer-shared-state divergence audit-completed-2026-05-27 warned against)
+- The disabled-launcher visual + tooltip is presentation; the gate that rejects clicks while another exclusive mode is active is logic — both live in the shell
+
+Today's enforcement (pre-LaunchRow): the existing standalone Oxford/Delphi/Assembly/Continuous buttons at CollabTab.tsx:6745+ DO NOT explicitly gate exclusivity — backend rejects the second init with `[OxfordAlreadyActive]` / `[DelphiAlreadyActive]` and the UI catches the error in the toast. This is a soft-gate (post-hoc UI feedback). SHA-LR.2 preserves the soft-gate; future LaunchRow shell extraction should harden to a pre-click hard-gate (disable the button visually + skip the IPC entirely while another exclusive mode is active).
+
+## Existing Oxford/Delphi state plumbing (per dev-challenger:0 msg 2390 Finding 1)
+
+When the LaunchRow shell extraction lands (Phase 2/3 of the unified-row migration), `OxfordConfig` / `DelphiConfig` / `AssemblyConfig` bodies should CONSUME the existing state hooks rather than re-implement:
+- Oxford: `useState<typeof activeOxford>` + `oxford_initiate_cmd` IPC (unchanged from SHA-LR.1 / SHA-LR.2)
+- Delphi: `setActiveDelphi` callback + `delphi_initiate_cmd` IPC (unchanged)
+- Assembly: `useProtocolState`-derived `mutate` + `set_assembly_state` (unchanged from SHA-LR.1)
+- Continuous: `setDiscussionState` + `start_discussion` IPC (preserved by SHA-LR.2)
+
+Re-implementing any of these in a per-mode body risks dropping state-machine invariants (e.g., Oxford's optimistic-phase=opening_a seed in setActiveOxford onStarted at CollabTab.tsx:7684).
 
 ## Out of scope for Phase 1
 
