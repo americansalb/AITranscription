@@ -541,3 +541,71 @@ Class-of-bug from §"Class of bug this branch only partially addresses" (2026-05
 **RESOLVED 2026-05-28:** tester:0 SHA-MW6.fix-2 (`e851569`) closed the backend root cause — project_wait's messages-arrived early-return path bypassed the 30s heartbeat tick, leaving busy-seat per-seat files stale while sidecars were actually alive. 1-line wire-up at vaak-mcp.rs:15040+. ui-architect:0 SHA-RC.1 (`14ef026`) added a 3-state UI safety net ("(checking…)" when trackers diverge, "(reconnecting…)" only when BOTH agree stale) as defense-in-depth.
 
 **RETRACTED 2026-05-28 — claimed watchdog regression from SHA-MW6.fix-2 was incorrect per tester:0's verify-before-asserting check** (full disagreement at `.vaak/_human-inbox/tester-0-watchdog-disagreement-2026-05-28.md`). I claimed the watchdog gates release on `heartbeat_fresh` derived from `last_alive_at_ms` which SHA-MW6.fix-2 keeps fresh. tester:0 traced `main.rs:7378-7395` and showed the watchdog actually prefers `last_active_at_ms` (NOT updated by SHA-MW6.fix-2; explicitly preserved by comment at vaak-mcp.rs:410-434), only falling back to `last_alive_at_ms` if active_ms==0. For evil-arch the active_ms was 22.7 min stale; `heartbeat_fresh` WAS already false; and the watchdog DID eventually fire via max_floor_exceeded at 15:23:56Z (held mic 1816s past 300s ceiling with heartbeat stale 2066990ms — the watchdog functioned correctly). The actual likely causes of the protracted mic-hold per tester:0: (1) moderator-mode early-return at main.rs:7269 if speaker is moderator; (2) should_suppress_floor_stall for working-turn at review_intensity >= 5. This is the same verify-before-asserting class-of-bug as my msg 2306 + msg 2322 failures — I should have grepped main.rs:7378-7395 before writing the spec. Retraction commits: `584fa46` (deleted spec) + this vision.md edit.
+
+## 2026-05-28 late session — Hot-reload Phase 1 + Continuous Review redesign + review-window sweeper
+
+### Hot-reload architecture pilot (Phase 1)
+
+Spec at `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md` (architect-lane, human msg 2415 directive). **Goal:** eliminate the per-commit "close Claude Code window → reopen" workflow that has cost the team ~30 cumulative hours across the project by caching MCP tool schemas at sidecar startup. The directive's locked architecture: **sidecar (`vaak-mcp.rs`) becomes a thin ~500-LOC MCP proxy; Tauri app holds ALL business logic; HTTP channel on localhost:7865; restart Vaak only.** Sidecar tool schemas remain stable because handler logic lives elsewhere; Tauri-side restarts are the only refresh path.
+
+**5-phase migration plan:**
+- Phase 1: single-tool pilot (`assembly_line` only) to prove the round-trip
+- Phase 2: `currency_*` (15 handlers)
+- Phase 3: `oxford_* / delphi_* / discussion_* / audience_* / assembly_line` (remaining)
+- Phase 3.5: `tiny_http` thread-pool / async upgrade (separate chain before Phase 4)
+- Phase 4: `project_send` + remaining core handlers
+- Phase 5: auto-detect Tauri restart + re-handshake
+
+**Phase 1 nine-commit chain (all on disk, gated on operator restart canary):**
+
+| SHA | Commit | Lane | What |
+|---|---|---|---|
+| SHA-HR.1.1 | `9795df9` | developer:0 | Move `protocol_active_seats_set` to `mcp_handlers::assembly_line` |
+| SHA-HR.1.2 | `79c6703` | developer:0 | Move `seed_rotation_order_if_empty` + `seed_rotation_order_force` + `protocol_normalize_in_place` |
+| SHA-HR.1.3 | `48709c0` | developer:0 | Wire `do_protocol_mutate_inner` set_preset arm via Option (a) `serde_json::Value` round-trip |
+| SHA-HR.1.2b | `a905f31` | developer:0 | Move `apply_set_preset` to module |
+| SHA-HR.1.4 | `3588f70` | developer:0 | Tauri-side POST `/mcp/assembly_line` endpoint in `start_speak_server` (auth pending) |
+| SHA-HR.1.4.token | `ec84b58` | developer:0 | F9 token-file ACL `ensure_and_load_mcp_proxy_token` — Windows `icacls` / Unix `chmod 0600` fail-closed; restores auth-ON for the pilot |
+| SHA-HR.1.5 | `8ebcd17` | developer:0 | Shrink `handle_assembly_line` to `ureq` HTTP forwarder with `mcp_proxy_post_with_retry` + exponential backoff + jitter |
+| SHA-HR.1.6 | `572c1d9` | developer:0 | `_hot_reload_phase: 1` sentinel canary in response payload for empirical Phase 1 verification |
+
+**F1-F11 amendments (architect-lane):** state-residency audit gate (F3), Phase 3.5 tiny_http upgrade extraction (F3.5), idempotency UUID via X-Vaak-Request-Id (F6), cold-start retry with exponential backoff (F7), token-file ACL fail-closed (F9 = SHA-HR.1.4.token), hook chain confirmation (F10), trust-model shift documentation (F11).
+
+**Acceptance gate:** operator restart → call `assembly_line(action="enable")` from a CC session → observe `_hot_reload_phase: 1` in result → validates hot-reload works end-to-end. Phase 2 currency_* migration **MUST start with auth ON** per F9 lock (no deferred enforcement).
+
+**Sequencing failure recovered:** dev:0 shipped SHA-HR.1.5 (`8ebcd17`) before SHA-HR.1.4.token landed, opening an interim auth-off gap. dev:0 msg 2573 owned it as "build/commit cycle blinded me to active ruling"; SHA-HR.1.4.token (`ec84b58`) shipped immediately after to retroactively close the gap. Class-of-bug: **build-cycle blind window** — local cargo build (2m) outpaces broadcast-and-ruling consumption.
+
+### Continuous Review redesign (Phase 4 stubs + sweeper)
+
+Spec at `.vaak/design-notes/2026-05-28-continuous-review-redesign-spec.md` (architect-lane, human msg 2549 directive). **Premise:** Continuous Review becomes a peer-review-on-commit system, NOT a discussion mode. Builders name ≥2 reviewers; APPROVE/BLOCK/COMMENT; 60s timer → **bumped to 5 min default per human msg 2599**; silence = APPROVE; `currency_objection` remains the unconditional economic backstop available on any commit at any time. 2 operating configurations: **standalone** + **within Assembly Line**.
+
+**Sweeper amendment (`1f9aadf`)** per human msg 2583 "the review window timer must auto-close, not wait for moderator intervention. Same sweeper pattern as D10.4 but for review windows" — opportunistic-tick triggers on `review_respond`, `review_get_state`, `project_send`, `project_check`, `keepalive_tick`. Why all five: review windows have lower traffic than Delphi rounds; relying only on event paths would orphan a zero-response window for the full timer.
+
+**Tonight's 5-commit Continuous Review chain:**
+
+| SHA | Commit | Lane | What |
+|---|---|---|---|
+| SHA-CR.sweeper | `49cafbf` | developer:0 | `auto_close_timed_out_round(&state.project_dir)` wired into `project_wait`'s 30s heartbeat-tick block (vaak-mcp.rs:15206-15207) mirroring D10.4 sweeper pattern |
+| SHA-CR.timeout | `53f067c` | developer:0 | Default `auto_close_timeout_seconds` bumped 60s → 300s at 4 call sites in vaak-mcp.rs (1914, 1954, 2536, 16130) per human msg 2599 |
+| SHA-CR.2 | `e5a2a30` | ui-architect:0 | `ShipModal.tsx` stub — builder names reviewers + picks timer; submit posts structured `project_send` with `metadata.commit_sha + reviewers + review_timer_secs` as canonical input for future `review_ship_cmd` |
+| SHA-CR.2.1 | `c5c7246` | ui-architect:0 | Timer preset list bumped 30/60/120/300s → 60/300/900/1800/3600s (1m / 5m / 15m / 30m / 1hr); default 60→300 in both `ShipModal` + `ContinuousSetupModal` per human msg 2599 |
+| SHA-CR.spec.timer-default | `063a033` | architect:0 | 4 references in CR redesign spec amended 60s→300s with full preset list (§Config 1 line 25, §System tracks line 102, §Constraints summary line 129, §Architecture rationale line 160) |
+
+**Phase 2 implementation (gated on Phase 1 acceptance):**
+- 2a: `.vaak/reviews.jsonl` schema + `with_reviews_lock`
+- 2b: `review_ship` MCP tool
+- 2c: `review_respond` MCP tool + sweeper opportunistic call
+- 2d: `review_get_state` MCP tool + sweeper opportunistic call
+- 2e: keepalive_tick / project_send / project_check sweeper-trigger wiring
+- 2f: UI `ShipModal` (stub shipped) + `ReviewWindow` timer + APPROVE/BLOCK/COMMENT response surface
+- 2g: review-outcome chip on commit message cards
+
+**Old `discussion_control(set, "continuous")` deprecated.** Continuous Review is now a working mode launched from the unified launch row, not a discussion-mode setting.
+
+### Class-of-bug: Saturated state (Claude Code idle-after-task-complete)
+
+Multiple incidents tonight (human msgs 2475, 2528, 2548, 2555, 2556, 2592, 2610) of agents flipping to standby after their last `project_wait`-returning task completes — Claude Code's session-level idle wrap-up runs **after** the sidecar's `project_wait` heartbeat tick, dropping the agent out of the polling loop until a manual nudge. **Root cause confirmed by tester:0 msg 2517:** `run_keep_alive` at vaak-mcp.rs:19057-19087 IS wired and correct, but `.claude/settings.json` lacks the `PreToolUse` / `PostToolUse` hook entry that would invoke `vaak-mcp --keep-alive` to keep the CC session active during sidecar idle windows. **Queued fix:** refined Option A — single-file `.claude/settings.json` edit adding the hook entry with Bash matcher.
+
+### Class-of-bug: build-cycle blind window (sequencing failure)
+
+dev:0 msg 2573 self-diagnosed the SHA-HR.1.5 ship-before-SHA-HR.1.4.token sequencing violation as "build/commit cycle blinded me to active ruling." During the ~2-minute cargo build window, the agent loses sight of broadcast-and-ruling traffic that may invalidate or reorder the next commit. Architect-lane mitigation: **time-critical sequencing rulings must include a `[BUILDER-CONFIRM-BEFORE-COMMIT]` directive header** that requires the next commit's broadcast to cite the ruling SHA explicitly. Codified into the spec layer; no behavioral discipline change asked of builders.
