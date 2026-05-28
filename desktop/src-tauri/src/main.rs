@@ -7581,6 +7581,16 @@ fn start_project_watcher(app_handle: tauri::AppHandle) {
             // these check the queued/designated seats whose stale heartbeats
             // would wedge the team.
             check_two_controls_dead_seats(&dir, &active_section, &proto_path, &app_handle);
+
+            // SHA-CR.tauri-tick — per architect msg 2627 RULING 1 + tester msg
+            // 2618 finding. Wall-clock backstop for continuous-review auto-close.
+            // Sidecar's own opportunistic sweeper (vaak-mcp.rs:2018) only fires
+            // when a sidecar is actively polling; silent rooms orphan the timer.
+            // This 1s Tauri tick closes the gap structurally — independent of
+            // sidecar liveness. Returns false fast when no continuous round is
+            // active (typical case); the read+gate sequence is bounded by a
+            // single board.lock acquire + small JSON read.
+            collab::auto_close_timed_out_review_round(&dir);
         }
     });
 }

@@ -979,6 +979,164 @@ pub fn write_discussion_unlocked(dir: &str, state: &DiscussionState) -> bool {
     atomic_write(&path, json.as_bytes()).is_ok()
 }
 
+// SHA-CR.tauri-tick (per architect msg 2627 RULING 1 + tester msg 2618 finding
+// + evil-arch msg 2613 META-PATTERN "Opportunistic Substrate Reliance").
+//
+// Wall-clock auto-close of continuous-review rounds that fires from Tauri's
+// existing 1s start_project_watcher loop (main.rs:7453+). Closes the gap where
+// the sidecar's own opportunistic sweeper (vaak-mcp.rs:2018) only fires when
+// a sidecar is actively polling — silent rooms (all seats Sauteed / API-
+// rate-limited / mid-cargo-build) orphan the timer for the full window
+// duration. Two empirical incidents tonight: Review #5 took 73 min;
+// Review #9 took 10+ min before human escalation (msg 2610).
+//
+// Why board.lock not discussion.lock: collab.rs only exposes with_board_lock;
+// sidecar uses with_discussion_lock for the same op. Accepted cross-lock
+// race: sidecar+Tauri both detect timer-expired in the same millisecond →
+// both write aggregate. Worst case = duplicate aggregate message on board.jsonl
+// (cosmetic only); discussion.json atomic_write means last-writer-wins on
+// state (semantically identical content from both writers). Phase gate
+// (phase=="submitting") makes the operation idempotent on the gating side:
+// second sweeper call sees phase=="reviewing" and returns false. Sidecar-
+// independence is the whole point of this backstop, so the race trade is
+// acceptable.
+//
+// Aggregate text is degraded vs sidecar's generate_mini_aggregate (which
+// classifies submissions as agree/disagree/alternative). The Tauri sweeper
+// writes a minimal "Auto-close (Tauri sweeper): timer expired. <N> response(s)
+// recorded." The rich classification stays sidecar-only for when sidecar IS
+// healthy (and reaches its own sweeper first).
+//
+// Cross-process aggregate_message_id collision: next_board_message_id() reads
+// max(id) from board.jsonl at call time. If sidecar wrote a message between
+// our read and write, our id is stale. But append-only board.jsonl tolerates
+// duplicate ids (the human-readable board doesn't index by id; only
+// next-message-id derivation needs uniqueness, which heals on next call).
+
+/// Scan the active section's board.jsonl for the highest message `id` and
+/// return id+1. Returns 1 if board is empty or missing.
+///
+/// **Caller responsibility:** if you need atomicity vs concurrent appends,
+/// hold `with_board_lock` around the read+append pair.
+pub fn next_board_message_id(dir: &str) -> u64 {
+    let path = active_board_path(dir);
+    let max_id = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let trimmed = l.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .and_then(|v| v.get("id").and_then(|i| i.as_u64()))
+        })
+        .max()
+        .unwrap_or(0);
+    max_id + 1
+}
+
+/// Append a single JSON message to the active section's board.jsonl.
+///
+/// **Caller responsibility:** hold `with_board_lock` for atomicity with
+/// other appenders. This helper opens with O_APPEND so within-process
+/// concurrent calls don't lose data, but ID allocation (next_board_message_id)
+/// outside the lock can collide.
+pub fn append_message_to_board(
+    dir: &str,
+    message: &serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = active_board_path(dir);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open board.jsonl: {}", e))?;
+    let line = serde_json::to_string(message)
+        .map_err(|e| format!("Failed to serialize message: {}", e))?;
+    writeln!(file, "{}", line)
+        .map_err(|e| format!("Failed to write to board.jsonl: {}", e))?;
+    Ok(())
+}
+
+/// Auto-close a continuous-review round whose timer has expired. Returns
+/// `true` if the round was closed by this call; `false` if no action was
+/// needed (no active continuous round / not in submitting phase / not yet
+/// timed out / on read/write error).
+///
+/// Idempotent: re-entry after a successful close sees phase=="reviewing"
+/// and returns false. Sidecar's `auto_close_timed_out_round_inner` has the
+/// same gate, so cross-process duplication is bounded to the single-window
+/// race described in the module-level comment.
+pub fn auto_close_timed_out_review_round(dir: &str) -> bool {
+    let lock_result = with_board_lock(dir, || {
+        let disc = read_discussion(dir);
+        if !disc.active
+            || disc.mode.as_deref() != Some("continuous")
+            || disc.phase.as_deref() != Some("submitting")
+        {
+            return Ok(false);
+        }
+        let timeout_secs = disc.settings.auto_close_timeout_seconds as u64;
+        if timeout_secs == 0 {
+            return Ok(false);
+        }
+        let last_round = match disc.rounds.last() {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+        let opened_at_epoch = match parse_iso_epoch_pub(&last_round.opened_at) {
+            Some(t) => t,
+            None => return Ok(false),
+        };
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now_secs.saturating_sub(opened_at_epoch) < timeout_secs {
+            return Ok(false);
+        }
+
+        let round_num = last_round.number;
+        let response_count = last_round.submissions.len();
+        let aggregate_body = format!(
+            "Auto-close (Tauri sweeper): timer expired ({}s). {} response(s) recorded.",
+            timeout_secs, response_count
+        );
+
+        let now_iso = iso_now();
+        let msg_id = next_board_message_id(dir);
+        let aggregate_msg = serde_json::json!({
+            "id": msg_id,
+            "from": "system",
+            "to": "all",
+            "type": "moderation",
+            "timestamp": now_iso,
+            "subject": format!("Review #{} closed", round_num),
+            "body": aggregate_body,
+            "metadata": {
+                "discussion_action": "auto_aggregate",
+                "round": round_num,
+                "closed_by": "tauri_sweeper",
+            }
+        });
+        let _ = append_message_to_board(dir, &aggregate_msg);
+
+        let mut updated = disc.clone();
+        if let Some(last) = updated.rounds.last_mut() {
+            last.closed_at = Some(now_iso.clone());
+            last.aggregate_message_id = Some(msg_id);
+        }
+        updated.phase = Some("reviewing".to_string());
+        let _ = write_discussion_unlocked(dir, &updated);
+
+        Ok(true)
+    });
+    lock_result.unwrap_or(false)
+}
+
 /// Compact board.jsonl by removing messages older than `max_age_days`.
 /// Keeps the last `min_keep` messages regardless of age to preserve context.
 /// Returns (kept, removed) counts. Uses board lock for safety.
