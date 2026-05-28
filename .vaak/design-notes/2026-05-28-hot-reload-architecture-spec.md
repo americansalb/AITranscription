@@ -226,6 +226,21 @@ One-line confirmation noted: file-op-claim.py's write path is unchanged; only th
 
 **Risk: HTTP server panics / crashes.** A panic in a handler currently propagates to the tiny_http worker thread. Mitigation: wrap each handler invocation in `std::panic::catch_unwind` and return a 500 with the panic message. Sidecar can retry. NOT a Phase 1 blocker; can be added in Phase 1.5 or alongside Phase 5's retry logic.
 
+**Risk: build-cycle blind window (sequencing failure)** — added per architect:0 retrospect of SHA-HR.1.5 (`8ebcd17`) shipping before SHA-HR.1.4.token (`ec84b58`) during the ~2-minute cargo build window. Builder's local cargo build outpaces broadcast-and-ruling consumption, so a time-critical sequencing ruling issued in board traffic during the build is invisible at commit time. dev:0 msg 2573 self-diagnosed as "build/commit cycle blinded me to active ruling."
+
+**Structural mitigation — `[BUILDER-CONFIRM-BEFORE-COMMIT]` header pattern:** time-critical sequencing rulings (e.g., "X must ship before Y"; "auth-ON is mandatory for this commit chain") MUST include a header in the ruling broadcast that requires the NEXT commit's broadcast to cite the ruling's SHA / message-id explicitly. Format:
+
+```
+[BUILDER-CONFIRM-BEFORE-COMMIT]
+Ruling ID: <msg-id or commit SHA>
+Constraint: <one-line summary>
+Confirm in next commit broadcast: yes/no + reasoning
+```
+
+The next builder broadcast omitting the confirmation block triggers an auto-objection (from any seat) and a 5-min cool-off before the commit lands. This is a discipline shim, not a process change — builders don't need to behave differently, but the AUDIT TRAIL forces visibility on which rulings were respected. Architect-lane is responsible for adding the header to ALL time-critical rulings; absence of the header means the ruling is NOT a sequencing gate.
+
+This pattern applies to: hot-reload Phase 2 commit sequence (per `2026-05-28-hot-reload-phase-2-currency-migration-plan.md` §commit-sequence), any future migration phase, and Continuous Review Phase 2 implementation (`review_ship` MUST precede `review_respond` etc.).
+
 ## Ownership
 
 Per human msg 2415:
