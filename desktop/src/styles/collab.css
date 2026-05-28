@@ -10055,3 +10055,19 @@
 }
 .review-outcome-chip-mark { font-weight: 700; }
 .review-outcome-chip-text { letter-spacing: 0.1px; }
+
+/* SHA-CR.econ-stale: no-ledger placeholder pill — surfaces the case
+   where get_currency_balances_cmd filtered the seat out (typically
+   bindings:status != "active") instead of silently hiding the pill. */
+.role-card-currency-no-ledger {
+  border: 1px dashed rgba(255, 165, 0, 0.45);
+  background: rgba(255, 165, 0, 0.04);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.rc-cur-no-ledger {
+  font-size: 10px;
+  font-style: italic;
+  color: #fbbf24;
+  letter-spacing: 0.3px;
+}

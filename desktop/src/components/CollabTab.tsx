@@ -5279,7 +5279,26 @@ When multiple instances of this role are active:
                           // is disabled in settings, hide pills entirely.
                           if (project?.config?.settings?.currency_enabled === false) return null;
                           const bal = currencyBalances.get(cardKey);
-                          if (!bal) return null;
+                          // SHA-CR.econ-stale: when the seat is non-vacant but
+                          // get_currency_balances_cmd returned no row (currently
+                          // filtered by sessions.json:bindings:status="active"
+                          // per architect msg 2650 main.rs:3962 hard filter),
+                          // render a no-ledger placeholder instead of hiding the
+                          // pill entirely. This surfaces the gap to the human
+                          // rather than silently showing zero gold. Once the
+                          // backend filter relaxes (developer-lane per
+                          // architect msg 2651 ruling) the bal lookup will
+                          // populate and this placeholder retires.
+                          if (!bal) {
+                            return (
+                              <div
+                                className="role-card-currency role-card-currency-no-ledger"
+                                title={`No ledger row returned for ${cardKey}. Backend get_currency_balances_cmd filters by sessions.json:bindings:status=='active' (see architect msg 2650). If the seat is active and this pill says "no ledger", the filter is rejecting them.`}
+                              >
+                                <span className="rc-cur rc-cur-no-ledger">no ledger</span>
+                              </div>
+                            );
+                          }
                           const d = bal.display;
                           // dev-challenger:0 msg 1325 BLOCKING guardrail: a seat
                           // with no ledger entry yet (initialized:false) shows the
