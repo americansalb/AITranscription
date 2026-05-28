@@ -71,10 +71,13 @@ export function AssemblySetupModal(props: {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
 
-      // Persist customization via protocol_mutate_cmd. Each setting is its own
-      // mutate call so the server can reject one without losing others. The
-      // rev is read fresh because we don't take a rev prop — the modal mutates
-      // against current server state.
+      // Persist customization via protocol_mutate_cmd. Each setting is its
+      // own mutate call so the server can reject one without losing others.
+      // Errors are tracked in a list rather than silently swallowed (SHA-LR.4
+      // — prior behavior gave the user a misleading "Activated" toast even
+      // when the customization writes failed).
+      const customizationErrors: string[] = [];
+
       const protocol = await invoke<{ rev: number }>("get_protocol_cmd", {
         dir: projectDir,
       }).catch(() => null);
@@ -85,7 +88,10 @@ export function AssemblySetupModal(props: {
           action: "set_mic_passing",
           args: { mode: micMode },
           rev: protocol.rev,
-        }).catch((e) => console.warn("[AssemblySetup] set_mic_passing:", e));
+        }).catch((e) => {
+          customizationErrors.push(`mic mode: ${String(e?.message ?? e)}`);
+          console.warn("[AssemblySetup] set_mic_passing:", e);
+        });
 
         if (micMode === "moderator" && moderator) {
           const p2 = await invoke<{ rev: number }>("get_protocol_cmd", {
@@ -97,7 +103,10 @@ export function AssemblySetupModal(props: {
               action: "set_moderator",
               args: { seat: moderator },
               rev: p2.rev,
-            }).catch((e) => console.warn("[AssemblySetup] set_moderator:", e));
+            }).catch((e) => {
+              customizationErrors.push(`moderator: ${String(e?.message ?? e)}`);
+              console.warn("[AssemblySetup] set_moderator:", e);
+            });
           }
         }
 
@@ -111,9 +120,22 @@ export function AssemblySetupModal(props: {
               action: "set_preset",
               args: { preset },
               rev: p3.rev,
-            }).catch((e) => console.warn("[AssemblySetup] set_preset:", e));
+            }).catch((e) => {
+              customizationErrors.push(`preset: ${String(e?.message ?? e)}`);
+              console.warn("[AssemblySetup] set_preset:", e);
+            });
           }
         }
+      } else {
+        customizationErrors.push("protocol state could not be read; customization skipped");
+      }
+
+      if (customizationErrors.length > 0) {
+        // Surface customization failures inline rather than enabling assembly
+        // against partially-saved settings. User can fix or abort.
+        setError(`Customization failed (${customizationErrors.length} of ${1 + (micMode === "moderator" ? 1 : 0) + (preset !== currentPreset ? 1 : 0)}): ${customizationErrors.join("; ")}`);
+        setBusy(false);
+        return;
       }
 
       // Flip assembly ON via the legacy set_assembly_state cmd. The post-
