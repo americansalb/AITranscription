@@ -310,7 +310,7 @@ The audit is COMPLETE:
 
 Based on NEW risks NR1-NR5, recommended Phase 2 implementation sequencing:
 
-1. **SHA-HR.2.0 IdempotencyCache** with mandatory `X-Vaak-Request-Id` header per NR4 (reject 400 on absence; cache write LAST after lock release per F6 cache scope verification)
+1. **SHA-HR.2.0 IdempotencyCache** with mandatory `X-Vaak-Request-Id` header per NR4 (reject 400 on absence; cache write is the LAST step BEFORE lock release, INSIDE the critical section per NR7 + architect msg 2662 ruling — handles concurrent-retry race + partial-failure semantics together; cache key = `(request_id, source_session_id)` tuple per NR6 architect msg 2662 ruling)
 2. **SHA-HR.2.1 F11 every-POST identity verification helper** (Tauri-side `verify_caller(post_payload, headers) → Result<(role, instance), Error>` against `.vaak/sessions/*.json` session_id binding)
 3. **SHA-HR.2.2 currency_balance + currency_ledger migration** (lowest risk; verify NR1 replay-on-read preserved + NR3 supply invariant via post-migration baseline check)
 4. **SHA-HR.2.3 Unrestricted mutating handlers** (currency_system_dispute, currency_call_judge, currency_objection — bulk migrate; NR2 multi-party check pattern applies to objection)
