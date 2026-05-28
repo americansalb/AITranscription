@@ -1911,7 +1911,7 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
         let timeout = updated.get("settings")
             .and_then(|s| s.get("auto_close_timeout_seconds"))
             .and_then(|t| t.as_u64())
-            .unwrap_or(60);
+            .unwrap_or(300);
 
         let board_msg_id = next_message_id(&pd);
         let notification = serde_json::json!({
@@ -2533,7 +2533,7 @@ fn handle_discussion_control(action: &str, mode: Option<&str>, topic: Option<&st
                     "max_rounds": if mode == "continuous" { 999 } else { 10 },
                     "timeout_minutes": 15,
                     "expire_paused_after_minutes": 60,
-                    "auto_close_timeout_seconds": if mode == "continuous" { 60 } else { 0 }
+                    "auto_close_timeout_seconds": if mode == "continuous" { 300 } else { 0 }
                 }
             });
 
@@ -16129,7 +16129,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
         let timeout = disc_fresh.get("settings")
             .and_then(|s| s.get("auto_close_timeout_seconds"))
             .and_then(|t| t.as_u64())
-            .unwrap_or(60);
+            .unwrap_or(300);
 
         // Get current round topic if available
         let round_topic = disc_fresh.get("rounds")
