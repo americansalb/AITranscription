@@ -15205,6 +15205,28 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             // per-seat session file here keeps standby seats observably alive.
             update_seat_alive_at_ms(&state.project_dir, &state.role, state.instance);
             polls_since_heartbeat = 0;
+
+            // SHA-CR.sweeper — Continuous Review window auto-close per human
+            // msg 2583 directive ("review window timer must auto-close, not
+            // wait for moderator intervention. Same sweeper pattern as D10.4
+            // but for review windows."). `auto_close_timed_out_round` checks
+            // `now - opened_at >= timeout` (default 60s) and posts the
+            // mini-aggregate if expired. Before this commit it was only
+            // lazy-called from project_send's submission-message handler
+            // (vaak-mcp.rs:14879) and the UserPromptSubmit hook
+            // (vaak-mcp.rs:16101) — both event-triggered, so during silent
+            // periods (all seats in long-poll, no prompting) the timer
+            // never fired. Empirically observed at Review #5 (~1h 13m
+            // delay from open to aggregate).
+            //
+            // Same opportunistic-sweeper pattern as SHA-D10.4
+            // (delphi_sweeper_maybe_close) — runs on every 30s heartbeat
+            // tick during any seat's poll, so as long as any seat is
+            // project_wait-polling (which is always per the team's
+            // Saturated commitment), the timer fires within 30s of expiry.
+            // Idempotent: auto_close_timed_out_round returns false if the
+            // round isn't expired yet OR if there's no active discussion.
+            let _ = auto_close_timed_out_round(&state.project_dir);
         }
 
         // Re-resolve active section every poll: read_board_filtered itself reads
