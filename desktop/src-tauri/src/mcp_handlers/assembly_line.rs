@@ -210,3 +210,110 @@ pub(crate) fn protocol_normalize_in_place(
         }
     }
 }
+
+/// SHA-HR.1.2d — moved from `bin/vaak-mcp.rs:4194` (apply_set_preset).
+///
+/// The dispatcher arm called from `do_protocol_mutate_inner` for the
+/// `"set_preset"` action. Writes preset / floor.mode / floor.assembly_active /
+/// consensus.mode, with cross-mode exclusivity gates enforcing:
+/// 1. V3 spec rule 10 (Assembly Line ↔ discussion preset mutex)
+/// 2. V1.0.7 interim gate (cross-transitions must route through Default chat)
+///
+/// String constants `PRESET_*` from the sidecar are replaced with
+/// `crate::protocol::Preset::Variant.as_wire_str()` which is the same
+/// "Default chat" / "Assembly Line" / "Delphi" / "Oxford" / "Continuous Review"
+/// wire strings via the typed `Preset` enum's `#[serde(rename = ...)]`.
+pub(crate) fn apply_set_preset(
+    state: &mut serde_json::Value,
+    args: &serde_json::Value,
+) -> Result<(), String> {
+    use crate::protocol::Preset;
+
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("[InvalidArgs] set_preset requires args.name (string)")?;
+    let prev_preset = state
+        .get("preset")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+    let is_discussion = |p: &str| {
+        p == Preset::ContinuousReview.as_wire_str()
+            || p == Preset::Delphi.as_wire_str()
+            || p == Preset::Oxford.as_wire_str()
+    };
+    if name == Preset::AssemblyLine.as_wire_str() && is_discussion(prev_preset) {
+        return Err(format!(
+            "[ConflictWithDiscussion] cannot set preset to '{}' while a discussion preset ('{}') is active. \
+             Set preset to '{}' first, then enable {}.",
+            Preset::AssemblyLine.as_wire_str(),
+            prev_preset,
+            Preset::DefaultChat.as_wire_str(),
+            Preset::AssemblyLine.as_wire_str()
+        ));
+    }
+    if is_discussion(name) && prev_preset == Preset::AssemblyLine.as_wire_str() {
+        return Err(format!(
+            "[ConflictWithAssembly] cannot set preset to '{}' while Assembly Line is active. \
+             Disable Assembly Line first (set preset to 'Default chat'), then start the discussion.",
+            name
+        ));
+    }
+
+    // V1.0.7 cross-transition gate + cold-open carve-out (per SHA-V107.fix-1
+    // commit 177669b).
+    if !prev_preset.is_empty()
+        && prev_preset != Preset::DefaultChat.as_wire_str()
+        && name != Preset::DefaultChat.as_wire_str()
+        && prev_preset != name
+    {
+        return Err(format!(
+            "[ConflictWithActivePreset] cannot transition preset directly from '{}' to '{}' — \
+             route through '{}' first to avoid floor.mode + rotation_order drift while the prior \
+             mode's state is still live. v1.0.7 interim gate per multi-writer audit Instance 4.",
+            prev_preset,
+            name,
+            Preset::DefaultChat.as_wire_str()
+        ));
+    }
+
+    // V1.5.0 commit 2/6: typed Preset enum dispatch.
+    let preset: Preset = match serde_json::from_value(serde_json::Value::String(name.to_string())) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(format!(
+                "[InvalidArgs] unknown preset '{}' — see spec §6 matrix for valid names",
+                name
+            ));
+        }
+    };
+    let (floor_mode, consensus_mode) = match preset {
+        Preset::DefaultChat => ("none", "none"),
+        Preset::Debate => ("reactive", "none"),
+        Preset::AssemblyLine => ("round-robin", "none"),
+        Preset::TownHall => ("queue", "none"),
+        Preset::Brainstorm => ("free-grab", "none"),
+        Preset::ContinuousReview => ("free-grab", "tally"),
+        Preset::Delphi => ("round-robin", "vote"),
+        Preset::Oxford => ("queue", "vote"),
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("preset".to_string(), serde_json::json!(preset.as_wire_str()));
+    }
+    let is_assembly_preset = matches!(preset, Preset::AssemblyLine);
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("mode".to_string(), serde_json::json!(floor_mode));
+        floor.insert(
+            "assembly_active".to_string(),
+            serde_json::json!(is_assembly_preset),
+        );
+        if !is_assembly_preset {
+            floor.insert("current_speaker".to_string(), serde_json::Value::Null);
+            floor.insert("moderator".to_string(), serde_json::Value::Null);
+        }
+    }
+    if let Some(cons) = state.get_mut("consensus").and_then(|c| c.as_object_mut()) {
+        cons.insert("mode".to_string(), serde_json::json!(consensus_mode));
+    }
+    Ok(())
+}
