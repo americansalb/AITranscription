@@ -1508,31 +1508,6 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                     }
                 }
 
-                // SHA-HR.1.7 (F6) — idempotency cache lookup per architect msg 2426
-                // Q4 + dev-challenger F6 ruling. Sidecar generates X-Vaak-Request-Id
-                // once per logical call and sends on every retry attempt. If a
-                // prior attempt landed (cached envelope exists), short-circuit
-                // and return the cached envelope — do NOT re-run the mutation.
-                let req_id: Option<String> = request
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("X-Vaak-Request-Id"))
-                    .map(|h| h.value.as_str().to_string());
-
-                if let Some(rid) = &req_id {
-                    if let Some(cached) = idempotency_lookup(rid) {
-                        let resp = Response::from_string(cached.to_string()).with_header(
-                            tiny_http::Header::from_bytes(
-                                &b"Content-Type"[..],
-                                &b"application/json"[..],
-                            )
-                            .unwrap(),
-                        );
-                        let _ = request.respond(resp);
-                        continue;
-                    }
-                }
-
                 // Read body
                 let mut body = String::new();
                 if request.as_reader().read_to_string(&mut body).is_err() {
@@ -1632,13 +1607,6 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                         "error": format!("[VaakAppError] {}", err)
                     }),
                 };
-
-                // SHA-HR.1.7 (F6) — store envelope in idempotency cache before
-                // responding so concurrent retries from the sidecar (or a lost
-                // response) replay the same envelope within TTL window.
-                if let Some(rid) = req_id {
-                    idempotency_store(rid, envelope.clone());
-                }
 
                 let resp = Response::from_string(envelope.to_string())
                     .with_header(
@@ -2608,73 +2576,6 @@ fn get_protocol_last_mtime() -> &'static Mutex<Option<(String, std::time::System
 
 fn get_notify_last_mtimes() -> &'static Mutex<(Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>, Option<std::time::SystemTime>)> {
     NOTIFY_LAST_MTIMES.get_or_init(|| Mutex::new((None, None, None, None)))
-}
-
-// SHA-HR.1.7 (F6) — MCP mutating-tool idempotency cache per architect msg 2426
-// Q4 + dev-challenger F6 ruling. Caches the Tauri-side response envelope for
-// 60s keyed by X-Vaak-Request-Id (sidecar generates ONCE per logical call,
-// sends on every retry attempt). If a sidecar attempt reaches the Tauri side
-// and the response is lost in transit (closed socket, sidecar timeout-then-
-// retry), the next attempt finds the cached envelope and returns it without
-// re-running the mutation. Eliminates double-mutation under retry storm.
-//
-// TTL = 60s; bounded growth via TTL eviction on every lookup/store. No LRU
-// pressure required because the retry backoff chain caps at ~28.8s total
-// (8 delays [100,200,500,1000,2000,5000,10000,10000]ms + jitter). 60s gives
-// > 2× safety margin.
-static MCP_IDEMPOTENCY_CACHE: std::sync::OnceLock<
-    Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>,
-> = std::sync::OnceLock::new();
-
-const MCP_IDEMPOTENCY_TTL_SECS: u64 = 60;
-// Hard cap per architect msg 2619 §F6 spec — protects against pathological
-// request-id-cardinality growth (e.g., a malformed sidecar generating fresh
-// UUIDs faster than TTL eviction can keep up). Evicts oldest-by-insertion-order
-// when the bound is hit.
-const MCP_IDEMPOTENCY_MAX_ENTRIES: usize = 10_000;
-
-fn get_mcp_idempotency_cache(
-) -> &'static Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>> {
-    MCP_IDEMPOTENCY_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-fn idempotency_evict_expired(
-    cache: &mut std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>,
-) {
-    let now = std::time::Instant::now();
-    let ttl = std::time::Duration::from_secs(MCP_IDEMPOTENCY_TTL_SECS);
-    cache.retain(|_, (inserted_at, _)| now.duration_since(*inserted_at) < ttl);
-}
-
-fn idempotency_enforce_cap(
-    cache: &mut std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>,
-) {
-    if cache.len() <= MCP_IDEMPOTENCY_MAX_ENTRIES {
-        return;
-    }
-    // Bound exceeded — drop the oldest-by-insertion entries until under cap.
-    let drop_count = cache.len() - MCP_IDEMPOTENCY_MAX_ENTRIES;
-    let mut entries: Vec<(String, std::time::Instant)> = cache
-        .iter()
-        .map(|(k, (t, _))| (k.clone(), *t))
-        .collect();
-    entries.sort_by_key(|(_, t)| *t);
-    for (k, _) in entries.into_iter().take(drop_count) {
-        cache.remove(&k);
-    }
-}
-
-fn idempotency_lookup(req_id: &str) -> Option<serde_json::Value> {
-    let mut cache = get_mcp_idempotency_cache().lock();
-    idempotency_evict_expired(&mut cache);
-    cache.get(req_id).map(|(_, env)| env.clone())
-}
-
-fn idempotency_store(req_id: String, envelope: serde_json::Value) {
-    let mut cache = get_mcp_idempotency_cache().lock();
-    idempotency_evict_expired(&mut cache);
-    cache.insert(req_id, (std::time::Instant::now(), envelope));
-    idempotency_enforce_cap(&mut cache);
 }
 
 /// Tauri command: start watching a project directory for .vaak/ file changes
