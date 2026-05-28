@@ -1314,15 +1314,14 @@ fn write_claims(project_dir: &str, claims: &serde_json::Value) -> Result<(), Str
 /// derived from `.vaak/sessions/<role>-<inst>.json:last_alive_at_ms` so MCP-side
 /// callers (agent claim queries, conflict-detection, claim-injection in handle_
 /// project_check) speak the same liveness language as the UI's read_claims_filtered
-/// in collab.rs:441. Threshold mirrors collab::staleness_thresholds::ALIVE_STATE_
-/// STALE_MS — duplicated here as a literal because the sidecar binary cannot
-/// reach into the desktop bin's crate. Future architectural close moves this
-/// into a shared lib module (forward-flag from evil-arch msg 5068 Path B).
+/// in collab.rs:441. Threshold is the SAME `collab::staleness_thresholds::ALIVE_STATE_STALE_MS`
+/// used by collab::read_claims_filtered and the two existing call-sites at lines
+/// ~10383 and ~11581. Prior duplicated literal at this site has been removed —
+/// the comment claiming the sidecar binary "cannot reach into the desktop bin's
+/// crate" was empirically false; both existing call-sites already reference the
+/// constant directly.
 fn read_claims_filtered(project_dir: &str) -> serde_json::Value {
-    /// Mirror of collab::staleness_thresholds::ALIVE_STATE_STALE_MS. MUST be
-    /// kept in sync — if you change one, change both. Future Path B refactor
-    /// puts both behind a shared module so this comment becomes obsolete.
-    const ALIVE_STATE_STALE_MS: u64 = 120_000;
+    use collab::staleness_thresholds::ALIVE_STATE_STALE_MS;
 
     let claims = read_claims(project_dir);
     let claims_obj = match claims.as_object() {
