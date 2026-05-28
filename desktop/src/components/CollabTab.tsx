@@ -6472,93 +6472,29 @@ When multiple instances of this role are active:
           );
         })()}
 
-        {/* Economy Settings + Oxford debate triggers (human msgs 657 + 706).
-            Both live in the rail below Discussion Mode; small profile so they
-            don't compete with the primary panels. The Oxford button swaps to
-            End mode when an active debate is detected (human msg 870). */}
-        {projectDir && (
+        {/* Launch row per human msg 2549 Continuous Review Redesign:
+              two groups — WORKING MODES (Assembly Line ⊻ Continuous Review;
+              mutually exclusive) and DISCRETE EVENTS (Oxford, Delphi;
+              launchable on top of either working mode).
+
+            Visual: small subhead labels + thin divider between groups.
+            Behavior: when one working mode is active, the other working
+            mode's launcher is disabled with an explanatory tooltip. The
+            event buttons remain enabled regardless. */}
+        {projectDir && (() => {
+          const isAssemblyActive = !!assemblyState?.active;
+          const isContinuousActive = discussionState?.active && discussionState?.mode === "continuous";
+          const workingModeActive = isAssemblyActive || isContinuousActive;
+          const otherWorkingModeMsg = isAssemblyActive
+            ? "Cannot start Continuous Review while Assembly Line is active"
+            : isContinuousActive
+              ? "Cannot start Assembly Line while Continuous Review is active"
+              : "";
+          return (
           <div className="economy-settings-trigger rail-section">
-            {activeOxford ? (
-              <button
-                type="button"
-                className="economy-settings-btn economy-settings-btn-destructive"
-                onClick={async () => {
-                  const summary = `${activeOxford.side_a.length} vs ${activeOxford.side_b.length}, moderator ${activeOxford.moderator}`;
-                  const confirmed = window.confirm(
-                    `End debate ${activeOxford.debate_id} (${summary})?\n\nPremise: ${activeOxford.premise}\n\nThis will mark the debate as abandoned and clear active state. No reward will be distributed.`,
-                  );
-                  if (!confirmed) return;
-                  try {
-                    const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("oxford_end_cmd", { dir: projectDir });
-                    setActiveOxford(null);
-                    showToast(`Debate ${activeOxford.debate_id} ended.`, "success");
-                  } catch (e) {
-                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-                    showToast(`Couldn't end debate — ${msg}`, "error");
-                  }
-                }}
-                title={`End the active Oxford debate (debate ${activeOxford.debate_id}, moderator ${activeOxford.moderator})`}
-              >
-                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
-                <span>End Oxford Debate</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="economy-settings-btn"
-                onClick={() => setOxfordSetupOpen(true)}
-                title="Start an Oxford-style debate (Phase A v1)"
-              >
-                <span className="economy-settings-icon" aria-hidden="true">⚖</span>
-                <span>Start Oxford Debate</span>
-              </button>
-            )}
-            {activeDelphi ? (
-              <button
-                type="button"
-                className="economy-settings-btn economy-settings-btn-destructive"
-                onClick={async () => {
-                  const roundData = activeDelphi.current_round > 0
-                    ? activeDelphi.rounds[activeDelphi.current_round - 1] ?? null
-                    : null;
-                  const nonSub = roundData?.non_submitters ?? [];
-                  const submittedCount = activeDelphi.participants.length - nonSub.length;
-                  const confirmed = window.confirm(
-                    `End Delphi discussion ${activeDelphi.discussion_id}?\n\nTopic: ${activeDelphi.topic}\n\nRound ${activeDelphi.current_round} of ${activeDelphi.max_rounds}, ${submittedCount}/${activeDelphi.participants.length} submitted this round.\n\nThis abandons the discussion. No convergence reward will be distributed.`,
-                  );
-                  if (!confirmed) return;
-                  try {
-                    const { invoke } = await import("@tauri-apps/api/core");
-                    await invoke("delphi_end_cmd", { dir: projectDir, outcome: "abandoned" });
-                    setActiveDelphi(null);
-                    showToast(`Delphi discussion ${activeDelphi.discussion_id} ended.`, "success");
-                  } catch (e) {
-                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-                    showToast(`Couldn't end discussion — ${msg}`, "error");
-                  }
-                }}
-                title={`End the active Delphi discussion (#${activeDelphi.discussion_id}, moderator ${activeDelphi.moderator})`}
-              >
-                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
-                <span>End Delphi Discussion</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="economy-settings-btn"
-                onClick={() => setDelphiSetupOpen(true)}
-                title="Start a Delphi discussion (blind submissions + anonymized aggregation)"
-              >
-                <span className="economy-settings-icon" aria-hidden="true">🔮</span>
-                <span>Start Delphi Discussion</span>
-              </button>
-            )}
-            {/* Assembly Mode launcher — human msg 2305+2313 parity with Oxford/Delphi.
-                Active state shows End button (parallel to End Oxford/Delphi);
-                inactive state opens AssemblySetupModal. Reads assemblyState
-                from the existing get_assembly_state poll (lines ~2351+). */}
-            {assemblyState?.active ? (
+            <div className="launch-row-subhead" aria-label="Working modes">Working modes</div>
+            {/* Assembly Mode launcher — working mode (mutually exclusive with Continuous Review per msg 2549). */}
+            {isAssemblyActive ? (
               <button
                 type="button"
                 className="economy-settings-btn economy-settings-btn-destructive"
@@ -6600,25 +6536,28 @@ When multiple instances of this role are active:
                 type="button"
                 className="economy-settings-btn"
                 onClick={() => setAssemblySetupOpen(true)}
-                title="Start one-speaker-at-a-time mic control with rotation, hand-raise, or moderator-picks mode"
+                disabled={isContinuousActive}
+                title={isContinuousActive ? otherWorkingModeMsg : "Start one-speaker-at-a-time mic control with rotation, hand-raise, or moderator-picks mode. Includes Continuous Review on every commit."}
               >
                 <span className="economy-settings-icon" aria-hidden="true">🔁</span>
                 <span>Start Assembly Line</span>
               </button>
             )}
-            {/* Continuous Review launcher — human msg 2313+2381 launch-row
-                slot 4. Uses the existing start_discussion / set_discussion_mode
-                Tauri paths; no new modal — Continuous has no per-launch
-                customization beyond participants (which default to all active
-                seats). */}
-            {discussionState?.active && discussionState?.mode === "continuous" ? (
+            {/* Continuous Review launcher — per human msg 2549 redesign,
+                this is now a WORKING MODE (free-form work + review on every
+                commit), mutually exclusive with Assembly Line. The legacy
+                "auto-triggered micro-rounds from status messages" semantic
+                is preserved at the backend until the new review-window
+                infrastructure lands; UI text updated to match the new
+                mental model. */}
+            {isContinuousActive ? (
               <button
                 type="button"
                 className="economy-settings-btn economy-settings-btn-destructive"
                 onClick={async () => {
                   if (!projectDir) return;
                   const confirmed = window.confirm(
-                    `End Continuous Review?\n\nStops auto-triggered micro-rounds. Active rounds will not be re-triggered.`,
+                    `End Continuous Review?\n\nFree-form work continues but no review windows will open on commits.`,
                   );
                   if (!confirmed) return;
                   try {
@@ -6632,7 +6571,7 @@ When multiple instances of this role are active:
                     showToast(`Couldn't end Continuous Review — ${msg}`, "error");
                   }
                 }}
-                title="End auto-triggered micro-rounds"
+                title="End Continuous Review (returns to free-form work without commit-review gating)"
               >
                 <span className="economy-settings-icon" aria-hidden="true">⏹</span>
                 <span>End Continuous Review</span>
@@ -6642,12 +6581,98 @@ When multiple instances of this role are active:
                 type="button"
                 className="economy-settings-btn"
                 onClick={() => setContinuousSetupOpen(true)}
-                title="Start auto-triggered micro-reviews from team status messages (silence = consent). Configurable timeout."
+                disabled={isAssemblyActive}
+                title={isAssemblyActive ? otherWorkingModeMsg : "Free-form work + Continuous Review window on every commit (builder names ≥2 reviewers; APPROVE/BLOCK/COMMENT; default 60s timer; silence = APPROVE)"}
               >
                 <span className="economy-settings-icon" aria-hidden="true">🔄</span>
                 <span>Start Continuous Review</span>
               </button>
             )}
+            <div className="launch-row-divider" aria-hidden="true" />
+            <div className="launch-row-subhead" aria-label="Discrete events">Events</div>
+            {/* Oxford debate launcher — discrete event, launchable on top of either working mode. */}
+            {activeOxford ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  const summary = `${activeOxford.side_a.length} vs ${activeOxford.side_b.length}, moderator ${activeOxford.moderator}`;
+                  const confirmed = window.confirm(
+                    `End debate ${activeOxford.debate_id} (${summary})?\n\nPremise: ${activeOxford.premise}\n\nThis will mark the debate as abandoned and clear active state. No reward will be distributed.`,
+                  );
+                  if (!confirmed) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("oxford_end_cmd", { dir: projectDir });
+                    setActiveOxford(null);
+                    showToast(`Debate ${activeOxford.debate_id} ended.`, "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't end debate — ${msg}`, "error");
+                  }
+                }}
+                title={`End the active Oxford debate (debate ${activeOxford.debate_id}, moderator ${activeOxford.moderator})`}
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Oxford Debate</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={() => setOxfordSetupOpen(true)}
+                title="Start an Oxford-style debate (Phase A v1). Discrete event — runs on top of any working mode."
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⚖</span>
+                <span>Start Oxford Debate</span>
+              </button>
+            )}
+            {/* Delphi discussion launcher — discrete event, launchable on top of either working mode. */}
+            {activeDelphi ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  const roundData = activeDelphi.current_round > 0
+                    ? activeDelphi.rounds[activeDelphi.current_round - 1] ?? null
+                    : null;
+                  const nonSub = roundData?.non_submitters ?? [];
+                  const submittedCount = activeDelphi.participants.length - nonSub.length;
+                  const confirmed = window.confirm(
+                    `End Delphi discussion ${activeDelphi.discussion_id}?\n\nTopic: ${activeDelphi.topic}\n\nRound ${activeDelphi.current_round} of ${activeDelphi.max_rounds}, ${submittedCount}/${activeDelphi.participants.length} submitted this round.\n\nThis abandons the discussion. No convergence reward will be distributed.`,
+                  );
+                  if (!confirmed) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("delphi_end_cmd", { dir: projectDir, outcome: "abandoned" });
+                    setActiveDelphi(null);
+                    showToast(`Delphi discussion ${activeDelphi.discussion_id} ended.`, "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't end discussion — ${msg}`, "error");
+                  }
+                }}
+                title={`End the active Delphi discussion (#${activeDelphi.discussion_id}, moderator ${activeDelphi.moderator})`}
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Delphi Discussion</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={() => setDelphiSetupOpen(true)}
+                title="Start a Delphi discussion (blind submissions + anonymized aggregation). Discrete event — runs on top of any working mode."
+              >
+                <span className="economy-settings-icon" aria-hidden="true">🔮</span>
+                <span>Start Delphi Discussion</span>
+              </button>
+            )}
+            <div className="launch-row-divider" aria-hidden="true" />
+            {/* Tooltip hint surfaced inline for screen readers when a working mode locks the other. */}
+            {workingModeActive ? (
+              <div className="launch-row-mutex-hint" role="status" aria-live="polite">{otherWorkingModeMsg}</div>
+            ) : null}
             <button
               type="button"
               className="economy-settings-btn"
@@ -6658,7 +6683,8 @@ When multiple instances of this role are active:
               <span>Economy Settings</span>
             </button>
           </div>
-        )}
+          );
+        })()}
 
         {/* Decision Panel sidebar wrapper — places the panel into the right
             rail per architect msg 935. DecisionPanel.tsx renders the inner

@@ -5,9 +5,11 @@ export type ContinuousSetupSubmit = {
   silence_timeout_seconds: number;
 };
 
+// Review window default duration — applies to each commit review window
+// per human msg 2549 redesign. 60s default; configurable for slower teams.
 const TIMEOUT_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 30, label: "30 seconds — tight feedback loop" },
-  { value: 60, label: "1 minute — default" },
+  { value: 60, label: "1 minute — default per spec §msg-2549" },
   { value: 120, label: "2 minutes — relaxed" },
   { value: 300, label: "5 minutes — async-style" },
 ];
@@ -110,13 +112,13 @@ export function ContinuousSetupModal(props: {
       >
         <h3 id="csm-title" className="csm-title">Start Continuous Review</h3>
         <p className="csm-subtitle">
-          Auto-triggers micro-review rounds from each developer status. Silence past the timeout counts as consent.
+          Free-form work + a review window on every commit. Builder names ≥2 reviewers (if available); named reviewers respond APPROVE / BLOCK / COMMENT. Silence past the timer = APPROVE.
         </p>
 
         {error && <div className="csm-error">{error}</div>}
 
         <label className="csm-field">
-          <span className="csm-field-label">Silence timeout</span>
+          <span className="csm-field-label">Review window duration</span>
           <select
             ref={firstFieldRef}
             className="csm-select"

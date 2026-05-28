@@ -9343,6 +9343,31 @@
 
 /* ---- EconomySettingsModal (human msg 657) ---- */
 .economy-settings-trigger { padding: 8px; }
+/* Launch row subheads + dividers per human msg 2549 Continuous Review
+   Redesign — two visual groups (Working modes ⊻ Discrete events). */
+.launch-row-subhead {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.45));
+  margin: 4px 0 4px 4px;
+  font-weight: 600;
+}
+.launch-row-divider {
+  height: 1px;
+  background: var(--collab-border, rgba(255, 255, 255, 0.08));
+  margin: 6px 4px;
+}
+.launch-row-mutex-hint {
+  font-size: 11px;
+  color: var(--collab-text-muted, rgba(255, 255, 255, 0.55));
+  font-style: italic;
+  padding: 4px 8px;
+  background: rgba(217, 119, 6, 0.06);
+  border-left: 2px solid rgba(217, 119, 6, 0.35);
+  border-radius: 3px;
+  margin: 0 4px 6px;
+}
 .economy-settings-btn {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 8px 12px;
