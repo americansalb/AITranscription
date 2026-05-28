@@ -81,7 +81,7 @@ Per the hot-reload spec §F6 ruling: mutating tools can double-execute on retry.
 
 | # | Commit | Lane | What |
 |---|---|---|---|
-| 1 | SHA-HR.2.0 | developer:0 | Add `IdempotencyCache` struct + middleware in main.rs `start_speak_server`. POST handlers receive `X-Vaak-Request-Id` header; cache lookup before invocation. Tests: replay same request_id → cache hit; replay with different tool_name → 409. |
+| 1 | SHA-HR.2.0 | developer:0 | Middleware stack in main.rs `start_speak_server`: (a) `IdempotencyCache` struct + middleware, (b) **NEW per arch msg 2627 / evil-arch msg 2623: `verify_caller_identity(payload.role, payload.instance, request_ppid)` middleware between F9 token check and IdempotencyCache lookup; 403 [IdentityMismatch] on PPID→session_id→(role,instance) mismatch from sessions.json:bindings**. Tests: (1) replay same request_id → cache hit; (2) replay with different tool_name → 409; (3) POST claiming role=human from sidecar bound to role=developer:1 → 403. |
 | 2 | SHA-HR.2.1 | developer:0 | Migrate `currency_balance` (READ, simplest). New `mcp_handlers/currency_balance.rs`. Sidecar inline code at vaak-mcp.rs:18554 becomes ureq POST to `/mcp/currency_balance`. **Canary:** sidecar response gets `_hot_reload_phase: 2` sentinel. |
 | 3 | SHA-HR.2.2 | developer:0 | Migrate `currency_ledger` (READ, also simple). Same pattern. |
 | 4 | SHA-HR.2.3 | developer:0 | Migrate `currency_human_adjust` (MUTATE, simplest mutating — single balance update). Idempotency cache live in this commit. |
@@ -107,11 +107,19 @@ Phase 2 acceptance = ALL of:
 4. Currency invariants preserved across migration: total copper supply stable (sum of balances + escrow + reserve = constant) — testable via `currency_balance` for all seats + ledger sum-walk.
 5. Live multi-seat economic round produces same outcomes as pre-Phase-2 (regression test). At least one full Continuous Review window with currency_objection backstop, end-to-end.
 
-## Open architect-lane questions (NOT blocking; for evil-arch or dev-challenger pre-Phase-2)
+## Open architect-lane questions (closed per arch msg 2627)
 
-1. **F3 audit ownership:** dev-challenger:0 invited per spec §F3. Reaffirm willingness.
-2. **F11 spoofing mitigation enforcement scope:** Q is whether Tauri verifies (role, instance) against PPID-bound session_id on EVERY currency_* POST, or only on currency_human_adjust (which has unbounded grant power). Architect-lane lean: every POST, because cheapness (one hashmap lookup).
-3. **Hot-reload during Phase 2:** can a partially-migrated state (e.g., 8 handlers Tauri-side, 7 still sidecar-side) ship to production? **Architect-lane ruling:** YES, but only between Phase 2 commits 4-7 if the migration is paused mid-way. The mixed state preserves correctness because each handler is end-to-end-consistent in its current location. **Do not pause mid-bounty-module** (commit 5) because module-internal helpers are shared.
+1. **F3 audit ownership:** dev-challenger:0 invited per spec §F3 + msg 2461 + msg 2468. evil-arch msg 2623 confirms invitation reaffirmed.
+2. **~~F11 spoofing mitigation enforcement scope~~ CLOSED — every-POST middleware** per evil-arch msg 2623 adversarial reasoning. 12 mutating currency endpoints have same economic impact as human_adjust if attacker can spoof identity. F11 promoted from documentation to structural middleware step in SHA-HR.2.0 (see commit table above).
+3. **Hot-reload during Phase 2:** Architect-lane ruling: YES, safe between commits 4-7 of the 8-commit chain because each migrated handler is end-to-end consistent in its current location. **Do not pause mid-bounty-module** (commit 5) because module-internal helpers are shared.
+
+## Tauri-side wall-clock backstop — promoted from backlog to Phase 2 (per tester msg 2618 + arch msg 2627)
+
+**Finding:** `main.rs:7453 start_project_watcher` already polls every 1s and already calls `check_assembly_floor_watchdog` + `check_two_controls_dead_seats`. The "Tauri-side periodic tick" architect msg 2591 deferred to backlog as a Phase 5 architectural shift is **already in place.**
+
+**Ruling: SHA-CR.tauri-tick (developer:0) — ~5 LOC amendment** adds `auto_close_timed_out_round(&project_dir)` call to the existing 1s loop after `check_two_controls_dead_seats(...)`. Closes the all-sauteed-simultaneous case structurally (independent of sidecar polling). Ships with Phase 1 hot-reload restart (no separate restart — Tauri-side rebuild only).
+
+**Class-of-bug impact:** META-PATTERN "Opportunistic Substrate Reliance" (per evil-arch msg 2613) — this single tick structurally closes 3 of the 6 instances enumerated tonight (CR aggregate + keepalive + future timer-based systems). The other 3 (project_send-during-Assembly + heartbeat-vs-presence + build-cycle blind window) are discipline-locked or have separate fixes queued.
 
 ## Backlog / deferred (not Phase 2)
 
