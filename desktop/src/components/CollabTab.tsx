@@ -2979,29 +2979,10 @@ When multiple instances of this role are active:
     }
   };
 
-  const handleToggleAssembly = async () => {
-    if (assemblyToggling || !projectDir) return;
-    setAssemblyToggling(true);
-    try {
-      if (window.__TAURI__) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const action = assemblyState?.active ? "disable" : "enable";
-        const next = await invoke<{
-          active: boolean;
-          current_speaker: string | null;
-          rotation_order: string[];
-        }>("set_assembly_state", { dir: projectDir, action });
-        setAssemblyState(next);
-      }
-    } catch (e) {
-      const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-      console.error("[CollabTab] Failed to toggle Assembly Line:", e);
-      setError(msg || "Failed to toggle Assembly Line");
-      showToast(`Couldn't toggle Assembly Line — ${msg}`, "error");
-    } finally {
-      setAssemblyToggling(false);
-    }
-  };
+  // handleToggleAssembly removed alongside the legacy assembly-line-toggle
+  // pill (human msg 2313+2381 launch-row rework). The new path is the
+  // dedicated Start/End Assembly Line buttons in the launch-row at
+  // line ~6745, which call set_assembly_state inline with mode-aware UX.
 
   // @ts-expect-error TS6133: retained for future ConsensusRow enrichment
   const handleCloseRound = async () => {
@@ -4163,42 +4144,12 @@ When multiple instances of this role are active:
           {/* Change D: "Discuss" button removed per human msg 5538 choice A
               + msg 5237 directive 5. Discussion-format start can return as
               a settings-panel action or moderator-tab affordance if needed. */}
-          {/* Assembly Line toggle — legacy v1.5.1 one-speaker-at-a-time mic
-              control. B.3 Item 1 (per spec §16-37): hide when the new
-              AssemblyControls card is rendering (twoControlsProtocol loaded).
-              Legacy is the strict subset of AssemblyControls' capabilities;
-              hiding rather than dual-wiring avoids state divergence on the
-              write side. Falls through to legacy render only on truly
-              pre-commit-A sections (no protocol.json yet). */}
-          {!twoControlsProtocol && (
-            <button
-              className="assembly-line-toggle"
-              onClick={handleToggleAssembly}
-              disabled={assemblyToggling}
-              title={
-                assemblyState?.active
-                  ? `Assembly Line ON · current speaker: ${assemblyState.current_speaker ?? "(none)"} · click to disable`
-                  : "Assembly Line OFF (simultaneous) · click to enable one-speaker-at-a-time"
-              }
-              aria-label={assemblyState?.active ? "Disable Assembly Line" : "Enable Assembly Line"}
-              style={{
-                background: assemblyState?.active ? "#137333" : "transparent",
-                color: assemblyState?.active ? "#fff" : "#137333",
-                border: "1px solid #137333",
-                borderRadius: 6,
-                padding: "4px 10px",
-                marginLeft: 6,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: assemblyToggling ? "wait" : "pointer",
-                opacity: assemblyToggling ? 0.6 : 1,
-              }}
-            >
-              {assemblyState?.active
-                ? `🎙 Assembly: ${assemblyState.current_speaker ?? "—"}`
-                : "Assembly Line"}
-            </button>
-          )}
+          {/* Legacy assembly-line-toggle pill REMOVED per human msg 2313 + 2381
+              ("100% work must be done"). The new launch-row (Start Assembly
+              Line button in the Oxford/Delphi launcher row at line ~6745)
+              is the universal replacement — works regardless of
+              twoControlsProtocol state and matches the Oxford/Delphi launcher
+              pattern the human asked for in msg 2313. */}
           <button
             className="project-settings-btn"
             onClick={() => setSettingsOpen(!settingsOpen)}
@@ -4232,48 +4183,23 @@ When multiple instances of this role are active:
             is ALWAYS visible (matches the F-UIA-CTR-4 Path A intent —
             band discoverable even when no mode is active; ProtocolPanel
             inside still handles its own no-protocol render). */}
-        {(() => {
-          // Phase 1b PROPER (architect msg 484 push for full restructure):
-          // Discussion Mode band → thin always-visible STRIP + ⚙ popover.
-          // The strip shows live preset/phase/plan in ~30px; Configure ⚙
-          // opens the popover hosting AssemblyControls + ProtocolPanel.
-          // Closes the msg-5450 discoverability lesson AND the human's
-          // "500px of chrome" complaint simultaneously: state visible
-          // always, controls reachable on demand.
-          const livePreset = (twoControlsProtocol?.preset as string) ?? "Default chat";
-          const livePhase = twoControlsProtocol?.floor?.phase as string | undefined;
-          const livePlanPath = twoControlsProtocol?.floor?.plan_path as string | undefined;
-          const phaseLabel = livePhase
-            ? livePhase === "execution"
-              ? " · Executing"
-              : livePhase === "planning"
-                ? " · Planning"
-                : ""
-            : "";
-          const planLabel = livePlanPath
-            ? ` · Plan: ${livePlanPath.replace(/^.*[\\/]/, "")}`
-            : "";
-          // P5-v2 (architect:0 msg 935 + human msg 932 = B):
-          // The horizontal .discussion-mode-strip + DiscussionSettingsPopover
-          // were removed in this commit. Discussion Mode settings (preset /
-          // mic mode / moderator / review intensity / plan) now live in the
-          // sidebar Discussion Mode card below via <AssemblyControls
-          // layout="vertical">. ProtocolPanel (floor + consensus + 1-click
-          // yield / force-release per evil-arch msg 509 + tech-leader msg
-          // 511) stays inline here because those urgency actions need to be
-          // reachable without opening the sidebar card. _livePreset, _phaseLabel,
-          // _planLabel are referenced below for the sidebar card title chip.
-          void livePreset; void phaseLabel; void planLabel;
-          return (
-            <ProtocolPanel
-              projectDir={projectDir}
-              section={activeSection || "default"}
-              selfSeat={null /* this is the human's view; selfSeat = null */}
-              rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
-              rolesConfig={project?.config?.roles}
-            />
-          );
-        })()}
+        {/* ProtocolPanel — gated on any active mode per human msg 2313+2381
+            ("isolated and inefficient" + "100% work must be done"). Previously
+            always-rendered chrome (P5-v2 inline render); now only appears when
+            Assembly / Oxford / Delphi is actually running. The unified
+            launch-row buttons (Oxford/Delphi/Assembly) at line ~6745 are the
+            ONLY discovery surface for inactive modes; ProtocolPanel surfaces
+            active-state controls (floor + consensus + 1-click yield/
+            force-release) when there's something to control. */}
+        {(assemblyState?.active || activeOxford || activeDelphi) && (
+          <ProtocolPanel
+            projectDir={projectDir}
+            section={activeSection || "default"}
+            selfSeat={null /* this is the human's view; selfSeat = null */}
+            rosterRoles={project?.config?.roles ? Object.keys(project.config.roles) : []}
+            rolesConfig={project?.config?.roles}
+          />
+        )}
 
         {/* Settings Panel */}
         {settingsOpen && (
@@ -6848,6 +6774,76 @@ When multiple instances of this role are active:
               >
                 <span className="economy-settings-icon" aria-hidden="true">🔁</span>
                 <span>Start Assembly Line</span>
+              </button>
+            )}
+            {/* Continuous Review launcher — human msg 2313+2381 launch-row
+                slot 4. Uses the existing start_discussion / set_discussion_mode
+                Tauri paths; no new modal — Continuous has no per-launch
+                customization beyond participants (which default to all active
+                seats). */}
+            {discussionState?.active && discussionState?.mode === "continuous" ? (
+              <button
+                type="button"
+                className="economy-settings-btn economy-settings-btn-destructive"
+                onClick={async () => {
+                  if (!projectDir) return;
+                  const confirmed = window.confirm(
+                    `End Continuous Review?\n\nStops auto-triggered micro-rounds. Active rounds will not be re-triggered.`,
+                  );
+                  if (!confirmed) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    await invoke("end_discussion", { dir: projectDir });
+                    const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+                    setDiscussionState(state);
+                    showToast("Continuous Review ended.", "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't end Continuous Review — ${msg}`, "error");
+                  }
+                }}
+                title="End auto-triggered micro-rounds"
+              >
+                <span className="economy-settings-icon" aria-hidden="true">⏹</span>
+                <span>End Continuous Review</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="economy-settings-btn"
+                onClick={async () => {
+                  if (!projectDir) return;
+                  try {
+                    const { invoke } = await import("@tauri-apps/api/core");
+                    const participants = (project?.sessions ?? [])
+                      .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
+                      .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`);
+                    const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
+                    const mgrSession = project?.sessions?.find(s => s.role === "manager" && s.status === "active");
+                    const moderator = modSession
+                      ? `moderator:${modSession.instance}`
+                      : mgrSession
+                        ? `manager:${mgrSession.instance}`
+                        : participants[0] || "human:0";
+                    await invoke("start_discussion", {
+                      dir: projectDir,
+                      mode: "continuous",
+                      topic: "Continuous review — auto-triggered micro-rounds",
+                      moderator,
+                      participants,
+                    });
+                    const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+                    setDiscussionState(state);
+                    showToast("Continuous Review started.", "success");
+                  } catch (e) {
+                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
+                    showToast(`Couldn't start Continuous Review — ${msg}`, "error");
+                  }
+                }}
+                title="Start auto-triggered micro-reviews from team status messages (silence = consent)"
+              >
+                <span className="economy-settings-icon" aria-hidden="true">🔄</span>
+                <span>Start Continuous Review</span>
               </button>
             )}
             <button
