@@ -122,14 +122,17 @@ describe("generateBriefing structure", () => {
     expect(result.startsWith("# Test Role")).toBe(true);
   });
 
-  it("contains all 6 required sections for single-instance role", () => {
+  it("contains all 7 required sections for single-instance role", () => {
+    // SHA: Turn Discipline (Assembly Line) section inserted at position 4;
+    // remaining sections shift down by one.
     const result = generateBriefing(minimalInput);
     expect(result).toContain("## 1. Identity");
     expect(result).toContain("## 2. Primary Function");
     expect(result).toContain("## 3. Anti-patterns");
-    expect(result).toContain("## 4. Peer Relationships");
-    expect(result).toContain("## 5. Action Boundary");
-    expect(result).toContain("## 6. Onboarding");
+    expect(result).toContain("## 4. Turn Discipline (Assembly Line)");
+    expect(result).toContain("## 5. Peer Relationships");
+    expect(result).toContain("## 6. Action Boundary");
+    expect(result).toContain("## 7. Onboarding");
   });
 
   it("includes identity text with title and description", () => {
@@ -426,7 +429,8 @@ describe("generateBriefing multi-instance", () => {
       peers: [],
       maxInstances: 3,
     });
-    expect(result).toContain("## 5. Multi-Instance Coordination");
+    // Turn Discipline inserted at §4 shifts Multi-Instance from §5 to §6.
+    expect(result).toContain("## 6. Multi-Instance Coordination");
     expect(result).toContain("ALWAYS check `project_claims`");
     expect(result).toContain("NEVER work on the same file as another instance");
   });
@@ -440,9 +444,9 @@ describe("generateBriefing multi-instance", () => {
       peers: [],
       maxInstances: 2,
     });
-    // With multi-instance: sections are 1-7 instead of 1-6
-    expect(result).toContain("## 6. Action Boundary");
-    expect(result).toContain("## 7. Onboarding");
+    // With Turn Discipline + Multi-Instance: sections are 1-8 instead of 1-7
+    expect(result).toContain("## 7. Action Boundary");
+    expect(result).toContain("## 8. Onboarding");
   });
 });
 
@@ -495,12 +499,14 @@ describe("generateBriefing template round-trip", () => {
       };
       const result = generateBriefing(input);
 
-      // Every template should produce a valid briefing with all sections
+      // Every template should produce a valid briefing with all sections.
+      // Turn Discipline (Assembly Line) is §4; Peer Relationships shifted to §5.
       expect(result).toContain(`# ${template.title}`);
       expect(result).toContain("## 1. Identity");
       expect(result).toContain("## 2. Primary Function");
       expect(result).toContain("## 3. Anti-patterns");
-      expect(result).toContain("## 4. Peer Relationships");
+      expect(result).toContain("## 4. Turn Discipline (Assembly Line)");
+      expect(result).toContain("## 5. Peer Relationships");
       expect(result.length).toBeGreaterThan(200); // Meaningful content
     }
   });
