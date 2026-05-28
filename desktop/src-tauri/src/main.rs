@@ -1161,6 +1161,117 @@ fn setup_claude_code_integration() {
 }
 
 /// Start local HTTP server for Claude Code speak integration
+/// SHA-HR.1.4.token — F9 fail-closed token file load+create+ACL per architect
+/// msg 2470 + msg 2568 ruling. Returns the token string on success; Err
+/// causes the `/mcp/*` endpoint to return 503 (fail-closed semantics).
+///
+/// On-disk layout: `.vaak/.mcp-proxy-token` contains 64 hex chars (32 random
+/// bytes). Created lazily on first /mcp/* request once the Tauri-side
+/// watched project_dir is known. ACL:
+/// - Windows: `icacls /inheritance:r /grant:r %USERNAME%:F`
+/// - Unix: `chmod 0600`
+///
+/// Fail-closed: if the file exists but readback fails OR the ACL set
+/// command returns non-zero OR the file ends up world-readable, refuse to
+/// return a token (caller returns 503). The endpoint will not authorize
+/// any request until the operator (Tauri main) can read the token from
+/// disk under restricted ACLs.
+fn ensure_and_load_mcp_proxy_token(project_dir: &str) -> Result<String, String> {
+    use std::io::Write;
+    let token_path = std::path::Path::new(project_dir)
+        .join(".vaak")
+        .join(".mcp-proxy-token");
+
+    // If file exists, read + return (assumes prior write set ACL).
+    if let Ok(existing) = std::fs::read_to_string(&token_path) {
+        let trimmed = existing.trim();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(trimmed.to_string());
+        }
+        // Malformed file — refuse to overwrite blind; require operator to delete.
+        return Err(format!(
+            "[ProxyTokenMalformed] {} exists but contents are not 64 hex chars; delete the file to regenerate",
+            token_path.display()
+        ));
+    }
+
+    // Generate 32 random bytes → 64 hex. Use two uuid::Uuid::new_v4 (16 bytes
+    // each, cryptographically random per uuid v4) concatenated to get 32 bytes.
+    let u1 = uuid::Uuid::new_v4();
+    let u2 = uuid::Uuid::new_v4();
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(u1.as_bytes());
+    bytes[16..].copy_from_slice(u2.as_bytes());
+    let hex: String = bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    // Ensure parent dir exists.
+    if let Some(parent) = token_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Write atomically: tmp file + rename. (Atomic rename within same dir.)
+    let tmp_path = token_path.with_extension("token.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp_path)
+            .map_err(|e| format!("[ProxyTokenWriteFailed] create tmp: {}", e))?;
+        f.write_all(hex.as_bytes())
+            .map_err(|e| format!("[ProxyTokenWriteFailed] write tmp: {}", e))?;
+        f.sync_all().ok();
+    }
+    std::fs::rename(&tmp_path, &token_path)
+        .map_err(|e| format!("[ProxyTokenWriteFailed] rename: {}", e))?;
+
+    // Apply ACL. Fail-closed: if perm-set fails, delete the file and return
+    // Err so the endpoint never authorizes a request with a world-readable
+    // token.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(&token_path, perms) {
+            let _ = std::fs::remove_file(&token_path);
+            return Err(format!("[ProxyTokenAclFailed] chmod 0600: {}", e));
+        }
+    }
+    #[cfg(windows)]
+    {
+        // icacls inheritance:r + grant running user full control. If the
+        // command fails OR the file is still world-readable, fail-closed
+        // by removing the file.
+        let username = std::env::var("USERNAME").unwrap_or_default();
+        if username.is_empty() {
+            let _ = std::fs::remove_file(&token_path);
+            return Err("[ProxyTokenAclFailed] USERNAME env var missing".to_string());
+        }
+        let status = std::process::Command::new("icacls")
+            .arg(&token_path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{}:F", username))
+            .output();
+        match status {
+            Ok(o) if o.status.success() => { /* perm set */ }
+            Ok(o) => {
+                let _ = std::fs::remove_file(&token_path);
+                return Err(format!(
+                    "[ProxyTokenAclFailed] icacls exit {}: {}",
+                    o.status,
+                    String::from_utf8_lossy(&o.stderr)
+                ));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&token_path);
+                return Err(format!("[ProxyTokenAclFailed] icacls invoke: {}", e));
+            }
+        }
+    }
+
+    Ok(hex)
+}
+
 fn start_speak_server(app_handle: tauri::AppHandle) {
     thread::spawn(move || {
         let server = match Server::http("127.0.0.1:7865") {
@@ -1302,6 +1413,11 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 continue;
             }
 
+            // SHA-HR.1.4.token — Phase 1 F9 fail-closed enforcement per architect msg 2568
+            // ruling: token verification MUST be active at endpoint lifetime. Closes the
+            // auth-off violation in 3588f70. Local-process spoof window (evil-arch msg 2564
+            // PowerShell snippet) now blocked by 401 unless caller has read .vaak/.mcp-proxy-token.
+            //
             // SHA-HR.1.4 — Phase 1 hot-reload architecture per
             // `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`
             // + human msg 2415. POST /mcp/assembly_line is the pilot endpoint
@@ -1321,6 +1437,77 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
             // localhost is the current threat model; tightening before
             // multi-tenant deployment is the gate.
             if method == "POST" && url == "/mcp/assembly_line" {
+                // SHA-HR.1.4.token — F9 fail-closed: ensure token exists + ACL set,
+                // then check X-Vaak-Token header before processing. Closes the
+                // auth-off violation per architect msg 2568.
+                // Read X-Vaak-Token header first so we can short-circuit 401 BEFORE
+                // any body parsing.
+                let provided_token: Option<String> = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("X-Vaak-Token"))
+                    .map(|h| h.value.as_str().to_string());
+
+                // Resolve project_dir early (needed for token-file path)
+                let pd_for_token = get_project_watched_dir().lock().clone();
+                let pd_for_token = match pd_for_token {
+                    Some(p) => p,
+                    None => {
+                        let resp = Response::from_string(
+                            r#"{"ok":false,"result":null,"error":"[NoWatchedProject] Tauri app is not watching a project yet"}"#,
+                        )
+                        .with_status_code(409)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .unwrap(),
+                        );
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                };
+
+                let expected_token = match ensure_and_load_mcp_proxy_token(&pd_for_token) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let resp_body = format!(
+                            r#"{{"ok":false,"result":null,"error":"[ProxyTokenSetupFailed] {}"}}"#,
+                            e.replace('"', "'")
+                        );
+                        let resp = Response::from_string(resp_body)
+                            .with_status_code(503)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .unwrap(),
+                            );
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                };
+                match &provided_token {
+                    Some(t) if t == &expected_token => { /* auth ok, fall through */ }
+                    _ => {
+                        let resp = Response::from_string(
+                            r#"{"ok":false,"result":null,"error":"[Unauthorized] missing or invalid X-Vaak-Token header"}"#,
+                        )
+                        .with_status_code(401)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .unwrap(),
+                        );
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                }
+
                 // Read body
                 let mut body = String::new();
                 if request.as_reader().read_to_string(&mut body).is_err() {
@@ -1372,27 +1559,8 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                     .unwrap_or_else(|| serde_json::json!({}));
                 let rev = payload.get("rev").and_then(|v| v.as_u64());
 
-                // Resolve project_dir from the Tauri-side watched dir state.
-                // If no project is currently watched, the endpoint can't dispatch.
-                let pd_opt = get_project_watched_dir().lock().clone();
-                let pd = match pd_opt {
-                    Some(p) => p,
-                    None => {
-                        let resp = Response::from_string(
-                            r#"{"ok":false,"result":null,"error":"[NoWatchedProject] Tauri app is not watching a project yet"}"#,
-                        )
-                        .with_status_code(409)
-                        .with_header(
-                            tiny_http::Header::from_bytes(
-                                &b"Content-Type"[..],
-                                &b"application/json"[..],
-                            )
-                            .unwrap(),
-                        );
-                        let _ = request.respond(resp);
-                        continue;
-                    }
-                };
+                // project_dir already resolved as pd_for_token above for token check.
+                let pd = pd_for_token;
                 let section = collab::get_active_section(&pd);
                 // Sidecar pilot: actor = "human" for the assembly_line action.
                 // Phase 2 will pass real role:instance from the sidecar body.

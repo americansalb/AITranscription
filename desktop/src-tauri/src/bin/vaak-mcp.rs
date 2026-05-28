@@ -3219,6 +3219,7 @@ fn handle_assembly_line(action: &str) -> Result<serde_json::Value, String> {
     // 0.5..1.5). Only ECONNREFUSED retries; 5xx with body does NOT (real
     // panic path from the Tauri handler is the dispatch error).
     let new_state = mcp_proxy_post_with_retry(
+        &pd,
         "/mcp/assembly_line",
         serde_json::json!({
             "action": "set_preset",
@@ -16926,6 +16927,7 @@ fn get_session_id() -> String {
 /// follow-on — endpoint ships AUTH-OFF tonight per main.rs strong-warn
 /// comment.
 fn mcp_proxy_post_with_retry(
+    project_dir: &str,
     path: &str,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -16933,6 +16935,25 @@ fn mcp_proxy_post_with_retry(
     let body = payload.to_string();
     let delays_ms: [u64; 8] = [100, 200, 500, 1000, 2000, 5000, 10000, 10000];
     let mut last_err: String = String::new();
+
+    // SHA-HR.1.4.token — read shared-secret from .vaak/.mcp-proxy-token and
+    // send as X-Vaak-Token header per architect msg 2568 F9(2) ruling.
+    // Token file is created+ACL'd by Tauri on first /mcp/* request; sidecar
+    // reads it once per call (cheap — small file, OS cached). If file is
+    // missing, the Tauri endpoint isn't ready yet → return immediate error
+    // (no point retrying without auth credentials).
+    let token_path = std::path::Path::new(project_dir)
+        .join(".vaak")
+        .join(".mcp-proxy-token");
+    let token = match std::fs::read_to_string(&token_path) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            return Err(format!(
+                "[ProxyTokenMissing] {} not found — Tauri-side /mcp/* endpoint may not be initialized yet (cold-start race)",
+                token_path.display()
+            ));
+        }
+    };
 
     for (attempt, base_delay) in std::iter::once(0u64)
         .chain(delays_ms.iter().copied())
@@ -16955,6 +16976,7 @@ fn mcp_proxy_post_with_retry(
         match client
             .post(&url)
             .set("Content-Type", "application/json")
+            .set("X-Vaak-Token", &token)
             .send_string(&body)
         {
             Ok(resp) => {
