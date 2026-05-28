@@ -22,7 +22,7 @@ Discussion modes today (open / directed) remain orthogonal — they govern messa
 - No rotation order. Agents work freely — anyone can build at any time.
 - When a builder ships a commit, they name at least 2 reviewers (if 2+ non-builder seats are available; 1 if only 1 available; 0 only if nobody else is online).
 - Builder CHOOSES who based on what changed and whose eyes they need.
-- A review window opens for the named reviewers; timer starts (default 60s, configurable).
+- A review window opens for the named reviewers; timer starts (default 5 min / 300s per human msg 2599; presets 1m / 5m / 15m / 30m / 1hr; configurable per-launch).
 - Named reviewers respond: APPROVE / BLOCK / COMMENT.
 - Uninvited agents can voluntarily respond with COMMENT only (advisory, non-blocking, cost-free).
 - Window closes when all named reviewers have responded OR timer expires.
@@ -99,7 +99,7 @@ Each review window produces a record:
 - `builder`: seat label (e.g., "developer:0")
 - `named_reviewers`: array of seat labels
 - `responses`: array of `{seat, type: APPROVE|BLOCK|COMMENT, text, at, was_named: bool}`
-- `timer_duration_secs`: number (default 60, configurable)
+- `timer_duration_secs`: number (default 300 / 5 min per human msg 2599; presets 60 / 300 / 900 / 1800 / 3600; configurable per-launch)
 - `timer_expired`: bool
 - `outcome`: "accepted" | "blocked"
 - `opened_at`: ISO timestamp
@@ -126,7 +126,7 @@ Role-specific review authority (who SHOULD review what) is the builder's judgmen
 - Builder chooses who
 - Named reviewers: APPROVE / BLOCK / COMMENT
 - Uninvited reviewers: COMMENT only (advisory, non-blocking)
-- Timer default 60s (configurable in Assembly setup, presumably Continuous Review standalone setup too)
+- Timer default 5 min / 300s per human msg 2599 (presets 1m / 5m / 15m / 30m / 1hr; configurable per-launch in both Assembly setup and Continuous Review standalone setup)
 - Silence from named reviewer within timer = APPROVE
 - BLOCK requires resolution before commit is accepted
 - `currency_objection` remains available on any commit at any time regardless of review outcome — the economic backstop
@@ -157,7 +157,7 @@ Three new MCP tools:
 
 3. **`review_get_state(commit_sha)`** — read-only. Returns the current state of a review window (open/closed, responses so far, timer remaining).
 
-The 60s timer is server-driven (Tauri-side via the same opportunistic-tick pattern as Delphi's SHA-D10.4 sweeper). Per human msg 2583 directive ("the review window timer must auto-close, not wait for moderator intervention. Same sweeper pattern as D10.4 but for review windows"), the sweeper fires on:
+The timer (default 5 min / 300s per human msg 2599; configurable per-launch) is server-driven (Tauri-side via the same opportunistic-tick pattern as Delphi's SHA-D10.4 sweeper). Per human msg 2583 directive ("the review window timer must auto-close, not wait for moderator intervention. Same sweeper pattern as D10.4 but for review windows"), the sweeper fires on:
 
 1. Every `review_respond` MCP call (post-atomic) — check if window timer expired OR all named reviewers responded → close
 2. Every `review_get_state` MCP call (pre-read) — same check; catches UI-poll cadence
