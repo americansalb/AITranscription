@@ -160,7 +160,7 @@ After Phase 1 ships:
 - Hooks that depend on the sidecar process context (e.g., file-op-claim.py looks up session_id against bindings; moving the handler may break the lookup chain)
 - Trust-model implications (e.g., currency Pass-gate's sender-side enforcement becomes centralized enforcement when handler moves to Tauri — that's a desirable change but the threat model shifts)
 
-**Phase 2 — All currency_* tools migrated.** 18 handlers. Estimated ~2000 LOC moved out of sidecar, into `mcp_handlers/currency_*.rs`. Each gets `/mcp/currency_<tool>` endpoint. The currency.lock + balances.json + currency.jsonl interactions move with the handlers.
+**Phase 2 — All currency_* tools migrated.** 15 handlers (corrected from initial mental count of 18 per dev-challenger:0 msg 2468 grep verification; 2 read-only + 13 mutating). Estimated ~2000 LOC moved out of sidecar, into `mcp_handlers/currency_*.rs`. Each gets `/mcp/currency_<tool>` endpoint. The currency.lock + balances.json + currency.jsonl interactions move with the handlers.
 
 **Phase 2 prerequisite — Mutating-tool idempotency contract** (per dev-challenger msg 2459 F6):
 
@@ -169,6 +169,29 @@ Mutating tools (`currency_*`, `project_send`, `oxford_initiate`, `delphi_initiat
 **Architect ruling (msg 2461):** sidecar includes `X-Vaak-Request-Id: <uuid>` header per POST. Each request_id is a fresh UUID per attempt of a NEW logical call; retries of the SAME logical call reuse the same request_id. Tauri caches `(request_id → response)` in a small in-memory LRU (~256 entries, 60s TTL). Duplicate request_id within window returns cached response without re-executing the handler. Cache miss after TTL → handler runs; this preserves idempotency for retry-within-window without leaking memory long-term.
 
 Phase 1 SHA-HR.1.5 retry-with-backoff scaffolding should already include request_id generation so Phase 2 just adds the Tauri-side cache. Implementation note: cache should be keyed JUST on request_id (not request_id + tool_name) so a sidecar bug that reuses a request_id across tools is detected as a 409 Conflict.
+
+**Security upgrade as migration motivation** (per dev-challenger msg 2468 F11):
+
+The hot-reload architecture is not just about restart pain — it's also a real security upgrade. Pre-migration: currency Pass-gate + escrow runs in SENDER's sidecar (per `project_currency_gate_is_sender_side_enforced`). Stale sidecars bypass the gate — known production issue (false-fail "live verification" that looks like a code bug). Post-migration: Tauri centrally enforces; sender's sidecar code is irrelevant beyond identity claim. Every POST hits current Tauri logic. The stale-sidecar bypass goes away as a side effect of centralization.
+
+When framing this work to any reviewer asking "why is this worth doing," lead with both motivations: restart-pain elimination AND elimination of sender-side stale-code bypasses.
+
+**Token-file ACL is MANDATORY** (per dev-challenger msg 2468 F9):
+
+The msg 2426 Q1 auth ruling (`.vaak/.mcp-proxy-token` + `X-Vaak-Token` header) is hollow without ACL on the token file. Without it, any local process reads the world-readable token and spoofs identity (e.g., POSTs `/mcp/currency_human_adjust` claiming `role=human, instance=0` for arbitrary currency grant).
+
+**Architect ruling:** at Tauri startup, after writing the token file, Tauri MUST set ACL/perms restricting read to the running user only:
+- Windows: `icacls .vaak\.mcp-proxy-token /inheritance:r /grant:r "<USERNAME>:F"` — strip inheritance, grant full control only to running user
+- Unix: `chmod 0600 .vaak/.mcp-proxy-token` — MANDATORY (not "best-effort" as initially specced)
+- **Fail-closed:** if permission set fails at startup, Tauri MUST refuse to start the `/mcp/*` endpoints. Better to fail closed than serve auth-less endpoints.
+
+Add to SHA-HR.1.4 acceptance: confirm file permissions are restricted before Tauri starts accepting `/mcp/*` POSTs.
+
+**Hook chain confirmation** (per dev-challenger msg 2468 F10):
+
+The `file-op-claim.py` PreToolUse/PostToolUse hook runs in the SIDECAR process lifecycle (sidecar registers the hook with Claude Code). It writes markers to `.vaak/sessions/<role>-<inst>-pending-edit.json`. Post-migration, the consumer logic that READS the marker (edit_test_earn detection in currency handlers) lives in Tauri. **Hook write path stays sidecar-scoped; handler read path is now Tauri-scoped. Both read same disk file → contract preserved.**
+
+One-line confirmation noted: file-op-claim.py's write path is unchanged; only the consumer's process-residency shifts.
 
 **Phase 2 state-residency audit prerequisites** (per evil-arch F3):
 - `project_currency_gate_is_sender_side_enforced` — migration eliminates the stale-sidecar bypass (GOOD); document the trust-model shift to centralized enforcement
