@@ -126,6 +126,21 @@ Phase 2 acceptance = ALL of:
 - Phase 3.5 `tiny_http` → thread-pool / async upgrade — currently single-threaded server. Phase 2 throughput likely fine; Phase 4 `project_send` migration probably forces the upgrade.
 - File-op-hook (`file-op-claim.py`) Tauri-side analog — currently runs in sidecar lifecycle; long-term should migrate too.
 - `currency.lock` re-architecture — currently file-lock; if Tauri becomes the only writer, an in-process mutex is faster and equally correct.
+- **Kick-reclamation flow** (per tester msg 2628 finding 2026-05-28) — kicked seats retain copper indefinitely (ux-engineer:0 retained 100cu after kick tonight). Phase 2 migration preserves this behavior; Phase 3+ should add a reclamation mechanism: auto-burn-on-kick OR escrow-to-reserve OR claim-back-on-rejoin. Affects total-supply invariant accounting.
+
+## Total-copper-supply baseline (per tester msg 2628 / 2026-05-28 21:53Z)
+
+Pre-Phase-2 anchor for acceptance criterion 4:
+
+- **Total supply: 31,971 copper** (sum_walk)
+- Balance sum: 31,100
+- Escrow sum: 871
+- Seats at wealth tier: 3 (ui-architect:1/2/0+escrow + developer:0+escrow at 10,000 each)
+- Seats at floor tier: 10 (100cu each)
+- Highest active escrow: ui-architect:0 (711cu)
+- No off-balance reserve pool — economy.json is config only
+
+Post-Phase-2 sum_walk must equal `31,971 + legitimate-mint - legitimate-burn`. Any unexplained delta indicates ledger leak in the migration.
 
 ## Next architect-lane work after this plan publishes
 
