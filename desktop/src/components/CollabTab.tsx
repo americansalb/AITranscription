@@ -178,19 +178,9 @@ function getRoleColor(slug: string): string {
   return HASH_PALETTE[hashSlug(slug) % HASH_PALETTE.length];
 }
 
-const WORKFLOW_TYPES: Record<string, { label: string; color: string; desc: string }> = {
-  full: { label: "Full Review", color: "#9b59b6", desc: "Complete onboarding + planning + full review pipeline" },
-  quick: { label: "Quick Feature", color: "#17bf63", desc: "Skip onboarding, abbreviated review cycle" },
-  bugfix: { label: "Bug Fix", color: "#f5a623", desc: "Focused diagnosis and fix, minimal review" },
-};
-
-function getWorkflowDisplay(type?: string, customColors?: Record<string, string>): { label: string; color: string } {
-  if (type && WORKFLOW_TYPES[type]) {
-    const color = customColors?.[type] || WORKFLOW_TYPES[type].color;
-    return { label: WORKFLOW_TYPES[type].label, color };
-  }
-  return { label: "No Workflow", color: "#657786" };
-}
+// WORKFLOW_TYPES + getWorkflowDisplay extracted to desktop/src/lib/workflowTypes.ts
+// (SHA-FF.4) so the display mapping has a single source of truth + is unit-testable.
+import { WORKFLOW_TYPES, getWorkflowDisplay } from "../lib/workflowTypes";
 
 interface VoteTally {
   proposalId: number;
