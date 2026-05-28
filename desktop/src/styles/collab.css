@@ -2915,6 +2915,29 @@
   cursor: default;
 }
 
+/* Ship + review trigger button — SHA-CR.4 per architect CR redesign spec. */
+.compose-ship-btn {
+  background: transparent;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  color: #d97706;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.compose-ship-btn:hover:not(:disabled) {
+  background: rgba(217, 119, 6, 0.12);
+  color: #fbbf24;
+}
+.compose-ship-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 
 /* ==================== Role Briefing Modal ==================== */
 

@@ -10,6 +10,7 @@ import { OxfordSetupModal } from "./OxfordSetupModal";
 import { DelphiSetupModal } from "./DelphiSetupModal";
 import { AssemblySetupModal } from "./AssemblySetupModal";
 import { ContinuousSetupModal } from "./ContinuousSetupModal";
+import { ShipModal } from "./ShipModal";
 import { buildFlowFeedRows } from "../lib/flowFeedBatcher";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
@@ -874,6 +875,9 @@ export function CollabTab() {
   // SHA-LR.3: Continuous launcher gains a customization modal (timeout
   // selector) matching the spec table slot 4 customization column.
   const [continuousSetupOpen, setContinuousSetupOpen] = useState(false);
+  // SHA-CR.4: ship-with-reviewers ShipModal trigger per architect CR
+  // redesign spec §UI item 2 + human msg 2549 directive.
+  const [shipModalOpen, setShipModalOpen] = useState(false);
   // Per spec §7.1 item 5 — aggregate render with collapse/expand affordance.
   // Keyed by aggregate_message_id so multi-round Delphi reveals can be
   // independently toggled. Defaults to expanded for the latest round.
@@ -7512,6 +7516,20 @@ When multiple instances of this role are active:
           >
             {sending ? "Sending\u2026" : "Send"}
           </button>
+          {/* Ship + open review trigger \u2014 per architect CR redesign spec
+              \u00a7UI item 2. Opens ShipModal where the builder names reviewers
+              + sets the review window timer. Always visible (the modal
+              works regardless of working mode); most useful when
+              Continuous Review or Assembly Line is active. */}
+          <button
+            type="button"
+            className="compose-ship-btn"
+            onClick={() => setShipModalOpen(true)}
+            disabled={sending}
+            title="Ship a commit and open a review window (names reviewers + sets timer)"
+          >
+            \ud83d\udea2 Ship + review
+          </button>
         </div>
 
         {/* Slice 4 \u2014 mic_to hint UI. Spec \u00a74.3 click-to-confirm. */}
@@ -7611,6 +7629,33 @@ When multiple instances of this role are active:
             );
           }}
         />
+
+        {/* Ship + open review modal — SHA-CR.4 per architect spec §UI item 2.
+            Builder names ≥2 reviewers + sets timer; modal posts structured
+            ship broadcast via project_send_cmd with metadata.commit_sha,
+            metadata.reviewers, metadata.review_timer_secs. When the new
+            review_ship_cmd backend tool lands, only the invoke target
+            swaps; UI shape unchanged. */}
+        {projectDir && (
+          <ShipModal
+            open={shipModalOpen}
+            projectDir={projectDir}
+            builderSeat="human:0"
+            activeSeats={
+              (project?.sessions ?? [])
+                .filter((b: SessionBinding) => b.status === "active" && !!b.role)
+                .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
+            }
+            defaultTimerSecs={continuousTimeout ?? 300}
+            onClose={() => setShipModalOpen(false)}
+            onShipped={(cfg) => {
+              showToast(
+                `Ship + review window opened for ${cfg.commit_sha} (${cfg.named_reviewers.length} reviewer${cfg.named_reviewers.length === 1 ? "" : "s"}; ${cfg.timer_secs}s).`,
+                "success",
+              );
+            }}
+          />
+        )}
 
         {/* Continuous Review setup modal — SHA-LR.3 customization. */}
         {projectDir && (
