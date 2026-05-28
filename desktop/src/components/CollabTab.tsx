@@ -9,6 +9,7 @@ import { EconomySettingsModal } from "./EconomySettingsModal";
 import { OxfordSetupModal } from "./OxfordSetupModal";
 import { DelphiSetupModal } from "./DelphiSetupModal";
 import { AssemblySetupModal } from "./AssemblySetupModal";
+import { buildFlowFeedRows } from "../lib/flowFeedBatcher";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
 // R1 6/6 + R2 9/9 + R5 18/18 tests passing). ProtocolPanel is the sole
@@ -1466,111 +1467,10 @@ export function CollabTab() {
   // batch by the `turn` field — NOT by consecutive same-seat (the old impl,
   // which broke the run on each seat → ~6-8 lines/turn = the human's complaint).
   // Keep the last 50 for render; newest is last (we scroll to bottom).
-  const flowFeedRows = useMemo(() => {
-    const out: Array<{ key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }> = [];
-    let passiveBatch: { turn: number | undefined; count: number; at?: string } | null = null;
-    // Change #3 (human msg 2262): interest, like passive, fires once per seat
-    // per rotation — six "earned 1 copper interest" lines every turn. Batch it
-    // the same way passive is batched: ONE line per turn. Interest amounts vary
-    // per seat (1c per 10c held), so we sum the copper instead of counting ×1.
-    let interestBatch: { turn: number | undefined; count: number; total: number; at?: string } | null = null;
-    // Human msg 2388 item 4 — decay, like passive and interest, fires once per
-    // seat per rotation (one debit row with reason/action_kind containing
-    // "decay" per seat). Batch the same way: ONE line per turn summing total
-    // copper destroyed. Decay rows come through as type="debit" with no
-    // dedicated type column — sniff by reason/action_kind.
-    let decayBatch: { turn: number | undefined; count: number; total: number; at?: string } | null = null;
-    const flushPassive = () => {
-      if (!passiveBatch) return;
-      const turnLabel = passiveBatch.turn != null ? ` (turn ${passiveBatch.turn})` : "";
-      out.push({
-        key: `passive-turn-${passiveBatch.turn ?? `idx${out.length}`}`,
-        text: `${passiveBatch.count} seat${passiveBatch.count === 1 ? "" : "s"} earned 1 copper passive${turnLabel}`,
-        tier: "passive",
-        at: passiveBatch.at,
-      });
-      passiveBatch = null;
-    };
-    const flushInterest = () => {
-      if (!interestBatch) return;
-      const turnLabel = interestBatch.turn != null ? ` (turn ${interestBatch.turn})` : "";
-      out.push({
-        key: `interest-turn-${interestBatch.turn ?? `idx${out.length}`}`,
-        text: `${interestBatch.count} seat${interestBatch.count === 1 ? "" : "s"} earned ${interestBatch.total.toLocaleString()} copper interest${turnLabel}`,
-        tier: "earn",
-        at: interestBatch.at,
-      });
-      interestBatch = null;
-    };
-    const flushDecay = () => {
-      if (!decayBatch) return;
-      const turnLabel = decayBatch.turn != null ? ` (turn ${decayBatch.turn})` : "";
-      out.push({
-        key: `decay-turn-${decayBatch.turn ?? `idx${out.length}`}`,
-        text: `${decayBatch.count} seat${decayBatch.count === 1 ? "" : "s"} lost ${decayBatch.total.toLocaleString()} copper to decay${turnLabel}`,
-        tier: "loss",
-        at: decayBatch.at,
-      });
-      decayBatch = null;
-    };
-    const isDecayRow = (row: CurrencyFeedRow): boolean => {
-      if (row.type !== "debit") return false;
-      const reason = (row.reason || "").toLowerCase();
-      const kind = (row.action_kind || "").toLowerCase();
-      return reason.includes("decay") || kind.includes("decay");
-    };
-    for (const row of currencyFeed) {
-      if (row.type === "passive") {
-        flushInterest();
-        flushDecay();
-        if (passiveBatch && passiveBatch.turn === row.turn) {
-          passiveBatch.count += 1;
-          passiveBatch.at = row.at;
-        } else {
-          flushPassive();
-          passiveBatch = { turn: row.turn, count: 1, at: row.at };
-        }
-        continue;
-      }
-      if (row.type === "interest") {
-        flushPassive();
-        flushDecay();
-        const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
-        if (interestBatch && interestBatch.turn === row.turn) {
-          interestBatch.count += 1;
-          interestBatch.total += amt;
-          interestBatch.at = row.at;
-        } else {
-          flushInterest();
-          interestBatch = { turn: row.turn, count: 1, total: amt, at: row.at };
-        }
-        continue;
-      }
-      if (isDecayRow(row)) {
-        flushPassive();
-        flushInterest();
-        const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
-        if (decayBatch && decayBatch.turn === row.turn) {
-          decayBatch.count += 1;
-          decayBatch.total += amt;
-          decayBatch.at = row.at;
-        } else {
-          flushDecay();
-          decayBatch = { turn: row.turn, count: 1, total: amt, at: row.at };
-        }
-        continue;
-      }
-      flushPassive();
-      flushInterest();
-      flushDecay();
-      const formatted = formatCurrencyLine(row);
-      out.push({ key: row.id || `${row.at ?? ""}-${out.length}`, text: formatted.text, tier: formatted.tier, seat: row.seat, at: row.at });
-    }
-    flushPassive();
-    flushInterest();
-    flushDecay();
-    return out.slice(-50);
-  }, [currencyFeed]);
+  const flowFeedRows = useMemo(
+    () => buildFlowFeedRows(currencyFeed, formatCurrencyLine),
+    [currencyFeed],
+  );
 
   // Change #1 (human msg 2262): index currency rows + disputes by the board
   // message they reference, so each message card can render its own economic
