@@ -27,11 +27,16 @@ export type ShipSubmit = {
   timer_secs: number;
 };
 
+// Timer presets per human msg 2599 ("60 seconds is too short for review
+// window"). Default moved from 60s → 5m. Range now covers tight-feedback
+// (1m) through proper-review (1h) so the builder can tune to the change's
+// scope.
 const TIMER_PRESETS: Array<{ value: number; label: string }> = [
-  { value: 30, label: "30 seconds — tight feedback loop" },
-  { value: 60, label: "1 minute — default per msg 2549" },
-  { value: 120, label: "2 minutes — relaxed" },
-  { value: 300, label: "5 minutes — async-style" },
+  { value: 60, label: "1 minute — tight feedback (tiny change)" },
+  { value: 300, label: "5 minutes — default (quick async review)" },
+  { value: 900, label: "15 minutes — moderate" },
+  { value: 1800, label: "30 minutes — relaxed" },
+  { value: 3600, label: "1 hour — proper review (large change)" },
 ];
 
 export function ShipModal(props: {
@@ -58,7 +63,7 @@ export function ShipModal(props: {
   const [commitSha, setCommitSha] = useState<string>(prefilledCommitSha ?? "");
   const [reviewers, setReviewers] = useState<Set<string>>(new Set());
   const [body, setBody] = useState<string>("");
-  const [timerSecs, setTimerSecs] = useState<number>(defaultTimerSecs ?? 60);
+  const [timerSecs, setTimerSecs] = useState<number>(defaultTimerSecs ?? 300);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -69,7 +74,7 @@ export function ShipModal(props: {
       setCommitSha(prefilledCommitSha ?? "");
       setReviewers(new Set());
       setBody("");
-      setTimerSecs(defaultTimerSecs ?? 60);
+      setTimerSecs(defaultTimerSecs ?? 300);
       setError(null);
       setBusy(false);
       const t = setTimeout(() => commitRef.current?.focus(), 0);

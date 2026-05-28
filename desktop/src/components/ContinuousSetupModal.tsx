@@ -5,13 +5,15 @@ export type ContinuousSetupSubmit = {
   silence_timeout_seconds: number;
 };
 
-// Review window default duration — applies to each commit review window
-// per human msg 2549 redesign. 60s default; configurable for slower teams.
+// Review window default duration. Per human msg 2599 ("60 seconds is too
+// short for review window"), default raised from 60s to 5m. Range covers
+// tight-feedback (1m) through proper-review (1h).
 const TIMEOUT_OPTIONS: Array<{ value: number; label: string }> = [
-  { value: 30, label: "30 seconds — tight feedback loop" },
-  { value: 60, label: "1 minute — default per spec §msg-2549" },
-  { value: 120, label: "2 minutes — relaxed" },
-  { value: 300, label: "5 minutes — async-style" },
+  { value: 60, label: "1 minute — tight feedback (tiny change)" },
+  { value: 300, label: "5 minutes — default (quick async review)" },
+  { value: 900, label: "15 minutes — moderate" },
+  { value: 1800, label: "30 minutes — relaxed" },
+  { value: 3600, label: "1 hour — proper review (large change)" },
 ];
 
 export function ContinuousSetupModal(props: {
@@ -31,7 +33,7 @@ export function ContinuousSetupModal(props: {
     onStarted,
   } = props;
 
-  const defaultTimeout = currentTimeoutSeconds ?? 60;
+  const defaultTimeout = currentTimeoutSeconds ?? 300;
   const [timeout, setTimeoutValue] = useState<number>(defaultTimeout);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +42,7 @@ export function ContinuousSetupModal(props: {
 
   useEffect(() => {
     if (open) {
-      setTimeoutValue(currentTimeoutSeconds ?? 60);
+      setTimeoutValue(currentTimeoutSeconds ?? 300);
       setError(null);
       setBusy(false);
       const t = setTimeout(() => firstFieldRef.current?.focus(), 0);
