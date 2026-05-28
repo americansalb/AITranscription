@@ -9,6 +9,7 @@ import { EconomySettingsModal } from "./EconomySettingsModal";
 import { OxfordSetupModal } from "./OxfordSetupModal";
 import { DelphiSetupModal } from "./DelphiSetupModal";
 import { AssemblySetupModal } from "./AssemblySetupModal";
+import { ContinuousSetupModal } from "./ContinuousSetupModal";
 import { buildFlowFeedRows } from "../lib/flowFeedBatcher";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
@@ -880,6 +881,9 @@ export function CollabTab() {
   // sidebar Discussion Mode card pattern the human called "isolated and
   // inefficient."
   const [assemblySetupOpen, setAssemblySetupOpen] = useState(false);
+  // SHA-LR.3: Continuous launcher gains a customization modal (timeout
+  // selector) matching the spec table slot 4 customization column.
+  const [continuousSetupOpen, setContinuousSetupOpen] = useState(false);
   // Per spec §7.1 item 5 — aggregate render with collapse/expand affordance.
   // Keyed by aggregate_message_id so multi-round Delphi reveals can be
   // independently toggled. Defaults to expanded for the latest round.
@@ -6647,36 +6651,8 @@ When multiple instances of this role are active:
               <button
                 type="button"
                 className="economy-settings-btn"
-                onClick={async () => {
-                  if (!projectDir) return;
-                  try {
-                    const { invoke } = await import("@tauri-apps/api/core");
-                    const participants = (project?.sessions ?? [])
-                      .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
-                      .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`);
-                    const modSession = project?.sessions?.find(s => s.role === "moderator" && s.status === "active");
-                    const mgrSession = project?.sessions?.find(s => s.role === "manager" && s.status === "active");
-                    const moderator = modSession
-                      ? `moderator:${modSession.instance}`
-                      : mgrSession
-                        ? `manager:${mgrSession.instance}`
-                        : participants[0] || "human:0";
-                    await invoke("start_discussion", {
-                      dir: projectDir,
-                      mode: "continuous",
-                      topic: "Continuous review — auto-triggered micro-rounds",
-                      moderator,
-                      participants,
-                    });
-                    const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
-                    setDiscussionState(state);
-                    showToast("Continuous Review started.", "success");
-                  } catch (e) {
-                    const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
-                    showToast(`Couldn't start Continuous Review — ${msg}`, "error");
-                  }
-                }}
-                title="Start auto-triggered micro-reviews from team status messages (silence = consent)"
+                onClick={() => setContinuousSetupOpen(true)}
+                title="Start auto-triggered micro-reviews from team status messages (silence = consent). Configurable timeout."
               >
                 <span className="economy-settings-icon" aria-hidden="true">🔄</span>
                 <span>Start Continuous Review</span>
@@ -7619,6 +7595,29 @@ When multiple instances of this role are active:
             );
           }}
         />
+
+        {/* Continuous Review setup modal — SHA-LR.3 customization. */}
+        {projectDir && (
+          <ContinuousSetupModal
+            open={continuousSetupOpen}
+            projectDir={projectDir}
+            activeSeats={
+              (project?.sessions ?? [])
+                .filter((b: SessionBinding) => b.status === "active" && !!b.role && b.role !== "human")
+                .map((b: SessionBinding) => `${b.role}:${b.instance ?? 0}`)
+            }
+            currentTimeoutSeconds={continuousTimeout}
+            onClose={() => setContinuousSetupOpen(false)}
+            onStarted={async () => {
+              try {
+                const { invoke } = await import("@tauri-apps/api/core");
+                const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
+                setDiscussionState(state);
+              } catch { /* polling will catch up */ }
+              showToast("Continuous Review started.", "success");
+            }}
+          />
+        )}
 
         {/* Assembly Mode setup modal — human msg 2305+2313 parity build. */}
         {projectDir && (

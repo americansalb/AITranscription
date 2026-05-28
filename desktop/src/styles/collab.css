@@ -9783,3 +9783,42 @@
 .asm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .asm-btn-submit:not(:disabled) { background: #137333; border-color: #137333; color: white; }
 .asm-btn-submit:not(:disabled):hover { background: #0f5a28; }
+
+/* ---- ContinuousSetupModal (SHA-LR.3 — Continuous timeout customization per spec table slot 4) ---- */
+.csm-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1500; animation: abm-fade 0.12s ease;
+}
+.csm-dialog {
+  background: var(--collab-bg-elevated, #1e1f24);
+  color: var(--collab-text, rgba(255, 255, 255, 0.95));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.12));
+  border-top: 3px solid #1a5fb4;
+  border-radius: 8px;
+  width: 480px; max-width: 94vw; max-height: 88vh;
+  display: flex; flex-direction: column;
+  padding: 20px 24px;
+  overflow-y: auto;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+.csm-title { margin: 0 0 4px; font-size: 15px; }
+.csm-subtitle { margin: 0 0 16px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); }
+.csm-error { padding: 8px 12px; background: rgba(255, 107, 107, 0.10); border-left: 3px solid #ff6b6b; color: #ff6b6b; font-size: 12px; border-radius: 4px; margin-bottom: 12px; }
+.csm-field { display: block; margin-bottom: 14px; font-size: 12px; }
+.csm-field-label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.6)); margin-bottom: 6px; }
+.csm-select {
+  display: block; width: 100%; padding: 6px 10px;
+  font: inherit; font-size: 12px;
+  background: var(--collab-bg, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.18));
+  border-radius: 4px; color: inherit; box-sizing: border-box;
+}
+.csm-select:focus { outline: 2px solid #1a5fb4; outline-offset: 1px; border-color: transparent; }
+.csm-summary { margin-top: 12px; padding: 8px 10px; font-size: 11px; color: var(--collab-text-muted, rgba(255, 255, 255, 0.7)); background: rgba(26, 95, 180, 0.08); border-left: 3px solid rgba(26, 95, 180, 0.55); border-radius: 4px; }
+.csm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--collab-border, rgba(255, 255, 255, 0.10)); }
+.csm-btn { padding: 8px 18px; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--collab-border, rgba(255, 255, 255, 0.2)); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; transition: background 0.12s ease; }
+.csm-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.csm-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.csm-btn-submit:not(:disabled) { background: #1a5fb4; border-color: #1a5fb4; color: white; }
+.csm-btn-submit:not(:disabled):hover { background: #154a8d; }
