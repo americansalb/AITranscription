@@ -134,6 +134,7 @@ Avoid: ONE 800-LOC LaunchRow.tsx. The per-mode bodies must be separate files so 
 
 **Phase 3 — Continuous migration (follow-up commit):**
 - Migrate continuous toggle → LaunchRow slot 4 with `ContinuousConfig` + `ContinuousControl`
+- **Semantic decision (per dev-challenger:0 msg 2390 Finding 4 + evil-architect:0 msg 2398):** Continuous uses **event-launcher semantics (option a)**. `Start Continuous Review` calls `start_discussion(mode: "continuous", ...)` which begins a discrete continuous-review session; `End Continuous Review` calls `end_discussion` to terminate it. The auto-trigger pattern fires WHILE the session is active. Rationale: preserves existing `start_discussion` backend semantics with no backend changes; matches the start/end mental model of the launcher row's other three slots; the discrete-session boundary gives the operator a clear ON/OFF affordance instead of an ambient mode they have to discover. Hybrid (option b: UI start/end with backend perpetual auto-trigger) was rejected as user-model-mismatch. Shipped in SHA-LR.2 commit `7090f5a` via inline button handlers (no dedicated modal because Continuous has no per-launch customization beyond participants which default to all active seats).
 
 **(Phase 4 — DEPRECATED:** see Phase 0 above. The previously-numbered Phase 4 was the backend Commit C fix; it has been promoted to Phase 0 PREREQUISITE per architect:0 msg 2330 ruling. No work remains under the Phase 4 number.)
 
