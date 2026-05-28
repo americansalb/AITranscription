@@ -4236,11 +4236,19 @@ fn apply_set_preset(
     // discussion gets silently overwritten by another non-Default mode while
     // floor.mode + rotation_order + discussion state drift independently.
     //
+    // Cold-open carve-out: when `prev_preset` is empty (no preset set yet
+    // — fresh section, new project, or first protocol_mutate after a
+    // schema bump), treat the state as equivalent to Default chat. Without
+    // this carve-out, the first preset transition on a cold-open state
+    // can never reach Assembly Line / Brainstorm / discussion modes, and
+    // pinning test `set_preset_assembly_from_empty_preset_allowed` fails.
+    //
     // Coarse — superset of the existing Assembly Line ↔ discussion mutex
     // above (which catches the most dangerous pairs explicitly). When
     // v1.5.0 typed enforcement ships, this gate becomes redundant and can
     // be removed.
-    if prev_preset != PRESET_DEFAULT_CHAT
+    if !prev_preset.is_empty()
+        && prev_preset != PRESET_DEFAULT_CHAT
         && name != PRESET_DEFAULT_CHAT
         && prev_preset != name
     {
@@ -6011,7 +6019,9 @@ mod protocol_slice2_tests {
     /// in input shape and writes the matrix-mapped modes.)
     #[test]
     fn apply_set_preset_assembly_line_maps_to_round_robin_none() {
-        let mut s = fresh_state();
+        // v1.0.7 cross-transition gate blocks direct Debate→AssemblyLine;
+        // route via Default chat first (matching real do_protocol_mutate flow).
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Assembly Line"})).unwrap();
         assert_eq!(s["preset"], "Assembly Line");
         assert_eq!(s["floor"]["mode"], "round-robin");
@@ -6020,7 +6030,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn apply_set_preset_continuous_review_maps_to_free_grab_tally() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         apply_set_preset(&mut s, &serde_json::json!({"name": "Continuous Review"})).unwrap();
         assert_eq!(s["floor"]["mode"], "free-grab");
         assert_eq!(s["consensus"]["mode"], "tally");
@@ -6028,7 +6038,7 @@ mod protocol_slice2_tests {
 
     #[test]
     fn apply_set_preset_unknown_returns_invalid_args() {
-        let mut s = fresh_state();
+        let mut s = fresh_state_at_default_chat();
         let err = apply_set_preset(&mut s, &serde_json::json!({"name": "Nonexistent"}))
             .unwrap_err();
         assert!(err.starts_with("[InvalidArgs]"), "got: {}", err);
@@ -7539,11 +7549,15 @@ mod protocol_slice2_tests {
     /// do_protocol_mutate, not the bare normalize() helper.
     #[test]
     fn normalize_wired_to_set_preset_clears_queue_on_free_grab() {
+        // v1.0.7 cross-transition gate requires routing through "Default chat"
+        // before any non-default destination. Seed the fixture at Default chat
+        // (mode=none) with the same queue/speaker shape we want to assert gets
+        // cleared by normalize — that's the wiring under test.
         let dir = temp_project_with_protocol(
             "normalize-set-preset",
             serde_json::json!({
-                "schema_version": 1, "rev": 0, "preset": "Town hall",
-                "floor": {"mode": "queue", "current_speaker": "architect:0", "queue": ["dev:0", "tester:0"], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
+                "schema_version": 1, "rev": 0, "preset": "Default chat",
+                "floor": {"mode": "none", "current_speaker": "architect:0", "queue": ["dev:0", "tester:0"], "rotation_order": [], "threshold_ms": 60000, "started_at": null},
                 "consensus": {"mode": "none", "round": null, "phase": null, "submissions": []},
                 "phase_plan": {"phases": [], "current_phase_idx": 0, "paused_at": null, "paused_total_secs": 0},
                 "scopes": {"floor": "instance", "consensus": "role"},
