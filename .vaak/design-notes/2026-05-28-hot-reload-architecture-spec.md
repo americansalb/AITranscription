@@ -146,13 +146,28 @@ After Phase 1 ships:
 
 ## Phases 2-5 (sketches; detailed specs per-phase)
 
+**Pre-phase gate (added per evil-arch msg 2434 F3):** Each phase MUST start with a per-handler state-residency audit. For each handler migrating to Tauri, enumerate:
+- Sidecar-local state the handler depends on (project_dir, session_id, role, instance — always; anything else is a yellow flag)
+- File reads / writes (paths + locks)
+- Hooks that depend on the sidecar process context (e.g., file-op-claim.py looks up session_id against bindings; moving the handler may break the lookup chain)
+- Trust-model implications (e.g., currency Pass-gate's sender-side enforcement becomes centralized enforcement when handler moves to Tauri — that's a desirable change but the threat model shifts)
+
 **Phase 2 — All currency_* tools migrated.** 18 handlers. Estimated ~2000 LOC moved out of sidecar, into `mcp_handlers/currency_*.rs`. Each gets `/mcp/currency_<tool>` endpoint. The currency.lock + balances.json + currency.jsonl interactions move with the handlers.
 
-**Phase 3 — oxford_* / delphi_* / assembly_* / discussion_control / audience_*.** Per-mode submodules under `mcp_handlers/`. ~3500 LOC moved.
+**Phase 2 state-residency audit prerequisites** (per evil-arch F3):
+- `project_currency_gate_is_sender_side_enforced` — migration eliminates the stale-sidecar bypass (GOOD); document the trust-model shift to centralized enforcement
+- `project_currency_edit_test_earns_dead` — file-op-claim.py hook lookup chain depends on sidecar process context; verify the lookup still works when the handler runs in Tauri (the hook still runs in the sidecar's lifecycle, but the handler it ultimately reaches via project_send proxy needs to honor the marker file)
+- dev-challenger:0 invited to lead this audit before Phase 2 begins
 
-**Phase 4 — project_send + project_check + project_wait + project_status + project_join + project_leave + project_kick + project_buzz + protocol_mutate + get_protocol + list/create/switch_section + update_briefing + claim/release/claims.** Highest-traffic. ~6000 LOC moved. tiny_http loop SHOULD be upgraded to spawn-per-request or a thread pool before this phase to handle project_wait long-poll concurrency.
+**Phase 3 — oxford_* / delphi_* / assembly_* / discussion_control / audience_*.** Per-mode submodules under `mcp_handlers/`. ~3500 LOC moved. Each tool's pre-phase audit examines its event broadcast paths and any sidecar-cached state (e.g., active_oxford_debate read-cache).
+
+**Phase 3.5 — tiny_http → thread-pool / async upgrade** (NEW per evil-arch msg 2434 F4). Extract the concurrency upgrade from Phase 4 to its own commit chain. Mixing infrastructure architectural change with handler-feature migration is the team's known highest-bug-risk pattern. Acceptance: existing /heartbeat /speak /collab/notify endpoints continue working under load test (e.g., 100 concurrent /heartbeat POSTs). Once Phase 3.5 lands cleanly, Phase 4 can proceed without compounded risk.
+
+**Phase 4 — project_send + project_check + project_wait + project_status + project_join + project_leave + project_kick + project_buzz + protocol_mutate + get_protocol + list/create/switch_section + update_briefing + claim/release/claims.** Highest-traffic. ~6000 LOC moved. Depends on Phase 3.5 (tiny_http upgrade) landing first.
 
 **Phase 5 — Auto-detect Tauri restart + re-handshake.** When the sidecar's POST fails with ECONNREFUSED or HTTP error, it should retry with exponential backoff (up to ~30s) instead of immediately erroring to Claude Code. When the Tauri restart completes, the sidecar resumes seamlessly. The MCP-side timeout per call needs to be tuned to accommodate the longest expected restart window.
+
+**Phase 5 long-poll cursor durability** (NEW per evil-arch msg 2434 F5). project_wait holds the sidecar's HTTP POST open for ~55s. If Tauri restarts mid-poll, sidecar gets ECONNREFUSED on a half-completed poll. **Architect ruling: IDEMPOTENT RETRY with cursor in sidecar.** Each poll fully described by its `last_seen` argument; sidecar retries with the SAME `last_seen` on ECONNREFUSED. No disk persistence needed — cursor lives client-side (sidecar memory) and is included in every retry. Alternative considered: persist cursor to disk per poll in Tauri. Rejected as more complex without functional benefit.
 
 **Final state:** vaak-mcp.rs is ~500 LOC. Tool surface registration + arg packaging + HTTP POST helper + backoff retry. Changes only when adding/removing/renaming a tool (rare). All business logic in `desktop/src-tauri/src/mcp_handlers/` modules.
 
