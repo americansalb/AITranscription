@@ -19511,6 +19511,51 @@ mod assembly_v3_phase1_tests {
         assert!(res.is_ok(), "empty preset → Assembly Line must succeed: {:?}", res);
     }
 
+    /// SHA-V107.fix-1 regression — cold-open carve-out must also allow other
+    /// non-Default destinations (Brainstorm, Town hall, Continuous Review).
+    /// Without the carve-out, the v1.0.7 gate rejects empty → anything-but-
+    /// Default-chat and any fresh section / new project gets stuck at the
+    /// first transition.
+    #[test]
+    fn v107_cold_open_carve_out_allows_brainstorm() {
+        let mut state = serde_json::json!({
+            "floor": {"mode": "none"},
+            "consensus": {"mode": "none"}
+        });
+        let res = apply_set_preset(&mut state, &serde_json::json!({"name": "Brainstorm"}));
+        assert!(
+            res.is_ok(),
+            "empty preset → Brainstorm must succeed (cold-open carve-out): {:?}",
+            res
+        );
+        assert_eq!(state["floor"]["mode"], serde_json::json!("free-grab"));
+    }
+
+    /// SHA-V107.fix-1 regression — the gate must still REJECT genuine
+    /// cross-transitions between non-Default presets (e.g., Assembly Line →
+    /// Brainstorm without routing through Default chat). The carve-out
+    /// only applies to empty prev_preset, not to ANY non-Default prev_preset.
+    #[test]
+    fn v107_gate_still_rejects_non_default_cross_transition() {
+        let mut state = serde_json::json!({
+            "preset": "Assembly Line",
+            "floor": {"mode": "round-robin"},
+            "consensus": {"mode": "none"}
+        });
+        let res = apply_set_preset(&mut state, &serde_json::json!({"name": "Brainstorm"}));
+        assert!(
+            res.is_err(),
+            "Assembly Line → Brainstorm must fail per v1.0.7 gate (carve-out is for empty only): {:?}",
+            res
+        );
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("[ConflictWithActivePreset]"),
+            "expected v1.0.7 gate error, got: {}",
+            err
+        );
+    }
+
     /// Heartbeat freshness threshold is exactly 90s — a 90s-old binding is
     /// still in (boundary), 91s is out.
     #[test]
