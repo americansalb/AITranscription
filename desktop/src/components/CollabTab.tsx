@@ -1474,6 +1474,12 @@ export function CollabTab() {
     // the same way passive is batched: ONE line per turn. Interest amounts vary
     // per seat (1c per 10c held), so we sum the copper instead of counting ×1.
     let interestBatch: { turn: number | undefined; count: number; total: number; at?: string } | null = null;
+    // Human msg 2388 item 4 — decay, like passive and interest, fires once per
+    // seat per rotation (one debit row with reason/action_kind containing
+    // "decay" per seat). Batch the same way: ONE line per turn summing total
+    // copper destroyed. Decay rows come through as type="debit" with no
+    // dedicated type column — sniff by reason/action_kind.
+    let decayBatch: { turn: number | undefined; count: number; total: number; at?: string } | null = null;
     const flushPassive = () => {
       if (!passiveBatch) return;
       const turnLabel = passiveBatch.turn != null ? ` (turn ${passiveBatch.turn})` : "";
@@ -1496,9 +1502,27 @@ export function CollabTab() {
       });
       interestBatch = null;
     };
+    const flushDecay = () => {
+      if (!decayBatch) return;
+      const turnLabel = decayBatch.turn != null ? ` (turn ${decayBatch.turn})` : "";
+      out.push({
+        key: `decay-turn-${decayBatch.turn ?? `idx${out.length}`}`,
+        text: `${decayBatch.count} seat${decayBatch.count === 1 ? "" : "s"} lost ${decayBatch.total.toLocaleString()} copper to decay${turnLabel}`,
+        tier: "loss",
+        at: decayBatch.at,
+      });
+      decayBatch = null;
+    };
+    const isDecayRow = (row: CurrencyFeedRow): boolean => {
+      if (row.type !== "debit") return false;
+      const reason = (row.reason || "").toLowerCase();
+      const kind = (row.action_kind || "").toLowerCase();
+      return reason.includes("decay") || kind.includes("decay");
+    };
     for (const row of currencyFeed) {
       if (row.type === "passive") {
         flushInterest();
+        flushDecay();
         if (passiveBatch && passiveBatch.turn === row.turn) {
           passiveBatch.count += 1;
           passiveBatch.at = row.at;
@@ -1510,6 +1534,7 @@ export function CollabTab() {
       }
       if (row.type === "interest") {
         flushPassive();
+        flushDecay();
         const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
         if (interestBatch && interestBatch.turn === row.turn) {
           interestBatch.count += 1;
@@ -1521,13 +1546,29 @@ export function CollabTab() {
         }
         continue;
       }
+      if (isDecayRow(row)) {
+        flushPassive();
+        flushInterest();
+        const amt = typeof row.amount === "number" ? Math.abs(row.amount) : 0;
+        if (decayBatch && decayBatch.turn === row.turn) {
+          decayBatch.count += 1;
+          decayBatch.total += amt;
+          decayBatch.at = row.at;
+        } else {
+          flushDecay();
+          decayBatch = { turn: row.turn, count: 1, total: amt, at: row.at };
+        }
+        continue;
+      }
       flushPassive();
       flushInterest();
+      flushDecay();
       const formatted = formatCurrencyLine(row);
       out.push({ key: row.id || `${row.at ?? ""}-${out.length}`, text: formatted.text, tier: formatted.tier, seat: row.seat, at: row.at });
     }
     flushPassive();
     flushInterest();
+    flushDecay();
     return out.slice(-50);
   }, [currencyFeed]);
 
