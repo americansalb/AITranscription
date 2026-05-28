@@ -5954,8 +5954,49 @@ fn do_protocol_mutate_inner(
                         }
                     }
                 }
+                // SHA-HR.1.3 — Phase 1 hot-reload architecture per
+                // `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`
+                // + human msg 2415. set_preset is the pilot action migrating from
+                // the sidecar's do_protocol_mutate to the Tauri-side path.
+                //
+                // Round-trip per mutation per tester:0 msg 2522 vote + developer:0
+                // msg 2515 lean (option a): serialize typed Protocol → JSON Value,
+                // call moved helpers in mcp_handlers::assembly_line, deserialize
+                // back. Preserves single-source-of-truth from SHA-HR.1.2 helper
+                // moves; ~1ms overhead acceptable for tool-call cadence.
+                //
+                // Mirrors the sidecar's apply_set_preset dispatch chain at
+                // vaak-mcp.rs:4059-4061 — apply_set_preset followed by
+                // seed_rotation_order_force (set_preset/set_assembly only) +
+                // protocol_normalize_in_place.
+                "set_preset" => {
+                    let mut json: serde_json::Value = serde_json::to_value(&current)
+                        .map_err(|e| format!("[ProtocolSerialize] {}", e))?;
+                    let active_seats =
+                        crate::mcp_handlers::assembly_line::protocol_active_seats_set(pd);
+                    match crate::mcp_handlers::assembly_line::apply_set_preset(&mut json, &args) {
+                        Ok(()) => {
+                            crate::mcp_handlers::assembly_line::seed_rotation_order_force(
+                                &mut json,
+                                &active_seats,
+                            );
+                            crate::mcp_handlers::assembly_line::protocol_normalize_in_place(
+                                &mut json,
+                                &active_seats,
+                            );
+                            match serde_json::from_value::<protocol::Protocol>(json) {
+                                Ok(new_proto) => {
+                                    current = new_proto;
+                                    Ok(())
+                                }
+                                Err(e) => Err(format!("[ProtocolDeserialize] {}", e)),
+                            }
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
                 other => Err(format!(
-                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning/accept_replanning); '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning/accept_replanning) + SHA-HR.1.3 hot-reload (set_preset); '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };
