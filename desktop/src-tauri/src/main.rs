@@ -3529,9 +3529,10 @@ fn list_active_seats_cmd(dir: String) -> Result<serde_json::Value, String> {
     // is a stored claim that doesn't reflect MCP-sidecar-death. Derive liveness from
     // per-seat .vaak/sessions/<role>-<inst>.json:last_alive_at_ms (written every
     // project_wait/project_send tick per vaak-mcp.rs:365 update_seat_alive_at_ms).
-    // Threshold 120s = 4× the 30s heartbeat cadence; conservative to avoid
-    // false-positive stale during legitimate long thinking.
-    const STALE_THRESHOLD_MS: u64 = 120_000;
+    // Threshold = collab::staleness_thresholds::ALIVE_STATE_STALE_MS (120s = 4× the
+    // 30s heartbeat cadence); single source of truth shared with read_claims_filtered
+    // + collab::read_claims_filtered + the watchdog at line 7395.
+    const STALE_THRESHOLD_MS: u64 = collab::staleness_thresholds::ALIVE_STATE_STALE_MS;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -7626,8 +7627,8 @@ fn check_two_controls_dead_seats(
 
     // Two-source freshness threshold (matches check_assembly_floor_watchdog
     // semantics): consider stale if no last_alive heartbeat in the last
-    // 120s. Reuses the same per-seat sessions/<role>-<inst>.json read path.
-    const DEAD_SEAT_THRESHOLD_MS: u64 = 120_000;
+    // ALIVE_STATE_STALE_MS (120s). Single source of truth via collab module.
+    const DEAD_SEAT_THRESHOLD_MS: u64 = collab::staleness_thresholds::ALIVE_STATE_STALE_MS;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
