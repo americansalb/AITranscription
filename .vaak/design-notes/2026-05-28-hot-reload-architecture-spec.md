@@ -132,6 +132,14 @@ The moved-to-Tauri handler runs INSIDE the tiny_http worker thread. It acquires 
 
 NOTE: if two sidecars POST simultaneously to `/mcp/assembly_line`, the tiny_http server handles them sequentially in the current loop pattern. For concurrent safety, the tiny_http loop should be changed to spawn-per-request OR the lock acquisition must be inside the handler (which it is). Current sync recv pattern is fine for the LOW-traffic /mcp endpoints; if traffic increases (Phase 4 covers project_send which is high-traffic), the loop will need a thread pool. NOT a Phase 1 blocker.
 
+## Cold-start retry-with-backoff (per dev-challenger msg 2459 F8)
+
+Phase 5 covers post-restart retry. F8 surfaces a different failure mode: cold-start, where the sidecar launches BEFORE Tauri's HTTP server binds :7865 (typical sequence when user opens Claude Code before Vaak). First `/mcp/<tool>` POST gets ECONNREFUSED → tool call errors back to CC.
+
+**Architect ruling (msg 2461):** fold the retry-with-backoff helper into Phase 1 (specifically SHA-HR.1.5) instead of waiting for Phase 5. The mechanism is identical to Phase 5's retry — same exponential backoff with jitter (delays `[100ms, 200ms, 500ms, 1s, 2s, 5s, 10s, 10s]`, total ~28.8s, jitter `delay * (0.5 + random())`). The Phase 1 helper handles BOTH the cold-start race AND the within-session restart case. Phase 5 then only adds the "auto-detect Tauri restart by listening for a sentinel" enhancement on top.
+
+Net effect: Phase 1's sidecar handler proxies are already retry-resilient. Cold-start race is closed at SHA-HR.1.5 ship.
+
 ## Phase 1 acceptance criteria
 
 After Phase 1 ships:
@@ -153,6 +161,14 @@ After Phase 1 ships:
 - Trust-model implications (e.g., currency Pass-gate's sender-side enforcement becomes centralized enforcement when handler moves to Tauri — that's a desirable change but the threat model shifts)
 
 **Phase 2 — All currency_* tools migrated.** 18 handlers. Estimated ~2000 LOC moved out of sidecar, into `mcp_handlers/currency_*.rs`. Each gets `/mcp/currency_<tool>` endpoint. The currency.lock + balances.json + currency.jsonl interactions move with the handlers.
+
+**Phase 2 prerequisite — Mutating-tool idempotency contract** (per dev-challenger msg 2459 F6):
+
+Mutating tools (`currency_*`, `project_send`, `oxford_initiate`, `delphi_initiate`, `set_assembly_state`, `protocol_mutate`) can double-execute on retry: sidecar POSTs, Tauri executes (ledger write + broadcast), HTTP response is interrupted by restart, sidecar retries with same payload, fresh Tauri double-executes. The Phase 5 retry-with-backoff helper handles transient unavailability but does NOT prevent double-execute on a partial-completion scenario.
+
+**Architect ruling (msg 2461):** sidecar includes `X-Vaak-Request-Id: <uuid>` header per POST. Each request_id is a fresh UUID per attempt of a NEW logical call; retries of the SAME logical call reuse the same request_id. Tauri caches `(request_id → response)` in a small in-memory LRU (~256 entries, 60s TTL). Duplicate request_id within window returns cached response without re-executing the handler. Cache miss after TTL → handler runs; this preserves idempotency for retry-within-window without leaking memory long-term.
+
+Phase 1 SHA-HR.1.5 retry-with-backoff scaffolding should already include request_id generation so Phase 2 just adds the Tauri-side cache. Implementation note: cache should be keyed JUST on request_id (not request_id + tool_name) so a sidecar bug that reuses a request_id across tools is detected as a 409 Conflict.
 
 **Phase 2 state-residency audit prerequisites** (per evil-arch F3):
 - `project_currency_gate_is_sender_side_enforced` — migration eliminates the stale-sidecar bypass (GOOD); document the trust-model shift to centralized enforcement
