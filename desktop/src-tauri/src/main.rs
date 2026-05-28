@@ -1302,6 +1302,129 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
                 continue;
             }
 
+            // SHA-HR.1.4 — Phase 1 hot-reload architecture per
+            // `.vaak/design-notes/2026-05-28-hot-reload-architecture-spec.md`
+            // + human msg 2415. POST /mcp/assembly_line is the pilot endpoint
+            // for the sidecar-to-Tauri HTTP proxy channel. SHA-HR.1.3 already
+            // wired do_protocol_mutate_inner's set_preset arm to call the
+            // moved mcp_handlers::assembly_line helpers; this endpoint exposes
+            // that path over the existing tiny_http listener at port 7865.
+            //
+            // Envelope per architect msg 2426 Q4 + dev-challenger msg 2526 F2
+            // resolution: {ok: bool, result: <opaque>, error: <string|null>}.
+            // Sidecar parses ONLY top-level envelope, passes `result` opaque to
+            // MCP caller. Hot-reload preserved for field renames inside result.
+            //
+            // Token ACL per architect msg 2470 F9 ruling — deferred to follow-on
+            // commit (SHA-HR.1.4.token). Phase 1 ships AUTH-OFF on this endpoint
+            // with a strong-warn comment so reviewers catch it. Single-tenant
+            // localhost is the current threat model; tightening before
+            // multi-tenant deployment is the gate.
+            if method == "POST" && url == "/mcp/assembly_line" {
+                // Read body
+                let mut body = String::new();
+                if request.as_reader().read_to_string(&mut body).is_err() {
+                    let resp = Response::from_string(
+                        r#"{"ok":false,"result":null,"error":"[BadRequest] cannot read body"}"#,
+                    )
+                    .with_status_code(400)
+                    .with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
+                    );
+                    let _ = request.respond(resp);
+                    continue;
+                }
+
+                // Parse JSON: {action, args, rev}
+                let payload: serde_json::Value = match serde_json::from_str(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let resp_body = format!(
+                            r#"{{"ok":false,"result":null,"error":"[BadJson] {}"}}"#,
+                            e.to_string().replace('"', "'")
+                        );
+                        let resp = Response::from_string(resp_body)
+                            .with_status_code(400)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .unwrap(),
+                            );
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                };
+
+                let action = payload
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = payload
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let rev = payload.get("rev").and_then(|v| v.as_u64());
+
+                // Resolve project_dir from the Tauri-side watched dir state.
+                // If no project is currently watched, the endpoint can't dispatch.
+                let pd_opt = get_project_watched_dir().lock().clone();
+                let pd = match pd_opt {
+                    Some(p) => p,
+                    None => {
+                        let resp = Response::from_string(
+                            r#"{"ok":false,"result":null,"error":"[NoWatchedProject] Tauri app is not watching a project yet"}"#,
+                        )
+                        .with_status_code(409)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .unwrap(),
+                        );
+                        let _ = request.respond(resp);
+                        continue;
+                    }
+                };
+                let section = collab::get_active_section(&pd);
+                // Sidecar pilot: actor = "human" for the assembly_line action.
+                // Phase 2 will pass real role:instance from the sidecar body.
+                let actor = "human".to_string();
+
+                let dispatch_result = do_protocol_mutate_inner(&pd, &actor, &section, &action, args, rev);
+
+                let envelope = match dispatch_result {
+                    Ok(result) => serde_json::json!({
+                        "ok": true,
+                        "result": result,
+                        "error": serde_json::Value::Null
+                    }),
+                    Err(err) => serde_json::json!({
+                        "ok": false,
+                        "result": serde_json::Value::Null,
+                        "error": format!("[VaakAppError] {}", err)
+                    }),
+                };
+
+                let resp = Response::from_string(envelope.to_string())
+                    .with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
+                    );
+                let _ = request.respond(resp);
+                continue;
+            }
+
             // Only accept POST to /speak
             if method != "POST" || url != "/speak" {
                 let response = Response::from_string("Not Found").with_status_code(404);
