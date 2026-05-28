@@ -1568,12 +1568,39 @@ fn start_speak_server(app_handle: tauri::AppHandle) {
 
                 let dispatch_result = do_protocol_mutate_inner(&pd, &actor, &section, &action, args, rev);
 
+                // SHA-HR.1.6 — Empirical hot-reload canary. The `_hot_reload_phase`
+                // sentinel field in the response envelope is present ONLY when the
+                // request was dispatched through the Tauri-side mcp_handlers path
+                // (not the sidecar's internal do_protocol_mutate fallback). For the
+                // hot-reload acceptance per architect spec + tester msg 2522:
+                //
+                // 1. Change behavior here (e.g. flip "_hot_reload_phase" from 1 to 2)
+                // 2. Restart Vaak only (NOT the sidecar / CC windows)
+                // 3. Call assembly_line from a running CC session
+                // 4. Observe the NEW sentinel value in the response
+                //
+                // If step 4 succeeds without rebuilding the sidecar, Phase 1's
+                // hot-reload claim is empirically validated for the pilot tool.
+                // Per architect msg 2419 spec acceptance criterion 5.
                 let envelope = match dispatch_result {
-                    Ok(result) => serde_json::json!({
-                        "ok": true,
-                        "result": result,
-                        "error": serde_json::Value::Null
-                    }),
+                    Ok(result) => {
+                        // Inject the canary sentinel into the result, then pass
+                        // through opaque per Q4 envelope. The sidecar parses
+                        // only the top-level {ok, result, error}; the sentinel
+                        // rides inside result.
+                        let mut result_with_sentinel = result;
+                        if let Some(obj) = result_with_sentinel.as_object_mut() {
+                            obj.insert(
+                                "_hot_reload_phase".to_string(),
+                                serde_json::json!(1),
+                            );
+                        }
+                        serde_json::json!({
+                            "ok": true,
+                            "result": result_with_sentinel,
+                            "error": serde_json::Value::Null
+                        })
+                    }
                     Err(err) => serde_json::json!({
                         "ok": false,
                         "result": serde_json::Value::Null,
