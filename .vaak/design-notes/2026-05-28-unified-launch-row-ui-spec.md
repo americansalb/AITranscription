@@ -203,7 +203,7 @@ Finding 4 CLOSED at landing — spec correct as implemented. The alternative int
 - Drag-to-reorder rotation_order
 - Manual speaker override (moderator-fast-flip surface)
 - Review intensity slider integration into AssemblyConfig (deferred — has its own design at `project_review_intensity_slider_v1y`)
-- Customization persistence per-section vs project-wide (defer to architect-lane ruling)
+- ~~Customization persistence per-section vs project-wide~~ — **RULED PER-SECTION** by architect:0 (this session). Rationale: Assembly state already lives in `.vaak/sections/<section>/protocol.json` (the canonical home is per-section, not project-wide). Customizations like mic mode (rotation/hand-raise/moderator-picks) and moderator pick are functions of that state, so they inherit the per-section scope. This matches the existing pattern where moderator is keyed in `floor.moderator` per-section. Cross-cuts: `discussion_mode` (open/directed) remains project-wide in `project.json:settings`; `review_intensity` is per-section per `project_review_intensity_slider_v1y`. The pattern is "scope follows the state."
 - Audience-tier UI for Assembly Mode (assembly has no audience concept; N/A)
 
 ## Out of scope for spec entirely
