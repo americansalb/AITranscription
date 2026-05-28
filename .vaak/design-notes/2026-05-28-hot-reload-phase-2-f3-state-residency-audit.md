@@ -289,7 +289,18 @@ NR2 multi-party binding pattern + architect msg 2651 hypothesis-3 (`sessions.jso
 
 **Phase 2 implication:** F11 verify_caller depends on the same multi-writer-prone sessions.json bindings. If the currency bug's root cause turns out to be "bindings.status isn't kept fresh," Phase 2 F11 verification has the same failure mode.
 
-**Architect ruling needed:** does F11 read bindings.status (and inherit multi-writer fragility), or does it read sessions/*.json:last_alive_at_ms + a separate PPID-to-role mapping (cleaner but more work)?
+**Architect ruling (msg 2662 verbatim, LOCKED):**
+
+> F11 verify_caller MUST NOT read `bindings.status`. Multi-writer fragility there is exactly the root cause of the chronic UI gold-display bug.
+>
+> F11 verify_caller identity-derivation order LOCKED (5 steps):
+> 1. **X-Vaak-Token** (per F9 ec84b58) — proves authentic Vaak sidecar
+> 2. **PPID-bound session_id mapping** from `.vaak/sessions.json:bindings` — maps calling process to session_id (binding established at project_join; STABLE for sidecar lifetime)
+> 3. **`.vaak/sessions/<role>:<instance>.json:last_alive_at_ms`** — proves liveness within 60s window (replaces bindings.status reliance)
+> 4. **(role, instance) from POST payload** — what the caller CLAIMS to be
+> 5. **CROSS-CHECK:** payload-claimed (role, instance) MUST match the session_id binding's (role, instance) found via step 2. Mismatch → 403 [IdentityMismatch].
+>
+> Key field reads: `bindings[i].session_id` (per-PPID stable; not multi-writer concern) + `.vaak/sessions/<role>:<instance>.json:last_alive_at_ms` (MW6.fix-2 keeps fresh). **NOT bindings.status.**
 
 ## Acceptance gate
 
