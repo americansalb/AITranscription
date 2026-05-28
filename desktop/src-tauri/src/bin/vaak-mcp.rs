@@ -9339,6 +9339,180 @@ mod protocol_slice2_tests {
         // contract verified by the code-path: quorum is checked first in
         // the ternary.)
     }
+
+    // ----------------------------------------------------------------------
+    // read_claims_filtered — alive_state derivation tests. This is the
+    // consumer side of MW6: read .vaak/sessions/<role>-<inst>.json's
+    // last_alive_at_ms and classify each surviving claim as "active",
+    // "stale", or "unknown". list_active_seats_cmd + the UI's
+    // "(reconnecting…)" badge both depend on this contract; SHA-MW6.fix-2
+    // (commit e851569) fixed the writer side, but no test pinned the
+    // reader's classification thresholds. These tests do.
+    // ----------------------------------------------------------------------
+
+    /// Helper — initialize a temp project with `.vaak/` + claims.json +
+    /// sessions.json + optional per-seat heartbeat files. Per-seat file
+    /// content is the raw JSON for the `.vaak/sessions/<role>-<inst>.json`.
+    /// Returns the temp directory; caller drops it.
+    fn temp_project_for_claims_filtered(
+        test_name: &str,
+        claims: serde_json::Value,
+        sessions: serde_json::Value,
+        seat_files: &[(&str, u32, serde_json::Value)],
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vaak-mcp-claims-{}", test_name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".vaak").join("sessions")).unwrap();
+        std::fs::write(
+            dir.join(".vaak").join("claims.json"),
+            serde_json::to_string_pretty(&claims).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".vaak").join("sessions.json"),
+            serde_json::to_string_pretty(&sessions).unwrap(),
+        )
+        .unwrap();
+        for (role, instance, content) in seat_files {
+            let path = dir
+                .join(".vaak")
+                .join("sessions")
+                .join(format!("{}-{}.json", role, instance));
+            std::fs::write(&path, serde_json::to_string(content).unwrap()).unwrap();
+        }
+        dir
+    }
+
+    /// Fresh per-seat file (last_alive_at_ms ~ now) → alive_state="active".
+    /// Pins the active threshold: stale_ms <= ALIVE_STATE_STALE_MS (120_000).
+    #[test]
+    fn read_claims_filtered_fresh_per_seat_file_is_active() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let dir = temp_project_for_claims_filtered(
+            "fresh-active",
+            serde_json::json!({
+                "architect:0": {
+                    "session_id": "s-arch-0",
+                    "claimed_at": "2026-05-28T00:00:00Z",
+                    "files": ["x.rs"]
+                }
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "architect", "instance": 0, "session_id": "s-arch-0",
+                 "status": "active",
+                 "last_heartbeat": collab::iso_now()}
+            ]}),
+            &[("architect", 0, serde_json::json!({"last_alive_at_ms": now_ms}))],
+        );
+        let filtered = read_claims_filtered(dir.to_str().unwrap());
+        let arch = filtered.get("architect:0").expect("claim survives");
+        assert_eq!(
+            arch.get("alive_state").and_then(|v| v.as_str()),
+            Some("active"),
+            "fresh per-seat file should classify as active; got: {}",
+            arch
+        );
+    }
+
+    /// Stale per-seat file (last_alive_at_ms > 120_000 ms old) → alive_state="stale".
+    /// Pins the stale threshold.
+    #[test]
+    fn read_claims_filtered_stale_per_seat_file_is_stale() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // 5 minutes ago — comfortably past the 120_000 ms threshold.
+        let stale_ms = now_ms.saturating_sub(300_000);
+        let dir = temp_project_for_claims_filtered(
+            "stale",
+            serde_json::json!({
+                "architect:0": {
+                    "session_id": "s-arch-0",
+                    "claimed_at": "2026-05-28T00:00:00Z",
+                    "files": ["x.rs"]
+                }
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "architect", "instance": 0, "session_id": "s-arch-0",
+                 "status": "active",
+                 "last_heartbeat": collab::iso_now()}
+            ]}),
+            &[("architect", 0, serde_json::json!({"last_alive_at_ms": stale_ms}))],
+        );
+        let filtered = read_claims_filtered(dir.to_str().unwrap());
+        let arch = filtered.get("architect:0").expect("claim survives");
+        assert_eq!(
+            arch.get("alive_state").and_then(|v| v.as_str()),
+            Some("stale"),
+            "5min-old per-seat file should classify as stale; got: {}",
+            arch
+        );
+    }
+
+    /// Zero last_alive_at_ms (never stamped) → alive_state="unknown".
+    /// Distinct from "stale" because a stamped-but-old file is a known-once-
+    /// alive signal, while zero is never-stamped.
+    #[test]
+    fn read_claims_filtered_zero_last_alive_is_unknown() {
+        let dir = temp_project_for_claims_filtered(
+            "zero",
+            serde_json::json!({
+                "architect:0": {
+                    "session_id": "s-arch-0",
+                    "claimed_at": "2026-05-28T00:00:00Z",
+                    "files": ["x.rs"]
+                }
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "architect", "instance": 0, "session_id": "s-arch-0",
+                 "status": "active",
+                 "last_heartbeat": collab::iso_now()}
+            ]}),
+            &[("architect", 0, serde_json::json!({"last_alive_at_ms": 0}))],
+        );
+        let filtered = read_claims_filtered(dir.to_str().unwrap());
+        let arch = filtered.get("architect:0").expect("claim survives");
+        assert_eq!(
+            arch.get("alive_state").and_then(|v| v.as_str()),
+            Some("unknown"),
+            "zero last_alive_at_ms should classify as unknown; got: {}",
+            arch
+        );
+    }
+
+    /// Missing per-seat file → alive_state="unknown". Same classification
+    /// as zero so the UI can render a single "unknown" affordance.
+    #[test]
+    fn read_claims_filtered_missing_per_seat_file_is_unknown() {
+        let dir = temp_project_for_claims_filtered(
+            "missing",
+            serde_json::json!({
+                "architect:0": {
+                    "session_id": "s-arch-0",
+                    "claimed_at": "2026-05-28T00:00:00Z",
+                    "files": ["x.rs"]
+                }
+            }),
+            serde_json::json!({"bindings": [
+                {"role": "architect", "instance": 0, "session_id": "s-arch-0",
+                 "status": "active",
+                 "last_heartbeat": collab::iso_now()}
+            ]}),
+            &[], // no per-seat files written
+        );
+        let filtered = read_claims_filtered(dir.to_str().unwrap());
+        let arch = filtered.get("architect:0").expect("claim survives");
+        assert_eq!(
+            arch.get("alive_state").and_then(|v| v.as_str()),
+            Some("unknown"),
+            "missing per-seat file should classify as unknown; got: {}",
+            arch
+        );
+    }
 }
 
 /// Walk up from CWD to find .vaak/project.json
