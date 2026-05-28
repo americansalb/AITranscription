@@ -11,6 +11,7 @@ import { DelphiSetupModal } from "./DelphiSetupModal";
 import { AssemblySetupModal } from "./AssemblySetupModal";
 import { ContinuousSetupModal } from "./ContinuousSetupModal";
 import { ShipModal } from "./ShipModal";
+import { ReviewWindow, type ReviewWindowState, type ReviewResponseType } from "./ReviewWindow";
 import { buildFlowFeedRows } from "../lib/flowFeedBatcher";
 import { useToast } from "./Toast";
 // AssemblyBanner removed per spec §11 step 3 (#954 vote-3 gate cleared by
@@ -1368,6 +1369,77 @@ export function CollabTab() {
     }
     return map;
   }, [currencyFeed]);
+
+  // SHA-CR.5 review-window state-aggregation per architect CR redesign
+  // spec + human msg 2549. Walks the message stream and builds a
+  // Map<commit_sha → ReviewWindowState> from:
+  //   - ship messages: type="ship" with metadata.commit_sha, .reviewers,
+  //     .review_timer_secs. These OPEN windows.
+  //   - review_response messages: type="review_response" with
+  //     metadata.commit_sha + .response_type + (.was_named). These add
+  //     to the window's responses array.
+  // Outcome computation: any BLOCK → "blocked"; else if timer expired
+  // or all named reviewers responded → "accepted".
+  const reviewWindowByCommit = useMemo(() => {
+    const map = new Map<string, ReviewWindowState>();
+    const msgs = project?.messages ?? [];
+    for (const m of msgs) {
+      const md: any = m.metadata ?? {};
+      const commitSha = typeof md.commit_sha === "string" ? md.commit_sha : null;
+      if (!commitSha) continue;
+      if (m.type === "ship") {
+        // Open the window. If a later ship message reuses the same SHA
+        // (shouldn't happen but safe-guard), the later one wins — most
+        // recent state.
+        const reviewers: string[] = Array.isArray(md.reviewers) ? md.reviewers : [];
+        const timerSecs: number = typeof md.review_timer_secs === "number" ? md.review_timer_secs : 300;
+        map.set(commitSha, {
+          commit_sha: commitSha,
+          builder: m.from ?? "unknown",
+          named_reviewers: reviewers,
+          responses: [],
+          timer_duration_secs: timerSecs,
+          opened_at: m.timestamp,
+        });
+      } else if (m.type === "review_response") {
+        const w = map.get(commitSha);
+        if (!w) continue; // response for an unknown commit; orphan
+        const responseType: ReviewResponseType | null =
+          md.response_type === "APPROVE" || md.response_type === "BLOCK" || md.response_type === "COMMENT"
+            ? md.response_type
+            : null;
+        if (!responseType) continue;
+        w.responses.push({
+          seat: m.from ?? "unknown",
+          response_type: responseType,
+          text: typeof m.body === "string" && m.body.trim().length > 0 ? m.body : undefined,
+          at: m.timestamp,
+          was_named: md.was_named === true || w.named_reviewers.includes(m.from ?? ""),
+        });
+      }
+    }
+    // Outcome computation pass — UI-only; the canonical close lives in
+    // SHA-CR.sweeper's server-side logic once it activates. This
+    // estimation lets the UI surface the most-likely outcome immediately
+    // without waiting for a close broadcast.
+    for (const [, w] of map) {
+      const hasBlock = w.responses.some((r) => r.response_type === "BLOCK" && r.was_named);
+      const namedResponded = new Set(w.responses.filter((r) => r.was_named).map((r) => r.seat));
+      const allNamedResponded = w.named_reviewers.length > 0 && w.named_reviewers.every((s) => namedResponded.has(s));
+      const openedAtMs = Date.parse(w.opened_at);
+      const expired = !isNaN(openedAtMs) && (Date.now() - openedAtMs) / 1000 >= w.timer_duration_secs;
+      if (hasBlock) {
+        w.outcome = "blocked";
+        w.closed_at = w.responses.find((r) => r.response_type === "BLOCK")?.at;
+      } else if (allNamedResponded || expired) {
+        w.outcome = "accepted";
+        w.closed_at = expired
+          ? new Date(openedAtMs + w.timer_duration_secs * 1000).toISOString()
+          : w.responses[w.responses.length - 1]?.at;
+      }
+    }
+    return map;
+  }, [project?.messages]);
 
   const disputeByMsg = useMemo(() => {
     const map = new Map<string, DisputeRow>();
@@ -7419,6 +7491,25 @@ When multiple instances of this role are active:
                       )}
                     </div>
                   )}
+                  {/* SHA-CR.5: ReviewWindow render on ship messages per
+                      architect spec §UI item 3. Looks up the
+                      reviewWindowByCommit Map; renders the review panel
+                      with current named-reviewer status + viewer-
+                      appropriate APPROVE/BLOCK/COMMENT actions. */}
+                  {msg.type === "ship" && projectDir && (() => {
+                    const md: any = msg.metadata ?? {};
+                    const commitSha = typeof md.commit_sha === "string" ? md.commit_sha : null;
+                    if (!commitSha) return null;
+                    const state = reviewWindowByCommit.get(commitSha);
+                    if (!state) return null;
+                    return (
+                      <ReviewWindow
+                        state={state}
+                        viewerSeat="human:0"
+                        projectDir={projectDir}
+                      />
+                    );
+                  })()}
                   {/* Change #1 (human msg 2262): per-message economic footer.
                       The real economic story is told here — on the message that
                       caused it — not in a separate sidebar. Human messages earn
