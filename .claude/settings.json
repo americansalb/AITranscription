@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/keep-alive-marker.cmd"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Read|Edit|Write|Grep|Glob|WebFetch|WebSearch|NotebookEdit",
@@ -7,6 +17,15 @@
           {
             "type": "command",
             "command": ".claude/hooks/turn-gate.cmd"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/keep-alive-marker.cmd"
           }
         ]
       }
@@ -18,6 +37,26 @@
           {
             "type": "command",
             "command": ".claude/hooks/file-op-claim.cmd"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/keep-alive-marker.cmd"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/keep-alive-marker.cmd"
           }
         ]
       }
