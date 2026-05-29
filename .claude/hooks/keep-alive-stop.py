@@ -41,8 +41,13 @@ REASON = (
 
 
 def repo_root_from_cwd(cwd: Path) -> "Path | None":
+    # Scope to a genuine Vaak TEAM project, identified by the .vaak/project.json
+    # marker (same marker project_join walks up to find) — NOT just any .vaak dir.
+    # A stray ~/.vaak (e.g. C:\Users\<user>\.vaak, which holds audiences/role-groups
+    # but NO project.json) must NOT make this hook trap a non-team CC session in
+    # keep-alive. Tester msg 520 flagged the over-broad ancestor-.vaak scope.
     for ancestor in [cwd, *cwd.parents]:
-        if (ancestor / ".vaak").is_dir():
+        if (ancestor / ".vaak" / "project.json").is_file():
             return ancestor
     return None
 
@@ -65,8 +70,17 @@ def main() -> None:
                 break
         if root is None:
             return  # not a Vaak team context -> allow stop
-        if (root / ".vaak" / "allow-stop").exists():
-            return  # explicit disband escape hatch -> allow stop
+        # Escape hatch — allow the stop if EITHER global pause sentinel is present.
+        # Developer (board msg 518) shipped `.vaak/seats-paused` as the canonical
+        # pause signal honored by the Layer-2 supervisor (vaak-mcp.rs) AND the
+        # Layer-1 wrapper (launch-team.ps1). This in-agent Stop hook MUST honor the
+        # SAME signal, or "all three converge on one pause" breaks: a human pause
+        # via seats-paused would be respected by supervisor+wrapper but the hook
+        # would keep blocking the seat from stopping -> un-pausable. Honor both
+        # names (`allow-stop` legacy/original + `seats-paused` canonical).
+        vaak = root / ".vaak"
+        if (vaak / "seats-paused").exists() or (vaak / "allow-stop").exists():
+            return  # explicit pause/disband escape hatch -> allow stop
         # Block the stop and steer the seat back into standby.
         print(json.dumps({"decision": "block", "reason": REASON}))
     except Exception:
