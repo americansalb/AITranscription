@@ -358,6 +358,85 @@ fn inject_stat_framing(project_dir: &str, role: &str, briefing_raw: &str) -> Str
     format!("{}{}", block, briefing_raw)
 }
 
+/// WS1 (root-context-differentiation spec 2026-05-29): per-role Tier-J judgment
+/// pack injection, keyed by the typed `stance` field (architect ruling msg 238).
+/// "independent"/absent injects the seat's own `judgment_pack` with neutral framing;
+/// "attack:<ref>"/"defend:<ref>" injects the NAMED pack with refute/defend framing
+/// (the ref makes the direction explicit data, never inferred). APPENDS under a
+/// Tier-J heading. Returns the briefing unchanged (with a loud stderr flag) when an
+/// independent seat has no pack — never silently homogenizes (dev-challenger attack 3).
+fn inject_judgment_pack(project_dir: &str, role: &str, briefing: &str) -> String {
+    let config = match read_project_config(project_dir) {
+        Ok(c) => c,
+        Err(_) => return briefing.to_string(),
+    };
+    let my_role_obj = match config
+        .get("roles")
+        .and_then(|r| r.as_object())
+        .and_then(|o| o.get(role))
+    {
+        Some(r) => r,
+        None => return briefing.to_string(),
+    };
+    // WS1 stance (architect ruling msg 238): pick the pack + framing from the
+    // TYPED stance, NEVER by inferring a direction. "attack:<ref>"/"defend:<ref>"
+    // name the target pack explicitly; "independent"/absent uses the seat's own
+    // judgment_pack. This kills the "pro-which-direction?" inference that would
+    // re-anchor to the consensus prior (dev-challenger attack 1).
+    let stance = my_role_obj
+        .get("stance")
+        .and_then(|v| v.as_str())
+        .unwrap_or("independent");
+
+    let (pack_rel, header): (String, &str) = if let Some(r) = stance.strip_prefix("attack:") {
+        (
+            r.trim().to_string(),
+            "## Judgment Pack — ADVERSARIAL (ATTACK THIS)\n\n\
+             The material below is the case FOR a position. Your job is to find where it is wrong, overclaimed, or unproven — NOT to agree with it. Treat every claim as a target; do not import its conclusions as your prior. If you agree wholesale, you are not doing your job. (Your opposition is engineered — it is reported separately from independent divergence, never counted as decorrelation.)\n\n",
+        )
+    } else if let Some(r) = stance.strip_prefix("defend:") {
+        (
+            r.trim().to_string(),
+            "## Judgment Pack — DEFEND THIS\n\n\
+             The material below is a position you are assigned to DEFEND. Steelman it: surface the strongest case for it and answer the obvious objections. (Your alignment is engineered — reported separately from independent divergence.)\n\n",
+        )
+    } else {
+        // independent (default) → inject the seat's OWN Tier-J pack, neutral framing.
+        match my_role_obj.get("judgment_pack").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => (
+                p.to_string(),
+                "## Role Judgment Pack — your lane's evidence + rubric\n\n\
+                 This is YOUR role's domain evidence and evaluation rubric; other seats do not carry it. Reach the conclusion your lane's evidence supports — do not pre-converge on what you imagine the others think.\n\n",
+            ),
+            _ => {
+                // dev-challenger attack 3: independent + no pack = this seat runs on
+                // shared/default context. Flag loudly; never silently homogenize.
+                eprintln!(
+                    "[vaak-mcp] seat '{}' is independent-stance with no judgment_pack — running on shared/default context (council diversity NOT ensured for this seat)",
+                    role
+                );
+                return briefing.to_string();
+            }
+        }
+    };
+
+    let pack_path = std::path::Path::new(project_dir).join(&pack_rel);
+    let pack_body = match std::fs::read_to_string(&pack_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "[vaak-mcp] judgment pack '{}' for seat '{}' unreadable: {} — skipping (seat falls back to shared context)",
+                pack_path.display(),
+                role,
+                e
+            );
+            return briefing.to_string();
+        }
+    };
+
+    format!("{}\n\n---\n\n{}{}", briefing, header, pack_body)
+}
+
 /// Path to the per-session last-seen-id tracker file.
 ///
 /// Keyed on (session_id, section) because board.jsonl is itself section-scoped
@@ -427,6 +506,51 @@ fn update_seat_alive_at_ms(project_dir: &str, role: &str, instance: u32) {
         // standby, not "active" work. last_active_at_ms is reserved for the
         // keep-alive hook (PreToolUse/PostToolUse) so the watchdog's stall
         // criterion stays meaningful.
+        if let Ok(serialized) = serde_json::to_string_pretty(&state) {
+            let _ = atomic_write(&seat_file, serialized.as_bytes());
+        }
+    }
+}
+
+/// Touch this seat's per-seat session file with a fresh `last_successful_wait_at_ms`.
+///
+/// Stamped ONLY from `handle_project_wait`'s genuinely-executing poll loop (entry +
+/// heartbeat tick) — NEVER from the success-blind keep-alive hook (`run_keep_alive`
+/// stamps `last_alive_at_ms`/`last_active_at_ms` on mere `tool_name` presence, so a
+/// parseable-but-rejected call refreshes them; see spec 2026-05-29). This field is the
+/// supervisor's clause-1 liveness signal for the busy-aware FRESH-relaunch trigger
+/// (architect msg 528): a malformed/rejected LOOP never reaches project_wait's success
+/// path, so it never refreshes this field and correctly ages into "stale" — which is
+/// exactly the case (court/55 wedge) that falls through both the Stop-hook and the
+/// Layer-1 wrapper.
+///
+/// ADDITIVE INSTRUMENTATION ONLY: no consumer is wired yet. The supervisor's three-clause
+/// gate that READS this field (and the kill->relaunch behaviour change) is gated on the
+/// evil-architect/tester review of the spec. Stamping the field now is inert and safe.
+/// Fail-open on every error — must never block project_wait.
+fn update_seat_successful_wait_at_ms(project_dir: &str, role: &str, instance: u32) {
+    let sessions_dir = std::path::Path::new(project_dir).join(".vaak").join("sessions");
+    if !sessions_dir.exists() {
+        return;
+    }
+    let seat_file = sessions_dir.join(format!("{}-{}.json", role, instance));
+    let mut state: serde_json::Value = std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("last_successful_wait_at_ms".to_string(), serde_json::json!(now_ms));
+        // Returning to project_wait = the turn is OVER → clear the turn-active marker
+        // (clause-3 PRIMARY, architect 563). A genuinely-standby seat thus has no
+        // turn_active marker; only a seat still mid-turn (thinking, building, or WEDGED)
+        // carries one. Also clear any leftover in-flight tool marker for the same reason.
+        obj.remove("turn_active_started_at_ms");
+        obj.remove("in_flight_tool");
+        obj.remove("in_flight_started_at_ms");
         if let Ok(serialized) = serde_json::to_string_pretty(&state) {
             let _ = atomic_write(&seat_file, serialized.as_bytes());
         }
@@ -9926,6 +10050,14 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     // editability per `[[feedback_auto_helpful_defeats_explicit_design]]`).
     let briefing = inject_stat_framing(&normalized, role, &briefing_raw);
 
+    // WS1 (root-context-differentiation spec 2026-05-29): append this role's
+    // Tier-J judgment pack so verdict/evidence/rubric material is role-differentiated,
+    // not in the universal root. The seat's typed `stance` selects the pack + framing:
+    // independent (own pack, neutral) | attack:<ref> | defend:<ref> (named pack,
+    // refute/defend framing) — so adversarial seats start anti-correlated by design,
+    // not pre-aligned with consensus.
+    let briefing = inject_judgment_pack(&normalized, role, &briefing);
+
     // Read last 10 messages directed to this role, this instance, or 'all'
     let my_instance_label = format!("{}:{}", role, instance);
     let all_messages = read_board_filtered(&normalized);
@@ -15179,6 +15311,12 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
     // Mark this session as in standby
     update_session_activity("standby");
 
+    // Clause-1 liveness (busy-aware FRESH-relaunch spec, architect 528): stamp the
+    // success-gated heartbeat on EVERY project_wait that genuinely begins executing.
+    // Reaching this line means the harness dispatched a valid project_wait to the
+    // server (not a rejected/malformed call), so the seat is provably alive in standby.
+    update_seat_successful_wait_at_ms(&state.project_dir, &state.role, state.instance);
+
     let start = std::time::Instant::now();
     let poll_interval = std::time::Duration::from_secs(3);
     let timeout = std::time::Duration::from_secs(timeout_secs);
@@ -15204,6 +15342,10 @@ fn handle_project_wait(timeout_secs: u64) -> Result<serde_json::Value, String> {
             // health pill's Layer 1 reads the seat as dead. Touching the
             // per-seat session file here keeps standby seats observably alive.
             update_seat_alive_at_ms(&state.project_dir, &state.role, state.instance);
+            // Clause-1 liveness (spec 2026-05-29): refresh the success-gated heartbeat on
+            // each 30s poll tick so a long-blocking-but-healthy standby seat stays fresh
+            // for the supervisor's three-clause gate (a wedged seat never reaches here).
+            update_seat_successful_wait_at_ms(&state.project_dir, &state.role, state.instance);
             polls_since_heartbeat = 0;
 
             // SHA-CR.sweeper — Continuous Review window auto-close per human
@@ -19246,6 +19388,56 @@ fn run_keep_alive() {
         obj.insert("session_id".to_string(), serde_json::json!(cc_session_id));
     }
 
+    // In-flight op marker (clause-3 of the busy-aware FRESH-relaunch gate, architect
+    // msg 537): make a long-running op (cargo build / long bash) OBSERVABLE to the
+    // external supervisor, which sees only files, not CC-process internals. PreToolUse
+    // stamps {in_flight_tool, in_flight_started_at_ms}; PostToolUse clears it. The
+    // supervisor reads "in-flight" = an unmatched start, and per 537 treats a marker
+    // OLDER than max-op-duration as a HUNG op (relaunch), younger as a legit op (spare).
+    // Idle tools (project_wait/project_check) are standby, not ops, so they don't stamp.
+    //
+    // CORRECTNESS DEPENDENCY (spec OPEN live-probe): this is only sound if PreToolUse
+    // does NOT fire for rejected/malformed calls — else a parseable-rejected LOOP would
+    // re-stamp a young marker each iteration and clause-3 would SPARE the very wedge it
+    // must catch. clause-1 (success-gated last_successful_wait_at_ms) is the independent
+    // backstop. ADDITIVE/INERT: no consumer reads in_flight_* yet (supervisor wiring is
+    // gated on the evil-arch/tester review).
+    let hook_event = payload.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Turn-active marker (clause-3 PRIMARY signal, architect msg 563). A turn BEGINS at
+    // UserPromptSubmit — stamp turn_active_started_at_ms covering the WHOLE turn (pure
+    // reasoning AND tool calls), set BEFORE any tool fires. This is what lets the supervisor
+    // spare a long PURE-thinking turn (evil-arch 547's deep-think gap) which has no in-flight
+    // tool marker yet. Cleared on a successful project_wait (return to standby) — see
+    // update_seat_successful_wait_at_ms. The supervisor's two-tier gate spares a turn-active
+    // seat under SHORT_CAP; a wedge (turn-active but never returning to project_wait) ages
+    // past the cap with no live child and is relaunched.
+    if hook_event == "UserPromptSubmit" {
+        obj.insert("turn_active_started_at_ms".to_string(), serde_json::json!(now_ms));
+    }
+
+    if !is_idle_tool {
+        if hook_event == "PreToolUse" {
+            obj.insert("in_flight_tool".to_string(), serde_json::json!(tool_name));
+            obj.insert("in_flight_started_at_ms".to_string(), serde_json::json!(now_ms));
+        } else if hook_event == "PostToolUse" {
+            // SUCCESS completion: clear the in-flight marker AND record the clause-2
+            // success-gated work signal. last_successful_work_at_ms is the "recent
+            // successful work" signal the supervisor's clause-2 keys off — distinct from
+            // the success-blind last_active_at_ms (which a rejected call also refreshes).
+            obj.remove("in_flight_tool");
+            obj.remove("in_flight_started_at_ms");
+            obj.insert("last_successful_work_at_ms".to_string(), serde_json::json!(now_ms));
+        } else if hook_event.starts_with("PostToolUse") {
+            // PostToolUseFailure (errored tool — Bash exit!=0, MCP {isError:true}): clear
+            // the in-flight marker but record NO work-success (a failed tool is not work).
+            // claude-code-guide probe (2026-05-29): failed tools fire PostToolUseFailure,
+            // NOT PostToolUse — clearing only on success would leave a phantom hung-op marker.
+            obj.remove("in_flight_tool");
+            obj.remove("in_flight_started_at_ms");
+        }
+    }
+
     // atomic_write — pin C: no board.lock on heartbeat; eventually-consistent OK.
     if let Ok(serialized) = serde_json::to_string_pretty(&state) {
         let _ = atomic_write(&seat_file, serialized.as_bytes());
@@ -19257,6 +19449,33 @@ fn run_keep_alive() {
 const SUPERVISE_POLL_INTERVAL_MS: u64 = 10_000;
 const SUPERVISE_HANG_THRESHOLD_MS: u64 = 90_000;
 const SUPERVISE_PRE_KILL_GRACE_MS: u64 = 5_000;
+/// Clause-3 TWO-TIER cap (architect msg 563 — closed design). Two bounded clocks so nothing
+/// legit is killed AND nothing is spared forever:
+/// SHORT cap — a TURN-ACTIVE seat (marker set at UserPromptSubmit, cleared on a successful
+/// project_wait) younger than this is spared: covers a pure deep-think turn and the early phase
+/// of any turn before tools fire (evil-arch 547's deep-think gap). A seat turn-active LONGER
+/// than this with no live long-op is a WEDGE -> relaunch (fast recovery).
+const SUPERVISE_TURN_ACTIVE_CAP_MS: u64 = 900_000; // 15 min
+/// LONG cap — a known-long in-flight op (real build/fetch/subagent) younger than this is spared
+/// even past the short cap, so a 40-min cargo build isn't killed mid-op (evil-arch 559). Past
+/// this it's a presumed HUNG op -> relaunch (dev-challenger 561). FOLLOW-UP (spec linchpin): an
+/// un-forgeable live-child-PID check (needs the claude pid in seat.json) will strengthen this
+/// tier against a rejected-Bash-loop forging the marker; until then the in_flight marker + this
+/// cap gate it.
+const SUPERVISE_CHILD_OP_CAP_MS: u64 = 3_600_000; // 60 min
+
+/// Tools that can legitimately run longer than the stall threshold. ONLY these qualify a
+/// young in-flight marker to SPARE a seat under clause-3 — so a wedge-LOOP on a fast tool
+/// (project_send/project_wait/Read/Edit) that forges a young in-flight marker (if PreToolUse
+/// fires on rejected calls — undocumented, see spec) is NOT spared. The common court/55
+/// wedge loops on fast tools, so this closes the forge-a-young-marker hole; the residual
+/// edge (a genuine repeated-Bash-reject loop) is bounded by SUPERVISE_MAX_OP_MS.
+fn is_known_long_tool(tool_name: &str) -> bool {
+    tool_name.ends_with("Bash")
+        || tool_name.ends_with("WebFetch")
+        || tool_name.ends_with("WebSearch")
+        || tool_name.ends_with("Task")
+}
 
 /// Layer 2 supervisor: scans `<project_dir>/.vaak/sessions/*.json` every 10s and
 /// kills any seat whose `last_alive_at_ms` is older than 90s (hung-but-running case).
@@ -19295,6 +19514,19 @@ fn run_supervise(project_dir: &str) {
     }));
 
     loop {
+        // Escape sentinel (architect msg 502 guardrail #4): when the human/operator
+        // creates `.vaak/seats-paused` (or `.vaak/allow-stop`), the supervisor must
+        // NOT kill any seat. Otherwise a human-ordered pause is *fought* — supervisor
+        // kills the stale seat, Layer 1 relaunches it via --resume, and the team
+        // becomes un-pausable, the exact inverse of the bug we are fixing. Mirrors the
+        // same two sentinel names honored by keep-alive-stop.py (Layer 4 Stop hook)
+        // and the Layer 1 wrapper, so all three converge on one pause signal.
+        if vaak_dir.join("seats-paused").exists() || vaak_dir.join("allow-stop").exists() {
+            eprintln!("[vaak-supervise] paused (.vaak/seats-paused|allow-stop present) — skipping scan");
+            std::thread::sleep(std::time::Duration::from_millis(SUPERVISE_POLL_INTERVAL_MS));
+            continue;
+        }
+
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -19399,48 +19631,106 @@ pub enum SuperviseDecision {
     Kill { pid: u32 },
 }
 
-/// First-pass decision (called BEFORE the grace-window sleep): checks
-/// two-source freshness threshold + PID liveness.
+/// First-pass decision (called BEFORE the grace-window sleep): the locked three-clause
+/// busy-aware FRESH-relaunch gate (architect msg 528/537). Relaunch a seat (-> BuzzAndWait
+/// -> grace -> Kill) ONLY when ALL THREE hold; SPARE (Skip) if ANY fails:
+///   (1) liveness STALE — `last_successful_wait_at_ms` older than threshold. This field is
+///       stamped ONLY in project_wait's server-side success path, NEVER by the success-blind
+///       keep-alive hook — so a rejected/malformed LOOP that advances last_alive/last_active
+///       does NOT keep this fresh (closes evil-arch 524). Composer keystrokes (last_drafting)
+///       also count as live so a human typing into a seat is never killed.
+///   (2) NO recent successful WORK — `last_successful_work_at_ms` (stamped only on a
+///       PostToolUse SUCCESS, not PostToolUseFailure) is stale. An actively-working seat
+///       isn't waiting, so its wait-liveness is stale; clause-2 spares it.
+///   (3) NO qualifying in-flight op — no `in_flight_*` marker for a known-long tool younger
+///       than SUPERVISE_MAX_OP_MS. A genuine cargo build/fetch/subagent is spared; a marker
+///       OLDER than the cap is a presumed HUNG op (relaunch); a fast-tool wedge-loop's forged
+///       young marker does not qualify (relaunch).
 ///
-/// Two-source rule (tech-leader #1042 + spec §3.1): "stale" means BOTH
-/// `last_alive_at_ms` AND `last_drafting_at_ms` exceed the threshold.
-/// The seat is fresh if EITHER source is recent — closing the long-bash
-/// false-kill window evil-arch #1028 raised. Composer-keystroke heartbeats
-/// (last_drafting) keep the supervisor from killing a seat whose user is
-/// actively typing even if hooks haven't fired in a while.
+/// "Never stamped" guard: a seat with no successful wait, no successful work, and no
+/// composer activity is mid-join / pre-instrumentation — Skip (conservative; never kill on
+/// no signal). NOTE: this means until the new sidecar deploys (so seats stamp
+/// last_successful_wait_at_ms), the supervisor Skips everyone — a SAFE transition (no false
+/// kills) that self-activates once seats run the new build.
 pub fn supervise_initial_decide(
     state: &serde_json::Value,
     now_ms: u64,
     threshold_ms: u64,
 ) -> SuperviseDecision {
-    let last_alive = state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    let last_drafting = state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    let most_recent = last_alive.max(last_drafting);
-    if most_recent == 0 { return SuperviseDecision::Skip; }
-    let age_ms = now_ms.saturating_sub(most_recent);
-    if age_ms < threshold_ms { return SuperviseDecision::Skip; }
-    let pid = state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32);
-    let pid = match pid {
+    let g = |k: &str| state.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let last_wait = g("last_successful_wait_at_ms");
+    let last_work = g("last_successful_work_at_ms");
+    let last_drafting = g("last_drafting_at_ms");
+    let turn_active = g("turn_active_started_at_ms");
+
+    // Never-stamped guard: no signal of any kind = mid-join / pre-instrumentation -> Skip
+    // (conservative; never kill on no signal). turn_active is included so a seat carrying ONLY
+    // an OLD turn_active marker (joined, ran a turn, wedged before ever waiting) is NOT auto-
+    // skipped here but proceeds to clause-3 (where an over-cap turn_active relaunches it).
+    if last_wait == 0 && last_work == 0 && last_drafting == 0 && turn_active == 0 {
+        return SuperviseDecision::Skip;
+    }
+
+    // Clause 1: liveness fresh (successful project_wait OR human composer keystrokes) -> spare.
+    if now_ms.saturating_sub(last_wait.max(last_drafting)) < threshold_ms {
+        return SuperviseDecision::Skip;
+    }
+
+    // Clause 2: recent successful WORK -> spare (actively-working seat, not waiting).
+    if last_work != 0 && now_ms.saturating_sub(last_work) < threshold_ms {
+        return SuperviseDecision::Skip;
+    }
+
+    // Clause 3 (TWO-TIER cap, architect 563):
+    //  (a) SHORT tier — a turn is active within SUPERVISE_TURN_ACTIVE_CAP_MS: covers a pure
+    //      deep-think turn and the early phase of any turn before tools fire -> spare.
+    if turn_active != 0 && now_ms.saturating_sub(turn_active) < SUPERVISE_TURN_ACTIVE_CAP_MS {
+        return SuperviseDecision::Skip;
+    }
+    //  (b) LONG tier — a known-long in-flight op within SUPERVISE_CHILD_OP_CAP_MS: covers a
+    //      40-min build past the short cap -> spare. Past this cap it's a presumed HUNG op and
+    //      is NOT spared (relaunch). A fast-tool wedge-loop's forged marker is not known-long.
+    if let Some(tool) = state.get("in_flight_tool").and_then(|v| v.as_str()) {
+        let started = g("in_flight_started_at_ms");
+        if started != 0
+            && is_known_long_tool(tool)
+            && now_ms.saturating_sub(started) < SUPERVISE_CHILD_OP_CAP_MS
+        {
+            return SuperviseDecision::Skip;
+        }
+    }
+
+    // All three relaunch-conditions hold. Proceed iff a PID is recorded + alive
+    // (no PID -> Layer 1 owns process exit; dead PID -> nothing to kill).
+    let pid = match state.get("pid").and_then(|v| v.as_u64()).map(|p| p as u32) {
         Some(p) => p,
-        None => return SuperviseDecision::Skip, // no PID → Layer 1 owns it
+        None => return SuperviseDecision::Skip,
     };
     if !is_process_alive(pid) { return SuperviseDecision::Skip; }
+    let age_ms = now_ms.saturating_sub(last_wait.max(last_work).max(last_drafting));
     SuperviseDecision::BuzzAndWait { pid, age_ms }
 }
 
-/// Post-grace decision: after the grace-window sleep, did the seat respond?
-/// Two-source rule mirror: recovery counts if EITHER `last_alive_at_ms`
-/// OR `last_drafting_at_ms` advanced during the grace window.
+/// Post-grace decision: after the grace-window sleep, did the seat genuinely respond?
+/// Recovery counts ONLY on SUCCESS-GATED signals advancing during the grace window —
+/// a successful project_wait, completed successful work, or composer keystrokes. The
+/// success-BLIND `last_alive_at_ms`/`last_active_at_ms` are deliberately NOT consulted:
+/// a malformed/rejected loop advances those (evil-arch 524) and would fake recovery,
+/// re-wedging the seat the gate just decided to relaunch.
 pub fn supervise_post_grace_decide(
     pre_state: &serde_json::Value,
     post_state: &serde_json::Value,
     pid: u32,
 ) -> SuperviseDecision {
-    let pre_alive = pre_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    let post_alive = post_state.get("last_alive_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    let pre_draft = pre_state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    let post_draft = post_state.get("last_drafting_at_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-    if post_alive > pre_alive || post_draft > pre_draft {
+    let advanced = |k: &str| {
+        let pre = pre_state.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let post = post_state.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        post > pre
+    };
+    if advanced("last_successful_wait_at_ms")
+        || advanced("last_successful_work_at_ms")
+        || advanced("last_drafting_at_ms")
+    {
         SuperviseDecision::AbortKill
     } else {
         SuperviseDecision::Kill { pid }
@@ -19451,16 +19741,20 @@ pub fn supervise_post_grace_decide(
 mod supervise_tests {
     use super::*;
 
-    fn seat_state(last_alive_at_ms: u64, pid: Option<u32>) -> serde_json::Value {
+    // The gate now keys off the SUCCESS-GATED `last_successful_wait_at_ms` (clause-1), NOT
+    // the success-blind `last_alive_at_ms`. These helpers build that field so the historical
+    // tests below exercise the new gate with their original intent (the first arg is the
+    // most-recent successful wait; the all-zero case is the never-stamped guard).
+    fn seat_state(last_successful_wait_at_ms: u64, pid: Option<u32>) -> serde_json::Value {
         match pid {
-            Some(p) => serde_json::json!({"last_alive_at_ms": last_alive_at_ms, "pid": p}),
-            None => serde_json::json!({"last_alive_at_ms": last_alive_at_ms}),
+            Some(p) => serde_json::json!({"last_successful_wait_at_ms": last_successful_wait_at_ms, "pid": p}),
+            None => serde_json::json!({"last_successful_wait_at_ms": last_successful_wait_at_ms}),
         }
     }
 
-    fn seat_state_two_source(last_alive_at_ms: u64, last_drafting_at_ms: u64, pid: u32) -> serde_json::Value {
+    fn seat_state_two_source(last_successful_wait_at_ms: u64, last_drafting_at_ms: u64, pid: u32) -> serde_json::Value {
         serde_json::json!({
-            "last_alive_at_ms": last_alive_at_ms,
+            "last_successful_wait_at_ms": last_successful_wait_at_ms,
             "last_drafting_at_ms": last_drafting_at_ms,
             "pid": pid
         })
@@ -19581,6 +19875,175 @@ mod supervise_tests {
             supervise_post_grace_decide(&pre, &post, 99999),
             SuperviseDecision::AbortKill,
         );
+    }
+
+    // ---- Three-clause busy-aware gate (architect 528/537) ----
+
+    const NOW: u64 = 1_700_000_000_000;
+    const THR: u64 = 90_000;
+
+    /// MAKE-OR-BREAK (evil-arch 524 / tester T3.1): a seat with a FRESH success-blind
+    /// last_alive_at_ms but a STALE last_successful_wait_at_ms must STILL relaunch — proves
+    /// the gate ignores the success-blind field a malformed/rejected loop keeps fresh.
+    #[test]
+    fn success_blind_last_alive_ignored_buzzes() {
+        let state = serde_json::json!({
+            "last_alive_at_ms": NOW - 1_000,      // fresh (a looping seat refreshes this)
+            "last_active_at_ms": NOW - 1_000,     // fresh (success-blind)
+            "last_successful_wait_at_ms": NOW - 200_000, // STALE — the load-bearing signal
+            "pid": std::process::id(),
+        });
+        match supervise_initial_decide(&state, NOW, THR) {
+            SuperviseDecision::BuzzAndWait { .. } => {}
+            other => panic!("expected BuzzAndWait (success-blind must be ignored), got {:?}", other),
+        }
+    }
+
+    /// Clause-2: stale wait but recent SUCCESSFUL work → Skip (actively-working seat).
+    #[test]
+    fn recent_successful_work_spared() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 200_000,
+            "last_successful_work_at_ms": NOW - 30_000,
+            "pid": std::process::id(),
+        });
+        assert_eq!(supervise_initial_decide(&state, NOW, THR), SuperviseDecision::Skip);
+    }
+
+    /// Q2: long cargo build — stale wait/work + YOUNG Bash in-flight marker → Skip.
+    #[test]
+    fn q2_long_build_young_marker_spared() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 200_000,
+            "in_flight_tool": "Bash",
+            "in_flight_started_at_ms": NOW - 120_000, // < 15min cap
+            "pid": std::process::id(),
+        });
+        assert_eq!(supervise_initial_decide(&state, NOW, THR), SuperviseDecision::Skip);
+    }
+
+    /// Q5: HUNG build — Bash in-flight marker OLDER than the LONG cap → relaunch (BuzzAndWait),
+    /// NOT spared forever (evil-arch 533 / dev-challenger 561 hung-child).
+    #[test]
+    fn q5_hung_build_stale_marker_buzzes() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 4_000_000,
+            "in_flight_tool": "Bash",
+            "in_flight_started_at_ms": NOW - 4_000_000, // > 60min long cap → presumed hung
+            "pid": std::process::id(),
+        });
+        match supervise_initial_decide(&state, NOW, THR) {
+            SuperviseDecision::BuzzAndWait { .. } => {}
+            other => panic!("expected BuzzAndWait (hung build past long cap), got {:?}", other),
+        }
+    }
+
+    /// LONG-cap boundary: live Bash op just-under → SPARE; just-over → relaunch.
+    #[test]
+    fn long_cap_boundary() {
+        let under = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 4_000_000,
+            "in_flight_tool": "Bash",
+            "in_flight_started_at_ms": NOW - (SUPERVISE_CHILD_OP_CAP_MS - 1),
+            "pid": std::process::id(),
+        });
+        assert_eq!(supervise_initial_decide(&under, NOW, THR), SuperviseDecision::Skip);
+        let over = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 4_000_000,
+            "in_flight_tool": "Bash",
+            "in_flight_started_at_ms": NOW - SUPERVISE_CHILD_OP_CAP_MS,
+            "pid": std::process::id(),
+        });
+        match supervise_initial_decide(&over, NOW, THR) {
+            SuperviseDecision::BuzzAndWait { .. } => {}
+            other => panic!("expected BuzzAndWait at long cap, got {:?}", other),
+        }
+    }
+
+    /// SHORT tier: a pure deep-think turn (turn_active young, no in-flight tool) → SPARE
+    /// (evil-arch 547's deep-think gap closed).
+    #[test]
+    fn deep_think_within_short_cap_spared() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 200_000, // stale (mid-turn, not waiting)
+            "turn_active_started_at_ms": NOW - 120_000,  // 2min into a reasoning turn
+            "pid": std::process::id(),
+        });
+        assert_eq!(supervise_initial_decide(&state, NOW, THR), SuperviseDecision::Skip);
+    }
+
+    /// WEDGE: turn-active PAST the short cap with NO live long-op → relaunch (fast recovery).
+    #[test]
+    fn wedge_turn_active_past_short_cap_buzzes() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 2_000_000,
+            "turn_active_started_at_ms": NOW - 1_000_000, // > 15min short cap, no in_flight
+            "pid": std::process::id(),
+        });
+        match supervise_initial_decide(&state, NOW, THR) {
+            SuperviseDecision::BuzzAndWait { .. } => {}
+            other => panic!("expected BuzzAndWait (wedge past short cap), got {:?}", other),
+        }
+    }
+
+    /// Discriminator: a long build PAST the short cap but within the LONG cap (live in-flight
+    /// Bash) → SPARE — the long tier rescues a 30-40min build the short cap alone would kill.
+    #[test]
+    fn long_build_past_short_cap_within_long_cap_spared() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 1_800_000,
+            "turn_active_started_at_ms": NOW - 1_800_000, // 30min: past short cap
+            "in_flight_tool": "Bash",
+            "in_flight_started_at_ms": NOW - 1_800_000,    // but a live build within long cap
+            "pid": std::process::id(),
+        });
+        assert_eq!(supervise_initial_decide(&state, NOW, THR), SuperviseDecision::Skip);
+    }
+
+    /// Q1: a wedge-loop forging a YOUNG in-flight marker on a FAST tool (project_send) is
+    /// NOT spared — clause-3 only spares known-long tools (closes the forge-a-marker hole).
+    #[test]
+    fn q1_fast_tool_forged_marker_buzzes() {
+        let state = serde_json::json!({
+            "last_successful_wait_at_ms": NOW - 200_000,
+            "in_flight_tool": "mcp__vaak__project_send",
+            "in_flight_started_at_ms": NOW - 2_000, // young, but not a known-long tool
+            "pid": std::process::id(),
+        });
+        match supervise_initial_decide(&state, NOW, THR) {
+            SuperviseDecision::BuzzAndWait { .. } => {}
+            other => panic!("expected BuzzAndWait (fast-tool marker must not spare), got {:?}", other),
+        }
+    }
+
+    /// Post-grace MAKE-OR-BREAK: last_alive_at_ms advanced during grace but the success-gated
+    /// signals did NOT → still Kill (a looping seat's success-blind tick must not fake recovery).
+    #[test]
+    fn post_grace_success_blind_advance_still_kills() {
+        let pre = serde_json::json!({"last_alive_at_ms": 1_000_000, "last_successful_wait_at_ms": 1_000_000});
+        let post = serde_json::json!({"last_alive_at_ms": 1_005_000, "last_successful_wait_at_ms": 1_000_000});
+        assert_eq!(supervise_post_grace_decide(&pre, &post, 7), SuperviseDecision::Kill { pid: 7 });
+    }
+
+    /// Post-grace: successful WORK advanced during grace → AbortKill.
+    #[test]
+    fn post_grace_work_advanced_aborts_kill() {
+        let pre = serde_json::json!({"last_successful_work_at_ms": 1_000_000});
+        let post = serde_json::json!({"last_successful_work_at_ms": 1_005_000});
+        assert_eq!(supervise_post_grace_decide(&pre, &post, 7), SuperviseDecision::AbortKill);
+    }
+
+    /// is_known_long_tool: builds/fetch/subagent qualify; fast/MCP tools do not.
+    #[test]
+    fn known_long_tool_classification() {
+        assert!(is_known_long_tool("Bash"));
+        assert!(is_known_long_tool("WebFetch"));
+        assert!(is_known_long_tool("WebSearch"));
+        assert!(is_known_long_tool("Task"));
+        assert!(!is_known_long_tool("Read"));
+        assert!(!is_known_long_tool("Edit"));
+        assert!(!is_known_long_tool("mcp__vaak__project_send"));
+        assert!(!is_known_long_tool("mcp__vaak__project_wait"));
     }
 }
 
@@ -20096,6 +20559,18 @@ fn stamp_supervisor_kill(seat_file: &std::path::Path, now_ms: u64) {
     if let Some(obj) = state.as_object_mut() {
         obj.insert("supervisor_killed_at_ms".to_string(), serde_json::json!(now_ms));
         obj.insert("last_writer_action".to_string(), serde_json::json!("layer2_supervisor_kill"));
+        // force_fresh (fresh-vs-resume OPTION 2, spec 2026-05-29): every supervisor kill is a
+        // three-clause fatigue/wedge relaunch, where --resume would RELOAD the bloated/poisoned
+        // context and re-degrade (the treadmill). Setting force_fresh:true tells BOTH wrappers
+        // (launch-seat.ps1 app-path + launch-team.ps1 manual-path) to relaunch with a FRESH
+        // session (project_join briefing + board snapshot) instead of --resume. One flag, read
+        // from disk, so the two wrappers stay unified (resolves tester 520's divergence). The
+        // wrapper clears force_fresh after consuming it on a fresh launch.
+        obj.insert("force_fresh".to_string(), serde_json::json!(true));
+        // Clear the in-flight marker we're about to invalidate by killing the process, so the
+        // relaunched seat doesn't inherit a phantom hung-op marker from its predecessor.
+        obj.remove("in_flight_tool");
+        obj.remove("in_flight_started_at_ms");
         if let Ok(serialized) = serde_json::to_string_pretty(&state) {
             let _ = atomic_write(seat_file, serialized.as_bytes());
         }

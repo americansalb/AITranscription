@@ -36,7 +36,9 @@ New-Item -ItemType Directory -Force -Path $logsDir  | Out-Null
 $seatJsonPath = Join-Path $seatsDir "$seatLabel.json"
 $logPath      = Join-Path $logsDir  "$seatLabel.jsonl"
 $sentinelPath = Join-Path $ProjectDir ".vaak\stop-$seatLabel"
-$resumeNudge  = "You are being resumed across a vaak restart. Your prior MCP server child died with the previous vaak.exe; the new vaak.exe has no record of your seat. Step 1: call mcp__vaak__project_join with role='$Role' to rebind your seat. Your prior instance was $Instance; flag if you land on a different number. Step 2: handle any unread team messages from the board. Step 3: call mcp__vaak__project_wait to enter standby. Continue indefinitely in autonomous team mode."
+$pausePath     = Join-Path $ProjectDir ".vaak\seats-paused"
+$allowStopPath = Join-Path $ProjectDir ".vaak\allow-stop"
+$resumeNudge  ="You are being resumed across a vaak restart. Your prior MCP server child died with the previous vaak.exe; the new vaak.exe has no record of your seat. Step 1: call mcp__vaak__project_join with role='$Role' to rebind your seat. Your prior instance was $Instance; flag if you land on a different number. Step 2: handle any unread team messages from the board. Step 3: call mcp__vaak__project_wait to enter standby. Continue indefinitely in autonomous team mode."
 
 function Write-VaakLog($ev, $payload) {
     $entry = [pscustomobject]@{
@@ -80,6 +82,19 @@ while ($true) {
         Write-VaakLog 'sentinel_exit' @{ reason = 'graceful drain via sentinel file' }
         Write-Host "[vaak-launch][$seatLabel] sentinel observed - exiting wrapper" -ForegroundColor Magenta
         break
+    }
+
+    # Global pause: .vaak/seats-paused (or allow-stop) halts relaunch. Honors the
+    # same human-ordered pause sentinel as the Stop hook (keep-alive-stop.py) and the
+    # Layer 2 supervisor (vaak-mcp.rs run_supervise), so a deliberate pause is never
+    # fought. Unlike the per-seat drain above this does NOT exit the wrapper — it polls,
+    # so removing the file auto-resumes this seat. (pause = temporary; disband one seat
+    # = stop-<role>-<instance>; the per-seat drain still wins if it appears mid-pause.)
+    while ((Test-Path $pausePath) -or (Test-Path $allowStopPath)) {
+        if (Test-Path $sentinelPath) { break }
+        Write-VaakLog 'paused' @{ reason = 'global seats-paused/allow-stop sentinel - not relaunching' }
+        Write-Host "[vaak-launch][$seatLabel] paused (seats-paused present) - holding, not relaunching" -ForegroundColor Magenta
+        Start-Sleep -Seconds 15
     }
 
     $attempt++
@@ -131,12 +146,22 @@ while ($true) {
     }
 
     if ($seatData -ne $null -and -not $script:dropResumeNextIter) {
-        $ageHrs = if ($seatData.last_fresh_at) { (($now - (Get-Date $seatData.last_fresh_at)).TotalHours) } else { 999 }
-        if ($ageHrs -ge 168) {
-            $reasonFresh = ("wall_clock_{0:N1}h" -f $ageHrs)
-        } elseif ($seatData.session_id) {
-            $useResume = $true
-            $sessionId = $seatData.session_id
+        if ($seatData.force_fresh -eq $true) {
+            # Layer-2 supervisor flagged a fatigue/wedge relaunch (force_fresh:true in
+            # seat.json, written by stamp_supervisor_kill). Relaunch FRESH (the $JoinPrompt
+            # path: project_join briefing + board snapshot), NOT --resume — which would
+            # RELOAD the bloated/poisoned context and re-degrade (the treadmill). The
+            # full-overwrite seat.json write below omits force_fresh, so it is consumed and
+            # cleared after exactly one fresh launch. (busy-aware FRESH-relaunch spec 2026-05-29.)
+            $reasonFresh = 'supervisor_force_fresh'
+        } else {
+            $ageHrs = if ($seatData.last_fresh_at) { (($now - (Get-Date $seatData.last_fresh_at)).TotalHours) } else { 999 }
+            if ($ageHrs -ge 168) {
+                $reasonFresh = ("wall_clock_{0:N1}h" -f $ageHrs)
+            } elseif ($seatData.session_id) {
+                $useResume = $true
+                $sessionId = $seatData.session_id
+            }
         }
     }
     if ($script:dropResumeNextIter) {
