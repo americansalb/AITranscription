@@ -78,23 +78,28 @@ export function AssemblySetupModal(props: {
       // when the customization writes failed).
       const customizationErrors: string[] = [];
 
-      const protocol = await invoke<{ rev: number }>("get_protocol_cmd", {
+      // NOTE: get_protocol_cmd returns { section, protocol, heartbeats } — the
+      // CAS `rev` lives on the nested `protocol` object (matching the canonical
+      // useProtocolState reader), NOT at the top level. Reading top-level `.rev`
+      // yielded undefined → rev:undefined reached the backend as None → every
+      // mutate failed with [MissingRev] and assembly mode couldn't start.
+      const resp = await invoke<{ protocol: { rev: number } }>("get_protocol_cmd", {
         dir: projectDir,
       }).catch(() => null);
 
-      if (protocol) {
+      if (resp) {
         await invoke("protocol_mutate_cmd", {
           dir: projectDir,
           action: "set_mic_passing",
           args: { mode: micMode },
-          rev: protocol.rev,
+          rev: resp.protocol.rev,
         }).catch((e) => {
           customizationErrors.push(`mic mode: ${String(e?.message ?? e)}`);
           console.warn("[AssemblySetup] set_mic_passing:", e);
         });
 
         if (micMode === "moderator" && moderator) {
-          const p2 = await invoke<{ rev: number }>("get_protocol_cmd", {
+          const p2 = await invoke<{ protocol: { rev: number } }>("get_protocol_cmd", {
             dir: projectDir,
           }).catch(() => null);
           if (p2) {
@@ -102,7 +107,7 @@ export function AssemblySetupModal(props: {
               dir: projectDir,
               action: "set_moderator",
               args: { seat: moderator },
-              rev: p2.rev,
+              rev: p2.protocol.rev,
             }).catch((e) => {
               customizationErrors.push(`moderator: ${String(e?.message ?? e)}`);
               console.warn("[AssemblySetup] set_moderator:", e);
@@ -111,7 +116,7 @@ export function AssemblySetupModal(props: {
         }
 
         if (preset && preset !== currentPreset) {
-          const p3 = await invoke<{ rev: number }>("get_protocol_cmd", {
+          const p3 = await invoke<{ protocol: { rev: number } }>("get_protocol_cmd", {
             dir: projectDir,
           }).catch(() => null);
           if (p3) {
@@ -119,7 +124,7 @@ export function AssemblySetupModal(props: {
               dir: projectDir,
               action: "set_preset",
               args: { preset },
-              rev: p3.rev,
+              rev: p3.protocol.rev,
             }).catch((e) => {
               customizationErrors.push(`preset: ${String(e?.message ?? e)}`);
               console.warn("[AssemblySetup] set_preset:", e);
