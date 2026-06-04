@@ -93,6 +93,17 @@ pub mod staleness_thresholds {
     /// so the threshold must be >= 2x that cycle (~65s margin) or a live parked
     /// seat false-evicts between cycles on timing drift.
     pub const SEAT_LIVE_STALE_MS: u64 = 120_000;
+
+    /// is_seat_live's window for `turn_active_started_at_ms` (a PURE-reasoning
+    /// turn: stamped at UserPromptSubmit before any tool fires, cleared on a
+    /// successful project_wait). MUST equal the SUPERVISOR's turn-active cap
+    /// (vaak-mcp.rs SUPERVISE_TURN_ACTIVE_CAP_MS = 900_000) — architect ruling
+    /// 629 + tester 630: if is_seat_live bounded turn_active at the 120s
+    /// success-field window while the supervisor spares it for 15min, the
+    /// 120s–15min band would re-create the 490-class dual-signal split
+    /// (supervisor keeps the seat, rotation evicts it). Same value → one
+    /// canonical liveness truth. Keep in sync if either changes.
+    pub const TURN_ACTIVE_LIVE_MS: u64 = 900_000;
 }
 
 // VAAK_FP:SHA-12.1:collab.rs:is_seat_alive
@@ -154,13 +165,17 @@ pub fn is_seat_alive(project_dir: &Path, seat: &str) -> bool {
 /// crashed-mid-tool seat whose PostToolUse never cleared the marker does NOT read
 /// live forever).
 ///
-/// NOT covered here, BY DESIGN (ruling 617 Q3): a current speaker doing pure long
-/// REASONING (no tool calls / no keystrokes → all three fields stale, no in_flight)
-/// is protected at the EVICTION CALL SITE via should_suppress_floor_stall
-/// (turn_type=="working"), which sees the protocol/floor turn-state this per-seat
-/// predicate cannot. Any caller that may evict the CURRENT speaker MUST also
-/// consult should_suppress_floor_stall — is_seat_live alone would skip a
-/// legitimately-thinking speaker.
+/// A PURE-reasoning turn (no tools/keystrokes/wait yet) is covered HERE for its
+/// first TURN_ACTIVE_LIVE_MS (15min) via turn_active_started_at_ms — keyed at the
+/// SAME bound the supervisor uses, so the two never disagree (the 490-class
+/// dual-signal split this fix exists to kill, ruling 629). The ONLY residual is a
+/// >15min continuous pure-reasoning CURRENT speaker (turn_active aged out, no
+/// other signal): that is protected at the eviction call site via
+/// should_suppress_floor_stall (turn_type=="working"), which sees protocol
+/// turn-state this per-seat predicate cannot. Per tester 618/architect 622 the
+/// watchdog is the ONLY path that force-evicts a still-holding current speaker, so
+/// should_suppress is required ONLY there (checked first) — NOT at the other
+/// rotation/candidate writers, which act on yielded floors / next-candidates.
 pub fn is_seat_live(project_dir: &Path, seat: &str) -> bool {
     if seat.starts_with("human:") { return true; }
     let (role, instance) = match seat.split_once(':') {
@@ -189,6 +204,19 @@ pub fn is_seat_live(project_dir: &Path, seat: &str) -> bool {
         .max(field("last_successful_wait_at_ms"))
         .max(field("last_drafting_at_ms"));
     if freshest != 0 && now_ms.saturating_sub(freshest) <= staleness_thresholds::SEAT_LIVE_STALE_MS {
+        return true;
+    }
+    // Pure-reasoning turn (architect 629 / evil-arch 619): turn_active_started_at_ms
+    // is stamped at UserPromptSubmit (before any tool fires) and cleared on a
+    // successful project_wait — so it covers a long PURE-thinking turn that has no
+    // work/wait/draft signal yet. Window = TURN_ACTIVE_LIVE_MS (15min = the
+    // SUPERVISOR's cap) so is_seat_live and the supervisor use the SAME signal at
+    // the SAME bound → no 490-class dual-signal split. A warm-zombie that got a
+    // prompt then froze ages past 15min (set once, never refreshed) → not live; a
+    // parked seat cleared it → not present. So it adds the genuine-thinking case
+    // without reviving a zombie.
+    let turn_active = field("turn_active_started_at_ms");
+    if turn_active != 0 && now_ms.saturating_sub(turn_active) <= staleness_thresholds::TURN_ACTIVE_LIVE_MS {
         return true;
     }
     // Young in_flight marker = mid genuine long tool call → live. Bounded so a
