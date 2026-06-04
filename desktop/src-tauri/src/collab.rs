@@ -91,19 +91,16 @@ pub mod staleness_thresholds {
     /// 90s hang threshold) per architect ruling 617: a purely-parked-alive seat
     /// refreshes last_successful_wait_at_ms only once per ~55s project_wait cycle,
     /// so the threshold must be >= 2x that cycle (~65s margin) or a live parked
-    /// seat false-evicts between cycles on timing drift.
+    /// seat false-evicts between cycles on timing drift. Architect 648 FINAL:
+    /// is_seat_live is mic-ELIGIBILITY (a different, cheaper, recoverable
+    /// decision than the supervisor's RELAUNCH), so ALL its signals — including
+    /// turn_active and in_flight — use this SHORT 120s window, NOT the
+    /// supervisor's long 15min/60min relaunch caps. Eligibility errs safe-short:
+    /// a false skip is benign (the seat gets the mic a round later); a false
+    /// KEEP is the expensive stuck-mic. (The frozen-mid-WORKING-turn current
+    /// speaker is released by the watchdog using the supervisor's LONG caps —
+    /// the eviction decision — NOT by this eligibility window.)
     pub const SEAT_LIVE_STALE_MS: u64 = 120_000;
-
-    /// is_seat_live's window for `turn_active_started_at_ms` (a PURE-reasoning
-    /// turn: stamped at UserPromptSubmit before any tool fires, cleared on a
-    /// successful project_wait). MUST equal the SUPERVISOR's turn-active cap
-    /// (vaak-mcp.rs SUPERVISE_TURN_ACTIVE_CAP_MS = 900_000) — architect ruling
-    /// 629 + tester 630: if is_seat_live bounded turn_active at the 120s
-    /// success-field window while the supervisor spares it for 15min, the
-    /// 120s–15min band would re-create the 490-class dual-signal split
-    /// (supervisor keeps the seat, rotation evicts it). Same value → one
-    /// canonical liveness truth. Keep in sync if either changes.
-    pub const TURN_ACTIVE_LIVE_MS: u64 = 900_000;
 }
 
 // VAAK_FP:SHA-12.1:collab.rs:is_seat_alive
@@ -165,17 +162,24 @@ pub fn is_seat_alive(project_dir: &Path, seat: &str) -> bool {
 /// crashed-mid-tool seat whose PostToolUse never cleared the marker does NOT read
 /// live forever).
 ///
-/// A PURE-reasoning turn (no tools/keystrokes/wait yet) is covered HERE for its
-/// first TURN_ACTIVE_LIVE_MS (15min) via turn_active_started_at_ms — keyed at the
-/// SAME bound the supervisor uses, so the two never disagree (the 490-class
-/// dual-signal split this fix exists to kill, ruling 629). The ONLY residual is a
-/// >15min continuous pure-reasoning CURRENT speaker (turn_active aged out, no
-/// other signal): that is protected at the eviction call site via
-/// should_suppress_floor_stall (turn_type=="working"), which sees protocol
-/// turn-state this per-seat predicate cannot. Per tester 618/architect 622 the
-/// watchdog is the ONLY path that force-evicts a still-holding current speaker, so
-/// should_suppress is required ONLY there (checked first) — NOT at the other
-/// rotation/candidate writers, which act on yielded floors / next-candidates.
+/// This is the mic-ELIGIBILITY predicate (architect 648 FINAL): "should this seat
+/// be a rotation candidate / kept eligible?" — a DIFFERENT, cheaper, recoverable
+/// decision from the supervisor's RELAUNCH ("should I kill+restart this process?").
+/// So all signals here use the SHORT 120s window, NOT the supervisor's long
+/// 15min/60min relaunch caps; matching those would keep a frozen-mid-turn seat
+/// mic-eligible for up to 60min = re-open the stuck-mic. The 512 unification is
+/// shared genuine SIGNALS (not the keepalive-fakeable last_alive), with
+/// decision-appropriate WINDOWS — not one shared window.
+///
+/// A long-thinking / long-building CURRENT speaker is NOT protected here (its
+/// signals age past 120s); it is protected at the watchdog's EVICTION decision,
+/// which uses the supervisor's LONG caps + should_suppress_floor_stall
+/// (turn_type=="working") so a genuine long turn isn't released — while a FROZEN
+/// working turn (signals stale past the long caps, only the keepalive heartbeat
+/// fresh) IS released. Per tester 618/architect 622 the watchdog is the ONLY path
+/// that force-evicts a still-holding current speaker, so should_suppress lives
+/// ONLY there — NOT at the other rotation/candidate writers (which act on yielded
+/// floors / next-candidates, where a 120s skip is benign).
 pub fn is_seat_live(project_dir: &Path, seat: &str) -> bool {
     if seat.starts_with("human:") { return true; }
     let (role, instance) = match seat.split_once(':') {
@@ -198,29 +202,28 @@ pub fn is_seat_live(project_dir: &Path, seat: &str) -> bool {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let field = |k: &str| parsed.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-    // Genuine-agent-action recency — the keepalive cannot fake ANY of these
-    // (it stamps only last_alive_at_ms / last_active_at_ms, deliberately excluded).
+    // ALL genuine-agent-action signals share the SHORT 120s ELIGIBILITY window
+    // (architect 648 FINAL). The keepalive cannot fake ANY of these (it stamps
+    // only last_alive_at_ms / last_active_at_ms, deliberately excluded). turn_active
+    // (a PURE-reasoning turn: stamped at UserPromptSubmit before any tool, cleared
+    // on successful project_wait) joins the SAME 120s window, NOT the supervisor's
+    // 15min cap — for ELIGIBILITY a frozen-mid-turn candidate should be skipped fast
+    // (skipping is benign; the >120s long-think CURRENT speaker is protected by the
+    // watchdog's long-cap eviction guard, not by this candidate-eligibility window).
     let freshest = field("last_successful_work_at_ms")
         .max(field("last_successful_wait_at_ms"))
-        .max(field("last_drafting_at_ms"));
+        .max(field("last_drafting_at_ms"))
+        .max(field("turn_active_started_at_ms"));
     if freshest != 0 && now_ms.saturating_sub(freshest) <= staleness_thresholds::SEAT_LIVE_STALE_MS {
         return true;
     }
-    // Pure-reasoning turn (architect 629 / evil-arch 619): turn_active_started_at_ms
-    // is stamped at UserPromptSubmit (before any tool fires) and cleared on a
-    // successful project_wait — so it covers a long PURE-thinking turn that has no
-    // work/wait/draft signal yet. Window = TURN_ACTIVE_LIVE_MS (15min = the
-    // SUPERVISOR's cap) so is_seat_live and the supervisor use the SAME signal at
-    // the SAME bound → no 490-class dual-signal split. A warm-zombie that got a
-    // prompt then froze ages past 15min (set once, never refreshed) → not live; a
-    // parked seat cleared it → not present. So it adds the genuine-thinking case
-    // without reviving a zombie.
-    let turn_active = field("turn_active_started_at_ms");
-    if turn_active != 0 && now_ms.saturating_sub(turn_active) <= staleness_thresholds::TURN_ACTIVE_LIVE_MS {
-        return true;
-    }
-    // Young in_flight marker = mid genuine long tool call → live. Bounded so a
-    // crashed-mid-tool seat (PostToolUse never cleared it) eventually fails.
+    // in_flight (mid genuine long tool call) at the same 120s eligibility window;
+    // bounded so a crashed-mid-tool seat (PostToolUse never cleared it) eventually
+    // fails. NOTE: the qualifying-long-op-tool gate + a shared collab::seat_activity()
+    // extraction (architect 648 #3 / dev-challenger 638) — so is_seat_live and the
+    // supervisor's clause-3 can't drift on WHICH-signals — is the tracked
+    // 512-completion follow-up; the qualifying-tool list currently lives in the
+    // supervisor (vaak-mcp.rs) and isn't visible to this shared module yet.
     if parsed.get("in_flight_tool").and_then(|v| v.as_str()).is_some() {
         let started = field("in_flight_started_at_ms");
         if started != 0 && now_ms.saturating_sub(started) <= staleness_thresholds::SEAT_LIVE_STALE_MS {
