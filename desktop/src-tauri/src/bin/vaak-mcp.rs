@@ -6271,6 +6271,28 @@ fn emit_two_controls_event(
 mod protocol_slice2_tests {
     use super::*;
 
+    // Regression fixtures for b303364 (UTF-8 byte-slice panic class). Authored
+    // by tester (msg 495). Without truncate_chars, &s[..N] panicked when byte N
+    // split a multi-byte char; these lock that the cut lands on a char boundary.
+    #[test]
+    fn truncate_chars_no_panic_on_multibyte_boundary() {
+        // '→' is 3 bytes; a byte-150 cut on 100 of them would land mid-char.
+        let s = "→".repeat(100);
+        let out = truncate_chars(&s, 50);
+        assert_eq!(out.chars().count(), 50); // 50 CHARS, not bytes
+        assert_eq!(out, "→".repeat(50)); // and it didn't panic getting here
+    }
+
+    #[test]
+    fn truncate_chars_shorter_than_limit_returns_whole() {
+        assert_eq!(truncate_chars("café ☕", 100), "café ☕");
+    }
+
+    #[test]
+    fn truncate_chars_exact_length_returns_whole() {
+        assert_eq!(truncate_chars("abc", 3), "abc");
+    }
+
     fn fresh_state() -> serde_json::Value {
         protocol_fresh_value()
     }
@@ -15932,12 +15954,14 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
                 obj.insert("last_writer_action".to_string(), serde_json::json!("project_leave_prune"));
                 obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
             }
-            // Propagate, don't swallow: if this floor-prune persist fails, the
-            // departed seat is still listed as current_speaker/moderator on disk
-            // → mic stuck on a gone seat (the stuck-mic class). Surface it.
+            // Log-and-continue, do NOT propagate (architect ruling 529/532): the
+            // agent is leaving regardless (non-abortable), and returning Err here
+            // would skip mark_seat_intentionally_left below → auto-respawn could
+            // RESURRECT the departed seat, which is strictly worse than a stuck
+            // mic (the latter self-heals via the floor-stall watchdog / is_seat_live
+            // predicate). Surface the failure loudly but never abort the leave.
             if let Err(e) = write_protocol_for_section_value(&state.project_dir, &section, &proto) {
-                eprintln!("[project_leave_prune] floor-prune persist FAILED for {} — floor may still reference a departed seat (stuck-mic risk): {}", leaver_label, e);
-                return Err(format!("project_leave floor-prune persist failed: {}", e));
+                eprintln!("[project_leave_prune] floor-prune persist FAILED for {} — floor may still reference a departed seat (stuck-mic risk; self-heals via floor-stall watchdog): {}", leaver_label, e);
             }
         }
         Ok(())
@@ -16038,11 +16062,13 @@ fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, S
                 obj.insert("last_writer_action".to_string(), serde_json::json!("project_kick_prune"));
                 obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
             }
-            // Propagate, don't swallow: a failed floor-prune persist leaves the
-            // kicked seat as current_speaker/moderator on disk → stuck mic.
+            // Log-and-continue, do NOT propagate (architect ruling 529/532):
+            // kick is non-abortable and returning Err would skip the kick's
+            // mark_seat_intentionally_left → the kicked seat could be RESURRECTED
+            // by auto-respawn (worse than a stuck mic, which self-heals via the
+            // floor-stall watchdog). Surface loudly, never abort the kick.
             if let Err(e) = write_protocol_for_section_value(&state.project_dir, &section, &proto) {
-                eprintln!("[project_kick_prune] floor-prune persist FAILED for {} — floor may still reference a kicked seat (stuck-mic risk): {}", target_label, e);
-                return Err(format!("project_kick floor-prune persist failed: {}", e));
+                eprintln!("[project_kick_prune] floor-prune persist FAILED for {} — floor may still reference a kicked seat (stuck-mic risk; self-heals via floor-stall watchdog): {}", target_label, e);
             }
         }
         Ok(())
