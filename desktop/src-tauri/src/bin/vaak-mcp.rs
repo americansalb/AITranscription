@@ -3218,6 +3218,32 @@ fn instance_is_occupied(project_dir: &str, role: &str, instance: u64) -> bool {
         .unwrap_or(false)
 }
 
+/// True if the exact role:instance seat is BUZZABLE. Looser than
+/// `instance_is_occupied` by design (architect ruling msg 230): project_buzz
+/// EXISTS to wake a disconnected/asleep seat, and a disconnected seat has
+/// binding status "disconnected" (set at line 1387), NOT active|idle. So an
+/// active|idle gate would reject buzz's entire target population. The correct
+/// buzz predicate is the codebase's canonical presence test (architect msg
+/// 2808, mirrored from the `seat_has_binding` closure ~14987): a binding
+/// exists for the seat AND its status is non-terminal — NOT "revoked", NOT
+/// "left". This admits active|idle|disconnected and rejects only truly-vacant
+/// (no binding), revoked (kicked), or left seats — for which a buzz is
+/// pointless anyway.
+fn seat_is_buzzable(project_dir: &str, role: &str, instance: u64) -> bool {
+    let sessions = read_sessions(project_dir);
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter().any(|b| {
+                let b_role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let b_inst = b.get("instance").and_then(|i| i.as_u64());
+                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                b_role == role && b_inst == Some(instance) && status != "revoked" && status != "left"
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// Distinct slugs of currently-occupied roles (status active/idle), in
 /// first-seen order. Used to build a helpful error listing valid targets
 /// when a send is rejected for hitting a vacant seat.
@@ -13932,7 +13958,17 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
             to
         };
         if !roles.contains_key(role_part) {
-            return Err(format!("Target role '{}' not found. Available: {:?}", role_part, roles.keys().collect::<Vec<_>>()));
+            // List only OCCUPIED roles, not the full roster (dev-challenger msg
+            // 227): advertising every vacant slot here nudges the next caller
+            // straight into the vacant-send trap the [VacantSeat] gate exists to
+            // stop. Point the hint at live seats only.
+            let occupied = occupied_role_slugs(&state.project_dir);
+            let occupied_list = if occupied.is_empty() {
+                "(none currently joined — use to=\"all\" or to=\"human\")".to_string()
+            } else {
+                occupied.join(", ")
+            };
+            return Err(format!("Target role '{}' not found. Currently occupied roles: {}", role_part, occupied_list));
         }
     }
 
@@ -15999,7 +16035,43 @@ fn handle_project_buzz(target_role: &str, target_instance: u32) -> Result<serde_
 
     // Validate target role exists
     if !roles.contains_key(target_role) {
-        return Err(format!("Target role '{}' not found. Available: {:?}", target_role, roles.keys().collect::<Vec<_>>()));
+        // List only OCCUPIED roles (dev-challenger msg 227) — same reason as the
+        // send-side not-found error: don't advertise vacant slots as targets.
+        let occupied = occupied_role_slugs(&state.project_dir);
+        let occupied_list = if occupied.is_empty() {
+            "(none currently joined)".to_string()
+        } else {
+            occupied.join(", ")
+        };
+        return Err(format!("Target role '{}' not found. Currently occupied roles: {}", target_role, occupied_list));
+    }
+
+    // Vacant-seat gate, DOOR #2 (dev-challenger msg 224). project_buzz is a
+    // SECOND agent-callable directed-send path: it writes {to, type:"buzz"} to
+    // board.jsonl and never routes through handle_project_send, so the
+    // [VacantSeat] gate there misses it. A buzz to a never-joined / left /
+    // revoked seat sits unread — the same ghost the human banned in msg 171.
+    //
+    // Predicate is LOOSER than send's (architect ruling msg 230): send needs a
+    // present READER (active|idle); buzz needs a bound-but-asleep seat, and a
+    // disconnected seat carries status "disconnected" (line 1387) — so buzz
+    // uses seat_is_buzzable (binding exists AND status NOT IN {revoked,left},
+    // i.e. active|idle|disconnected). This is load-bearing: gating buzz on
+    // active|idle would reject exactly the disconnected seats buzz exists to
+    // wake. human caller bypass mirrors handle_project_send.
+    if state.role != "human"
+        && !seat_is_buzzable(&state.project_dir, target_role, target_instance as u64)
+    {
+        let occupied = occupied_role_slugs(&state.project_dir);
+        let occupied_list = if occupied.is_empty() {
+            "(none currently joined)".to_string()
+        } else {
+            occupied.join(", ")
+        };
+        return Err(format!(
+            "[VacantSeat] Cannot buzz '{}:{}' — no active session is bound to that seat (never joined, left, or revoked), so the buzz would sit unread on the board. Currently occupied roles: {}.",
+            target_role, target_instance, occupied_list
+        ));
     }
 
     let target_label = format!("{}:{}", target_role, target_instance);
