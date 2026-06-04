@@ -2071,7 +2071,7 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
             "type": "moderation",
             "timestamp": now,
             "subject": format!("Review #{}: {}", next_round, truncate_chars(&topic, 80)),
-            "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / neutral / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
+            "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nTo be COUNTED in the tally, respond via project_send with type=\"submission\" (to \"all\" or the moderator), body starting with one of: agree / neutral / disagree: [reason] / alternative: [proposal]. IMPORTANT: other message types (review/status/broadcast) are NOT tallied — a disagree posted any other way is silently dropped and counts as silence.\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
             "metadata": {
                 "discussion_action": "auto_round",
                 "round": next_round,

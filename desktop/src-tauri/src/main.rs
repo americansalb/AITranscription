@@ -3234,7 +3234,7 @@ fn start_discussion(
     let mod_ref = state.moderator.as_deref().unwrap_or("none");
     let parts_ref = state.participants.join(", ");
     let announcement_body = if is_continuous {
-        format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. Respond with: agree / disagree: [reason] / alternative: [proposal]. Silence within the timeout = consent.",
+        format!("Continuous Review mode activated.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n\nReview windows open automatically when developers post status updates. To be COUNTED, respond via project_send with type=\"submission\", body starting with: agree / neutral / disagree: [reason] / alternative: [proposal]. Other message types are NOT tallied. Silence within the timeout = consent.",
             topic_ref, mod_ref, parts_ref)
     } else {
         format!("A {} discussion has been started.\n\n**Topic:** {}\n**Moderator:** {}\n**Participants:** {}\n**Round:** 1\n\nSubmit your position using type: submission, addressed to the moderator.",
