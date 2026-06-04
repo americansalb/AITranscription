@@ -79,6 +79,20 @@ pub mod staleness_thresholds {
     /// thinking pause but tight enough that a dead sidecar surfaces within
     /// ~2min on the UI.
     pub const ALIVE_STATE_STALE_MS: u64 = 120_000;
+
+    /// A seat is "not live" (GATE-1 floor-stall, is_seat_live) when ALL of its
+    /// genuine-agent-action signals (last_successful_work_at_ms /
+    /// last_successful_wait_at_ms / last_drafting_at_ms) are older than this AND
+    /// it has no young in_flight tool marker. Distinct name from
+    /// ALIVE_STATE_STALE_MS because is_seat_live keys on DIFFERENT fields (the
+    /// success-gated work/wait/draft signals, NOT the keepalive-bumped
+    /// last_alive_at_ms that ALIVE_STATE_STALE_MS governs) — a warm-zombie has a
+    /// fresh last_alive_at_ms but stale success-fields. 120s (NOT the supervisor's
+    /// 90s hang threshold) per architect ruling 617: a purely-parked-alive seat
+    /// refreshes last_successful_wait_at_ms only once per ~55s project_wait cycle,
+    /// so the threshold must be >= 2x that cycle (~65s margin) or a live parked
+    /// seat false-evicts between cycles on timing drift.
+    pub const SEAT_LIVE_STALE_MS: u64 = 120_000;
 }
 
 // VAAK_FP:SHA-12.1:collab.rs:is_seat_alive
@@ -125,6 +139,67 @@ pub fn is_seat_alive(project_dir: &Path, seat: &str) -> bool {
         .unwrap_or(0);
     let stale_ms = now_ms.saturating_sub(last_alive_at_ms);
     stale_ms <= staleness_thresholds::ALIVE_STATE_STALE_MS
+}
+
+/// GATE-1 floor-stall liveness predicate (architect contract 512/617). Unlike
+/// is_seat_alive — which keys on last_alive_at_ms, bumped by the keepalive, so a
+/// WARM ZOMBIE (fresh heartbeat, cognitively dead) reads "alive" — is_seat_live
+/// keys on GENUINE-agent-action signals the keepalive cannot fake:
+///   - last_successful_work_at_ms  (stamped on PostToolUse SUCCESS)
+///   - last_successful_wait_at_ms  (stamped on project_wait SUCCESS)
+///   - last_drafting_at_ms         (composer keystrokes)
+/// A seat is live if the most recent of those is within SEAT_LIVE_STALE_MS, OR
+/// it has a YOUNG in_flight tool marker (mid genuine long tool call: in_flight_tool
+/// present AND in_flight_started_at_ms within SEAT_LIVE_STALE_MS — bounded so a
+/// crashed-mid-tool seat whose PostToolUse never cleared the marker does NOT read
+/// live forever).
+///
+/// NOT covered here, BY DESIGN (ruling 617 Q3): a current speaker doing pure long
+/// REASONING (no tool calls / no keystrokes → all three fields stale, no in_flight)
+/// is protected at the EVICTION CALL SITE via should_suppress_floor_stall
+/// (turn_type=="working"), which sees the protocol/floor turn-state this per-seat
+/// predicate cannot. Any caller that may evict the CURRENT speaker MUST also
+/// consult should_suppress_floor_stall — is_seat_live alone would skip a
+/// legitimately-thinking speaker.
+pub fn is_seat_live(project_dir: &Path, seat: &str) -> bool {
+    if seat.starts_with("human:") { return true; }
+    let (role, instance) = match seat.split_once(':') {
+        Some(pair) => pair,
+        None => return false,
+    };
+    let seat_file = project_dir
+        .join(".vaak")
+        .join("sessions")
+        .join(format!("{}-{}.json", role, instance));
+    let parsed: serde_json::Value = match std::fs::read_to_string(&seat_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => return false,
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let field = |k: &str| parsed.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    // Genuine-agent-action recency — the keepalive cannot fake ANY of these
+    // (it stamps only last_alive_at_ms / last_active_at_ms, deliberately excluded).
+    let freshest = field("last_successful_work_at_ms")
+        .max(field("last_successful_wait_at_ms"))
+        .max(field("last_drafting_at_ms"));
+    if freshest != 0 && now_ms.saturating_sub(freshest) <= staleness_thresholds::SEAT_LIVE_STALE_MS {
+        return true;
+    }
+    // Young in_flight marker = mid genuine long tool call → live. Bounded so a
+    // crashed-mid-tool seat (PostToolUse never cleared it) eventually fails.
+    if parsed.get("in_flight_tool").and_then(|v| v.as_str()).is_some() {
+        let started = field("in_flight_started_at_ms");
+        if started != 0 && now_ms.saturating_sub(started) <= staleness_thresholds::SEAT_LIVE_STALE_MS {
+            return true;
+        }
+    }
+    false
 }
 
 /// Atomic file write: write to .tmp file, fsync, then rename over target.
@@ -265,6 +340,33 @@ pub struct RoleConfig {
     /// role-color initial circle when missing or load fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+    /// WS1 (root-context-differentiation spec 2026-05-29): path to this role's
+    /// Tier-J judgment pack — verdict/evidence/rubric material injected ONLY into
+    /// this seat, never the universal root. Relative to project dir (e.g.
+    /// ".vaak/roles/architect.judgment.md"). None = no role-specific judgment pack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgment_pack: Option<String>,
+    /// WS1 stance (architect ruling msg 238, replacing the adversarial_inversion
+    /// bool): how this seat relates to a judgment pack —
+    ///   "independent" (default): inject the seat's OWN Tier-J pack, neutral framing.
+    ///   "attack:<pack_ref>": inject the NAMED pack and frame it as something to REFUTE.
+    ///   "defend:<pack_ref>": inject the named pack and frame it as something to DEFEND.
+    /// The pack_ref names the target EXPLICITLY so the assembler never INFERS the
+    /// direction (which would re-anchor to the consensus prior — dev-challenger
+    /// attack 1). None/absent = independent. NOTE: inversion ≠ independence — the
+    /// divergence metric counts independent seats only; attack/defend spread is
+    /// reported separately (see acceptance spec).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stance: Option<String>,
+    /// WS2 (cross-model-seating spec 2026-05-29): provider this seat routes to
+    /// ("anthropic" | "openai" | "google" | "xai"). None = anthropic / current
+    /// Claude-Code-sidecar behavior, so existing rosters are untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// WS2: concrete model id for `model_provider` (e.g. "gpt-4.1", "gemini-2.5-pro").
+    /// None = provider default. Ignored on the default anthropic CC-seat path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 /// Per-role character stats. Each axis 1-10. See human msg 3254 + spec for
@@ -2128,6 +2230,12 @@ fn create_role_inner(
         custom: true,
         stats: stats.cloned(),
         avatar_url: avatar_url.map(|s| s.to_string()),
+        // WS1/WS2 (specs 2026-05-29) — new roles default to no judgment pack,
+        // independent stance, default (anthropic/CC) provider. Set later via roster edit.
+        judgment_pack: None,
+        stance: None,
+        model_provider: None,
+        model_id: None,
     };
 
     // Add role to config
