@@ -136,7 +136,36 @@ static ACTIVE_PROJECT: Mutex<Option<ActiveProjectState>> = Mutex::new(None);
 /// panicking thread) would deadlock → hang instead of abort = a worse zombie.
 /// OnceLock set-once is correct: a sidecar process serves exactly one seat for
 /// its lifetime (auto-rejoin re-binds the SAME role).
-static CRASH_INFO: std::sync::OnceLock<(String, u32, String)> = std::sync::OnceLock::new();
+/// Tuple: (role, instance, project_dir, process_nonce). The nonce is the
+/// rejoin-race guard (Fix A.1) — see process_nonce().
+static CRASH_INFO: std::sync::OnceLock<(String, u32, String, String)> = std::sync::OnceLock::new();
+
+/// Fresh per-process nonce for crash-marker attribution (GATE-1 Fix A.1,
+/// architect ruling 594 / dev-challenger 589 / tester 590). Minted once per
+/// process. Written into the seat's binding at join AND into the .crashed
+/// marker; the supervisor reconciler disconnects a seat ONLY if the marker's
+/// nonce still equals the binding's current process_nonce. A rejoined process
+/// mints a NEW nonce → a stale marker from the crashed process no longer
+/// matches → the revived live seat is NOT flapped to disconnected (closes the
+/// crash→restart→rejoin race, evil-arch 578).
+///
+/// NOT session_id: that is reused across the launcher's --resume relaunch
+/// (resume-masks-stale-sidecar), which would false-match. NOT a timestamp:
+/// last_working/last_alive are bump-able by the keepalive independent of the
+/// agent (the warm-zombie mechanism) and clocks can step. An equality check on
+/// a fresh PID+nanos nonce is immune to all three.
+fn process_nonce() -> String {
+    static PROCESS_NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROCESS_NONCE
+        .get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}-{}", std::process::id(), nanos)
+        })
+        .clone()
+}
 
 #[derive(Clone)]
 struct ActiveProjectState {
@@ -10004,6 +10033,11 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
             bindings[idx]["last_heartbeat"] = serde_json::json!(now);
             bindings[idx]["status"] = serde_json::json!("active");
             bindings[idx]["activity"] = serde_json::json!("working");
+            // Fix A.1 rejoin guard: stamp this process's nonce so a stale
+            // .crashed marker from a PRIOR process of this seat no longer matches
+            // (the reconciler disconnects only on nonce equality). Under the same
+            // file lock as the reconciler → status+nonce write serializes with it.
+            bindings[idx]["process_nonce"] = serde_json::json!(process_nonce());
             // Set per-session section if requested
             if let Some(sec) = section {
                 bindings[idx]["active_section"] = serde_json::json!(sec);
@@ -10151,7 +10185,10 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
             "claimed_at": now,
             "last_heartbeat": now,
             "status": "active",
-            "activity": "working"
+            "activity": "working",
+            // Fix A.1 rejoin guard (see process_nonce()): the reconciler
+            // disconnects a seat only if a .crashed marker's nonce equals this.
+            "process_nonce": process_nonce()
         });
         // Set per-session section if requested
         if let Some(sec) = section {
@@ -10268,7 +10305,7 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     }
     // Lock-free snapshot for the panic hook (GATE-1 Fix A). set() no-ops if
     // already set (same seat for the process lifetime), so re-join is harmless.
-    let _ = CRASH_INFO.set((role.to_string(), instance, normalized.clone()));
+    let _ = CRASH_INFO.set((role.to_string(), instance, normalized.clone(), process_nonce()));
 
     notify_desktop();
 
@@ -19810,39 +19847,55 @@ fn run_supervise(project_dir: &str) {
             .unwrap_or(0);
 
         // GATE-1 Fix A reconciler: a panicking sidecar drops a lock-free
-        // .vaak/sessions/<role>-<inst>.crashed marker (it cannot safely write
-        // sessions.json from a panic hook). The supervisor is the sole
-        // sessions.json writer — fold each marker into status="disconnected"
-        // under the file lock, then clear it. Closes the crash→fake-active-zombie
-        // window within ONE poll (vs the heartbeat-staleness minutes).
+        // .vaak/sessions/<role>-<inst>.crashed marker whose CONTENT is the
+        // crashing process's nonce (it cannot safely write sessions.json from a
+        // panic hook). The supervisor is the sole sessions.json writer.
+        //
+        // Fix A.1 rejoin guard (architect 594): disconnect the seat ONLY IF the
+        // marker's nonce still equals the binding's current process_nonce. If a
+        // new process rejoined the seat (it minted a new nonce + wrote it to the
+        // binding at join, under THIS same lock), the nonces differ → the marker
+        // is stale → clear it WITHOUT disconnecting the revived live seat. The
+        // nonce-read is outside the lock (marker content is immutable — the
+        // crashed process is dead); the compare+status-write is inside the lock,
+        // serialized with the rejoin's nonce+status write → no flap under any
+        // interleaving. Closes the crash→restart→rejoin race (evil-arch 578).
         if let Ok(crash_entries) = std::fs::read_dir(&sessions_dir) {
             for ce in crash_entries.flatten() {
                 let cp = ce.path();
                 if cp.extension().and_then(|s| s.to_str()) != Some("crashed") { continue; }
                 let stem = cp.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let marker_nonce = std::fs::read_to_string(&cp).unwrap_or_default().trim().to_string();
                 // Filename is "<role>-<inst>"; role slugs contain hyphens
                 // (dev-challenger, ui-architect, cd-author), so split on the LAST '-'.
                 if let Some(idx) = stem.rfind('-') {
                     let role = stem[..idx].to_string();
                     if let Ok(inst) = stem[idx + 1..].parse::<u32>() {
+                        let mn = marker_nonce.clone();
                         let _ = with_file_lock(project_dir, || {
                             let mut sessions = read_sessions(project_dir);
+                            let mut disconnected = false;
                             if let Some(bindings) = sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
                                 for b in bindings.iter_mut() {
                                     let br = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
                                     let bi = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
-                                    if br == role && bi == inst {
+                                    let bn = b.get("process_nonce").and_then(|n| n.as_str()).unwrap_or("");
+                                    // Disconnect ONLY on nonce match (genuine crash, not rejoined).
+                                    if br == role && bi == inst && !mn.is_empty() && bn == mn {
                                         if let Some(o) = b.as_object_mut() {
                                             o.insert("status".to_string(), serde_json::json!("disconnected"));
                                             o.insert("activity".to_string(), serde_json::json!("disconnected"));
                                         }
+                                        disconnected = true;
                                     }
                                 }
                             }
-                            write_sessions(project_dir, &sessions)?;
+                            if disconnected {
+                                write_sessions(project_dir, &sessions)?;
+                            }
                             Ok(())
                         });
-                        eprintln!("[vaak-supervise] reconciled crash-marker {}:{} → disconnected", role, inst);
+                        eprintln!("[vaak-supervise] crash-marker {}:{} (nonce match → disconnected, else stale-cleared)", role, inst);
                     }
                 }
                 let _ = std::fs::remove_file(&cp);
@@ -21309,12 +21362,14 @@ fn main() {
     // hasn't joined yet, CRASH_INFO is empty → nothing to mark (correct).
     let default_panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Some((role, instance, dir)) = CRASH_INFO.get() {
+        if let Some((role, instance, dir, nonce)) = CRASH_INFO.get() {
             let marker = std::path::Path::new(dir)
                 .join(".vaak")
                 .join("sessions")
                 .join(format!("{}-{}.crashed", role, instance));
-            let _ = std::fs::write(&marker, b"crashed");
+            // Marker content = this process's nonce → the reconciler disconnects
+            // only if it still matches the binding's process_nonce (rejoin guard).
+            let _ = std::fs::write(&marker, nonce.as_bytes());
         }
         default_panic_hook(info);
     }));
