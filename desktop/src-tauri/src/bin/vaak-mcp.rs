@@ -3158,6 +3158,88 @@ fn active_assembly_seats(project_dir: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// True if at least one instance of `role` is occupied (binding status
+/// "active" or "idle"). Used by project_send to reject directed sends aimed
+/// at VACANT seats (the bare-role "any live instance" case; the instance-exact
+/// "role:N" case uses `instance_is_occupied`).
+///
+/// Why this exists: project_send previously appended to the board with no
+/// occupancy check and returned `delivered_to: [to]` echoing whatever slug
+/// the caller passed. A send to a role nobody had joined "succeeded"
+/// silently — the message just sat unread on board.jsonl forever. The join
+/// briefing lists the full roster (including every vacant slot), so a
+/// directive like "DM every other role" caused agents to fire at ~30 empty
+/// seats with zero feedback. The human's standing instruction (msg 171,
+/// 2026-06-04): "Fix it. Shall never happen again."
+///
+/// Liveness = binding status ∈ {active, idle} — the codebase's established
+/// "seat present" predicate (matches active_assembly_seats). Architect ruling
+/// msg 202: an idle/standby teammate is present and must receive mail.
+/// Deliberately NOT heartbeat-gated: a teammate mid-reconnect keeps its
+/// active|idle binding while its heartbeat goes briefly stale, so status-based
+/// blocking won't false-negative a live reconnect. Only a role with NO
+/// active|idle binding — nobody ever joined, or everyone left/was revoked —
+/// is treated as vacant.
+fn role_is_occupied(project_dir: &str, role: &str) -> bool {
+    let sessions = read_sessions(project_dir);
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter().any(|b| {
+                let b_role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                b_role == role && (status == "active" || status == "idle")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// True if the EXACT role:instance seat is occupied (status active/idle).
+/// Used for instance-targeted directed sends (e.g. "developer:1") so a send
+/// to a dead instance is rejected even when a sibling instance of the same
+/// role is live — dev-challenger msg 190 pt 3 (instance granularity).
+///
+/// A local helper rather than reusing `protocol_seat_exists_active`: that
+/// shared helper is status=="active" ONLY and is consumed by assembly-seat
+/// logic, so it would make the :N path inconsistent with the bare-role path's
+/// active|idle predicate, and widening it would change assembly behavior.
+fn instance_is_occupied(project_dir: &str, role: &str, instance: u64) -> bool {
+    let sessions = read_sessions(project_dir);
+    sessions.get("bindings")
+        .and_then(|b| b.as_array())
+        .map(|bindings| {
+            bindings.iter().any(|b| {
+                let b_role = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                let b_inst = b.get("instance").and_then(|i| i.as_u64());
+                let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                b_role == role && b_inst == Some(instance) && (status == "active" || status == "idle")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Distinct slugs of currently-occupied roles (status active/idle), in
+/// first-seen order. Used to build a helpful error listing valid targets
+/// when a send is rejected for hitting a vacant seat.
+fn occupied_role_slugs(project_dir: &str) -> Vec<String> {
+    let sessions = read_sessions(project_dir);
+    let mut out: Vec<String> = Vec::new();
+    if let Some(bindings) = sessions.get("bindings").and_then(|b| b.as_array()) {
+        for b in bindings {
+            let status = b.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            if status != "active" && status != "idle" {
+                continue;
+            }
+            if let Some(role) = b.get("role").and_then(|r| r.as_str()) {
+                if !out.iter().any(|r| r == role) {
+                    out.push(role.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// V3 Phase 2.5 — resolve a yield_to.target to a concrete live seat label.
 /// Returns None if the target is "human" (caller falls back to round-robin
 /// because humans aren't in rotation_order), if the named role has no
@@ -13677,6 +13759,54 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 if binding.get("status").and_then(|s| s.as_str()) == Some("revoked") {
                     return Err("Your role has been revoked. You cannot send messages. Call project_leave to exit.".to_string());
                 }
+            }
+        }
+    }
+
+    // Vacant-seat gate (human directive msg 171, 2026-06-04: "Fix it. Shall
+    // never happen again"). Directed sends to a role nobody has joined used
+    // to succeed silently — the message landed unread on board.jsonl and
+    // delivered_to echoed the slug back as if a teammate got it. Reject those
+    // up front so "delivered" means "a present teammate will see this".
+    //
+    // Exemptions:
+    //   - "all"        → broadcast; fan-out is resolved at read time, not here.
+    //   - "human"/"human:N" → the human sovereign is not an MCP binding in
+    //                  sessions.json, so an occupancy check would wrongly bounce
+    //                  every agent→human message. Always allowed.
+    //   - human caller bypasses entirely (sovereignty; mirrors the gates below).
+    // Target forms:
+    //   "role"   → reject if NO instance of that role is occupied.
+    //   "role:N" → reject if that EXACT instance is not occupied, even when a
+    //              sibling instance is live (instance granularity, dev-challenger
+    //              msg 190 pt 3 — a directive to developer:1 must not silently
+    //              land in developer:0's mailbox or an empty seat).
+    if state.role != "human" {
+        let target_is_broadcast = to == "all";
+        let (target_base, target_inst) = match to.split_once(':') {
+            Some((r, i)) => (r, i.parse::<u64>().ok()),
+            None => (to, None),
+        };
+        let target_is_human = target_base == "human";
+        if !target_is_broadcast && !target_is_human && !to.is_empty() {
+            // role:N → that EXACT instance must be occupied. Bare role → any
+            // occupied instance of that role. Both use the active|idle predicate.
+            let seat_live = match target_inst {
+                Some(inst) => instance_is_occupied(&state.project_dir, target_base, inst),
+                None => role_is_occupied(&state.project_dir, target_base),
+            };
+            if !seat_live {
+                let occupied = occupied_role_slugs(&state.project_dir);
+                let occupied_list = if occupied.is_empty() {
+                    "(none currently joined)".to_string()
+                } else {
+                    occupied.join(", ")
+                };
+                let what = if target_inst.is_some() { to } else { target_base };
+                return Err(format!(
+                    "[VacantSeat] No active session is bound to '{}' — that seat is vacant, so the message would sit unread on the board. Send only to a role/instance someone has joined. Currently occupied roles: {}. (Use to:\"all\" to broadcast, or to:\"human\" to reach the human.)",
+                    what, occupied_list
+                ));
             }
         }
     }
