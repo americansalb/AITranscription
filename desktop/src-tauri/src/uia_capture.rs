@@ -189,8 +189,10 @@ fn get_value(el: &windows::Win32::UI::Accessibility::IUIAutomationElement) -> St
             if let Ok(val) = pattern.CurrentValue() {
                 let s = val.to_string();
                 if !s.is_empty() {
-                    if s.len() > 200 {
-                        return format!("{}...", &s[..200]);
+                    if s.chars().count() > 200 {
+                        // char-safe truncation: byte slicing &s[..200] panics if
+                        // byte 200 splits a multi-byte UTF-8 char (captured UI text)
+                        return format!("{}...", s.chars().take(200).collect::<String>());
                     }
                     return s;
                 }

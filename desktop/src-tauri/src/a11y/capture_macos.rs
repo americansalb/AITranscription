@@ -182,7 +182,9 @@ mod ax {
                     let cf_str: CFString = TCFType::wrap_under_get_rule(val as CFStringRef);
                     let s = cf_str.to_string();
                     if s.is_empty() { None }
-                    else if s.len() > 200 { Some(format!("{}...", &s[..200])) }
+                    // char-safe truncation: byte slicing &s[..200] panics if byte
+                    // 200 splits a multi-byte UTF-8 char (captured accessibility text)
+                    else if s.chars().count() > 200 { Some(format!("{}...", s.chars().take(200).collect::<String>())) }
                     else { Some(s) }
                 } else if type_id == CFNumberGetTypeID() {
                     let cf_num: CFNumber = TCFType::wrap_under_get_rule(val as *const _);

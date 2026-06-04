@@ -1963,6 +1963,23 @@ fn generate_mini_aggregate(project_dir: &str, discussion: &serde_json::Value) ->
     Ok(result)
 }
 
+/// Truncate `s` to at most `max_chars` CHARACTERS, returning a prefix slice
+/// that always ends on a UTF-8 char boundary. Returns the whole string if it
+/// has <= max_chars chars.
+///
+/// Why this exists: naive byte-index truncation (`&s[..200]`) PANICS when the
+/// byte index lands inside a multi-byte UTF-8 char. This codebase's messages
+/// are saturated with multi-byte chars (→ ✓ ⚠️ em-dashes, accented words), and
+/// topics/bodies built from user-supplied status text are routinely sliced for
+/// display — so byte truncation can crash the sidecar on ordinary input. Found
+/// 2026-06-04 during the "fix every glitch" sweep.
+fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
+}
+
 /// Auto-create a micro-round in continuous mode when a developer posts a status message.
 /// Returns the new round number, or None if no round was created.
 fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, status_msg_body: &str, author: &str, msg_id: u64) -> Option<u32> {
@@ -2005,8 +2022,8 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
         // Build round topic from the status message
         let topic = if !subject.is_empty() {
             subject.clone()
-        } else if body.len() > 200 {
-            format!("{}...", &body[..200])
+        } else if body.chars().count() > 200 {
+            format!("{}...", truncate_chars(&body, 200))
         } else {
             body.clone()
         };
@@ -2044,7 +2061,7 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
             "to": "all",
             "type": "moderation",
             "timestamp": now,
-            "subject": format!("Review #{}: {}", next_round, if topic.len() > 80 { &topic[..80] } else { &topic }),
+            "subject": format!("Review #{}: {}", next_round, truncate_chars(&topic, 80)),
             "body": format!("**REVIEW WINDOW OPEN** ({}s)\n{} reported: {}\n\nRespond with: agree / neutral / disagree: [reason] / alternative: [proposal]\nSilence within {}s = consent.", timeout, author_owned, topic, timeout),
             "metadata": {
                 "discussion_action": "auto_round",
@@ -2213,7 +2230,7 @@ fn handle_audience_vote(topic: &str, arguments: &str, phase: &str, pool: Option<
 
     // Call the backend API for audience voting
     eprintln!("[audience_vote] Calling backend: topic='{}', phase={}, pool={:?}",
-        &topic[..topic.len().min(80)], backend_phase, pool);
+        truncate_chars(topic, 80), backend_phase, pool);
 
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(120)) // 27 parallel LLM calls can take time
@@ -2316,7 +2333,7 @@ fn handle_audience_vote(topic: &str, arguments: &str, phase: &str, pool: Option<
             "to": "all",
             "type": "broadcast",
             "timestamp": utc_now_iso(),
-            "subject": format!("Audience {} — {}", phase_label, &topic[..topic.len().min(60)]),
+            "subject": format!("Audience {} — {}", phase_label, truncate_chars(topic, 60)),
             "body": board_body,
             "metadata": {
                 "audience_vote": true,
@@ -16691,7 +16708,7 @@ fn check_project_from_cwd(session_id: &str) -> Option<String> {
             let display_body = if (mtype == "directive" || mtype == "review") || body.len() <= 300 {
                 body.to_string()
             } else {
-                format!("{}... (truncated)", &body[..300])
+                format!("{}... (truncated)", truncate_chars(body, 300))
             };
 
             output.push_str(&format!("\n[#{}] [{}] FROM {} ({}): \"{}\"\n{}\n", id, routing_tag, from, mtype, subject, display_body));
