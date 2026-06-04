@@ -2046,7 +2046,16 @@ fn auto_create_continuous_round(project_dir: &str, status_msg_subject: &str, sta
             }));
         }
 
-        let _ = write_discussion_state_unlocked(&pd, &updated);
+        // Persist-then-notify: if the round state doesn't durably write, ABORT
+        // the whole open — do NOT post the "review window open / silence=consent"
+        // notification and do NOT report a round number. Otherwise we get a
+        // split-brain: an announced/in-memory round the disk never recorded, and
+        // "silence = consent" auto-approves a round that isn't durably open
+        // (evil-arch msg 468).
+        if let Err(e) = write_discussion_state_unlocked(&pd, &updated) {
+            eprintln!("[auto_create_continuous_round] round-state persist FAILED — aborting open (no notification, no round): {}", e);
+            return Ok(None);
+        }
 
         // Post review window notification
         let timeout = updated.get("settings")
@@ -15923,7 +15932,13 @@ fn handle_project_leave() -> Result<serde_json::Value, String> {
                 obj.insert("last_writer_action".to_string(), serde_json::json!("project_leave_prune"));
                 obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
             }
-            let _ = write_protocol_for_section_value(&state.project_dir, &section, &proto);
+            // Propagate, don't swallow: if this floor-prune persist fails, the
+            // departed seat is still listed as current_speaker/moderator on disk
+            // → mic stuck on a gone seat (the stuck-mic class). Surface it.
+            if let Err(e) = write_protocol_for_section_value(&state.project_dir, &section, &proto) {
+                eprintln!("[project_leave_prune] floor-prune persist FAILED for {} — floor may still reference a departed seat (stuck-mic risk): {}", leaver_label, e);
+                return Err(format!("project_leave floor-prune persist failed: {}", e));
+            }
         }
         Ok(())
     })?;
@@ -16023,7 +16038,12 @@ fn handle_project_kick(role: &str, instance: u32) -> Result<serde_json::Value, S
                 obj.insert("last_writer_action".to_string(), serde_json::json!("project_kick_prune"));
                 obj.insert("rev_at".to_string(), serde_json::json!(utc_now_iso()));
             }
-            let _ = write_protocol_for_section_value(&state.project_dir, &section, &proto);
+            // Propagate, don't swallow: a failed floor-prune persist leaves the
+            // kicked seat as current_speaker/moderator on disk → stuck mic.
+            if let Err(e) = write_protocol_for_section_value(&state.project_dir, &section, &proto) {
+                eprintln!("[project_kick_prune] floor-prune persist FAILED for {} — floor may still reference a kicked seat (stuck-mic risk): {}", target_label, e);
+                return Err(format!("project_kick floor-prune persist failed: {}", e));
+            }
         }
         Ok(())
     })?;
