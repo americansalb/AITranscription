@@ -129,6 +129,15 @@ fn get_backend_url() -> String {
 /// Set on project_join, read by project_send/project_check/etc.
 static ACTIVE_PROJECT: Mutex<Option<ActiveProjectState>> = Mutex::new(None);
 
+/// Lock-free snapshot of this process's (role, instance, project_dir), set once
+/// at join. Read ONLY by the panic hook (GATE-1 Fix A, architect ruling 572) so
+/// it can drop a crash-marker WITHOUT taking any lock — under panic="abort" a
+/// hook that re-locked ACTIVE_PROJECT/the file lock (possibly held by the
+/// panicking thread) would deadlock → hang instead of abort = a worse zombie.
+/// OnceLock set-once is correct: a sidecar process serves exactly one seat for
+/// its lifetime (auto-rejoin re-binds the SAME role).
+static CRASH_INFO: std::sync::OnceLock<(String, u32, String)> = std::sync::OnceLock::new();
+
 #[derive(Clone)]
 struct ActiveProjectState {
     project_dir: String,
@@ -10257,6 +10266,9 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
             session_id: session_id.to_string(),
         });
     }
+    // Lock-free snapshot for the panic hook (GATE-1 Fix A). set() no-ops if
+    // already set (same seat for the process lifetime), so re-join is harmless.
+    let _ = CRASH_INFO.set((role.to_string(), instance, normalized.clone()));
 
     notify_desktop();
 
@@ -19797,6 +19809,46 @@ fn run_supervise(project_dir: &str) {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        // GATE-1 Fix A reconciler: a panicking sidecar drops a lock-free
+        // .vaak/sessions/<role>-<inst>.crashed marker (it cannot safely write
+        // sessions.json from a panic hook). The supervisor is the sole
+        // sessions.json writer — fold each marker into status="disconnected"
+        // under the file lock, then clear it. Closes the crash→fake-active-zombie
+        // window within ONE poll (vs the heartbeat-staleness minutes).
+        if let Ok(crash_entries) = std::fs::read_dir(&sessions_dir) {
+            for ce in crash_entries.flatten() {
+                let cp = ce.path();
+                if cp.extension().and_then(|s| s.to_str()) != Some("crashed") { continue; }
+                let stem = cp.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                // Filename is "<role>-<inst>"; role slugs contain hyphens
+                // (dev-challenger, ui-architect, cd-author), so split on the LAST '-'.
+                if let Some(idx) = stem.rfind('-') {
+                    let role = stem[..idx].to_string();
+                    if let Ok(inst) = stem[idx + 1..].parse::<u32>() {
+                        let _ = with_file_lock(project_dir, || {
+                            let mut sessions = read_sessions(project_dir);
+                            if let Some(bindings) = sessions.get_mut("bindings").and_then(|b| b.as_array_mut()) {
+                                for b in bindings.iter_mut() {
+                                    let br = b.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                                    let bi = b.get("instance").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                                    if br == role && bi == inst {
+                                        if let Some(o) = b.as_object_mut() {
+                                            o.insert("status".to_string(), serde_json::json!("disconnected"));
+                                            o.insert("activity".to_string(), serde_json::json!("disconnected"));
+                                        }
+                                    }
+                                }
+                            }
+                            write_sessions(project_dir, &sessions)?;
+                            Ok(())
+                        });
+                        eprintln!("[vaak-supervise] reconciled crash-marker {}:{} → disconnected", role, inst);
+                    }
+                }
+                let _ = std::fs::remove_file(&cp);
+            }
+        }
+
         // Enumerate per-seat session files.
         let entries = match std::fs::read_dir(&sessions_dir) {
             Ok(e) => e,
@@ -21245,6 +21297,27 @@ fn main() {
     eprintln!("[vaak-mcp] Session ID: {}", session_id);
 
     cache_session_id(&session_id);
+
+    // GATE-1 Fix A (architect ruling 572 / evil-arch 561 / dev-challenger 559):
+    // panic="abort" makes catch_unwind inert, so a panicking request handler
+    // would otherwise leave this seat falsely status="active" (a crash-zombie).
+    // Install a panic HOOK that does EXACTLY ONE lock-free thing before abort:
+    // atomic-create .vaak/sessions/<role>-<inst>.crashed from the join-time
+    // CRASH_INFO snapshot. NO lock, NO sessions.json write (can't deadlock under
+    // abort, can't corrupt cross-process). The supervisor reconciles the marker
+    // to status="disconnected" under proper lock within one poll. If the seat
+    // hasn't joined yet, CRASH_INFO is empty → nothing to mark (correct).
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some((role, instance, dir)) = CRASH_INFO.get() {
+            let marker = std::path::Path::new(dir)
+                .join(".vaak")
+                .join("sessions")
+                .join(format!("{}-{}.crashed", role, instance));
+            let _ = std::fs::write(&marker, b"crashed");
+        }
+        default_panic_hook(info);
+    }));
 
     // Windows console control handler: catches terminal close/Ctrl+C and writes "disconnected"
     // before the OS kills the process. This enables instant disconnect detection in the UI.
