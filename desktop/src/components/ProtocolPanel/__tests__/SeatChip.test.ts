@@ -3,7 +3,7 @@
 // Pure-function classification — no React render needed for this layer.
 
 import { describe, expect, it } from 'vitest';
-import { computeSeatChipState } from '../SeatChip';
+import { computeSeatChipState, describeSeatChipState } from '../SeatChip';
 import type { Heartbeat, Protocol } from '../../../hooks/useProtocolState';
 
 const baseProtocol: Protocol = {
@@ -93,5 +93,30 @@ describe('computeSeatChipState — six visual states (R2)', () => {
     expect(
       computeSeatChipState('developer:0', baseProtocol, hb, false, NOW),
     ).toBe('drafting');
+  });
+});
+
+describe('describeSeatChipState — stuck label derives from threshold_ms', () => {
+  it('uses the actual threshold, not a hardcoded 60s (90s preset)', () => {
+    const proto: Protocol = { ...baseProtocol, floor: { ...baseProtocol.floor, threshold_ms: 90_000 } };
+    expect(describeSeatChipState('stuck', proto)).toBe('Silent past 90s — anyone can grab');
+  });
+
+  it('uses 60s for the default threshold', () => {
+    expect(describeSeatChipState('stuck', baseProtocol)).toBe('Silent past 60s — anyone can grab');
+  });
+
+  it('falls back to 60s (never "0s"/"NaNs") when threshold_ms is absent/zero', () => {
+    // Guards the reviewer-flagged edge: a falsy threshold_ms must not render
+    // "Silent past 0s" or "Silent past NaNs" — the lying-label bug one layer down.
+    const zero: Protocol = { ...baseProtocol, floor: { ...baseProtocol.floor, threshold_ms: 0 } };
+    expect(describeSeatChipState('stuck', zero)).toBe('Silent past 60s — anyone can grab');
+    const missing: Protocol = { ...baseProtocol, floor: { ...baseProtocol.floor, threshold_ms: undefined as unknown as number } };
+    expect(describeSeatChipState('stuck', missing)).toBe('Silent past 60s — anyone can grab');
+  });
+
+  it('non-stuck states are unaffected by threshold', () => {
+    expect(describeSeatChipState('holding', baseProtocol)).toBe('Has the mic');
+    expect(describeSeatChipState('online', baseProtocol)).toBe('Online · click to raise hand');
   });
 });

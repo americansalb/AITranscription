@@ -64,12 +64,25 @@ const STATE_ICON: Record<SeatChipState, string> = {
 
 const STATE_DESCRIPTION: Record<SeatChipState, string> = {
   holding: 'Has the mic',
-  stuck: 'Silent past 60s — anyone can grab',
+  // `stuck` copy is computed dynamically from the floor threshold (see
+  // describeSeatChipState) so it never hardcodes 60s when threshold_ms differs.
+  stuck: 'Silent past the floor threshold — anyone can grab',
   drafting: 'Composing',
   online: 'Online · click to raise hand',
   disconnected: 'Disconnected',
   vacant: 'Vacant',
 };
+
+// Human-readable state description. `stuck` interpolates the actual floor
+// threshold (threshold_ms) rather than a hardcoded "60s", which was wrong
+// whenever a preset configured a non-default threshold.
+export function describeSeatChipState(state: SeatChipState, protocol: Protocol): string {
+  if (state === 'stuck') {
+    const thresholdSecs = Math.round((protocol.floor.threshold_ms || 60_000) / 1000);
+    return `Silent past ${thresholdSecs}s — anyone can grab`;
+  }
+  return STATE_DESCRIPTION[state];
+}
 
 export function SeatChip({
   seatLabel,
@@ -87,8 +100,9 @@ export function SeatChip({
 
   const lastActive = heartbeat?.last_active_at_ms ?? 0;
   const ageSecs = lastActive > 0 ? Math.max(0, Math.floor((now - lastActive) / 1000)) : null;
+  const stateDescription = describeSeatChipState(chipState, protocol);
   const ariaLabel =
-    `${seatLabel}, ${STATE_DESCRIPTION[chipState]}` +
+    `${seatLabel}, ${stateDescription}` +
     (ageSecs !== null ? `, last active ${ageSecs}s ago` : '');
 
   const inQueue = protocol.floor.queue.includes(seatLabel);
@@ -111,7 +125,7 @@ export function SeatChip({
           {isSelf ? ' (you)' : ''}
         </span>
         <span className="seat-chip__state">
-          {inQueue ? `In queue · #${protocol.floor.queue.indexOf(seatLabel) + 1}` : STATE_DESCRIPTION[chipState]}
+          {inQueue ? `In queue · #${protocol.floor.queue.indexOf(seatLabel) + 1}` : stateDescription}
         </span>
       </span>
     </button>

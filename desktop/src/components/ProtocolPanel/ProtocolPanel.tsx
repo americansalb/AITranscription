@@ -538,7 +538,7 @@ function SymbolKey() {
   return (
     <div className="protocol-panel__symbol-key">
       <div><b style={{ color: '#4f46e5' }}>🎙 Has the mic</b><br />Currently speaking.</div>
-      <div><b style={{ color: '#f59e0b' }}>⚠ Silent past 60s</b><br />Anyone can grab the mic.</div>
+      <div><b style={{ color: '#f59e0b' }}>⚠ Silent past the floor threshold</b><br />Anyone can grab the mic.</div>
       <div><b style={{ color: '#3b82f6' }}>✎ Composing</b><br />Drafting — don't skip.</div>
       <div><b>● Online</b><br />Connected, idle.</div>
       <div><b style={{ color: '#94a3b8' }}>⊘ Disconnected</b><br />Offline.</div>
