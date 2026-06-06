@@ -1153,6 +1153,27 @@ fn read_board_filtered(project_dir: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Resolved decision ids from the active section's decisions.jsonl (mirrors
+/// collab.rs decisions_jsonl_path_for_section). Each line is a DecisionResolution
+/// JSON object carrying a `decision_id`. Used by the one-active-decision gate so
+/// answered/cancelled/archived decisions free the active slot. Fail-open:
+/// missing or unparseable file → empty set (never blocks on read failure).
+fn read_resolved_decision_ids(project_dir: &str) -> std::collections::HashSet<u64> {
+    let section = get_active_section(project_dir);
+    let path = if section == "default" {
+        vaak_dir(project_dir).join("decisions.jsonl")
+    } else {
+        vaak_dir(project_dir).join("sections").join(section).join("decisions.jsonl")
+    };
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("decision_id").and_then(|d| d.as_u64()))
+        .collect()
+}
+
 /// Get the next message ID (count of existing messages + 1)
 // VAAK_FP:SHA-13.2:vaak-mcp.rs:next_message_id_function_split
 /// Compute the next board.jsonl message id via max-id semantics.
@@ -13967,6 +13988,77 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     "[OptionsRequired] A message to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. For a result/status report, end it with a next-step options block (e.g. proceed / adjust / stop). Per human directive msg 966: options-or-blocked.",
                     choice_count, allow_other
                 ));
+            }
+        }
+    }
+
+    // One-active-decision gate (human directive msg 1007: "one active decision
+    // at a time, system-enforced" — picked over merge-only on card 993; root
+    // cause = decision-card spam, human msg 983). Role-AGNOSTIC by design
+    // (human 991 rejected a single funnel-role): this is a SYSTEM constraint, not
+    // a seat. At most ONE unresolved decision-to-human is active; a new decision
+    // is rejected with [DecisionPending] unless it carries metadata.supersedes:
+    // <id> to replace the active one.
+    //
+    // Deadlock-safe: only the SINGLE most-recent decision-to-human is treated as
+    // "active". Enforcing against ALL historical opens would permanently wedge
+    // the channel when several stale cards already sit unresolved — clearing
+    // (resolve or supersede) the latest can always reopen the channel.
+    // Resolution detected from BOTH the board (an answer whose
+    // metadata.in_reply_to == the decision id) AND decisions.jsonl resolved ids
+    // (answered/cancelled/archived). FAIL-OPEN throughout: a missed block is
+    // mild (one extra card); a false block would stop the team reaching the
+    // human entirely. Human caller exempt; only fires for decisions
+    // (to:human + non-empty metadata.choices — guaranteed by the options gate).
+    if state.role != "human" {
+        let target_base = to.split_once(':').map(|(r, _)| r).unwrap_or(to);
+        let this_is_decision = metadata.as_ref()
+            .and_then(|m| m.get("choices"))
+            .and_then(|c| c.as_array())
+            .map(|c| !c.is_empty())
+            .unwrap_or(false);
+        if target_base == "human" && this_is_decision {
+            let supersedes = metadata.as_ref()
+                .and_then(|m| m.get("supersedes"))
+                .and_then(|v| v.as_u64());
+            let board = read_board(&state.project_dir);
+            // The single most-recent decision-to-human (highest id).
+            let latest_decision_id = board.iter()
+                .filter(|m| {
+                    let mt = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
+                    let base = mt.split_once(':').map(|(r, _)| r).unwrap_or(mt);
+                    base == "human"
+                        && m.get("metadata")
+                            .and_then(|md| md.get("choices"))
+                            .and_then(|c| c.as_array())
+                            .map(|c| !c.is_empty())
+                            .unwrap_or(false)
+                })
+                .filter_map(|m| m.get("id").and_then(|v| v.as_u64()))
+                .max();
+            if let Some(latest_id) = latest_decision_id {
+                if Some(latest_id) != supersedes {
+                    let resolved = read_resolved_decision_ids(&state.project_dir);
+                    let answered = board.iter().any(|m| {
+                        m.get("metadata")
+                            .and_then(|md| md.get("in_reply_to"))
+                            .and_then(|v| v.as_u64())
+                            == Some(latest_id)
+                    });
+                    let superseded = board.iter().any(|m| {
+                        m.get("metadata")
+                            .and_then(|md| md.get("supersedes"))
+                            .and_then(|v| v.as_u64())
+                            == Some(latest_id)
+                    });
+                    let is_open = !resolved.contains(&latest_id) && !answered && !superseded;
+                    if is_open {
+                        return Err(format!(
+                            "[DecisionPending] The human already has an OPEN decision (message id {}). Only one decision may be active at a time (human directive msg 1007). Wait for them to resolve it, or replace it by setting metadata.supersedes: {} on this send. Route extra input through whoever is coordinating instead of stacking a competing card.",
+                            latest_id, latest_id
+                        ));
+                    }
+                }
             }
         }
     }
