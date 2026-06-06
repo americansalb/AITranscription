@@ -13934,6 +13934,43 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
         }
     }
 
+    // Options-or-blocked gate (human directive msg 966, 2026-06-06: "Hard rule:
+    // options-or-blocked"). The human found that agent "decisions" surfaced as
+    // prose they could only acknowledge, not pick (msgs 941/967). Enforce that
+    // any agent->human send is a PICKABLE decision: metadata.choices with 2-4
+    // options AND metadata.allow_other == true (the human must never be trapped
+    // by the agent's pre-selected options — msg 953). Pure result/status reports
+    // comply by ending in a "what next" options block (e.g. proceed/adjust/stop).
+    //
+    // Exemptions:
+    //   - human caller bypasses (sovereignty; mirrors the gates above/below).
+    //   - fires ONLY when the TARGET is the human ("human" / "human:N"); agent->agent
+    //     sends and "all" broadcasts are unaffected.
+    // Scope: handle_project_send only. project_buzz is a nudge, not a decision,
+    // so it is intentionally NOT gated (resolves the spec's open question).
+    // Activation: sender-side gate — sidecar rebuild + CC restart; stale sidecars
+    // won't enforce (standing rule for all sender-side gates in this repo).
+    if state.role != "human" {
+        let target_base = to.split_once(':').map(|(r, _)| r).unwrap_or(to);
+        if target_base == "human" {
+            let choice_count = metadata.as_ref()
+                .and_then(|m| m.get("choices"))
+                .and_then(|c| c.as_array())
+                .map(|c| c.len())
+                .unwrap_or(0);
+            let allow_other = metadata.as_ref()
+                .and_then(|m| m.get("allow_other"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if choice_count < 2 || choice_count > 4 || !allow_other {
+                return Err(format!(
+                    "[OptionsRequired] A message to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. For a result/status report, end it with a next-step options block (e.g. proceed / adjust / stop). Per human directive msg 966: options-or-blocked.",
+                    choice_count, allow_other
+                ));
+            }
+        }
+    }
+
     // VAAK_FP:SHA-12.3:vaak-mcp.rs:extended_thinking_body_size_gate
     // Per human msg 1483 (2026-05-26): extended_thinking must be default
     // for substantive sends. Body-size heuristic per dev-challenger:0
