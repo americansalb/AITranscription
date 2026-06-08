@@ -3491,8 +3491,14 @@ When multiple instances of this role are active:
         const validFormats = ["delphi", "oxford", "continuous", "red_team"];
         const format = parts[1]?.toLowerCase();
         if (!format || !validFormats.includes(format)) {
-          console.error("[CollabTab] Usage: /debate <delphi|oxford|continuous> [topic]");
-          return true;
+          // Usage error: PRESERVE the draft (return false) and surface a
+          // VISIBLE + screen-reader-announced error. console.error alone is
+          // invisible to this user (CLAUDE.md: cannot see the screen), so a
+          // bare return-true silently wiped their typed command — the exact
+          // "did it eat my message?" failure (dev-challenger 505 / evil-arch
+          // 507). showToast is the a11y-aware toast used elsewhere in this file.
+          showToast("Usage: /debate <delphi|oxford|continuous> [topic]", "error");
+          return false;
         }
 
         let moderatorOverride: string | undefined;
@@ -3727,6 +3733,31 @@ When multiple instances of this role are active:
     // Linter would suggest [project?.messages, project?.sessions, visibleMsgLimit]
     // which IS the no-op pattern this fix addresses.
   }, [messagesLength, lastMsgId, sessionsLength, sessionsActiveCount, visibleMsgLimit]);
+
+  // PERF #2 (architect 504): memoize the timeline item build — merge the
+  // visible board messages with the SIGNIFICANT inline currency notices, then
+  // sort by timestamp — so it isn't rebuilt on every parent re-render. Pure
+  // data; depends only on the cached visibleMessages, the flow-feed rows, and
+  // the inline-notice/currency-enabled toggles (NOT on compose state). The
+  // per-second re-render that made this hot was already removed by the poll
+  // change-guards (593f546); this is the cheap belt-and-suspenders memo so the
+  // sort/merge is skipped on any unrelated parent re-render.
+  type TimelineItem =
+    | { kind: "msg"; msg: BoardMessage; ts: string }
+    | { kind: "cur"; line: { key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }; ts: string };
+  const timelineItems = useMemo<TimelineItem[]>(() => {
+    const inlineCurrencyOn =
+      inlineCurrencyNotices && project?.config?.settings?.currency_enabled !== false;
+    const inlineSignificantTiers = new Set<CurrencyTier>(["loss", "dispute", "destroyed"]);
+    return [
+      ...messageListDerivedCache.visibleMessages.map((m): TimelineItem => ({ kind: "msg", msg: m, ts: m.timestamp })),
+      ...(inlineCurrencyOn
+        ? flowFeedRows
+            .filter((l) => inlineSignificantTiers.has(l.tier))
+            .map((l): TimelineItem => ({ kind: "cur", line: l, ts: l.at ?? "" }))
+        : []),
+    ].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  }, [messageListDerivedCache, flowFeedRows, inlineCurrencyNotices, project?.config?.settings?.currency_enabled]);
 
   // ===== WATCHING STATE: Project Dashboard =====
   if (watching) {
@@ -7091,32 +7122,9 @@ When multiple instances of this role are active:
               const voteResponseIds = messageListDerivedCache.voteResponseIds;
               const totalCount = messageListDerivedCache.totalCount;
               const hasHiddenMessages = messageListDerivedCache.hasHiddenMessages;
-              const visibleMessages = messageListDerivedCache.visibleMessages;
-
-              // Phase 5 Layer 1 (human msg 1971): interleave per-turn currency
-              // notices into the timeline "like the mic pass". Merge the Flow
-              // Feed rows (already display-formatted in flowFeedRows) with the
-              // board messages, sorted by ISO timestamp (lexical = chronological).
-              // Gated on the inline-notices toggle AND currency being enabled.
-              const inlineCurrencyOn =
-                inlineCurrencyNotices && project?.config?.settings?.currency_enabled !== false;
-              type TimelineItem =
-                | { kind: "msg"; msg: BoardMessage; ts: string }
-                | { kind: "cur"; line: { key: string; text: string; tier: CurrencyTier; seat?: string; at?: string }; ts: string };
-              // Only SIGNIFICANT economic events interleave into the timeline
-              // (human msg 2082: not "10 messages every turn about gold and
-              // copper"). Routine earn/escrow-hold/passive/interest stay in the
-              // sidebar Chitragupta feed; the timeline shows losses, disputes,
-              // and pool-destroyed only.
-              const inlineSignificantTiers = new Set<CurrencyTier>(["loss", "dispute", "destroyed"]);
-              const timelineItems: TimelineItem[] = [
-                ...visibleMessages.map((m): TimelineItem => ({ kind: "msg", msg: m, ts: m.timestamp })),
-                ...(inlineCurrencyOn
-                  ? flowFeedRows
-                      .filter((l) => inlineSignificantTiers.has(l.tier))
-                      .map((l): TimelineItem => ({ kind: "cur", line: l, ts: l.at ?? "" }))
-                  : []),
-              ].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+              // timelineItems (visible messages + significant currency notices,
+              // sorted) is now memoized at component scope (PERF #2) so it isn't
+              // rebuilt on unrelated parent re-renders.
 
               return (<>
               {hasHiddenMessages && (
