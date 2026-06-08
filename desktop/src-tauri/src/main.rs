@@ -9340,6 +9340,60 @@ More prose.
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // ── set_assembly_state — floor.assembly_active sync (commit 9c8cd0a) ──
+
+    /// Regression lock for the dual-write desync. set_assembly_state (the
+    /// launch-row Start/End button's path) mutates the Protocol struct directly
+    /// — it does NOT route through apply_set_preset, which is where the MCP
+    /// protocol_mutate path syncs assembly_active. Before 9c8cd0a this entry
+    /// point set preset + floor.mode but NEVER floor.assembly_active, so a UI
+    /// surface reading floor.assembly_active strictly (CollabTab.tsx:5840)
+    /// desynced from preset/mode. This locks the invariant
+    /// assembly_active == (preset == "Assembly Line") on THIS write path.
+    #[test]
+    fn set_assembly_state_syncs_assembly_active() {
+        let tmp = std::env::temp_dir().join("vaak-test-set-assembly-active");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        initialize_project(
+            tmp.to_str().unwrap().to_string(),
+            serde_json::json!({
+                "project_id": "test-asm",
+                "name": "Asm Test",
+                "roles": { "developer": {"title": "Developer"} },
+                "settings": { "heartbeat_timeout_seconds": 300 }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let dir = tmp.to_str().unwrap().to_string();
+        let section = collab::get_active_section(&dir);
+
+        // enable → preset, floor.mode, AND assembly_active move together.
+        set_assembly_state(dir.clone(), "enable".to_string()).unwrap();
+        let proto = protocol::read_protocol_for_section(&dir, &section);
+        assert_eq!(proto.preset, "Assembly Line");
+        assert_eq!(proto.floor.mode, "round-robin");
+        assert_eq!(
+            proto.floor.assembly_active,
+            Some(true),
+            "enable must set floor.assembly_active=Some(true) — the desync 9c8cd0a fixed"
+        );
+
+        // disable → all three clear together.
+        set_assembly_state(dir.clone(), "disable".to_string()).unwrap();
+        let proto = protocol::read_protocol_for_section(&dir, &section);
+        assert_eq!(proto.preset, "Default chat");
+        assert_eq!(proto.floor.mode, "none");
+        assert_eq!(
+            proto.floor.assembly_active,
+            Some(false),
+            "disable must set floor.assembly_active=Some(false)"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn test_initialize_project_path_traversal_rejected() {
         let result = initialize_project(
