@@ -245,9 +245,9 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // — modal closed, nothing happened, user confused. Now await mutate(),
   // catch error from useProtocolState.friendlyError, surface inline in modal
   // body. Modal stays open on error so the user can correct and retry.
-  const handleAssemblyToggle = () => {
-    void mutate('set_assembly', { active: !assemblyActive });
-  };
+  // (Assembly on/off toggle handler removed — the sole control is now the
+  // launch-row Start/End Assembly Line button. The in-panel surface is a
+  // read-only status indicator. See the assembly-mic-indicator render below.)
 
   const handlePhaseToggle = () => {
     if (!canTogglePhase) return;
@@ -654,16 +654,28 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           Was 4 vertical rows (~120px); now one flex-wrap row (~36px).
           Mic-button + phase-pill + mic-mode (compact) + plan-link all inline. */}
       <div className="assembly-controls-row">
-        <button
-          type="button"
-          className={`assembly-mic-btn${assemblyActive ? ' is-on' : ' is-off'}`}
-          onClick={handleAssemblyToggle}
-          aria-pressed={assemblyActive}
-          title={assemblyActive ? 'Click to turn Assembly Line off (everyone can speak freely)' : 'Click to turn Assembly Line on (one speaker at a time)'}
+        {/* Read-only assembly STATUS — the single on/off toggle lives in the
+            launch-row "Start/End Assembly Line" button (working-modes group).
+            The legacy in-panel toggle pill was removed per human msgs 2313/2381;
+            this restores that single-control intent (human msg 414: "why are
+            there 2 places that say assembly on/off"). Kept as a readout because
+            it carries "who has the floor", which the launch-row button doesn't
+            show. Not interactive — no onClick, no aria-pressed. */}
+        <div
+          className={`assembly-mic-indicator${assemblyActive ? ' is-on' : ' is-off'}`}
+          role="status"
+          aria-label={
+            assemblyActive
+              ? currentSpeaker
+                ? `Assembly Line on, ${currentSpeaker} has the floor`
+                : 'Assembly Line on, waiting for next speaker'
+              : 'Assembly Line off, anyone can speak'
+          }
+          title="Turn Assembly Line on or off from the Start/End Assembly Line button in the launch row"
         >
           <span aria-hidden="true" className="assembly-mic-icon">🎙</span>
           <span className="assembly-mic-label">{assemblyButtonText}</span>
-        </button>
+        </div>
 
         <button
           type="button"

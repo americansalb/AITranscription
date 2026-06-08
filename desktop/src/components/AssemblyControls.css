@@ -68,6 +68,36 @@
   filter: brightness(1.1);
 }
 
+/* Read-only assembly status indicator. Same visual family as the (removed)
+ * in-panel toggle so the section still reads at a glance, but NOT interactive
+ * — the single on/off control is the launch-row Start/End Assembly Line button
+ * (human msg 414 dedup). No pointer cursor, no hover. */
+.assembly-mic-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1.5px solid rgba(245, 158, 11, 0.4);
+  background: transparent;
+  color: #f59e0b;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: default;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.assembly-mic-indicator.is-on {
+  background: #f59e0b;
+  color: #0f1115;
+}
+
+.assembly-mic-indicator.is-off {
+  border-color: rgba(245, 158, 11, 0.25);
+  color: rgba(245, 158, 11, 0.6);
+}
+
 .assembly-mic-icon {
   font-size: 14px;
 }
@@ -1161,6 +1191,7 @@
  * They are the section's primary controls; full-width gives them visual
  * weight without competing with the secondary label/control rows below. */
 .assembly-controls.is-vertical .assembly-mic-btn,
+.assembly-controls.is-vertical .assembly-mic-indicator,
 .assembly-controls.is-vertical .assembly-phase-pill {
   grid-column: 1 / -1;
   justify-content: flex-start;
