@@ -4498,6 +4498,7 @@ fn do_protocol_mutate(
                 "set_assembly" => apply_set_assembly(&mut current, &args),
                 "accept_plan" => apply_accept_plan(&mut current, &args, actor, pd),
                 "open_planning" => apply_open_planning(&mut current, actor),
+                "open_execution" => apply_open_execution(&mut current, actor),
                 "revise_plan" => apply_revise_plan(&mut current, &args, actor, pd),
                 "set_mic_passing" => match apply_set_mic_passing(&mut current, &args) {
                     Ok(MutateOutcome::Applied) => Ok(()),
@@ -5774,6 +5775,36 @@ fn apply_open_planning(state: &mut serde_json::Value, actor: &str) -> Result<(),
     Ok(())
 }
 
+/// open_execution — free planning→execution toggle (human msg 577). Mirror of
+/// apply_open_planning (same moderator/privileged gate); no plan_path required.
+/// Added to the sidecar for the "mirror by design" invariant so this binary
+/// dispatches the same actions as main.rs's do_protocol_mutate_inner (prevents
+/// the Tauri-vs-sidecar drift class, e.g. the assembly_active drift fixed in
+/// 9c8cd0a). The UI phase pill routes through main.rs; this keeps an agent that
+/// calls open_execution from hitting [UnknownMutation]. accept_plan remains the
+/// optional plan-pinned variant. Clears plan_path/plan_hash on the free toggle.
+fn apply_open_execution(state: &mut serde_json::Value, actor: &str) -> Result<(), String> {
+    let role = caller_role(actor);
+    let is_moderator = state
+        .get("floor")
+        .and_then(|f| f.get("moderator"))
+        .and_then(|v| v.as_str())
+        == Some(actor);
+    let is_privileged = matches!(role, "architect" | "manager" | "human");
+    if !is_moderator && !is_privileged {
+        return Err(format!(
+            "[OpenExecutionForbidden] caller '{}' (role '{}') may not call open_execution — gated to current moderator OR architect/manager/human (mirror of open_planning).",
+            actor, role
+        ));
+    }
+    if let Some(floor) = state.get_mut("floor").and_then(|f| f.as_object_mut()) {
+        floor.insert("phase".to_string(), serde_json::json!("execution"));
+        floor.insert("plan_path".to_string(), serde_json::Value::Null);
+        floor.insert("plan_hash".to_string(), serde_json::Value::Null);
+    }
+    Ok(())
+}
+
 /// revise_plan — gated to architect/manager/human only per spec §64 / finding #1.
 /// Without this gate the entire pre-commit-hook structural floor is bypassable
 /// by any single rogue or confused agent (evil-arch msg 988 CRITICAL).
@@ -6289,7 +6320,7 @@ fn emit_two_controls_event(
         // accept_replanning emits phase_toggled (extended payload — see match
         // arm below for the reason+triggered_by fields). Existing v1.1
         // consumers parse phase_toggled and ignore unknown fields.
-        "accept_plan" | "open_planning" | "accept_replanning" => "phase_toggled",
+        "accept_plan" | "open_planning" | "open_execution" | "accept_replanning" => "phase_toggled",
         "revise_plan" => "plan_revised",
         "set_mic_passing" => "mic_passing_mode_changed",
         "raise_hand" => "hand_raised",
@@ -6309,7 +6340,7 @@ fn emit_two_controls_event(
             payload.insert("old".into(), pre_get("assembly_active"));
             payload.insert("new".into(), post_get("assembly_active"));
         }
-        "accept_plan" | "open_planning" => {
+        "accept_plan" | "open_planning" | "open_execution" => {
             payload.insert("old".into(), pre_get("phase"));
             payload.insert("new".into(), post_get("phase"));
             payload.insert("plan_path".into(), post_get("plan_path"));
