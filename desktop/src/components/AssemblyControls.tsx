@@ -876,9 +876,16 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
         role="group"
         aria-label="Collaboration map: turn-taking by phase"
       >
+        {/* Copy describes the ACTUAL backend phase gate (architect 516 +
+            evil-arch 517 + developer trace of vaak-mcp.rs:4987
+            `planning_blocks_working`): the only thing floor.phase enforces is
+            that turn_type="working" (code/commit claims) is blocked during
+            Planning. There is NO backend gate blocking questions/decisions by
+            phase — so we describe what IS enforced, not the aspirational
+            "questions locked in execution" rule (human 323's WANT, not built). */}
         <div className="assembly-combo-gating-note">
-          Questions and decisions: <strong>allowed in Planning</strong>
-          {' · '}<strong>locked in Execution</strong>
+          Phase gate: <strong>Planning</strong> = plan &amp; review (code/work claims blocked)
+          {' · '}<strong>Execution</strong> = build &amp; commit freely
         </div>
         <div className="assembly-combo-grid">
           {[
@@ -914,7 +921,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                     <>
                       {aOn ? 'Mic passes one seat at a time' : 'Anyone can speak'}
                       {' · '}
-                      {isPlan ? 'questions and decisions allowed' : 'questions and decisions locked'}
+                      {isPlan ? 'plan & review — code/work claims blocked' : 'build & commit freely'}
                     </>
                   )}
                 </div>
