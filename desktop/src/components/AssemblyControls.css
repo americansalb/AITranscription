@@ -1288,3 +1288,79 @@
   width: 100%;
   text-align: left;
 }
+
+/* ============================================================
+ * Q3 — Assembly x Phase consequence map (architect 500 FINAL).
+ * Read-only 2x2 mental-model + safety surface. The live cell is
+ * accented (#4f46e5, matching the .role-active idiom); the
+ * {no turn-taking + Execution} cell is an amber warning (#fbbf24,
+ * matching .assembly-empty-rotation-warning) so the user only
+ * lands in the no-order state deliberately. Renders in both the
+ * horizontal and vertical (sidebar) layouts — the grid is
+ * self-contained, no is-vertical override needed.
+ * ============================================================ */
+.assembly-combo-map {
+  margin: 8px 0 4px;
+}
+
+.assembly-combo-gating-note {
+  font-size: 11.5px;
+  color: #d4d4d4;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.assembly-combo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.assembly-combo-cell {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0.55;
+  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.assembly-combo-cell.is-live {
+  opacity: 1;
+  border-color: #4f46e5;
+  background: rgba(79, 70, 229, 0.10);
+}
+
+.assembly-combo-cell.is-warn {
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.assembly-combo-cell.is-warn.is-live {
+  border-color: #fbbf24;
+  background: rgba(251, 191, 36, 0.10);
+}
+
+.assembly-combo-cell-head {
+  font-weight: 600;
+  font-size: 11.5px;
+  margin-bottom: 2px;
+}
+
+.assembly-combo-live-tag {
+  color: #4f46e5;
+  font-weight: 600;
+}
+
+.assembly-combo-cell.is-warn .assembly-combo-live-tag {
+  color: #fbbf24;
+}
+
+.assembly-combo-cell-body {
+  color: #cbd5e1;
+}
+
+.assembly-combo-warn {
+  color: #fbbf24;
+  font-weight: 600;
+}

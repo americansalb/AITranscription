@@ -860,6 +860,70 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
         )}
       </div>
 
+      {/* Q3 (human 426 "planning vs assembly as beautiful functionality" + 339
+          "assembly and planning aren't related, right?" + 323 "questions only
+          in planning, we're in execution"; architect 500 FINAL): Assembly
+          (turn-taking) and Phase (planning/execution) are TWO ORTHOGONAL
+          dimensions. This read-only 2x2 map is the mental-model + safety
+          surface — each cell states its COLLABORATION CONSEQUENCE, the live
+          cell is highlighted, and the {no turn-taking · Execution} cell renders
+          as a warning so the user only lands in the no-order state deliberately
+          (the "everyone acts at once, no order" failure mode). The two CONTROLS
+          stay orthogonal and single-placed: assembly on/off = launch-row
+          button; phase = the pill above. */}
+      <div
+        className="assembly-combo-map"
+        role="group"
+        aria-label="Collaboration map: turn-taking by phase"
+      >
+        <div className="assembly-combo-gating-note">
+          Questions and decisions: <strong>allowed in Planning</strong>
+          {' · '}<strong>locked in Execution</strong>
+        </div>
+        <div className="assembly-combo-grid">
+          {[
+            { aOn: true, isPlan: true },
+            { aOn: true, isPlan: false },
+            { aOn: false, isPlan: true },
+            { aOn: false, isPlan: false },
+          ].map(({ aOn, isPlan }) => {
+            const isLive = assemblyActive === aOn && (phase === 'planning') === isPlan;
+            const warn = !aOn && !isPlan; // no turn-taking + execution = the chaos cell
+            return (
+              <div
+                key={`${aOn ? 'on' : 'off'}-${isPlan ? 'plan' : 'exec'}`}
+                className={
+                  'assembly-combo-cell'
+                  + (isLive ? ' is-live' : '')
+                  + (warn ? ' is-warn' : '')
+                }
+                aria-current={isLive ? 'true' : undefined}
+              >
+                <div className="assembly-combo-cell-head">
+                  {aOn ? 'Turn-taking on' : 'No turn-taking'}
+                  {' · '}
+                  {isPlan ? 'Planning' : 'Execution'}
+                  {isLive && <span className="assembly-combo-live-tag"> — current</span>}
+                </div>
+                <div className="assembly-combo-cell-body">
+                  {warn ? (
+                    <span className="assembly-combo-warn">
+                      ⚠ No turn-taking — agents may act simultaneously
+                    </span>
+                  ) : (
+                    <>
+                      {aOn ? 'Mic passes one seat at a time' : 'Anyone can speak'}
+                      {' · '}
+                      {isPlan ? 'questions and decisions allowed' : 'questions and decisions locked'}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Affordance C — Moderator replanning queue (Commit Q.A per
           collaborative-proposal-workflow-spec-2026-05-15.md §Affordance C).
           Visible only to the moderator seat AND only when there is at least
