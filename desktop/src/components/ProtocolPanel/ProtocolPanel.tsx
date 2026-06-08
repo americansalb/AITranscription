@@ -302,7 +302,14 @@ function CompactMicLine({
   const isSelfSpeaker = selfSeat !== null && speaker === selfSeat;
   const hb = speaker ? heartbeats[speaker] : undefined;
   const ageSecs = hb && hb.last_active_at_ms ? Math.max(0, Math.floor((now - hb.last_active_at_ms) / 1000)) : null;
-  const isAssemblyLine = protocol.floor.mode === 'round-robin';
+  // Read the canonical assembly signal, NOT floor.mode. apply_set_preset maps
+  // BOTH Preset::AssemblyLine AND Preset::Delphi to floor.mode='round-robin'
+  // (vaak-mcp.rs:4700/4704), so floor.mode==='round-robin' would mislabel a
+  // running Delphi as "ASSEMBLY LINE" (evil-architect board msg 385). The
+  // assembly_active mirror is set true ONLY for the Assembly preset (false for
+  // Delphi); fall back to preset for legacy sections where the field may be
+  // absent (mirrors AssemblyControls.tsx:100).
+  const isAssemblyLine = protocol.floor.assembly_active ?? (protocol.preset === 'Assembly Line');
 
   return (
     <div className="protocol-mic-stack">
