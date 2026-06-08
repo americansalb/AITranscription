@@ -729,13 +729,93 @@ fn type_text(text: String) -> Result<(), String> {
     Ok(())
 }
 
+// PERF (human msg 569/571 "why is vaak so memory-intensive / 19 windows"):
+// these auxiliary windows used to be declared in tauri.conf.json's eager
+// app.windows list, so Tauri spawned each one's full WebView2 (a whole
+// Chromium engine, ~100MB+) at STARTUP even though the user only opens them
+// on demand. They are now created LAZILY here on first show, replicating each
+// window's original tauri.conf attributes exactly. The hide/toggle paths keep
+// the window resident after first open (cheap re-show); only the first open
+// pays creation. Nothing emits to these windows at startup, and the
+// screen-reader settings window is NOT the live screen-reader path (Alt+A
+// describe-screen + speak events are event-based, independent of this window),
+// so lazy creation does not affect screen-reader functionality.
+
+fn ensure_recording_overlay(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window("recording-indicator") {
+        return Ok(w);
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "recording-indicator",
+        tauri::WebviewUrl::App("index.html#/overlay".into()),
+    )
+    .title("")
+    .inner_size(160.0, 48.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())
+}
+
+// NOTE: the `transcript` window is intentionally NOT lazy. It receives live
+// emits while hidden — heartbeat, project-file-changed, speak-transcript,
+// project-update (see emit sites below) — so it must stay resident to not drop
+// transcription/TTS events. It remains in tauri.conf.json's eager window list.
+// (Candidate for lazy conversion only after its hidden-window live-event
+// dependencies are verified; not safe to defer blind.)
+
+fn ensure_screen_reader_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window("screen-reader") {
+        return Ok(w);
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "screen-reader",
+        tauri::WebviewUrl::App("index.html#/screen-reader".into()),
+    )
+    .title("Vaak - Screen Reader")
+    .inner_size(700.0, 600.0)
+    .min_inner_size(500.0, 400.0)
+    .center()
+    .resizable(true)
+    .decorations(true)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())
+}
+
+fn ensure_queue_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window("queue") {
+        return Ok(w);
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "queue",
+        tauri::WebviewUrl::App("index.html#/queue".into()),
+    )
+    .title("Vaak - Voice Controls")
+    .inner_size(420.0, 650.0)
+    .min_inner_size(350.0, 400.0)
+    .center()
+    .resizable(true)
+    .decorations(true)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())
+}
+
 /// Show the floating recording indicator overlay
 #[tauri::command]
 fn show_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("recording-indicator") {
-        // Just show - NEVER set_focus, or it steals focus from the user's app
-        let _ = window.show();
-    }
+    let window = ensure_recording_overlay(&app)?;
+    // Just show - NEVER set_focus, or it steals focus from the user's app
+    let _ = window.show();
     Ok(())
 }
 
@@ -748,7 +828,7 @@ fn hide_recording_overlay(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Show the transcript window
+/// Show the transcript window (eager — see ensure_* note above)
 #[tauri::command]
 fn show_transcript_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("transcript") {
@@ -770,29 +850,27 @@ fn hide_transcript_window(app: tauri::AppHandle) -> Result<(), String> {
 /// Show the screen reader settings window
 #[tauri::command]
 fn show_screen_reader_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("screen-reader") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    let window = ensure_screen_reader_window(&app)?;
+    let _ = window.show();
+    let _ = window.set_focus();
     Ok(())
 }
 
 /// Toggle screen reader settings window visibility
 #[tauri::command]
 fn toggle_screen_reader_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("screen-reader") {
-        match window.is_visible() {
-            Ok(true) => { let _ = window.hide(); },
-            _ => {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+    let window = ensure_screen_reader_window(&app)?;
+    match window.is_visible() {
+        Ok(true) => { let _ = window.hide(); },
+        _ => {
+            let _ = window.show();
+            let _ = window.set_focus();
         }
     }
     Ok(())
 }
 
-/// Toggle transcript window visibility
+/// Toggle transcript window visibility (eager — see ensure_* note above)
 #[tauri::command]
 fn toggle_transcript_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("transcript") {
@@ -810,13 +888,12 @@ fn toggle_transcript_window(app: tauri::AppHandle) -> Result<(), String> {
 /// Toggle queue window visibility
 #[tauri::command]
 fn toggle_queue_window(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("queue") {
-        match window.is_visible() {
-            Ok(true) => { let _ = window.hide(); },
-            _ => {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+    let window = ensure_queue_window(&app)?;
+    match window.is_visible() {
+        Ok(true) => { let _ = window.hide(); },
+        _ => {
+            let _ = window.show();
+            let _ = window.set_focus();
         }
     }
     Ok(())

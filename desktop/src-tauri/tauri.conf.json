@@ -23,20 +23,6 @@
         "center": true
       },
       {
-        "title": "",
-        "label": "recording-indicator",
-        "width": 160,
-        "height": 48,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false,
-        "focus": false,
-        "url": "index.html#/overlay"
-      },
-      {
         "title": "Claude Sessions - Transcript",
         "label": "transcript",
         "width": 900,
@@ -52,32 +38,6 @@
         "alwaysOnTop": false,
         "skipTaskbar": false,
         "url": "index.html#/transcript"
-      },
-      {
-        "title": "Vaak - Screen Reader",
-        "label": "screen-reader",
-        "width": 700,
-        "height": 600,
-        "resizable": true,
-        "minWidth": 500,
-        "minHeight": 400,
-        "center": true,
-        "visible": false,
-        "decorations": true,
-        "url": "index.html#/screen-reader"
-      },
-      {
-        "title": "Vaak - Voice Controls",
-        "label": "queue",
-        "width": 420,
-        "height": 650,
-        "resizable": true,
-        "minWidth": 350,
-        "minHeight": 400,
-        "center": true,
-        "visible": false,
-        "decorations": true,
-        "url": "index.html#/queue"
       }
     ],
     "security": {
