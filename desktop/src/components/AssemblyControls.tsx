@@ -893,7 +893,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
               freely" = reverses the human's intent). Take no stance; the
               enforce-vs-warn decision is the human's on return. */}
           <div className="assembly-combo-gating-subnote">
-            Question/decision gating in Execution: not yet enforced.
+            Question/decision gating in Execution: not yet enforced — pending your call.
           </div>
         </div>
         <div className="assembly-combo-grid">
