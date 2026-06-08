@@ -8775,19 +8775,12 @@ fn main() {
                 log_error("[setup] Screen reader ask hotkey Alt+A registered");
             }
 
-            // Collaborate v2: close button hides instead of destroying the window,
-            // so the launcher button in App.tsx can reopen it.
-            // Per §20 of COLLABORATE_V2_SPEC.html: "Closing main does not close
-            // Collaborate and vice versa. Window state persists across app restarts."
-            if let Some(cv2_window) = app.get_webview_window("collaborate-v2") {
-                let cv2_clone = cv2_window.clone();
-                cv2_window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = cv2_clone.hide();
-                    }
-                });
-            }
+            // Collaborate v2: window is now created LAZILY on first show
+            // (collab_v2.rs ensure_collaborate_v2_window) to avoid spawning its
+            // WebView2 at startup (PERF, human msg 569). The close→hide handler
+            // (spec §20: closing hides instead of destroying so the launcher can
+            // reopen it) is attached at creation time there, so the prior
+            // startup-time handler block here is no longer needed.
 
             Ok(())
         })
