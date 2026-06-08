@@ -475,6 +475,93 @@ fn inject_judgment_pack(project_dir: &str, role: &str, briefing: &str) -> String
     format!("{}\n\n---\n\n{}{}", briefing, header, pack_body)
 }
 
+/// Lever 1 — per-role PRIVATE CONTEXT injection (role-differentiation buildplan
+/// .vaak/design-notes/2026-06-08-role-differentiation-buildplan.md; human msgs
+/// 158 + 170). Reads every `.md` under `.vaak/roles/<role>/context/` and appends
+/// it to the briefing under a "## Your Private Context" header — so each seat can
+/// be handed load-bearing INPUTS the other seats do NOT hold (threat model,
+/// incident log, domain corpus). This is the Delphi's core conclusion made real:
+/// differentiation must live in each agent's INFORMATION, not its instructions.
+///
+/// ADDITIVE + FAIL-OPEN (human msg 170 — must not break the role-creation wizard):
+/// the `context/` DIR is a separate path from the wizard-owned `<role>.md` briefing
+/// FILE, so they never collide. A missing/empty/unreadable dir returns the briefing
+/// UNCHANGED — wizard-created roles behave identically until someone deliberately
+/// drops a doc in. briefingGenerator.ts and the 7-step wizard are untouched.
+///
+/// TOKEN BUDGET (dev-challenger msg 180): total injected context is capped; the
+/// CONTEXT is truncated to fit, never the briefing — so the harness's Arm-C
+/// max-asymmetry run cannot push the agent's actual task out of the window.
+///
+/// LIFECYCLE NOTE: slug delete/rename must clean/move this dir or a reused slug
+/// inherits a dead role's private context (cross-role bleed, dev-challenger 180 /
+/// evil-arch 178). That guard lives in collab.rs role-CRUD, paired with this PR.
+///
+/// NOT YET HARNESS-VALIDATED: per human ruling #3 (msg 158) no differentiation
+/// lever MERGES without an ablation divergence number. This is the mechanism; the
+/// harness gate is separate and upstream of merge.
+fn inject_role_private_context(project_dir: &str, role: &str, briefing: &str) -> String {
+    let context_dir = vaak_dir(project_dir).join("roles").join(role).join("context");
+    let entries = match std::fs::read_dir(&context_dir) {
+        Ok(e) => e,
+        Err(_) => return briefing.to_string(), // no context dir → fail-open
+    };
+    // Deterministic injection order: sort .md files by name.
+    let mut md_files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .collect();
+    md_files.sort();
+    if md_files.is_empty() {
+        return briefing.to_string();
+    }
+    // ~24k chars ≈ ~6k tokens — generous for a lens doc, still leaves room for
+    // the task. Truncate CONTEXT only; never the briefing.
+    const MAX_CONTEXT_CHARS: usize = 24_000;
+    let mut blocks: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    let mut truncated = false;
+    for path in &md_files {
+        if used >= MAX_CONTEXT_CHARS {
+            truncated = true;
+            break;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("context");
+        let remaining = MAX_CONTEXT_CHARS - used;
+        let body: &str = if content.len() > remaining {
+            truncated = true;
+            let mut cut = remaining;
+            while cut > 0 && !content.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            &content[..cut]
+        } else {
+            &content
+        };
+        used += body.len();
+        blocks.push(format!("### {}\n{}", name, body));
+    }
+    if blocks.is_empty() {
+        return briefing.to_string();
+    }
+    let mut out = String::with_capacity(briefing.len() + used + 256);
+    out.push_str(briefing);
+    out.push_str("\n\n---\n\n## Your Private Context\n\n");
+    out.push_str(
+        "Load-bearing context specific to YOUR role that other seats do not hold. \
+         Reason from it; do not discard it to match what you imagine peers will say.\n\n",
+    );
+    out.push_str(&blocks.join("\n\n"));
+    if truncated {
+        out.push_str("\n\n_[private context truncated to fit the injection budget]_");
+    }
+    out
+}
+
 /// Path to the per-session last-seen-id tracker file.
 ///
 /// Keyed on (session_id, section) because board.jsonl is itself section-scoped
@@ -10281,6 +10368,15 @@ fn handle_project_join(role: &str, project_dir: &str, session_id: &str, section:
     // not pre-aligned with consensus.
     let briefing = inject_judgment_pack(&normalized, role, &briefing);
 
+    // Lever 1 (role-differentiation buildplan 2026-06-08; human msgs 158/170):
+    // append this role's PRIVATE context docs (.vaak/roles/<role>/context/*.md)
+    // so each seat holds load-bearing INPUTS others lack — "differentiation =
+    // information, not instruction." Additive + fail-open; the wizard-owned
+    // <role>.md is untouched. NOT harness-validated yet (human ruling #3 — no
+    // lever merges without an ablation divergence number); shipped as the
+    // mechanism, gated separately.
+    let briefing = inject_role_private_context(&normalized, role, &briefing);
+
     // Read last 10 messages directed to this role, this instance, or 'all'
     let my_instance_label = format!("{}:{}", role, instance);
     let all_messages = read_board_filtered(&normalized);
@@ -13317,6 +13413,67 @@ fn append_dispute_system_message(dir: &str, subject: &str, body: &str, metadata:
     Ok(msg_id)
 }
 
+/// Visibility stub for a bounced decision-to-human (evil-arch msg 29/53 — the
+/// observability defect). When a decision card hits the one-active-decision gate
+/// and bounces with [DecisionPending], that error returns to the SENDING agent
+/// ONLY — so from the human's seat a gated-but-alive agent is indistinguishable
+/// from a dead one. This posts a lightweight to:"all" notice so the human SEES
+/// the block instead of silence.
+///
+/// Two reviewer-mandated guards (evil-arch msg 53, dev-challenger msg 55):
+///   - DEDUP (H1): emit at most ONCE per (caller, blocking_card_id). The gate
+///     tells the bounced agent to "retain and re-send"; without dedup every
+///     retry would spray another stub and rebuild the exact decision-spam the
+///     one-card gate exists to kill (human msg 983). Dedup is re-checked UNDER
+///     the board lock — the gate's earlier read_board (~L14024) is lock-free, so
+///     checking there would be a TOCTOU against a concurrent sender.
+///   - HONEST WORDING (H2): nothing is durably queued — the send was REJECTED
+///     and the agent must re-send (server-side FIFO = evil-arch #2, deferred).
+///     The text says "blocked behind #N, must re-send", never "queued", so the
+///     human is not promised a card that evaporates if the agent drops to
+///     project_wait.
+///
+/// Best-effort: any failure here MUST NOT alter the caller's [DecisionPending]
+/// return. No board lock is held at the call site (handle_project_send acquires
+/// with_currency_and_board_lock only later, ~L14265), so this is a FIRST
+/// acquisition — parking_lot is non-reentrant, so the ordering is deadlock-safe
+/// by construction (dev-challenger msg 55 lock note).
+fn emit_blocked_decision_stub(dir: &str, caller: &str, blocking_id: u64) {
+    let _ = collab::with_currency_and_board_lock(dir, || -> Result<(), String> {
+        let board = read_board(dir);
+        let already = board.iter().any(|m| {
+            let md = m.get("metadata");
+            md.and_then(|x| x.get("decision_block_stub")).and_then(|v| v.as_bool()).unwrap_or(false)
+                && md.and_then(|x| x.get("blocked_caller")).and_then(|v| v.as_str()) == Some(caller)
+                && md.and_then(|x| x.get("blocking_card_id")).and_then(|v| v.as_u64()) == Some(blocking_id)
+        });
+        if already {
+            return Ok(());
+        }
+        let subject = format!("[blocked] {}'s decision is held behind open card #{}", caller, blocking_id);
+        let body = format!(
+            "{} tried to send a decision to the human, but it is blocked behind open card #{} \
+             (only one decision-to-human may be active at a time). It is NOT queued server-side: \
+             resolve #{} (answer or supersede it) and {} must re-send. Until then no card from {} \
+             will reach the human.",
+            caller, blocking_id, blocking_id, caller, caller
+        );
+        let metadata = serde_json::json!({
+            "decision_block_stub": true,
+            "blocked_caller": caller,
+            "blocking_card_id": blocking_id,
+        });
+        // NOTE: append_dispute_system_message is dispute-NAMED for historical
+        // reasons (5 of its 6 callers are currency disputes) but is a GENERIC
+        // system->all->broadcast appender — no dispute coupling. Reused here for
+        // the non-dispute decision-block stub (dev-challenger msg 73 nit a:
+        // flagged the name as potentially misleading; comment over rename to
+        // avoid churning the 5 currency call sites).
+        let _ = append_dispute_system_message(dir, &subject, &body, metadata);
+        Ok(())
+    });
+}
+
 /// `currency_concede(dispute_id)` — caller (challenger or target) concedes;
 /// the OTHER party wins the full pool. Resolves the dispute, removes it
 /// from the open-disputes snapshot, posts a system message.
@@ -13971,6 +14128,17 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     // so it is intentionally NOT gated (resolves the spec's open question).
     // Activation: sender-side gate — sidecar rebuild + CC restart; stale sidecars
     // won't enforce (standing rule for all sender-side gates in this repo).
+    //
+    // 2026-06-08 phantom-card refinement (human directive msg 158): the gate
+    // now keys on TYPE, aligning the backend's decision-detector with the UI's
+    // render condition (DecisionPanel.tsx renders ONLY type:"question"/"directive"
+    // as cards). Previously ANY to:human send required choices, so agents stapled
+    // choices onto type:"status" messages to satisfy the gate — but those never
+    // rendered as cards (invisible) yet still occupied the one-active-decision
+    // slot, wedging the channel with phantoms the human could not see or clear.
+    // New predicate: a DECISION is type:"question" + choices. Three cases below.
+    // 966 prose-wall protection is preserved AND now UI-enforced: to make the
+    // human PICK you must use type:"question" or it won't render as a card.
     if state.role != "human" {
         let target_base = to.split_once(':').map(|(r, _)| r).unwrap_or(to);
         if target_base == "human" {
@@ -13983,12 +14151,27 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                 .and_then(|m| m.get("allow_other"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if choice_count < 2 || choice_count > 4 || !allow_other {
+            if msg_type == "question" {
+                // A decision the human must PICK → require pickable choices.
+                if choice_count < 2 || choice_count > 4 || !allow_other {
+                    return Err(format!(
+                        "[OptionsRequired] A type:\"question\" to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. If this is NOT a decision, use a non-question type — status/presence reports should go to:\"all\" (broadcasts are not gated). Per human directives msg 966 + 158.",
+                        choice_count, allow_other
+                    ));
+                }
+            } else if choice_count > 0 {
+                // Stapling: choices on a NON-question. The UI renders only
+                // type:"question"/"directive" as cards, so this would be an
+                // INVISIBLE phantom that still occupies the one-active slot (the
+                // 7-phantom bug, human msg 158). Reject at source and redirect.
                 return Err(format!(
-                    "[OptionsRequired] A message to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. For a result/status report, end it with a next-step options block (e.g. proceed / adjust / stop). Per human directive msg 966: options-or-blocked.",
-                    choice_count, allow_other
+                    "[DecisionMustBeQuestion] You attached {} choice(s) to a type:\"{}\" message to the human, but only type:\"question\" renders as a clickable decision card. If the human must PICK, resend as type:\"question\" (2-4 choices + allow_other:true). If this is a status/presence report, send it to:\"all\" — broadcasts are not gated and do not compete for the human's decision slot. (Stapling choices onto non-question messages created invisible phantom cards that silently wedged the slot — human directive msg 158.)",
+                    choice_count, msg_type
                 ));
             }
+            // else: non-question, no choices → plain status/presence. Passes as
+            // text; it will not render as a card (UI render condition is the 966
+            // backstop) and does NOT occupy the one-active-decision slot.
         }
     }
 
@@ -14009,25 +14192,32 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     // (answered/cancelled/archived). FAIL-OPEN throughout: a missed block is
     // mild (one extra card); a false block would stop the team reaching the
     // human entirely. Human caller exempt; only fires for decisions
-    // (to:human + non-empty metadata.choices — guaranteed by the options gate).
+    // (to:human + type:"question" + non-empty choices — guaranteed by the
+    // options gate; 2026-06-08 human msg 158 added the type:"question" requirement
+    // so legacy type:"status" phantom cards no longer occupy the slot).
     if state.role != "human" {
         let target_base = to.split_once(':').map(|(r, _)| r).unwrap_or(to);
-        let this_is_decision = metadata.as_ref()
-            .and_then(|m| m.get("choices"))
-            .and_then(|c| c.as_array())
-            .map(|c| !c.is_empty())
-            .unwrap_or(false);
+        let this_is_decision = msg_type == "question"
+            && metadata.as_ref()
+                .and_then(|m| m.get("choices"))
+                .and_then(|c| c.as_array())
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
         if target_base == "human" && this_is_decision {
             let supersedes = metadata.as_ref()
                 .and_then(|m| m.get("supersedes"))
                 .and_then(|v| v.as_u64());
             let board = read_board(&state.project_dir);
-            // The single most-recent decision-to-human (highest id).
+            // The single most-recent decision-to-human (highest id). Must be a
+            // type:"question" with choices (2026-06-08 msg 158) — this is what
+            // makes the 7 legacy type:"status" phantoms self-clean: they no
+            // longer match here, so they stop being counted as the active block.
             let latest_decision_id = board.iter()
                 .filter(|m| {
                     let mt = m.get("to").and_then(|t| t.as_str()).unwrap_or("");
                     let base = mt.split_once(':').map(|(r, _)| r).unwrap_or(mt);
                     base == "human"
+                        && m.get("type").and_then(|t| t.as_str()) == Some("question")
                         && m.get("metadata")
                             .and_then(|md| md.get("choices"))
                             .and_then(|c| c.as_array())
@@ -14053,8 +14243,20 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
                     });
                     let is_open = !resolved.contains(&latest_id) && !answered && !superseded;
                     if is_open {
+                        // Observability stub (evil-arch #1, msg 29/53): make this
+                        // bounce VISIBLE to the human instead of silent — from the
+                        // human's seat a gated-but-alive agent otherwise looks dead.
+                        // latest_id IS the active blocker by construction: the
+                        // deadlock-safe design (comment above) treats only the
+                        // most-recent decision-to-human as active, and we only reach
+                        // here when that one is_open (resolves dev-challenger H3
+                        // "wrong id" — it is the correct blocking-card id, not the
+                        // latest board message). Deduped + honest + best-effort;
+                        // never alters the [DecisionPending] return below.
+                        let caller_seat = format!("{}:{}", state.role, state.instance);
+                        emit_blocked_decision_stub(&state.project_dir, &caller_seat, latest_id);
                         return Err(format!(
-                            "[DecisionPending] The human already has an OPEN decision (message id {}). Only one decision may be active at a time (human directive msg 1007). Wait for them to resolve it, or replace it by setting metadata.supersedes: {} on this send. Route extra input through whoever is coordinating instead of stacking a competing card.",
+                            "[DecisionPending] The human already has an OPEN decision (message id {}). Only one decision may be active at a time (human directive msg 1007). Wait for them to resolve it, or replace it by setting metadata.supersedes: {} on this send. Route extra input through whoever is coordinating instead of stacking a competing card. IMPORTANT: retain this decision and re-send it once the open one clears — do NOT drop to project_wait/standby having silently abandoned it (that is the only way this gate loses a decision).",
                             latest_id, latest_id
                         ));
                     }

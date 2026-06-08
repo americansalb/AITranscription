@@ -2313,6 +2313,21 @@ fn create_role_inner(
     std::fs::write(&briefing_path, briefing)
         .map_err(|e| format!("Failed to write briefing file: {}", e))?;
 
+    // Defense-in-depth (dev-challenger msg 204 + architect msg 206): clear any
+    // STALE private dir .vaak/roles/<slug>/ (context/ + future memory/) before
+    // the new role uses it. delete_role removes it best-effort, but that can
+    // silently fail (e.g. a locked file on Windows), so a REUSED slug could
+    // otherwise inherit a dead role's private context. Clearing at CREATE makes
+    // "zero inherited context" a create-time INVARIANT that does NOT depend on
+    // the prior delete succeeding, and runs on the exact path the injector reads
+    // (.vaak/roles/<slug>/) — closing any delete/inject slug-canonicalization gap
+    // too (evil-arch msg 186 #1). The <slug>.md briefing FILE just written and
+    // the <slug>/ DIR are distinct paths, so this never touches the briefing.
+    let private_dir = roles_dir.join(slug);
+    if private_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&private_dir);
+    }
+
     Ok(role_config)
 }
 
@@ -2585,6 +2600,19 @@ fn delete_role_inner(
     let briefing_path = vaak_dir.join("roles").join(format!("{}.md", slug));
     let _ = std::fs::remove_file(&briefing_path);
 
+    // Remove the per-role PRIVATE directory .vaak/roles/<slug>/ — holds the
+    // role's private context/ + (future) memory/ for role-differentiation
+    // lever 1/2. Best-effort but CRITICAL: leaving it behind means a future
+    // role that REUSES this slug silently inherits the deleted role's private
+    // context/memory — cross-role data bleed (dev-challenger msg 180 / evil-arch
+    // msg 178; the dangerous half of human msg 170's "don't break the role
+    // process"). The <slug>.md briefing FILE (removed above) and the <slug>/ DIR
+    // are distinct paths, so this never touches the wizard's briefing file.
+    let role_private_dir = vaak_dir.join("roles").join(slug);
+    if role_private_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&role_private_dir);
+    }
+
     // Remove session bindings for this role (best-effort)
     let sessions_path = vaak_dir.join("sessions.json");
     if let Ok(sessions_content) = std::fs::read_to_string(&sessions_path) {
@@ -2601,6 +2629,101 @@ fn delete_role_inner(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod role_private_dir_lifecycle {
+    use super::*;
+
+    /// Regression guard for the cross-role data-bleed (evil-arch msg 178 /
+    /// dev-challenger msg 180; human role-process guardrail msg 170). Deleting a
+    /// role MUST remove its `.vaak/roles/<slug>/` private dir (context/ + future
+    /// memory/), or a later role that reuses the slug silently inherits the dead
+    /// role's private context. "Passes by construction" is not a guard — this
+    /// test fails loudly if a future refactor of delete_role drops the cleanup.
+    #[test]
+    fn delete_role_removes_private_context_dir_no_slug_reuse_bleed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let vaak = tmp.path().join(".vaak");
+        std::fs::create_dir_all(vaak.join("roles").join("victim").join("context")).unwrap();
+        // Minimal project.json with the role present (delete_role requires it).
+        std::fs::write(
+            vaak.join("project.json"),
+            r#"{"name":"t","roles":{"victim":{"title":"Victim"}},"roster":[]}"#,
+        )
+        .unwrap();
+        // Briefing file (existing behavior) + a private context doc that must
+        // NOT survive deletion.
+        std::fs::write(vaak.join("roles").join("victim.md"), "briefing").unwrap();
+        let secret = vaak
+            .join("roles")
+            .join("victim")
+            .join("context")
+            .join("threat.md");
+        std::fs::write(&secret, "PRIVATE THREAT MODEL").unwrap();
+        assert!(secret.exists());
+
+        delete_role(dir, "victim").unwrap();
+
+        // A recreated "victim" slug must start with ZERO inherited context.
+        assert!(
+            !vaak.join("roles").join("victim").exists(),
+            "private dir leaked after delete — cross-role context bleed"
+        );
+        assert!(!secret.exists(), "private context doc leaked after delete");
+        // Briefing file gone too (pre-existing behavior, unchanged).
+        assert!(!vaak.join("roles").join("victim.md").exists());
+    }
+
+    /// Defense-in-depth (dev-challenger msg 204 / architect msg 206): even if a
+    /// prior delete's best-effort cleanup silently failed (locked Windows file)
+    /// and left a STALE .vaak/roles/<slug>/ behind, CREATING a role on that slug
+    /// must wipe it so the new role starts with zero inherited context. Uses
+    /// create_role_inner directly to avoid the pub create_role's global-template
+    /// home-dir side effect.
+    #[test]
+    fn create_role_clears_stale_private_dir_on_slug_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vaak = tmp.path().join(".vaak");
+        // A stale private dir orphaned by a delete that silently failed.
+        std::fs::create_dir_all(vaak.join("roles").join("reused").join("context")).unwrap();
+        let stale = vaak
+            .join("roles")
+            .join("reused")
+            .join("context")
+            .join("old_secret.md");
+        std::fs::write(&stale, "DEAD ROLE'S THREAT MODEL").unwrap();
+        // project.json WITHOUT the slug, so create can add it fresh.
+        let config_path = vaak.join("project.json");
+        std::fs::write(&config_path, r#"{"name":"t","roles":{},"roster":[]}"#).unwrap();
+        assert!(stale.exists());
+
+        create_role_inner(
+            &config_path,
+            &vaak,
+            "reused",
+            "Reused",
+            "desc",
+            &[],
+            1,
+            "briefing",
+            &[],
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+
+        // New role must NOT inherit the dead role's private context.
+        assert!(
+            !stale.exists(),
+            "stale private context survived slug reuse on create"
+        );
+        assert!(!vaak.join("roles").join("reused").join("context").exists());
+        // The new role's briefing file IS written (not touched by the clear).
+        assert!(vaak.join("roles").join("reused.md").exists());
+    }
 }
 
 // ==================== Global Role Templates ====================
