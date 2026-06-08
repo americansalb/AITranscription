@@ -11747,6 +11747,40 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
             "draw": tally_draw,
             "strict_majority_winner": strict_majority_winner,
         });
+        // Bug #2 fix (debate-15 self-contradiction; team-converged final spec
+        // msgs 766/771/773): recorded votes are AUTHORITATIVE on the WINNER —
+        // the moderator may VOID but NEVER REDIRECT. Same computed-beats-asserted
+        // class as the assembly_active dual-write drift (9c8cd0a).
+        //   COMPUTE WINNER (precedence): human vote (side_a|side_b) > agent
+        //   strict-majority winner > none (tie / zero votes).
+        //   VALIDATE the moderator's `outcome` against it:
+        //     - matches the computed winner → accept (confirmation);
+        //     - 'abandoned' → always accept (VOID: nobody wins, safe escape for
+        //       a bad vote / procedural disruption);
+        //     - names a DIFFERENT winner (or 'draw') when a clear winner exists →
+        //       REJECT [OxfordOutcomeContradictsTally] (ban on REDIRECT — an
+        //       assertion may not reassign a recorded win, critical once the
+        //       reward pool is live);
+        //     - no computed winner (tie/zero) → any `outcome` is load-bearing.
+        let human_decisive = matches!(human_vote.as_deref(), Some("side_a") | Some("side_b"));
+        let computed_winner: Option<String> = if human_decisive {
+            human_vote.clone() // "side_a" | "side_b"
+        } else {
+            strict_majority_winner.map(|w| w.to_string()) // "side_a" | "side_b" | None
+        };
+        let announced_outcome = outcome.to_string();
+        if let Some(ref w) = computed_winner {
+            let expected = format!("{}_wins", w);
+            if announced_outcome != expected && announced_outcome != "abandoned" {
+                return Err(format!(
+                    "[OxfordOutcomeContradictsTally] recorded votes are authoritative: computed winner is '{}' (human={}, side_a={}, side_b={}, draw={}). You passed '{}'. Pass '{}' to confirm the vote, or 'abandoned' to VOID the debate (nobody wins). You may not name a different winner than the recorded tally.",
+                    expected, human_vote.as_deref().unwrap_or("none"), tally_a, tally_b, tally_draw, announced_outcome, expected
+                ));
+            }
+        }
+        // `announced_outcome` is now validated (it matches the computed winner,
+        // is 'abandoned', or there was no computed winner). It IS the outcome.
+        let outcome = announced_outcome.as_str();
         // Reward distribution: per spec §6.1 v2.2 POOL-FUNDED. The pool_balance
         // field is plan v2 §3b territory (not yet shipped at the time of this
         // commit), so the actual debit-from-pool + credit-to-winners is a TODO.
@@ -11767,14 +11801,17 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
         })?;
         clear_active_oxford(&dir)?;
         let msg_id = next_message_id(&dir);
+        // Outcome is now guaranteed consistent with the recorded tally (a
+        // contradicting winner was rejected above), so the broadcast simply
+        // reports the result + the tally it was validated against.
         let _ = append_to_board(&dir, &serde_json::json!({
             "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
             "timestamp": utc_now_iso(),
             "subject": format!("[OxfordDebateEnded] debate {} — {}", debate_id, outcome),
-            "body": format!("Moderator {} ends debate {} with outcome '{}'. Audience-vote + reward distribution will be added in a follow-up commit (deferred per spec §6.1 dependency on pool_balance §3b).", caller, debate_id, outcome),
-            "metadata": { "debate_id": debate_id, "outcome": outcome, "oxford_event": "ended" }
+            "body": format!("Moderator {} ends debate {} with outcome '{}' (audience tally: side_a={}, side_b={}, draw={}, human={}; computed winner: {}). Reward distribution is deferred per spec §6.1 (pool_balance §3b not shipped).", caller, debate_id, outcome, tally_a, tally_b, tally_draw, human_vote.as_deref().unwrap_or("none"), computed_winner.as_deref().unwrap_or("none")),
+            "metadata": { "debate_id": debate_id, "outcome": outcome, "computed_winner": computed_winner, "oxford_event": "ended" }
         }));
-        Ok(serde_json::json!({ "debate_id": debate_id, "outcome": outcome, "ended_at": now }))
+        Ok(serde_json::json!({ "debate_id": debate_id, "outcome": outcome, "computed_winner": computed_winner, "ended_at": now }))
     })
 }
 
@@ -11966,6 +12003,19 @@ fn handle_oxford_audience_vote(vote: &str) -> Result<serde_json::Value, String> 
             voter: caller.clone(),
             vote: vote.to_string(),
         })?;
+        // Bug #1 fix (debate-15; team-converged): the vote was recorded to the
+        // jsonl but NOT surfaced, so the moderator announced the outcome blind to
+        // it. Broadcast [OxfordAudienceVote] to the board so the moderator (and
+        // team) see votes live and the announced outcome is built from the same
+        // data oxford_end tallies. Single source of truth on write AND read.
+        let msg_id = next_message_id(&dir);
+        let _ = append_to_board(&dir, &serde_json::json!({
+            "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
+            "timestamp": utc_now_iso(),
+            "subject": format!("[OxfordAudienceVote] debate {} — {} voted {}", debate_id, caller, vote),
+            "body": format!("Audience member {} cast '{}' in Oxford debate {}. The moderator's final outcome is computed from these recorded votes (the tally is authoritative when votes exist).", caller, vote, debate_id),
+            "metadata": { "debate_id": debate_id, "voter": caller, "vote": vote, "oxford_event": "audience_vote" }
+        }));
         Ok(serde_json::json!({
             "debate_id": debate_id,
             "voter": caller,
@@ -18607,7 +18657,7 @@ fn handle_request(request: &serde_json::Value, session_id: &str) -> Option<serde
                 },
                 {
                     "name": "oxford_end",
-                    "description": "End an active Oxford debate (MODERATOR ONLY). Writes the Ended event with the moderator's announced outcome and clears the active-debate snapshot. Outcome must be one of: side_a_wins, side_b_wins, draw, abandoned. Reward distribution + audience-vote window will be added in a follow-up commit (deferred pending pool_balance from plan v2 §3b). Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordInvalidOutcome].",
+                    "description": "End an active Oxford debate (MODERATOR ONLY). Tallies recorded audience votes and writes the Ended event. IMPORTANT: when decisive votes exist, the COMPUTED TALLY is authoritative — your `outcome` argument is OVERRIDDEN by the recorded votes (a decisive human vote beats the audience majority; else the audience strict-majority winner; tie/all-draw → draw). Your `outcome` is load-bearing ONLY when there are no decisive votes, OR when you pass 'abandoned' (an explicit void, always honored). Any override is reported transparently on the board. So you cannot announce a result that contradicts the recorded votes. Outcome must be one of: side_a_wins, side_b_wins, draw, abandoned. Reward distribution deferred pending pool_balance (plan v2 §3b). Errors: [NoActiveOxfordDebate], [OxfordModeratorOnly], [OxfordInvalidOutcome].",
                     "inputSchema": {
                         "type": "object",
                         "properties": { "outcome": { "type": "string", "description": "side_a_wins | side_b_wins | draw | abandoned" } },
