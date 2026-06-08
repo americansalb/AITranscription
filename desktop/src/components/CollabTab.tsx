@@ -851,6 +851,163 @@ function removeSavedProject(path: string): void {
   } catch { /* ignore */ }
 }
 
+// ── ComposeBox ───────────────────────────────────────────────────────────
+// PERF (human msg 443 "so slow and laggy i can't even type"): the message
+// compose state (msgBody/msgTo/mic-to) used to live on the CollabTab parent.
+// Every keystroke called setMsgBody → re-rendered the ENTIRE ~7000-line
+// CollabTab, including the timeline `.map` that builds up to MSG_PAGE_SIZE
+// (100) message nodes per render — the typing lag the human reported.
+//
+// Fix: isolate the compose subsystem into this child. Now a keystroke only
+// re-renders ComposeBox; the parent (and its 100-node timeline) is untouched
+// while typing. The parent still owns sendMessage (slash-command + discussion
+// wiring stays put); it's passed in as onSend(body, to, micTo) → Promise<bool>
+// and the child clears its own draft on a true result. Behavior-preserving —
+// the draft persistence, mic-to hint, Enter-to-send, and Ship button are all
+// reproduced verbatim, just relocated.
+type ComposeBoxProps = {
+  sending: boolean;
+  roleStatuses: RoleStatus[];
+  sessions: SessionBinding[];
+  placeholder: string;
+  onSend: (body: string, to: string, micTo: string | null) => Promise<boolean>;
+  onShip: () => void;
+};
+
+function ComposeBox({ sending, roleStatuses, sessions, placeholder, onSend, onShip }: ComposeBoxProps) {
+  const [msgTo, setMsgTo] = useState("all");
+  const [msgBody, setMsgBodyRaw] = useState(() => localStorage.getItem("vaak_compose_draft") || "");
+  // Per human msg 4346 "make it so i can add ulimited text to you" — no cap.
+  // localStorage.setItem can throw QuotaExceededError on very large drafts;
+  // caught + ignored so typing is never interrupted (in-memory state is the
+  // source of truth regardless of whether the persist succeeds).
+  const setMsgBody = (v: string) => {
+    setMsgBodyRaw(v);
+    try {
+      localStorage.setItem("vaak_compose_draft", v);
+    } catch {
+      // QuotaExceededError → fall back to no-persist; draft stays usable.
+    }
+  };
+  // Slice 4 — mic_to composer state. Spec §4.3: regex is hint, metadata is
+  // authoritative. micToConfirmed is set ONLY when the user clicks confirm.
+  const [micToConfirmed, setMicToConfirmed] = useState<string | null>(null);
+  const [micToHintDismissed, setMicToHintDismissed] = useState(false);
+
+  const sessionsLength = sessions.length;
+  const sessionsActiveCount = sessions.filter((s) => s.status === "active").length;
+
+  // Live mic_to candidate from the body + roster. Pure hint; does NOT auto-write
+  // metadata. Keyed on the content-stable session proxies (not the array ref)
+  // per the F-UI-A audit so it isn't defeated by per-heartbeat session refs.
+  const micToCandidate = useMemo(() => {
+    if (!msgBody.trim() || micToHintDismissed) return null;
+    const seatList: SeatRef[] = sessions.map((s) => ({
+      role: s.role,
+      instance: s.instance,
+      connected: s.status === "active",
+    }));
+    return detectMicTo(msgBody, seatList, null, null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [msgBody, sessionsLength, sessionsActiveCount, micToHintDismissed]);
+
+  const handleSend = async () => {
+    const ok = await onSend(msgBody, msgTo, micToConfirmed);
+    if (ok) {
+      setMsgBody("");
+      setMicToConfirmed(null);
+      setMicToHintDismissed(false);
+    }
+  };
+
+  return (
+    <>
+      {/* Compose Bar */}
+      <div className="compose-bar">
+        <select
+          className="compose-target"
+          value={msgTo}
+          onChange={(e) => setMsgTo(e.target.value)}
+        >
+          <option value="all">@ Everyone</option>
+          {roleStatuses.map((role: RoleStatus) => (
+            <option key={role.slug} value={role.slug}>
+              @ {role.title}{role.active_instances > 1 ? " (all)" : ""}
+            </option>
+          ))}
+          {/* Instance-specific options for roles with multiple active instances */}
+          {roleStatuses
+            .filter((role: RoleStatus) => role.active_instances > 1)
+            .flatMap((role: RoleStatus) => {
+              const instances: JSX.Element[] = [];
+              for (let i = 0; i < role.active_instances; i++) {
+                instances.push(
+                  <option key={`${role.slug}:${i}`} value={`${role.slug}:${i}`}>
+                    @ {role.title} :{i}
+                  </option>
+                );
+              }
+              return instances;
+            })}
+        </select>
+        {/* Multi-line <textarea rows=3>; Enter sends, Shift+Enter newline. */}
+        <textarea
+          className="compose-input compose-input-textarea"
+          rows={3}
+          value={msgBody}
+          onChange={(e) => {
+            setMsgBody(e.target.value);
+            // Reset confirmation if the body changes — user may have edited
+            // away the mic_to mention. They must confirm again.
+            if (micToConfirmed) setMicToConfirmed(null);
+            if (micToHintDismissed) setMicToHintDismissed(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void handleSend();
+            }
+          }}
+          placeholder={placeholder}
+          disabled={sending}
+        />
+        <button
+          className="compose-send-btn"
+          onClick={() => void handleSend()}
+          disabled={!msgBody.trim() || sending}
+        >
+          {sending ? "Sending…" : "Send"}
+        </button>
+        {/* Ship + open review trigger — opens ShipModal (names reviewers + timer). */}
+        <button
+          type="button"
+          className="compose-ship-btn"
+          onClick={onShip}
+          disabled={sending}
+          title="Ship a commit and open a review window (names reviewers + sets timer)"
+        >
+          {"🚢"} Ship + review
+        </button>
+      </div>
+
+      {/* Slice 4 — mic_to hint UI. Spec §4.3 click-to-confirm. */}
+      {micToCandidate && !micToConfirmed && (
+        <MicToHint
+          candidate={micToCandidate}
+          onConfirm={(seat) => setMicToConfirmed(seat)}
+          onDismiss={() => setMicToHintDismissed(true)}
+        />
+      )}
+      {micToConfirmed && (
+        <div className="mic-to-hint mic-to-hint--confirmed" role="note">
+          <span>{"✓"} Will pass mic to <b>{micToConfirmed}</b> on send</span>
+          <button type="button" onClick={() => setMicToConfirmed(null)} aria-label="Cancel mic transfer">{"×"}</button>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function CollabTab() {
   const { showToast } = useToast();
   const [project, setProject] = useState<ParsedProject | null>(null);
@@ -916,28 +1073,11 @@ export function CollabTab() {
   const [autoCollab, setAutoCollab] = useState(false);
   const [humanInLoop, setHumanInLoop] = useState(false);
   const [selectedRole, setSelectedRole] = useState<RoleStatus | null>(null);
-  const [msgTo, setMsgTo] = useState("all");
-  const [msgBody, setMsgBodyRaw] = useState(() => localStorage.getItem("vaak_compose_draft") || "");
-  // Per human msg 4346 "make it so i can add ulimited text to you" — cap removed.
-  // localStorage will accept arbitrarily large strings up to ~5-10MB browser limit;
-  // if the draft exceeds localStorage quota, setItem silently fails (caught + ignored
-  // so typing isn't interrupted). In-memory msgBody state remains unlimited regardless.
-  const setMsgBody = (v: string) => {
-    setMsgBodyRaw(v);
-    try {
-      localStorage.setItem("vaak_compose_draft", v);
-    } catch {
-      // QuotaExceededError on very large drafts → fall back to no-persist;
-      // user's in-progress text remains usable until window close.
-    }
-  };
+  // Compose-cluster state (msgTo / msgBody / mic-to) now lives in the
+  // <ComposeBox> child so keystrokes don't re-render this 7000-line parent
+  // and its 100-node timeline (PERF, human msg 443). sendMessage stays here
+  // and is passed to ComposeBox as onSend(body, to, micTo).
   const [sending, setSending] = useState(false);
-  // Slice 4 — mic_to composer state. Spec §4.3: regex is hint, metadata is
-  // authoritative. micToConfirmed is set ONLY when the user clicks the hint's
-  // confirm button. Without click, message ships with NO mic_to metadata
-  // (the §4.3 defense against "Mic to architect's approach" false positives).
-  const [micToConfirmed, setMicToConfirmed] = useState<string | null>(null);
-  const [micToHintDismissed, setMicToHintDismissed] = useState(false);
   const [workflowDropdownOpen, setWorkflowDropdownOpen] = useState(false);
   const [discussionModeOpen, setDiscussionModeOpen] = useState(false);
   const [discussionState, setDiscussionState] = useState<DiscussionState | null>(null);
@@ -3310,9 +3450,12 @@ When multiple instances of this role are active:
     setProjectDir("");
   };
 
-  const sendMessage = async () => {
-    if (!msgBody.trim() || !projectDir) return;
-    const trimmed = msgBody.trim();
+  // Returns true when the compose draft should be cleared (message/command
+  // consumed successfully), false to preserve the draft (early-return or error).
+  // Called by <ComposeBox> via onSend; body/to/micTo come from the child's state.
+  const sendMessage = async (body: string, to: string, micTo: string | null): Promise<boolean> => {
+    if (!body.trim() || !projectDir) return false;
+    const trimmed = body.trim();
 
     // Slash command parsing for discussion control
     if (trimmed.startsWith("/")) {
@@ -3328,8 +3471,7 @@ When multiple instances of this role are active:
         const format = parts[1]?.toLowerCase();
         if (!format || !validFormats.includes(format)) {
           console.error("[CollabTab] Usage: /debate <delphi|oxford|continuous> [topic]");
-          setMsgBody("");
-          return;
+          return true;
         }
 
         let moderatorOverride: string | undefined;
@@ -3354,6 +3496,7 @@ When multiple instances of this role are active:
           : parts.slice(topicStart).join(" ") || "Open discussion";
 
         setSending(true);
+        let ok = false;
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
@@ -3371,7 +3514,7 @@ When multiple instances of this role are active:
               moderator: moderatorOverride || defaultMod,
               participants,
             });
-            setMsgBody("");
+            ok = true;
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);
           }
@@ -3382,16 +3525,17 @@ When multiple instances of this role are active:
         } finally {
           setSending(false);
         }
-        return;
+        return ok;
       }
 
       if (cmd === "/end-debate" || cmd === "/end-discussion") {
         setSending(true);
+        let ok = false;
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
             await invoke("end_discussion", { dir: projectDir });
-            setMsgBody("");
+            ok = true;
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);
           }
@@ -3402,16 +3546,17 @@ When multiple instances of this role are active:
         } finally {
           setSending(false);
         }
-        return;
+        return ok;
       }
 
       if (cmd === "/close-round") {
         setSending(true);
+        let ok = false;
         try {
           if (window.__TAURI__) {
             const { invoke } = await import("@tauri-apps/api/core");
             await invoke("close_discussion_round", { dir: projectDir });
-            setMsgBody("");
+            ok = true;
             const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
             if (state) setDiscussionState(state);
           }
@@ -3422,7 +3567,7 @@ When multiple instances of this role are active:
         } finally {
           setSending(false);
         }
-        return;
+        return ok;
       }
 
       // Unknown slash command — fall through to regular send
@@ -3430,6 +3575,7 @@ When multiple instances of this role are active:
 
     // Regular message send
     setSending(true);
+    let ok = false;
     try {
       if (window.__TAURI__) {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -3437,17 +3583,15 @@ When multiple instances of this role are active:
         // has explicitly confirmed the hint. Backend's project_send hook
         // (Slice 2 vaak-mcp.rs) calls apply_protocol_mic_to_transfer in the
         // SAME with_file_lock window — board append + floor move atomic.
-        const metadata = micToConfirmed ? { mic_to: micToConfirmed } : undefined;
+        const metadata = micTo ? { mic_to: micTo } : undefined;
         await invoke("send_team_message", {
           dir: projectDir,
-          to: msgTo,
+          to,
           subject: "",
           body: trimmed,
           metadata,
         });
-        setMsgBody("");
-        setMicToConfirmed(null);
-        setMicToHintDismissed(false);
+        ok = true;
       }
     } catch (e) {
       const msg = typeof e === "string" ? e : (e instanceof Error ? e.message : String(e));
@@ -3456,6 +3600,7 @@ When multiple instances of this role are active:
     } finally {
       setSending(false);
     }
+    return ok;
   };
 
   // Content-stable dep proxies per ui-architect:1 msg 4279 F-UI-A +
@@ -3472,26 +3617,8 @@ When multiple instances of this role are active:
   const sessionsLength = project?.sessions?.length ?? 0;
   const sessionsActiveCount = project?.sessions?.filter((s) => s.status === "active").length ?? 0;
 
-  // Compute the live mic_to candidate from msgBody. Pure function over the
-  // current body + roster — re-runs each render. The candidate is the HINT
-  // (spec §4.3); it does NOT auto-write metadata. The user must click confirm
-  // (handled by MicToHint below).
-  const micToCandidate = useMemo(() => {
-    if (!msgBody.trim() || micToHintDismissed) return null;
-    const seatList: SeatRef[] = (project?.sessions || []).map((s) => ({
-      role: s.role,
-      instance: s.instance,
-      connected: s.status === "active",
-    }));
-    // selfSeat=null because human view; currentSpeaker is the ProtocolPanel
-    // floor.current_speaker but we don't have it directly here. Use null —
-    // self_target detection runs only when seat-bound, not the human-side UI.
-    return detectMicTo(msgBody, seatList, null, null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    // ^ F-UI-A class-of-bug per dev-challenger:0 msg 4292 audit:
-    // bare `project?.sessions` is fresh ref per heartbeat → useMemo defeated.
-    // Use sessionsLength + sessionsActiveCount proxy (declared below) instead.
-  }, [msgBody, sessionsLength, sessionsActiveCount, micToHintDismissed]);
+  // (micToCandidate moved into <ComposeBox> — it depends on the compose body,
+  // which now lives in the child so keystrokes don't re-render this parent.)
 
   // O(N²) → O(N): pre-build question→answer Map once per messages-reference change.
   // Wave 1.5c F-DC-AUDIT-2 fix per dev-challenger:0 msg 4292: keyed on
@@ -7521,100 +7648,20 @@ When multiple instances of this role are active:
           </button>
         )}
 
-        {/* Compose Bar */}
-        <div className="compose-bar">
-          <select
-            className="compose-target"
-            value={msgTo}
-            onChange={(e) => setMsgTo(e.target.value)}
-          >
-            <option value="all">@ Everyone</option>
-            {project?.role_statuses.map((role: RoleStatus) => (
-              <option key={role.slug} value={role.slug}>
-                @ {role.title}{role.active_instances > 1 ? " (all)" : ""}
-              </option>
-            ))}
-            {/* Instance-specific options for roles with multiple active instances */}
-            {project?.role_statuses
-              .filter((role: RoleStatus) => role.active_instances > 1)
-              .flatMap((role: RoleStatus) => {
-                const instances: JSX.Element[] = [];
-                for (let i = 0; i < role.active_instances; i++) {
-                  instances.push(
-                    <option key={`${role.slug}:${i}`} value={`${role.slug}:${i}`}>
-                      @ {role.title} :{i}
-                    </option>
-                  );
-                }
-                return instances;
-              })}
-          </select>
-          {/* Change E (CollabTab restructure spec, architect msg 5238/5249/5259):
-              human msg 5237 "we need to make the text box slightly bigger and
-              that's only possible if we clean up a bunch of the UI consolidating
-              things into tabs etc" — converted from single-line <input> to
-              multi-line <textarea rows=3> so 3 lines of message text fit before
-              scrolling. Enter still sends; Shift+Enter inserts a newline for
-              multi-paragraph messages. Padding bumped 6px → 8px and font-size
-              13px → 14px for the slightly-bigger feel without dominating the
-              vertical space. */}
-          <textarea
-            className="compose-input compose-input-textarea"
-            rows={3}
-            value={msgBody}
-            onChange={(e) => {
-              setMsgBody(e.target.value);
-              // Reset confirmation if the body changes — user may have
-              // edited away the mic_to mention. They must confirm again.
-              if (micToConfirmed) setMicToConfirmed(null);
-              if (micToHintDismissed) setMicToHintDismissed(false);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-              }
-            }}
-            placeholder={`Message${activeSection ? ` in #${sections.find(s => s.slug === activeSection)?.name || activeSection}` : ""}... (Enter to send · Shift+Enter for newline · /debate delphi [topic])`}
-            disabled={sending}
-          />
-          <button
-            className="compose-send-btn"
-            onClick={sendMessage}
-            disabled={!msgBody.trim() || sending}
-          >
-            {sending ? "Sending\u2026" : "Send"}
-          </button>
-          {/* Ship + open review trigger \u2014 per architect CR redesign spec
-              \u00a7UI item 2. Opens ShipModal where the builder names reviewers
-              + sets the review window timer. Always visible (the modal
-              works regardless of working mode); most useful when
-              Continuous Review or Assembly Line is active. */}
-          <button
-            type="button"
-            className="compose-ship-btn"
-            onClick={() => setShipModalOpen(true)}
-            disabled={sending}
-            title="Ship a commit and open a review window (names reviewers + sets timer)"
-          >
-            \ud83d\udea2 Ship + review
-          </button>
-        </div>
-
-        {/* Slice 4 \u2014 mic_to hint UI. Spec \u00a74.3 click-to-confirm. */}
-        {micToCandidate && !micToConfirmed && (
-          <MicToHint
-            candidate={micToCandidate}
-            onConfirm={(seat) => setMicToConfirmed(seat)}
-            onDismiss={() => setMicToHintDismissed(true)}
-          />
-        )}
-        {micToConfirmed && (
-          <div className="mic-to-hint mic-to-hint--confirmed" role="note">
-            <span>\u2713 Will pass mic to <b>{micToConfirmed}</b> on send</span>
-            <button type="button" onClick={() => setMicToConfirmed(null)} aria-label="Cancel mic transfer">\u00d7</button>
-          </div>
-        )}
+        {/* Compose Bar — extracted to <ComposeBox> so keystrokes only re-render
+            the child, not this 7000-line parent + its 100-node timeline (PERF,
+            human msg 443 "so slow and laggy i can't even type"). Compose state
+            (body/recipient/mic-to) lives in the child; the parent re-renders
+            only when `sending` toggles on send. The placeholder is computed
+            here because it reads activeSection/sections (parent-owned). */}
+        <ComposeBox
+          sending={sending}
+          roleStatuses={project?.role_statuses ?? []}
+          sessions={project?.sessions ?? []}
+          placeholder={`Message${activeSection ? ` in #${sections.find(s => s.slug === activeSection)?.name || activeSection}` : ""}... (Enter to send · Shift+Enter for newline · /debate delphi [topic])`}
+          onSend={sendMessage}
+          onShip={() => setShipModalOpen(true)}
+        />
 
         {/* Economy Settings modal (human msg 657 — live-tunable constants) */}
         <EconomySettingsModal
