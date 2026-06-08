@@ -1310,6 +1310,15 @@
   line-height: 1.4;
 }
 
+/* Honest "not yet enforced" marker — muted/italic so it reads as a caveat,
+   not an enforced rule (architect 525). */
+.assembly-combo-gating-subnote {
+  margin-top: 3px;
+  font-size: 10.5px;
+  font-style: italic;
+  color: #9ca3af;
+}
+
 .assembly-combo-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

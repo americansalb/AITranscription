@@ -884,8 +884,17 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
             phase — so we describe what IS enforced, not the aspirational
             "questions locked in execution" rule (human 323's WANT, not built). */}
         <div className="assembly-combo-gating-note">
-          Phase gate: <strong>Planning</strong> = plan &amp; review (code/work claims blocked)
-          {' · '}<strong>Execution</strong> = build &amp; commit freely
+          Phase gate: <strong>Planning</strong> = plan &amp; review (work claims blocked)
+          {' · '}<strong>Execution</strong> = build &amp; replan
+          {/* Honest marker (architect 525 ratified): the human (323) wants
+              questions/decisions gated by phase, but no backend gate exists.
+              State that it's unenforced — neither claim it works ("locked in
+              Execution" = false promise) nor assert the opposite ("build
+              freely" = reverses the human's intent). Take no stance; the
+              enforce-vs-warn decision is the human's on return. */}
+          <div className="assembly-combo-gating-subnote">
+            Question/decision gating in Execution: not yet enforced.
+          </div>
         </div>
         <div className="assembly-combo-grid">
           {[
@@ -921,7 +930,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                     <>
                       {aOn ? 'Mic passes one seat at a time' : 'Anyone can speak'}
                       {' · '}
-                      {isPlan ? 'plan & review — code/work claims blocked' : 'build & commit freely'}
+                      {isPlan ? 'plan & review — work claims blocked' : 'build & replan'}
                     </>
                   )}
                 </div>
