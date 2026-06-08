@@ -3703,6 +3703,16 @@ fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, 
             "enable" => {
                 proto.preset = "Assembly Line".to_string();
                 proto.floor.mode = "round-robin".to_string();
+                // Two-controls field MUST be set in lockstep with preset/mode.
+                // This entry point mutates the Protocol struct directly (it does
+                // NOT route through apply_set_preset, which is where the MCP
+                // protocol_mutate path syncs assembly_active — vaak-mcp.rs:4726).
+                // Omitting it here is the same desync apply_set_preset's own
+                // sync was added to fix (vaak-mcp.rs:6498-6525): a UI surface
+                // reading floor.assembly_active strictly (CollabTab.tsx:5840)
+                // would show AL "off" while preset/mode say "on". Refactor-drift
+                // sibling — keep both write paths writing the same field set.
+                proto.floor.assembly_active = Some(true);
                 proto.floor.rotation_order = active_seats.clone();
                 proto.floor.current_speaker = active_seats.first().cloned();
                 proto.floor.started_at = Some(collab::iso_now());
@@ -3710,6 +3720,7 @@ fn set_assembly_state(dir: String, action: String) -> Result<serde_json::Value, 
             "disable" => {
                 proto.preset = "Default chat".to_string();
                 proto.floor.mode = "none".to_string();
+                proto.floor.assembly_active = Some(false); // see "enable" note
                 proto.floor.rotation_order = vec![];
                 // current_speaker preserved per spec §2.2 normalize() — the
                 // none-mode HOLDING semantics keep the speaker informational.
