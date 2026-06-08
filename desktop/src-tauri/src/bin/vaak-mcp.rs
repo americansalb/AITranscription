@@ -14040,6 +14040,151 @@ fn caller_is_exempt_from_extthink_gate(role: &str, _to: &str) -> bool {
     role == "human" || role == "system"
 }
 
+/// Options-or-blocked / phantom-card decision gate (human directives msg 966 +
+/// 158). Pure predicate extracted from `handle_project_send` so the three gate
+/// behaviors can be unit-tested without MCP state (mirrors the
+/// `extract_claude_session_id_from_cmdline` pure-fn test pattern). Returns
+/// `Ok(())` when the send is allowed, or `Err(reason)` carrying the EXACT bounce
+/// message the caller surfaces to the sender.
+///
+/// Fires ONLY when an agent (sender_role != "human") targets the human
+/// ("human" / "human:N"). Agent->agent sends, "all" broadcasts, and the human
+/// caller itself all bypass (sovereignty). Three cases when it fires:
+///   1. type:"question"      → must carry 2-4 choices AND allow_other:true,
+///                             else `[OptionsRequired]`.
+///   2. non-question + choices>0 → `[DecisionMustBeQuestion]` (stapling a
+///                             decision onto a type the UI never renders as a
+///                             card = invisible phantom that wedges the slot).
+///   3. non-question, no choices → passes (plain status/presence text).
+///
+/// This is the sender-side runtime behavior live-verified 2026-06-08 (board
+/// msg 297 rendered a real card; msg 317 reported the stapled-status bounce).
+fn check_human_decision_gate(
+    sender_role: &str,
+    target: &str,
+    msg_type: &str,
+    choice_count: usize,
+    allow_other: bool,
+) -> Result<(), String> {
+    // Human caller bypasses (sovereignty; mirrors the other send-gates).
+    if sender_role == "human" {
+        return Ok(());
+    }
+    // Gate fires only when the TARGET is the human; agent->agent and "all" pass.
+    let target_base = target.split_once(':').map(|(r, _)| r).unwrap_or(target);
+    if target_base != "human" {
+        return Ok(());
+    }
+    if msg_type == "question" {
+        // A decision the human must PICK → require pickable choices.
+        if choice_count < 2 || choice_count > 4 || !allow_other {
+            return Err(format!(
+                "[OptionsRequired] A type:\"question\" to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. If this is NOT a decision, use a non-question type — status/presence reports should go to:\"all\" (broadcasts are not gated). Per human directives msg 966 + 158.",
+                choice_count, allow_other
+            ));
+        }
+    } else if choice_count > 0 {
+        // Stapling: choices on a NON-question. The UI renders only
+        // type:"question"/"directive" as cards, so this would be an
+        // INVISIBLE phantom that still occupies the one-active slot (the
+        // 7-phantom bug, human msg 158). Reject at source and redirect.
+        return Err(format!(
+            "[DecisionMustBeQuestion] You attached {} choice(s) to a type:\"{}\" message to the human, but only type:\"question\" renders as a clickable decision card. If the human must PICK, resend as type:\"question\" (2-4 choices + allow_other:true). If this is a status/presence report, send it to:\"all\" — broadcasts are not gated and do not compete for the human's decision slot. (Stapling choices onto non-question messages created invisible phantom cards that silently wedged the slot — human directive msg 158.)",
+            choice_count, msg_type
+        ));
+    }
+    // else: non-question, no choices → plain status/presence. Passes as text; it
+    // will not render as a card and does NOT occupy the one-active-decision slot.
+    Ok(())
+}
+
+#[cfg(test)]
+mod decision_gate_tests {
+    //! Locks the options-or-blocked / phantom-card decision gate (human
+    //! directives msg 966 + 158), live-verified 2026-06-08 (board msg 297/317).
+    //! Without these, a future edit to `handle_project_send` could silently
+    //! re-open the phantom-card hole — the bug the human hit 7 times — with no
+    //! failing test to catch it. Pure-fn signature lets us assert all three
+    //! branches plus the bypasses with zero MCP state.
+    use super::check_human_decision_gate;
+
+    // ---- Case 1: type:"question" requires 2-4 choices AND allow_other ----
+
+    #[test]
+    fn valid_question_card_passes() {
+        // The positive path proven live by board card msg 297.
+        assert!(check_human_decision_gate("developer", "human", "question", 3, true).is_ok());
+        assert!(check_human_decision_gate("developer", "human", "question", 2, true).is_ok());
+        assert!(check_human_decision_gate("developer", "human", "question", 4, true).is_ok());
+        // "human:0" target form resolves to the human too.
+        assert!(check_human_decision_gate("moderator", "human:0", "question", 2, true).is_ok());
+    }
+
+    #[test]
+    fn question_without_allow_other_bounces_options_required() {
+        let err = check_human_decision_gate("developer", "human", "question", 3, false)
+            .expect_err("question without allow_other must bounce");
+        assert!(err.starts_with("[OptionsRequired]"), "got: {err}");
+    }
+
+    #[test]
+    fn question_with_too_few_or_too_many_choices_bounces() {
+        for n in [0usize, 1, 5, 6] {
+            let err = check_human_decision_gate("developer", "human", "question", n, true)
+                .expect_err("question with {n} choices must bounce");
+            assert!(err.starts_with("[OptionsRequired]"), "n={n} got: {err}");
+        }
+    }
+
+    // ---- Case 2: choices stapled to a NON-question → phantom rejection ----
+
+    #[test]
+    fn stapled_status_bounces_decision_must_be_question() {
+        // The negative path proven live by board msg 317 — THE behavior that
+        // distinguishes the fix from the old phantom-creating code.
+        let err = check_human_decision_gate("developer", "human", "status", 2, false)
+            .expect_err("status with choices must bounce");
+        assert!(err.starts_with("[DecisionMustBeQuestion]"), "got: {err}");
+    }
+
+    #[test]
+    fn stapled_choices_on_any_non_question_type_bounce() {
+        // allow_other is irrelevant here: a non-question with ANY choices is a
+        // phantom regardless, because the UI only renders type:"question".
+        for ty in ["status", "answer", "handoff", "review", "directive"] {
+            let err = check_human_decision_gate("developer", "human", ty, 3, true)
+                .expect_err("non-question {ty} with choices must bounce");
+            assert!(err.starts_with("[DecisionMustBeQuestion]"), "ty={ty} got: {err}");
+        }
+    }
+
+    // ---- Case 3: plain non-question, no choices → passes ----
+
+    #[test]
+    fn plain_status_to_human_passes() {
+        assert!(check_human_decision_gate("developer", "human", "status", 0, false).is_ok());
+        assert!(check_human_decision_gate("developer", "human", "answer", 0, false).is_ok());
+    }
+
+    // ---- Bypasses: gate fires ONLY agent->human ----
+
+    #[test]
+    fn human_caller_bypasses_entirely() {
+        // Sovereignty: the human is never gated, even sending a bare question.
+        assert!(check_human_decision_gate("human", "human", "question", 0, false).is_ok());
+        assert!(check_human_decision_gate("human", "developer", "status", 9, true).is_ok());
+    }
+
+    #[test]
+    fn agent_to_agent_and_broadcast_bypass() {
+        // A stapled-status that WOULD bounce to the human passes to a peer/all.
+        assert!(check_human_decision_gate("developer", "architect", "status", 2, false).is_ok());
+        assert!(check_human_decision_gate("developer", "all", "status", 2, false).is_ok());
+        // Even a malformed question is fine when it isn't aimed at the human.
+        assert!(check_human_decision_gate("developer", "tester", "question", 0, false).is_ok());
+    }
+}
+
 fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, metadata: Option<serde_json::Value>, _session_id: &str) -> Result<serde_json::Value, String> {
     let state = get_or_rejoin_state()?;
 
@@ -14139,40 +14284,21 @@ fn handle_project_send(to: &str, msg_type: &str, subject: &str, body: &str, meta
     // New predicate: a DECISION is type:"question" + choices. Three cases below.
     // 966 prose-wall protection is preserved AND now UI-enforced: to make the
     // human PICK you must use type:"question" or it won't render as a card.
-    if state.role != "human" {
-        let target_base = to.split_once(':').map(|(r, _)| r).unwrap_or(to);
-        if target_base == "human" {
-            let choice_count = metadata.as_ref()
-                .and_then(|m| m.get("choices"))
-                .and_then(|c| c.as_array())
-                .map(|c| c.len())
-                .unwrap_or(0);
-            let allow_other = metadata.as_ref()
-                .and_then(|m| m.get("allow_other"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if msg_type == "question" {
-                // A decision the human must PICK → require pickable choices.
-                if choice_count < 2 || choice_count > 4 || !allow_other {
-                    return Err(format!(
-                        "[OptionsRequired] A type:\"question\" to the human must be a pickable decision: include metadata.choices with 2-4 options (each {{id, label, desc?}}) AND metadata.allow_other: true (the human must always have a free-text escape). You sent {} choice(s), allow_other={}. If this is NOT a decision, use a non-question type — status/presence reports should go to:\"all\" (broadcasts are not gated). Per human directives msg 966 + 158.",
-                        choice_count, allow_other
-                    ));
-                }
-            } else if choice_count > 0 {
-                // Stapling: choices on a NON-question. The UI renders only
-                // type:"question"/"directive" as cards, so this would be an
-                // INVISIBLE phantom that still occupies the one-active slot (the
-                // 7-phantom bug, human msg 158). Reject at source and redirect.
-                return Err(format!(
-                    "[DecisionMustBeQuestion] You attached {} choice(s) to a type:\"{}\" message to the human, but only type:\"question\" renders as a clickable decision card. If the human must PICK, resend as type:\"question\" (2-4 choices + allow_other:true). If this is a status/presence report, send it to:\"all\" — broadcasts are not gated and do not compete for the human's decision slot. (Stapling choices onto non-question messages created invisible phantom cards that silently wedged the slot — human directive msg 158.)",
-                    choice_count, msg_type
-                ));
-            }
-            // else: non-question, no choices → plain status/presence. Passes as
-            // text; it will not render as a card (UI render condition is the 966
-            // backstop) and does NOT occupy the one-active-decision slot.
-        }
+    // Options-or-blocked / phantom-card decision gate. Predicate extracted to
+    // the pure fn `check_human_decision_gate` (just above this handler) so the
+    // three behaviors are unit-tested in mod decision_gate_tests. Metadata
+    // extraction stays here (handler owns the JSON); the fn owns the policy.
+    {
+        let choice_count = metadata.as_ref()
+            .and_then(|m| m.get("choices"))
+            .and_then(|c| c.as_array())
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let allow_other = metadata.as_ref()
+            .and_then(|m| m.get("allow_other"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        check_human_decision_gate(&state.role, to, msg_type, choice_count, allow_other)?;
     }
 
     // One-active-decision gate (human directive msg 1007: "one active decision
