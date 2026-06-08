@@ -123,6 +123,13 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // moderator-fast-flip block.
   // ••• menu dropdown open state.
   const [planMenuOpen, setPlanMenuOpen] = useState(false);
+  // Plan VIEWER (human msg 579 "I should be able to read a clear plan";
+  // architect 586): fetch the bound plan file's content and render it in a
+  // readable modal, so the plan is something the user READS in-app, not an
+  // opaque file path. null = closed; '' shows the loading/empty state.
+  const [planViewerOpen, setPlanViewerOpen] = useState(false);
+  const [planViewerContent, setPlanViewerContent] = useState<string | null>(null);
+  const [planViewerError, setPlanViewerError] = useState<string | null>(null);
   // Baseline-snapshot pattern for surfacing modal errors (B.1 fold per UX-eng
   // msg 1155 FINDING). When a modal opens we snapshot the current `lastError`
   // — any future `lastError` that differs from the baseline is an error that
@@ -264,6 +271,23 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
     } else {
       // execution → planning is destructive (clears plan_hash); confirm-modal per §63.
       setConfirmOpenPlanning(true);
+    }
+  };
+
+  // Open the plan viewer: fetch the bound plan's markdown via read_plan_file
+  // (Tauri command, reuses validate_plan_path) and show it in a modal. Falls
+  // back to an inline error if the read fails (e.g. file moved).
+  const openPlanViewer = async () => {
+    setPlanMenuOpen(false);
+    if (!planPath || !projectDir) return;
+    setPlanViewerError(null);
+    setPlanViewerContent(null);
+    setPlanViewerOpen(true);
+    try {
+      const content = await invoke<string>('read_plan_file', { dir: projectDir, planPath });
+      setPlanViewerContent(content);
+    } catch (e) {
+      setPlanViewerError(String(e));
     }
   };
 
@@ -791,11 +815,11 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                   <button
                     type="button"
                     role="menuitem"
-                    className="assembly-plan-menu-item is-disabled"
-                    disabled
-                    title="View-plan-file deferred — no shell-opener plugin in v1.1"
+                    className="assembly-plan-menu-item"
+                    onClick={openPlanViewer}
+                    title="Read the current plan's content in-app"
                   >
-                    View plan file (v1.2)
+                    View plan…
                   </button>
                 </div>
               )}
@@ -1320,6 +1344,36 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
                 disabled={!replanningReason.trim()}
               >
                 Propose replanning
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Plan viewer modal (human msg 579 "read a clear plan"). Renders the
+          bound plan file's content read via read_plan_file. Markdown is shown
+          as readable preformatted text (a full markdown render can be layered
+          later); the goal here is that the plan is READABLE in-app, not a path. */}
+      {planViewerOpen && (
+        <div className="assembly-modal-backdrop" onClick={() => setPlanViewerOpen(false)}>
+          <div className="assembly-modal assembly-plan-viewer-modal" role="dialog" aria-modal="true" aria-label="Plan content" onClick={(e) => e.stopPropagation()}>
+            <div className="assembly-modal-title">
+              Plan{planPath ? `: ${planPath.replace(/^.*\//, '')}` : ''}
+            </div>
+            <div className="assembly-modal-body">
+              {planViewerError ? (
+                <div className="assembly-modal-error" role="alert">
+                  Could not read plan: {planViewerError}
+                </div>
+              ) : planViewerContent === null ? (
+                <div className="assembly-plan-viewer-loading">Loading plan…</div>
+              ) : (
+                <pre className="assembly-plan-viewer-content">{planViewerContent}</pre>
+              )}
+            </div>
+            <div className="assembly-modal-actions">
+              <button type="button" className="assembly-modal-cancel" onClick={() => setPlanViewerOpen(false)}>
+                Close
               </button>
             </div>
           </div>

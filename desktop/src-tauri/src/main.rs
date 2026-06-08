@@ -5816,6 +5816,19 @@ fn validate_plan_path_main(project_dir: &str, plan_path: &str) -> Result<std::pa
     Ok(canon_cand)
 }
 
+/// Read the markdown content of a bound plan file for the in-app plan VIEWER
+/// (human msg 579 "I should be able to read a clear plan"; architect 586).
+/// Reuses validate_plan_path_main for path safety (under .vaak/design-notes/,
+/// .md, no `..`, must exist + canonicalize within the design-notes dir), then
+/// returns the file content for the frontend to render. The plan_path passed
+/// here is the already-validated floor.plan_path, so this normally succeeds.
+#[tauri::command]
+fn read_plan_file(dir: String, plan_path: String) -> Result<String, String> {
+    let canon = validate_plan_path_main(&dir, &plan_path)?;
+    std::fs::read_to_string(&canon)
+        .map_err(|e| format!("[PlanReadFailed] cannot read plan file: {}", e))
+}
+
 /// Inner of `protocol_mutate_cmd` — pure-input version that runs the same
 /// CAS gate + dispatch as vaak-mcp.rs's `do_protocol_mutate`. Mirrored by
 /// design (vaak-mcp and vaak-desktop are separate binaries with no shared
@@ -8943,6 +8956,7 @@ fn main() {
             // Protocol v6 (Slice 3+4) — read + UI-side mutate
             get_protocol_cmd,
             protocol_mutate_cmd,
+            read_plan_file,
             // Collaborative-proposal-workflow v1 (Commit Q.B) — moderator's
             // informational dismiss event for board audit trail.
             emit_replanning_dismissed_cmd,

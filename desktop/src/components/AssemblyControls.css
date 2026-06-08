@@ -1373,3 +1373,31 @@
   color: #fbbf24;
   font-weight: 600;
 }
+
+/* Plan viewer modal (human msg 579 "read a clear plan") — readable, scrollable
+   preformatted plan content. */
+.assembly-plan-viewer-modal {
+  max-width: 720px;
+  width: 90vw;
+}
+
+.assembly-plan-viewer-content {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0;
+}
+
+.assembly-plan-viewer-loading {
+  color: #9ca3af;
+  font-size: 12px;
+  font-style: italic;
+}
