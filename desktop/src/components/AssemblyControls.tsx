@@ -624,18 +624,21 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   // capability. Negative space replaces it; assembly button + phase pill
   // labels carry the state-meaning.
 
-  // B.3 Item 5 (per UX-eng spec §104-136 + human msg 1421): embed
-  // current_speaker in the assembly button label so "who has the floor"
-  // reads as the primary state on the primary control. Three button-text
-  // states:
-  //   assembly OFF                          → "Assembly Off — anyone can speak"
-  //   assembly ON + speaker                 → "Assembly On — <seat> has floor"
-  //   assembly ON + no speaker (idle)       → "Assembly On — waiting for next speaker"
+  // Q2 (human msg 345/414 "why are there 2 places that say assembly on/off"):
+  // this in-panel surface is a READ-ONLY FLOOR readout, NOT a second on/off
+  // control. The single on/off control is the launch-row "Start/End Assembly
+  // Line" button. So the label must NOT contain the words "Assembly On/Off" —
+  // it states only who holds the floor (or that anyone can speak when
+  // turn-taking is off). This is the last surface that echoed the on/off
+  // wording; with it gone, exactly one place says "assembly on/off".
+  //   assembly OFF              → "Anyone can speak — no turn-taking"
+  //   assembly ON + speaker     → "<seat> has the floor"
+  //   assembly ON + no speaker  → "Waiting for next speaker"
   const assemblyButtonText = !assemblyActive
-    ? 'Assembly Off — anyone can speak'
+    ? 'Anyone can speak — no turn-taking'
     : currentSpeaker
-      ? `Assembly On — ${currentSpeaker} has floor`
-      : 'Assembly On — waiting for next speaker';
+      ? `${currentSpeaker} has the floor`
+      : 'Waiting for next speaker';
 
   // B.3 Item 3 (per UX-eng spec §63-84): plain-language phase labels.
   // Drops all-caps, adds action-oriented subtitle hint after the primary
@@ -667,11 +670,11 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
           aria-label={
             assemblyActive
               ? currentSpeaker
-                ? `Assembly Line on, ${currentSpeaker} has the floor`
-                : 'Assembly Line on, waiting for next speaker'
-              : 'Assembly Line off, anyone can speak'
+                ? `Floor: ${currentSpeaker} has the floor`
+                : 'Floor: waiting for next speaker'
+              : 'Floor: anyone can speak, no turn-taking'
           }
-          title="Turn Assembly Line on or off from the Start/End Assembly Line button in the launch row"
+          title="Floor status (read-only). Turn turn-taking on or off from the Start/End Assembly Line button in the launch row."
         >
           <span aria-hidden="true" className="assembly-mic-icon">🎙</span>
           <span className="assembly-mic-label">{assemblyButtonText}</span>
