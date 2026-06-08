@@ -252,12 +252,15 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
   const handlePhaseToggle = () => {
     if (!canTogglePhase) return;
     // Snapshot lastError baseline so we only show errors that land AFTER this
-    // modal opens (B.1 baseline-snapshot pattern).
+    // action (B.1 baseline-snapshot pattern).
     setErrorBaseline(lastError);
     if (phase === 'planning') {
-      // planning → execution requires a plan_path; open the accept-plan entry.
-      setPlanEntryMode('accept');
-      setPlanPathInput('');
+      // planning → execution: FREE one-click toggle (human msg 577 —
+      // switching to execution must NOT demand a typed plan_path). Calls the
+      // free `open_execution` mutation (mirror of open_planning). Pinning a
+      // written plan is now the OPTIONAL "Accept a plan" action below, not the
+      // required path to execution.
+      void mutate('open_execution', {});
     } else {
       // execution → planning is destructive (clears plan_hash); confirm-modal per §63.
       setConfirmOpenPlanning(true);
@@ -689,7 +692,7 @@ export function AssemblyControls({ protocol, mutate, lastError, selfRole, projec
             !canTogglePhase
               ? 'Phase change is human-only (per phase_change_human_only)'
               : phase === 'planning'
-                ? 'Click to accept a plan and switch to Executing'
+                ? 'Click to switch to Executing (no plan file required)'
                 : 'Click to open Planning (discards current plan)'
           }
         >

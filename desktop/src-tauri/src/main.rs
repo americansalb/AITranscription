@@ -6132,6 +6132,29 @@ fn do_protocol_mutate_inner(
                         Ok(())
                     }
                 }
+                "open_execution" => {
+                    // Free planning→execution toggle (human msg 577: switching to
+                    // execution should NOT demand a typed plan_path). Mirror of
+                    // open_planning — same moderator/privileged gate, no plan
+                    // required. accept_plan stays as the OPTIONAL plan-pinned
+                    // variant; this is the one-click default path. Clears any
+                    // stale accepted-plan pins so a free toggle doesn't leave a
+                    // dangling plan_hash (architect 584).
+                    let role = caller_role_main(actor);
+                    let is_moderator = current.floor.moderator.as_deref() == Some(actor);
+                    let is_privileged = matches!(role, "architect" | "manager" | "human");
+                    if !is_moderator && !is_privileged {
+                        Err(format!(
+                            "[OpenExecutionForbidden] caller '{}' (role '{}') may not call open_execution — gated to current moderator OR architect/manager/human (mirror of open_planning).",
+                            actor, role
+                        ))
+                    } else {
+                        current.floor.phase = Some("execution".to_string());
+                        current.floor.plan_path = None;
+                        current.floor.plan_hash = None;
+                        Ok(())
+                    }
+                }
                 "revise_plan" => {
                     let role = caller_role_main(actor);
                     if !matches!(role, "architect" | "manager" | "human") {
@@ -6402,7 +6425,7 @@ fn do_protocol_mutate_inner(
                     }
                 }
                 other => Err(format!(
-                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning/accept_replanning) + SHA-HR.1.3 hot-reload (set_preset); '{}' must go through MCP protocol_mutate",
+                    "[InvalidAction] UI dispatch handles toggle_queue/yield/pause_plan/resume_plan/extend_phase/advance_phase + two-controls v1 (set_assembly/accept_plan/open_planning/open_execution/revise_plan/set_mic_passing/raise_hand/grant_mic/set_moderator) + collaborative-proposal v1 (propose_replanning/accept_replanning) + SHA-HR.1.3 hot-reload (set_preset); '{}' must go through MCP protocol_mutate",
                     other
                 )),
             };
