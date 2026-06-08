@@ -851,6 +851,25 @@ function removeSavedProject(path: string): void {
   } catch { /* ignore */ }
 }
 
+// PERF (human msg 443 "so slow and laggy i can't even type"): change-guard for
+// the high-frequency pollers. pollAssembly (1s), pollDiscussion (5s),
+// pollActiveOxford (2s), and pollActiveDelphi (2s) each called setState with a
+// FRESH object every tick, so React could never bail via Object.is and the
+// whole CollabTab monolith re-rendered up to once per second even with zero
+// user activity — background churn that keystrokes had to fight. Wrapping each
+// setter in `setX(prev => sameJSON(prev, next) ? prev : next)` returns the SAME
+// reference when nothing changed, so React skips the re-render. The payloads
+// are tiny (assembly state, discussion state, etc.) so the JSON compare is
+// far cheaper than a full monolith re-render.
+function sameJSON(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 // ── ComposeBox ───────────────────────────────────────────────────────────
 // PERF (human msg 443 "so slow and laggy i can't even type"): the message
 // compose state (msgBody/msgTo/mic-to) used to live on the CollabTab parent.
@@ -2314,7 +2333,8 @@ When multiple instances of this role are active:
         const { invoke } = await import("@tauri-apps/api/core");
         const state = await invoke<DiscussionState | null>("get_discussion_state", { dir: projectDir });
         if (!cancelled) {
-          setDiscussionState(state);
+          // Change-guard (PERF): skip re-render when discussion state is unchanged.
+          setDiscussionState((prev) => sameJSON(prev, state) ? prev : state);
           // Sync continuous timeout from server state
           if (state?.settings?.auto_close_timeout_seconds != null) {
             setContinuousTimeout(state.settings.auto_close_timeout_seconds);
@@ -2340,7 +2360,8 @@ When multiple instances of this role are active:
           current_speaker: string | null;
           rotation_order: string[];
         }>("get_assembly_state", { dir: projectDir });
-        if (!cancelled) setAssemblyState(state);
+        // Change-guard (PERF): skip the 1Hz re-render when state is unchanged.
+        if (!cancelled) setAssemblyState((prev) => sameJSON(prev, state) ? prev : state);
       } catch { /* command may not exist on older binaries */ }
     };
     pollAssembly();
@@ -2369,21 +2390,21 @@ When multiple instances of this role are active:
           phase_started_at?: string | null;
         } | null>("read_active_oxford_cmd", { dir: projectDir });
         if (!cancelled) {
-          if (result) {
-            setActiveOxford({
-              debate_id: result.debate_id,
-              moderator: result.moderator,
-              premise: result.premise,
-              side_a: result.side_a,
-              side_b: result.side_b,
-              current_speaker: result.current_speaker ?? null,
-              turn_count: Array.isArray(result.turn_history) ? result.turn_history.length : 0,
-              phase: result.phase ?? "none",
-              phase_started_at: result.phase_started_at ?? null,
-            });
-          } else {
-            setActiveOxford(null);
-          }
+          const next = result
+            ? {
+                debate_id: result.debate_id,
+                moderator: result.moderator,
+                premise: result.premise,
+                side_a: result.side_a,
+                side_b: result.side_b,
+                current_speaker: result.current_speaker ?? null,
+                turn_count: Array.isArray(result.turn_history) ? result.turn_history.length : 0,
+                phase: result.phase ?? "none",
+                phase_started_at: result.phase_started_at ?? null,
+              }
+            : null;
+          // Change-guard (PERF): skip the 2s re-render when unchanged.
+          setActiveOxford((prev) => sameJSON(prev, next) ? prev : next);
         }
       } catch { /* pre-fix binary — no End button surface */ }
     };
@@ -2413,11 +2434,11 @@ When multiple instances of this role are active:
           includeUnshuffle: true,
         });
         if (cancelled) return;
-        if (result && result.active && result.discussion_id !== undefined) {
-          setActiveDelphi(result as ActiveDelphiDebate);
-        } else {
-          setActiveDelphi(null);
-        }
+        const next = (result && result.active && result.discussion_id !== undefined)
+          ? (result as ActiveDelphiDebate)
+          : null;
+        // Change-guard (PERF): skip the 2s re-render when unchanged.
+        setActiveDelphi((prev) => sameJSON(prev, next) ? prev : next);
       } catch { /* pre-Delphi-SHA binary — poll inert; optimistic seed from modal remains */ }
     };
     pollActiveDelphi();
