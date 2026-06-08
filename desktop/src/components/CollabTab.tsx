@@ -3592,7 +3592,7 @@ When multiple instances of this role are active:
             visualizes evidence + economics. Ruling enforcement (writing the
             verdict) is Phase 4 — buttons surface that boundary rather than write
             to .vaak/. */}
-        {rulingDispute && (() => {
+        {rulingDispute && project?.config?.settings?.currency_enabled !== false && (() => {
           const d = rulingDispute;
           const poolCopper = typeof d.pool === "number" ? d.pool : 0;
           const challengedMsg = project?.messages?.find((m) => String(m.id) === String(d.target_msg));
@@ -4928,7 +4928,7 @@ When multiple instances of this role are active:
                         summary; click toggles a mini-leaderboard inside the
                         section body. stopPropagation so it doesn't collapse the
                         section. Hidden until currency data exists. */}
-                    {currencyLeaderboard.seats.length > 0 && (
+                    {currencyLeaderboard.seats.length > 0 && project?.config?.settings?.currency_enabled !== false && (
                       <button
                         type="button"
                         className="balance-bar-summary"
@@ -4958,7 +4958,7 @@ When multiple instances of this role are active:
                 {/* Phase 5 Surface 3 — Balance Bar mini-leaderboard. Per-seat
                     horizontal bar relative to the 10,000-copper start; red zone
                     when balance < 0. Read-only. */}
-                {balanceExpanded && currencyLeaderboard.seats.length > 0 && (
+                {balanceExpanded && currencyLeaderboard.seats.length > 0 && project?.config?.settings?.currency_enabled !== false && (
                   <div className="balance-leaderboard" role="table" aria-label="Currency leaderboard">
                     {currencyLeaderboard.seats.map((s) => {
                       const net = s.balance + s.escrow;
@@ -5568,8 +5568,11 @@ When multiple instances of this role are active:
         {/* Phase 5 Surface 1 — Flow Feed (Chitragupta's Scroll). Relocated into
             the sidebar rail ABOVE Discussion Mode per human msg 1962. Read-only
             transaction ticker; reads read_currency_feed_cmd on the shared 30s
-            currency poll. Collapsible, pref persisted; auto-hides when empty. */}
-        {currencyFeed.length > 0 && (
+            currency poll. Collapsible, pref persisted; auto-hides when empty.
+            Also hidden when currency mode is OFF (human msg 425): historical
+            currency.jsonl rows are still fetched but must not surface — same
+            hide-when-off contract as the roster pills + per-message footer. */}
+        {currencyFeed.length > 0 && project?.config?.settings?.currency_enabled !== false && (
           <CollapsibleSection
             id="flow-feed-section"
             className="flow-feed-section rail-section"
@@ -5628,8 +5631,12 @@ When multiple instances of this role are active:
         {/* Phase 5 (human msg 1971) — "More Stats" popup. Accessible modal with
             the deep currency breakdown: total in play, per-seat leaderboard with
             balance/escrow bars (red below 0), open disputes + pools, and recent
-            transactions. Read-only; derives entirely from already-fetched data. */}
-        {statsOpen && (
+            transactions. Read-only; derives entirely from already-fetched data.
+            Gated on currency_enabled (human msg 425) as defense-in-depth: the
+            trigger button lives inside the Flow Feed (already gated), so this
+            modal is normally unreachable when currency is OFF — but the explicit
+            gate guards against any future trigger surface opening it. */}
+        {statsOpen && project?.config?.settings?.currency_enabled !== false && (
           <div
             className="currency-stats-overlay"
             role="presentation"
@@ -5788,8 +5795,12 @@ When multiple instances of this role are active:
 
         {/* Phase 7 (human msg 2074) — Lifetime Scoreboard. Aggregates every
             end-of-session snapshot per agent (frontend TS). Collapsed by default;
-            auto-hides until at least one session has ended + been snapshotted. */}
-        {scoreboard.length > 0 && (
+            auto-hides until at least one session has ended + been snapshotted.
+            Also hidden when currency mode is OFF (human msg 425): lifetime
+            snapshots are still aggregated in memory but must not surface — same
+            hide-when-off contract as the Flow Feed, Balance Bar, and per-message
+            footer. This was the last ungated standalone currency rail section. */}
+        {scoreboard.length > 0 && project?.config?.settings?.currency_enabled !== false && (
           <CollapsibleSection
             id="scoreboard-section"
             className="scoreboard-section rail-section"
@@ -7475,8 +7486,13 @@ When multiple instances of this role are active:
                   {/* Change #1 (human msg 2262): per-message economic footer.
                       The real economic story is told here — on the message that
                       caused it — not in a separate sidebar. Human messages earn
-                      no currency, so this is naturally null for them. */}
-                  {msg.from !== "human" && (() => {
+                      no currency, so this is naturally null for them.
+                      Gated on currency_enabled (human msg 425): when currency
+                      mode is OFF, the historical currency.jsonl rows are still
+                      fetched but MUST NOT render — same hide-when-off contract
+                      the roster coin pills and inline notices already honor.
+                      This footer was the missed surface. */}
+                  {msg.from !== "human" && project?.config?.settings?.currency_enabled !== false && (() => {
                     const econ = buildMsgEconomy(
                       economicByMsg.get(String(msg.id)),
                       disputeByMsg.get(String(msg.id)),
