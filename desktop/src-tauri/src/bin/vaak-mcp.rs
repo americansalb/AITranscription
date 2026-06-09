@@ -11762,9 +11762,24 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
         //       assertion may not reassign a recorded win, critical once the
         //       reward pool is live);
         //     - no computed winner (tie/zero) → any `outcome` is load-bearing.
-        let human_decisive = matches!(human_vote.as_deref(), Some("side_a") | Some("side_b"));
+        // Human-draw = (b), authoritative (architect 793 ruling): a PRESENT
+        // human vote is the decorrelated judge's verdict — including "draw",
+        // which is a JUDGMENT ("I rule it even"), NOT an abstention. Abstention
+        // is NOT voting (null), which correctly falls through to the agent
+        // tally. So three authoritative results:
+        //   Winner(side): human side-vote, else agent strict-majority winner.
+        //   Draw:         a present human "draw" vote (overrides the agent tally).
+        //   None:         no human vote AND no agent majority (tie/zero) →
+        //                 moderator's `outcome` is load-bearing.
+        // Validate the moderator's `outcome`: it must CONFIRM the computed
+        // result or VOID ('abandoned'); it may never REDIRECT to a contrary one.
+        let human_v = human_vote.as_deref();
+        let human_decisive = matches!(human_v, Some("side_a") | Some("side_b"));
+        let computed_draw = human_v == Some("draw");
         let computed_winner: Option<String> = if human_decisive {
             human_vote.clone() // "side_a" | "side_b"
+        } else if computed_draw {
+            None // authoritative draw — no winning side (enforced just below)
         } else {
             strict_majority_winner.map(|w| w.to_string()) // "side_a" | "side_b" | None
         };
@@ -11774,12 +11789,25 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
             if announced_outcome != expected && announced_outcome != "abandoned" {
                 return Err(format!(
                     "[OxfordOutcomeContradictsTally] recorded votes are authoritative: computed winner is '{}' (human={}, side_a={}, side_b={}, draw={}). You passed '{}'. Pass '{}' to confirm the vote, or 'abandoned' to VOID the debate (nobody wins). You may not name a different winner than the recorded tally.",
-                    expected, human_vote.as_deref().unwrap_or("none"), tally_a, tally_b, tally_draw, announced_outcome, expected
+                    expected, human_v.unwrap_or("none"), tally_a, tally_b, tally_draw, announced_outcome, expected
                 ));
             }
+        } else if computed_draw && announced_outcome != "draw" && announced_outcome != "abandoned" {
+            return Err(format!(
+                "[OxfordOutcomeContradictsTally] the human voted 'draw' — an authoritative judgment (not an abstention). Pass 'draw' to confirm, or 'abandoned' to VOID the debate. You may not name a winner when the human ruled it even (agent tally: side_a={}, side_b={}).",
+                tally_a, tally_b
+            ));
         }
-        // `announced_outcome` is now validated (it matches the computed winner,
-        // is 'abandoned', or there was no computed winner). It IS the outcome.
+        // `announced_outcome` is now validated: it matches a computed winner, is
+        // the authoritative draw, is 'abandoned', or there was no computed
+        // result. It IS the outcome. `computed_label` is for the broadcast.
+        let computed_label: String = if let Some(ref w) = computed_winner {
+            w.clone()
+        } else if computed_draw {
+            "draw (human-authoritative)".to_string()
+        } else {
+            "none".to_string()
+        };
         let outcome = announced_outcome.as_str();
         // Reward distribution: per spec §6.1 v2.2 POOL-FUNDED. The pool_balance
         // field is plan v2 §3b territory (not yet shipped at the time of this
@@ -11808,8 +11836,8 @@ fn handle_oxford_end(outcome: &str) -> Result<serde_json::Value, String> {
             "id": msg_id, "from": "system", "to": "all", "type": "broadcast",
             "timestamp": utc_now_iso(),
             "subject": format!("[OxfordDebateEnded] debate {} — {}", debate_id, outcome),
-            "body": format!("Moderator {} ends debate {} with outcome '{}' (audience tally: side_a={}, side_b={}, draw={}, human={}; computed winner: {}). Reward distribution is deferred per spec §6.1 (pool_balance §3b not shipped).", caller, debate_id, outcome, tally_a, tally_b, tally_draw, human_vote.as_deref().unwrap_or("none"), computed_winner.as_deref().unwrap_or("none")),
-            "metadata": { "debate_id": debate_id, "outcome": outcome, "computed_winner": computed_winner, "oxford_event": "ended" }
+            "body": format!("Moderator {} ends debate {} with outcome '{}' (audience tally: side_a={}, side_b={}, draw={}, human={}; computed result: {}). Reward distribution is deferred per spec §6.1 (pool_balance §3b not shipped).", caller, debate_id, outcome, tally_a, tally_b, tally_draw, human_vote.as_deref().unwrap_or("none"), computed_label),
+            "metadata": { "debate_id": debate_id, "outcome": outcome, "computed_winner": computed_winner, "computed_draw": computed_draw, "oxford_event": "ended" }
         }));
         Ok(serde_json::json!({ "debate_id": debate_id, "outcome": outcome, "computed_winner": computed_winner, "ended_at": now }))
     })
