@@ -139,28 +139,54 @@ def main() -> None:
     if proto is None:
         sys.exit(0)
     floor = proto.get("floor") or {}
-    level = int(floor.get("review_intensity") or 5)
-
-    # Level 1-5: pass through, no gate.
-    if level < 6:
-        sys.exit(0)
 
     # Determine caller seat. Claude Code's hook contract passes session_id in
     # the stdin payload (verified: env grep shows CLAUDE_CODE_SESSION_ID is set
     # but no CLAUDE_SESSION_ID; payload.session_id is the canonical source per
     # https://docs.claude.com/en/docs/claude-code/hooks). Tester msg 2503 +
     # architect msg 2511 verified the prior env var path was inert.
+    # (Hoisted above the review-intensity gate because the planning-phase
+    # enforcement below applies at ALL intensity levels, not just 6+.)
     session_id = payload.get("session_id", "")
     if not session_id:
         sys.exit(0)
     seat = seat_for_session(vaak_dir, session_id)
     if seat is None:
         sys.exit(0)
+    is_human = seat == "human" or seat == "human:0"
 
-    # Exempt: human / moderator / current_speaker.
     current_speaker = floor.get("current_speaker")
     moderator = floor.get("moderator")
-    if seat == "human" or seat == "human:0":
+
+    # ── PLANNING-PHASE ENFORCEMENT (human msg 804: "make planning mode actually
+    #    enforce"). When floor.phase == "planning", BUILDING tools are hard-denied
+    #    for every seat except the human — plan/review/decide first, then switch
+    #    to Execution to build. This is the LIGHT enforcement: NO plan-hash /
+    #    scope-block ceremony (the human disabled that in May, f45f519 — do not
+    #    re-impose it); it only gates BUILD tools on the phase. Reading
+    #    (Read/Grep/Glob/WebFetch/WebSearch) stays allowed — planning IS for
+    #    reading/thinking. Bash is not gated by this hook at all, so the team
+    #    keeps an escape valve. Escape: flip the phase to Execution (phase pill
+    #    → Executing, or the open_execution mutation). Applies at every
+    #    review_intensity level, so it runs BEFORE the level<6 early-exit below.
+    phase = floor.get("phase") or "execution"
+    build_tools = ("Edit", "Write", "NotebookEdit")
+    if phase == "planning" and tool in build_tools and not is_human:
+        deny(
+            f"[planning_blocks_work] {seat} cannot {tool} during the PLANNING phase. "
+            f"Plan, review, and decide first — then switch to Execution to build "
+            f"(phase pill -> Executing, or call open_execution). Reading/searching is "
+            f"allowed in planning; only building is blocked."
+        )
+
+    level = int(floor.get("review_intensity") or 5)
+
+    # Level 1-5: pass through, no review-intensity turn gate.
+    if level < 6:
+        sys.exit(0)
+
+    # Exempt: human / moderator / current_speaker (turn-gate exemptions).
+    if is_human:
         sys.exit(0)
     if moderator and seat == moderator:
         sys.exit(0)
