@@ -5,6 +5,10 @@ import { TranscriptApp } from "./TranscriptApp";
 import { ScreenReaderApp } from "./ScreenReaderApp";
 import { QueueApp } from "./QueueApp";
 import { CollaborateV2App } from "./components/CollaborateV2/CollaborateV2App";
+import { lazy, Suspense } from "react";
+// UI2 ("One Window" decree, board msg 210) — lazy so the old surface pays
+// zero cost until cutover. Lives at #/ui2 inside the existing main window.
+const Ui2App = lazy(() => import("./ui2/Ui2App"));
 import { ToastProvider } from "./components/Toast";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 // tokens.css must load BEFORE styles.css so design tokens cascade properly
@@ -46,6 +50,7 @@ const isTranscript = hash === "#/transcript";
 const isScreenReader = hash === "#/screen-reader";
 const isQueue = hash === "#/queue";
 const isCollaborateV2 = hash === "#/collaborate-v2";
+const isUi2 = hash === "#/ui2";
 
 // Disabled StrictMode to prevent duplicate event listener registration.
 // ToastProvider wraps the entire route switch so any route — current or
@@ -69,6 +74,12 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     ) : isCollaborateV2 ? (
       <ErrorBoundary fallbackLabel="The Collaborate v2 window encountered an error.">
         <CollaborateV2App />
+      </ErrorBoundary>
+    ) : isUi2 ? (
+      <ErrorBoundary fallbackLabel="The One Window surface encountered an error.">
+        <Suspense fallback={null}>
+          <Ui2App />
+        </Suspense>
       </ErrorBoundary>
     ) : (
       <ErrorBoundary fallbackLabel="The main application encountered an error.">

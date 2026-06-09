@@ -1,0 +1,83 @@
+// Engine Room (§4.4) — the full, unabridged board. Closed by default.
+// Nothing is hidden from audit; it is hidden from default attention.
+import { useMemo, useState } from "react";
+import { useUi2Store } from "../store/store";
+
+export function EngineRoom() {
+  const open = useUi2Store((s) => s.engineRoomOpen);
+  const setEngineRoom = useUi2Store((s) => s.setEngineRoom);
+  const messages = useUi2Store((s) => s.project?.messages ?? []);
+  const violations = useUi2Store((s) => s.feed.protocolViolations);
+  const [seat, setSeat] = useState("all");
+  const [type, setType] = useState("all");
+  const [raw, setRaw] = useState(false);
+
+  const seats = useMemo(() => [...new Set(messages.map((m) => m.from))].sort(), [messages]);
+  const types = useMemo(() => [...new Set(messages.map((m) => m.type))].sort(), [messages]);
+  const filtered = useMemo(
+    () =>
+      messages.filter(
+        (m) => (seat === "all" || m.from === seat) && (type === "all" || m.type === type),
+      ),
+    [messages, seat, type],
+  );
+
+  if (!open) {
+    return (
+      <button type="button" className="ui2-engine-toggle" onClick={() => setEngineRoom(true)}>
+        ▸ Engine Room · {messages.length} messages
+        {violations > 0 ? ` · ${violations} protocol` : ""}
+      </button>
+    );
+  }
+
+  return (
+    <section className="ui2-engine" role="region" aria-label="Engine room — full board">
+      <header className="ui2-engine-header">
+        <button type="button" onClick={() => setEngineRoom(false)}>
+          ▾ Engine Room
+        </button>
+        <select value={seat} onChange={(e) => setSeat(e.target.value)} aria-label="Filter by seat">
+          <option value="all">all seats</option>
+          {seats.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+        <select value={type} onChange={(e) => setType(e.target.value)} aria-label="Filter by type">
+          <option value="all">all types</option>
+          {types.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <label className="ui2-engine-raw">
+          <input type="checkbox" checked={raw} onChange={(e) => setRaw(e.target.checked)} /> raw
+          JSONL
+        </label>
+        <span className="ui2-meta">
+          {filtered.length}/{messages.length}
+        </span>
+      </header>
+      <div className="ui2-engine-list">
+        {filtered.map((m) =>
+          raw ? (
+            <pre key={m.id} className="ui2-engine-rawrow">
+              {JSON.stringify(m)}
+            </pre>
+          ) : (
+            <div key={m.id} className="ui2-engine-row">
+              <span className="ui2-meta">
+                #{m.id} · {m.timestamp} · {m.from} → {m.to} · {m.type}
+              </span>
+              <strong>{m.subject}</strong>
+              <p>{m.body}</p>
+            </div>
+          ),
+        )}
+      </div>
+    </section>
+  );
+}
