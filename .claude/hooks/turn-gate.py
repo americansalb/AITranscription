@@ -172,12 +172,28 @@ def main() -> None:
     phase = floor.get("phase") or "execution"
     build_tools = ("Edit", "Write", "NotebookEdit")
     if phase == "planning" and tool in build_tools and not is_human:
-        deny(
-            f"[planning_blocks_work] {seat} cannot {tool} during the PLANNING phase. "
-            f"Plan, review, and decide first — then switch to Execution to build "
-            f"(phase pill -> Executing, or call open_execution). Reading/searching is "
-            f"allowed in planning; only building is blocked."
+        # Over-block fix (code-interpreter 834 + evil-arch 811 "block build,
+        # not think"): WRITING THE PLAN is planning, not building. So allow
+        # writes to planning docs (.vaak/design-notes/ specs+plans, or a root
+        # PLAN.md) and block only CODE. This is what lets the team author a
+        # plan the human can read DURING planning (human msg 828).
+        fp = (
+            payload.get("tool_input", {}).get("file_path")
+            or payload.get("tool_input", {}).get("path")
+            or ""
+        ).replace("\\", "/")
+        is_planning_doc = (
+            ".vaak/design-notes/" in fp
+            or fp == "PLAN.md"
+            or fp.endswith("/PLAN.md")
         )
+        if not is_planning_doc:
+            deny(
+                f"[planning_blocks_work] {seat} cannot {tool} CODE during the PLANNING "
+                f"phase. Writing PLANS is allowed (.vaak/design-notes/ or PLAN.md) — "
+                f"write the plan there so it can be read+approved. To build code, switch "
+                f"to Execution (phase pill -> Executing, or call open_execution)."
+            )
 
     level = int(floor.get("review_intensity") or 5)
 
