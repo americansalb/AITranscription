@@ -4,6 +4,12 @@
 // so the production import graph (store → invoke/listen) runs unmodified and
 // only the final IPC hop is fake. Recorded limitation: the real Rust commands
 // and WebView2-specific paint are NOT exercised here.
+//
+// MOCK-ROT WARNING (review msg 365): the ParsedProject fixture below is
+// hand-maintained against the Rust source of truth — collab.rs:542
+// (ParsedProject) and the BoardMessage/SessionBinding/RoleStatus structs
+// around it. If the engine contract evolves, update this shape or the suite
+// proves nothing. Generator-fixture idea tracked in src/ui2/LATER.md.
 
 export interface MockWindow {
   __UI2_SENT: Array<{ cmd: string; args: Record<string, unknown> }>;

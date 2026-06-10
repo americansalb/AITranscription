@@ -93,9 +93,19 @@ test("§7 perf: 5,000-message board — initial render, typing long-tasks, scrol
     `[ui2-perf] 5k board: initial render=${renderMs.toFixed(0)}ms · long tasks while typing=${longTasks} · scroll=${fps.toFixed(1)}fps`,
   );
 
-  expect(renderMs).toBeLessThan(1000); // §7: initial render < 1s
-  expect(longTasks).toBeLessThanOrEqual(1); // §7 proxy: keystroke→paint < 16ms
-  expect(fps).toBeGreaterThan(50); // §7: 60fps target with headless variance
+  // §7 bars vs CI gates — recorded decision, Review #22 (msgs 365/367/368/369),
+  // option B: named allowances, not tighter flaky gates. A future edit to these
+  // thresholds requires a register entry, never a silent change.
+  //   render  <1s   → gated 1:1
+  //   keystroke <16ms → gated via 50ms-longtask proxy (observer floor; 16–49ms
+  //                     stalls are invisible here) — true bar attested on real
+  //                     hardware per release
+  //   scroll  60fps → gated >50 (shared 2-core runner variance allowance) —
+  //                   60fps verified per release on real hardware
+  //                   (2026-06-10: 60.3 / 60.6 / 60.8 / 60.9 across 3 machines)
+  expect(renderMs).toBeLessThan(1000);
+  expect(longTasks).toBeLessThanOrEqual(1);
+  expect(fps).toBeGreaterThan(50);
 });
 
 test("mute is experience-first: feed stays silent even when traffic lands", async ({ page }) => {

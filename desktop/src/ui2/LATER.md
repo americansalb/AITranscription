@@ -13,6 +13,17 @@ Items discovered mid-build. Nothing here is shipped or promised.
 - **actions/checkout@v4 Node-20 deprecation** (CI run annotation, evil-architect msg 312): forced Node-24 from 2026-06-16 — bump to checkout@v5 across workflows before then. Non-blocking today.
 - **Concurrent non-Oxford discussions share one identity slot** (dev-challenger msg 309 residual 2): lifecycle records carry no discussion id, so perfect attribution is impossible UI-side. Sequential case is fixed; the concurrent fix is engine-side metadata = a §8 STOP-and-card item.
 
+## §7 bars vs CI gates (recorded decision, Review #22 — for the Phase 5 cutover card)
+| §7 bar | CI gate | Gap handling |
+|---|---|---|
+| initial render < 1s (5k board) | gated 1:1 (`<1000ms`) | none |
+| keystroke→paint < 16ms | 50ms-longtask proxy, ≤1 | 16–49ms stalls invisible to the gate; true bar attested per release on real hardware |
+| scroll 60fps | `>50` | shared-runner variance allowance; 60fps verified per release on real hardware (2026-06-10: 60.3/60.6/60.8/60.9 across 3 machines) |
+
+Threshold edits require a register entry — never silent (msg 335 lesson, reaffirmed msgs 367/368/369).
+
+- **Mock-rot guard** (msg 365): e2e/tauriMock.ts hand-maintains the ParsedProject shape vs collab.rs:542. Cross-reference added in the mock header; the durable fix is a Rust `#[test]` that serializes a sample ParsedProject as the fixture the e2e consumes.
+
 ## Ideas (not authorized, parked)
 - Per-discussion keys for *continuous* discussions: today all continuous-review rounds share one "discussion-active" key, so consecutive continuous discussions fold into one row whose verdict is the latest end-event. Fine for digesting ceremony; revisit if operators want one row per continuous topic.
 - Day-row collapse for old R7 bursts (pre-approved lever from the IA table if Phase 2 measurement exceeds the ~10-row target).
