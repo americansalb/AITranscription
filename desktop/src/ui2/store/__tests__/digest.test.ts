@@ -119,6 +119,27 @@ describe("deriveFeed — per-discussion identity (msg 282 MED-3 / 284 MED-2)", (
     expect(reconcile(messages, feed)).toBe(true);
   });
 
+  it("an R4 landing while muted still retires the key; the unmute derivation marks the verdict", () => {
+    const messages = [
+      msg(1, { from: "system", type: "moderation", subject: "review A", metadata: { discussion_action: "start" } }),
+      msg(2, { from: "system", type: "moderation", metadata: { discussion_action: "auto_round", round: 1 } }),
+      msg(3, { from: "moderator:0", subject: "A ended", metadata: { discussion_action: "end", final_round: 1 } }),
+      msg(4, { from: "system", type: "moderation", subject: "review B", metadata: { discussion_action: "start" } }),
+      msg(5, { from: "system", type: "moderation", metadata: { discussion_action: "auto_round", round: 1 } }),
+    ];
+    // muted at id 2: the end (3) and B's events accrue silently
+    const muted = deriveFeed(messages, 2);
+    const mutedRows = muted.rows.filter((r) => r.kind === "discussion");
+    expect(mutedRows).toHaveLength(1); // B opens no visible row while muted
+    expect(mutedRows[0].kind === "discussion" && mutedRows[0].verdict).toBeNull(); // zero movement
+    expect(reconcile(messages, muted)).toBe(true);
+    // unmute: catch-up derivation marks A's verdict; B's events stay in catch-up
+    const after = deriveFeed(messages, null, { from: 3, to: 5 });
+    const rows = after.rows.filter((r) => r.kind === "discussion");
+    expect(rows[0].kind === "discussion" && rows[0].verdict?.subject).toBe("A ended");
+    expect(reconcile(messages, after)).toBe(true);
+  });
+
   it("an orphan end (no open discussion) lands in the catch-all burst, no crash", () => {
     const messages = [msg(1, { from: "moderator:0", metadata: { discussion_action: "end" } })];
     const feed = deriveFeed(messages, null);

@@ -95,6 +95,28 @@ export function deriveFeed(
     const t = classify(msg, live);
     classified.set(msg.id, t);
 
+    // an R4 that lands while muted / in the catch-up range still RETIRES its
+    // discussion identity so post-end events can't fold into a closed row
+    // (review msg 309 residual 1). markVerdict additionally surfaces the
+    // verdict line WITHOUT joining the row's events — the message itself
+    // stays in the engine/catch-up set, so reconcile() counts it once.
+    // During mute only the (invisible) retirement runs — a verdict line
+    // appearing would break the zero-movement contract; the unmute
+    // derivation takes the catch-up path and marks it then.
+    const retire = (treatment: Extract<Treatment, { rule: "R4" }>, markVerdict: boolean) => {
+      const key = treatment.discussionKey === "continuous" ? continuousKey : treatment.discussionKey;
+      if (treatment.discussionKey === "continuous") {
+        continuousKey = null;
+        live.delete("continuous");
+      } else {
+        live.delete(treatment.discussionKey);
+      }
+      if (markVerdict && key) {
+        const row = discussionRows.get(key);
+        if (row && !row.verdict) row.verdict = msg;
+      }
+    };
+
     // R6 never surfaces, in any mode
     if (t.rule === "R6") {
       violations++;
@@ -104,12 +126,14 @@ export function deriveFeed(
 
     // mute overlay: zero screen movement — no rows, no count ticks
     if (mutedAtId !== null && msg.id > mutedAtId && t.rule !== "R1" && t.rule !== "R2") {
+      if (t.rule === "R4") retire(t, false);
       engineOnly.push(msg);
       continue;
     }
 
     // unmute catch-up: the accrued range folds into ONE row, not ordinary rows
     if (catchup && msg.id >= catchup.from && msg.id <= catchup.to && t.rule !== "R1" && t.rule !== "R2") {
+      if (t.rule === "R4") retire(t, true);
       if (!catchupRow) {
         catchupRow = {
           kind: "burst",

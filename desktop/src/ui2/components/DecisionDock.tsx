@@ -37,6 +37,9 @@ function ActiveCard({ card }: { card: DecisionCardState }) {
     setBusy(true);
     try {
       await resolveCard(card.msg.id, choiceId, text);
+    } catch {
+      // store surfaced it in the error bar; without this catch the rethrow
+      // escapes as an unhandled rejection (review msg 309 LOW-A)
     } finally {
       setBusy(false);
     }
