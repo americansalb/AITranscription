@@ -9,7 +9,20 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const boardPath = resolve(here, "../../.vaak/board.jsonl");
+// Resolve the ACTIVE section's board — collab::active_board_path semantics
+// (collab.rs:1582). The root board.jsonl is the "default" section only;
+// auditing it for a non-default section passes vacuously (correction to the
+// first run of this audit, msg 392 vs dev-challenger's msg 395).
+const vaakDir = resolve(here, "../../.vaak");
+let section = "default";
+try {
+  section = readFileSync(resolve(vaakDir, "active-section"), "utf8").trim() || "default";
+} catch {}
+const boardPath =
+  section === "default"
+    ? resolve(vaakDir, "board.jsonl")
+    : resolve(vaakDir, "sections", section, "board.jsonl");
+console.error(`[spot-audit] section=${section} board=${boardPath}`);
 
 // bundle the pure derivation modules (TS) into an importable data-url module
 const bundle = await build({
