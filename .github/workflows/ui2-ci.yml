@@ -63,6 +63,16 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
+      # tauri_build::build() validates externalBin (binaries/vaak-mcp-<target>)
+      # at compile time, but only the Windows sidecar is committed — and the
+      # sidecar can't be built first because it lives in the same crate behind
+      # the same build script (chicken-and-egg, CI run 27249860932). A
+      # placeholder satisfies the existence check; cargo check compiles
+      # nothing that executes it.
+      - name: Placeholder sidecar for externalBin validation
+        working-directory: desktop/src-tauri
+        run: touch binaries/vaak-mcp-x86_64-unknown-linux-gnu
+
       - name: Cargo check (Tauri shell)
         working-directory: desktop/src-tauri
         run: cargo check --locked

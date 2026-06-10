@@ -9,6 +9,9 @@ Items discovered mid-build. Nothing here is shipped or promised.
 - ~~Derivation perf~~ MEASURED (second commit): 5k-message board derives in ~64ms + 8ms reconcile (was 629ms — deriveDock was quadratic, fixed with a reply index; perf.test.ts holds a 250ms CI-safe bound). Paint-side numbers (keystroke <16ms, 60fps scroll) still unmeasured — need the real webview.
 - **Coverage number**: 27 tests over classify/digest/dock/liveness + the smoke path. @vitest/coverage-v8 not installed, so the ≥80% figure is unquantified.
 
+- **actions/checkout@v4 Node-20 deprecation** (CI run annotation, evil-architect msg 312): forced Node-24 from 2026-06-16 — bump to checkout@v5 across workflows before then. Non-blocking today.
+- **Concurrent non-Oxford discussions share one identity slot** (dev-challenger msg 309 residual 2): lifecycle records carry no discussion id, so perfect attribution is impossible UI-side. Sequential case is fixed; the concurrent fix is engine-side metadata = a §8 STOP-and-card item.
+
 ## Ideas (not authorized, parked)
 - Per-discussion keys for *continuous* discussions: today all continuous-review rounds share one "discussion-active" key, so consecutive continuous discussions fold into one row whose verdict is the latest end-event. Fine for digesting ceremony; revisit if operators want one row per continuous topic.
 - Day-row collapse for old R7 bursts (pre-approved lever from the IA table if Phase 2 measurement exceeds the ~10-row target).
