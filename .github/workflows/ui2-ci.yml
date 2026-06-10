@@ -80,6 +80,17 @@ jobs:
         working-directory: desktop/src-tauri
         run: touch binaries/vaak-mcp-x86_64-unknown-linux-gnu
 
+      # errors surface as ::error:: annotations — the public Checks API can
+      # read those while raw job logs stay admin-gated (msg 329/331 method)
       - name: Cargo check (Tauri shell)
         working-directory: desktop/src-tauri
-        run: cargo check --locked
+        run: |
+          set +e
+          cargo check --locked --message-format short 2>&1 | tee /tmp/check.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -E "^error|error\[|error:" /tmp/check.log | head -40 | while read -r line; do
+              echo "::error::$line"
+            done
+          fi
+          exit "$status"
