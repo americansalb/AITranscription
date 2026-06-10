@@ -17494,6 +17494,17 @@ fn get_parent_pid() -> Option<u32> {
     }
 }
 
+/// Get parent process ID on Unix. Parity twin of the Windows ToolHelp
+/// version above — two call sites (session-id derivation + status display)
+/// are platform-unconditional, so the function must exist on every target;
+/// without this, the crate has never compiled on Linux (CI run 9f0b962,
+/// E0425 at 17674/17830).
+#[cfg(unix)]
+fn get_parent_pid() -> Option<u32> {
+    let ppid = unsafe { libc::getppid() };
+    if ppid > 0 { Some(ppid as u32) } else { None }
+}
+
 /// Generate a fallback session ID from stable system identifiers
 fn generate_fallback_id() -> String {
     let mut hasher = DefaultHasher::new();
