@@ -121,4 +121,13 @@ test("mute is experience-first: feed stays silent even when traffic lands", asyn
   await composer.press("Enter");
   await expect(page.getByText("human still speaks while muted")).toBeVisible();
   await expect(page.getByText("should not surface")).toHaveCount(0); // silence held
+
+  // unmute: the accrued traffic surfaces as ONE catch-up row, expandable —
+  // never as ordinary rows (IA table §2, msg 364 coverage extension)
+  await page.getByRole("button", { name: "Unmute room" }).click();
+  const catchup = page.getByRole("button", { name: /caught up: \d+ events while muted/ });
+  await expect(catchup).toBeVisible();
+  await expect(page.getByText("should not surface")).toHaveCount(0); // still folded
+  await catchup.click();
+  await expect(page.getByText("noise during mute")).toBeVisible(); // audit on expand
 });
