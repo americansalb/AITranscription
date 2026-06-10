@@ -78,7 +78,7 @@ export function EngineRoom() {
       <Virtuoso
         className="ui2-engine-list"
         data={filtered}
-        computeItemKey={(_, m) => m.id}
+        computeItemKey={(_, m) => `${m.id}-${m.timestamp}`}
         initialItemCount={Math.min(filtered.length, 30)}
         itemContent={(_, m) =>
           raw ? (

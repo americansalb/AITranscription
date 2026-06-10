@@ -29,7 +29,7 @@ function ExpandedEvents({ events }: { events: BoardMessage[] }) {
   return (
     <ul className="ui2-expanded-events">
       {events.map((m) => (
-        <li key={m.id}>
+        <li key={`${m.id}-${m.timestamp}`}>
           <span className="ui2-meta">
             {when(m.timestamp)} · {m.from} → {m.to}
           </span>

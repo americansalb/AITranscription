@@ -154,17 +154,19 @@ export function deriveFeed(
     }
 
     switch (t.rule) {
+      // row keys carry the timestamp: ids are not unique on the live board
+      // (finding T1) and a duplicate React key corrupts list rendering
       case "R1":
         closeBurst();
-        rows.push({ kind: "message", key: `m${msg.id}`, msg, voice: "human" });
+        rows.push({ kind: "message", key: `m${msg.id}-${msg.timestamp}`, msg, voice: "human" });
         break;
       case "R2":
         closeBurst();
-        rows.push({ kind: "card", key: `c${msg.id}`, msg });
+        rows.push({ kind: "card", key: `c${msg.id}-${msg.timestamp}`, msg });
         break;
       case "R3":
         closeBurst();
-        rows.push({ kind: "message", key: `m${msg.id}`, msg, voice: "relay" });
+        rows.push({ kind: "message", key: `m${msg.id}-${msg.timestamp}`, msg, voice: "relay" });
         break;
       case "R4":
       case "R5": {
@@ -217,12 +219,16 @@ export function deriveFeed(
   return { rows, engineOnly, protocolViolations: violations, classified };
 }
 
-/** Audit invariant (§0): every input message is accounted for exactly once. */
+/** Audit invariant (§0): every input message is accounted for exactly once.
+ * Counts by OBJECT IDENTITY, not id — the live board has produced two distinct
+ * messages sharing one id (engine id-allocation race, trial finding T1,
+ * msgs 395/397/398), and that engine defect must not read as UI data loss.
+ * Duplicate-id detection stays in the spot-audit script's independent recount. */
 export function reconcile(messages: BoardMessage[], feed: DerivedFeed): boolean {
-  const seen = new Set<number>();
+  const seen = new Set<BoardMessage>();
   const add = (m: BoardMessage) => {
-    if (seen.has(m.id)) return false;
-    seen.add(m.id);
+    if (seen.has(m)) return false;
+    seen.add(m);
     return true;
   };
   for (const row of feed.rows) {
@@ -233,5 +239,5 @@ export function reconcile(messages: BoardMessage[], feed: DerivedFeed): boolean 
     }
   }
   for (const m of feed.engineOnly) if (!add(m)) return false;
-  return messages.every((m) => seen.has(m.id));
+  return messages.every((m) => seen.has(m));
 }

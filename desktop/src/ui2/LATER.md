@@ -12,6 +12,8 @@ Items discovered mid-build. Nothing here is shipped or promised.
 
 - **actions/checkout@v4 Node-20 deprecation** (CI run annotation, evil-architect msg 312): forced Node-24 from 2026-06-16 — bump to checkout@v5 across workflows before then. Non-blocking today.
 - **Concurrent non-Oxford discussions share one identity slot** (dev-challenger msg 309 residual 2): lifecycle records carry no discussion id, so perfect attribution is impossible UI-side. Sequential case is fixed; the concurrent fix is engine-side metadata = a §8 STOP-and-card item.
+- **TRIAL FINDING T1 — engine id-allocation race** (msgs 395/397/398, corroborated at two consumer surfaces): two distinct live messages shared id 212. Engine-lane fix (lock-held counter or ULID) = §8 card. UI-side insurance shipped: reconcile() counts by object identity; React keys carry id+timestamp. Residual fragility: `classified` Map and `in_reply_to` joins are id-keyed — a duplicate-id CARD would misresolve; acceptable until the engine fix, recorded here.
+- **TRIAL FINDING T2 — live board derives to 71 rows, not ~10** (msg 395): dense relay/human interleave fragments R7 bursts. Pre-approved lever = day-row collapse; per Review #27 consensus, the human's trial experience arbitrates before the lever is spent.
 
 ## §7 bars vs CI gates (recorded decision, Review #22 — for the Phase 5 cutover card)
 | §7 bar | CI gate | Gap handling |
