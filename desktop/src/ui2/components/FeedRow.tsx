@@ -1,10 +1,28 @@
 // One feed row, all variants. Collapsed digests expand per-row, never sticky.
+import { useState } from "react";
 import { useUi2Store } from "../store/store";
 import type { BoardMessage, FeedRow as FeedRowType } from "../store/types";
 
 function when(iso: string): string {
   const t = Date.parse(iso);
   return Number.isFinite(t) ? new Date(t).toLocaleTimeString() : "";
+}
+
+/** Clamped body with an expand affordance — a decision surface must never
+ * hide the question behind an unopenable clamp (review msg 281 MED-2). */
+export function ClampedBody({ body }: { body: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const long = body.split("\n").length > 6 || body.length > 600;
+  return (
+    <>
+      <p className={`ui2-body${showAll || !long ? "" : " ui2-clamp"}`}>{body}</p>
+      {long && (
+        <button type="button" className="ui2-clamp-toggle" onClick={() => setShowAll(!showAll)}>
+          {showAll ? "show less" : "show all"}
+        </button>
+      )}
+    </>
+  );
 }
 
 function ExpandedEvents({ events }: { events: BoardMessage[] }) {
@@ -43,7 +61,7 @@ export function FeedRowView({ row }: { row: FeedRowType }) {
       <article className="ui2-row ui2-card-inline">
         <header className="ui2-meta">decision · {when(row.msg.timestamp)}</header>
         <h3>{row.msg.subject || "Decision"}</h3>
-        <p className="ui2-body ui2-clamp">{row.msg.body}</p>
+        <ClampedBody body={row.msg.body} />
         <span className="ui2-meta">answer in the Decision Dock →</span>
       </article>
     );
@@ -69,10 +87,9 @@ export function FeedRowView({ row }: { row: FeedRowType }) {
   }
 
   // burst
-  const label =
-    row.key === "muted-catchup"
-      ? `caught up: ${row.count} events while muted — see Engine Room`
-      : `⚙ ${row.count} engine events${row.protocolViolations > 0 ? ` · ${row.protocolViolations} protocol` : ""}`;
+  const label = row.key.startsWith("muted-catchup")
+    ? `caught up: ${row.count} events while muted · expand`
+    : `⚙ ${row.count} engine events${row.protocolViolations > 0 ? ` · ${row.protocolViolations} protocol` : ""}`;
   return (
     <article className="ui2-row ui2-digest">
       <button

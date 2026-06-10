@@ -23,12 +23,16 @@ function isCardShaped(msg: BoardMessage): boolean {
   return Array.isArray(meta(msg).choices) || msg.type === "decision";
 }
 
-/** Discussion key for R4/R5 grouping. Tie-break: debate_id first. */
+/** Raw discussion key for R4/R5 grouping. Tie-break: debate_id first.
+ * Non-Oxford discussions return the sentinel "continuous" — deriveFeed maps it
+ * to a per-discussion identity keyed by the start-message id, so sequential
+ * Delphi/Continuous discussions never merge into one row (adversary pass
+ * msg 282 MED-3 / msg 284 MED-2). */
 export function discussionKey(msg: BoardMessage): string | null {
   const m = meta(msg);
   if (m.debate_id !== undefined && m.debate_id !== null) return `oxford-${m.debate_id}`;
   if (m.oxford_event !== undefined) return "oxford-unkeyed";
-  if (m.discussion_action !== undefined || m.round !== undefined) return "discussion-active";
+  if (m.discussion_action !== undefined || m.round !== undefined) return "continuous";
   return null;
 }
 

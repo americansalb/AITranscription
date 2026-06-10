@@ -1,8 +1,15 @@
 // Engine Room (§4.4) — the full, unabridged board. Closed by default.
 // Nothing is hidden from audit; it is hidden from default attention.
 import { useMemo, useState } from "react";
+import { Virtuoso } from "react-virtuoso";
 import { useUi2Store } from "../store/store";
 import type { BoardMessage } from "../store/types";
+
+function when(iso: string): string {
+  const t = Date.parse(iso);
+  // locale time like the feed; full ISO stays available in raw mode
+  return Number.isFinite(t) ? new Date(t).toLocaleTimeString() : iso;
+}
 
 // stable fallback — an inline [] would make every store snapshot unequal
 // and loop the render (zustand compares with Object.is)
@@ -66,23 +73,27 @@ export function EngineRoom() {
           {filtered.length}/{messages.length}
         </span>
       </header>
-      <div className="ui2-engine-list">
-        {filtered.map((m) =>
+      {/* virtualized — the board grows unbounded; an inline map here is the
+          CollabTab timeline lesson reborn (review msg 281 MED-1) */}
+      <Virtuoso
+        className="ui2-engine-list"
+        data={filtered}
+        computeItemKey={(_, m) => m.id}
+        initialItemCount={Math.min(filtered.length, 30)}
+        itemContent={(_, m) =>
           raw ? (
-            <pre key={m.id} className="ui2-engine-rawrow">
-              {JSON.stringify(m)}
-            </pre>
+            <pre className="ui2-engine-rawrow">{JSON.stringify(m)}</pre>
           ) : (
-            <div key={m.id} className="ui2-engine-row">
+            <div className="ui2-engine-row">
               <span className="ui2-meta">
-                #{m.id} · {m.timestamp} · {m.from} → {m.to} · {m.type}
+                #{m.id} · {when(m.timestamp)} · {m.from} → {m.to} · {m.type}
               </span>
               <strong>{m.subject}</strong>
               <p>{m.body}</p>
             </div>
-          ),
-        )}
-      </div>
+          )
+        }
+      />
     </section>
   );
 }

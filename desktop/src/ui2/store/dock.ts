@@ -16,8 +16,9 @@ function buildResolutionIndex(messages: BoardMessage[]): Map<number, BoardMessag
   const index = new Map<number, BoardMessage>();
   for (const m of messages) {
     if (role(m.from) !== "human") continue;
-    const target = meta(m).in_reply_to;
-    if (typeof target === "number" && !index.has(target)) index.set(target, m);
+    // normalize — a string-typed id must still resolve (review msg 282 LOW-2)
+    const target = Number(meta(m).in_reply_to);
+    if (Number.isFinite(target) && target > 0 && !index.has(target)) index.set(target, m);
   }
   return index;
 }

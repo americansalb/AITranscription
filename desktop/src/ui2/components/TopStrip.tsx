@@ -18,6 +18,7 @@ function LivenessDots({ dots }: { dots: SeatDot[] }) {
       {seated.map((d) => (
         <span
           key={`${d.role}:${d.instance}`}
+          role="img"
           className={`ui2-dot ui2-dot-${d.liveness}`}
           title={dotTitle(d)}
           aria-label={dotTitle(d)}

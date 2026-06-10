@@ -56,7 +56,8 @@
 .ui2-dot-warm-zombie { background: transparent; border: 1px solid var(--ink-muted); }
 .ui2-dot-dead { background: var(--status-warn); }
 .ui2-dot-vacant { background: transparent; border: 1px solid var(--ink-ghost); }
-.ui2-dots-vacant { color: var(--ink-ghost); font-size: var(--text-xs); margin-left: var(--s1); }
+/* muted not ghost — the vacancy count is informational text (msg 281 MED-3) */
+.ui2-dots-vacant { color: var(--ink-muted); font-size: var(--text-xs); margin-left: var(--s1); }
 .ui2-mute-btn {
   border: 1px solid var(--line);
   border-radius: var(--r-full);
@@ -137,7 +138,9 @@
   to { transform: none; opacity: 1; }
 }
 .ui2-dock-active { border-color: var(--accent); background: var(--accent-soft); }
-.ui2-dock-queued { opacity: 0.38; }
+/* 0.55 floor — queued cards are information, not decoration; 0.38 fell to
+   ~3.2:1 contrast (review msg 281 MED-3) */
+.ui2-dock-queued { opacity: 0.55; }
 .ui2-dock-options { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s3); }
 .ui2-dock-options button {
   border: 1px solid var(--accent);
@@ -222,7 +225,7 @@
   cursor: pointer;
 }
 .ui2-engine-raw { font-size: var(--text-sm); color: var(--ink-muted); }
-.ui2-engine-list { flex: 1; overflow-y: auto; padding: var(--s2) var(--s5); }
+.ui2-engine-list { flex: 1; min-height: 0; padding: var(--s2) var(--s5); }
 .ui2-engine-row { padding: var(--s2) 0; border-bottom: 1px solid var(--line); font-size: var(--text-sm); }
 .ui2-engine-row p { margin: var(--s1) 0 0; white-space: pre-wrap; }
 .ui2-engine-rawrow {
@@ -234,6 +237,26 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* hover states — parity with dock options (msg 281 LOW) */
+.ui2-mute-btn:hover,
+.ui2-composer button:not(:disabled):hover,
+.ui2-connect button:hover,
+.ui2-engine-toggle:hover,
+.ui2-engine-header button:hover {
+  background: var(--line);
+}
+.ui2-clamp-toggle {
+  background: none;
+  border: none;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-family: var(--font-body);
+  cursor: pointer;
+  padding: var(--s1) 0 0;
+  text-decoration: underline;
+}
+.ui2-clamp-toggle:hover { color: var(--ink); }
 
 /* ---- connect screen + errors ---- */
 .ui2-connect {

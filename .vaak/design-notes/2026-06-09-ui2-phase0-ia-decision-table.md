@@ -26,7 +26,9 @@ Deterministic field-level match rules. This table compiles directly into one pur
 | R6 | DM-style messages to human from non-relay | `role(to) = human` AND `role(from) ∉ {code-interpreter, system}` | **Engine Room only** + increments a `protocol` counter visible in the ⚙ digest (the counter is itself signal for the next seat-reduction round). The relay and the dock are the only doors (§6) — this rule is the architectural enforcement of complaint #1 | logged + flagged |
 | R7 | Everything else | broadcasts, status, reviews, handoffs, SYSTEM events, agent↔agent directed traffic, and any R5-keyed message whose discussion doesn't resolve | **Folded into a time-burst ⚙ digest row**: "⚙ N engine events · expand". A silence gap > 10 min closes the burst; next event opens a new row. One row per burst, count updates in place | logged |
 
-Tie-breaks: a message matching R5 keys for two discussions resolves by `debate_id` first, then `discussion_action` context. R2 beats R3 (a relay-authored card is a card, not a relay post). R2's author gate beats R2's field match — author check runs first.
+Tie-breaks: a message matching R5 keys for two discussions resolves by `debate_id` first, then `discussion_action` context. R2 beats R3 (a relay-authored card is a card, not a relay post). R2's author gate beats R2's field match — author check runs first. **R4 beats R3** (recorded post-implementation per review msg 282 LOW-1: a relay/system post carrying an end-event renders as the verdict digest, not as relay prose — the verdict IS the signal).
+
+**Per-discussion identity (amended per reviews msg 282 MED-3 / msg 284 MED-2):** non-Oxford discussions are keyed by their start-message id (`disc-<id>`), not a shared sentinel; an end event retires the key, so the next start opens a NEW row. Sequential Delphi/Continuous discussions never merge and verdicts never overwrite each other. Oxford keys (`oxford-<debate_id>`) likewise retire on `ended`.
 
 ## 2. Mute overlay (§4.3) — modifies the table while active
 

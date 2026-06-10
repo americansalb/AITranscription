@@ -19,7 +19,9 @@ export function Composer() {
     try {
       // store action read imperatively — subscribing would re-render per keystroke
       await useUi2Store.getState().sendMessage(to, body);
-      setText("");
+      setText(""); // clear only on success — a failed send keeps the draft
+    } catch {
+      // the store already surfaced the error in the error bar (msg 281 HIGH-3)
     } finally {
       setBusy(false);
     }

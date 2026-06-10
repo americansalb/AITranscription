@@ -68,24 +68,62 @@ describe("deriveFeed — folding", () => {
 });
 
 describe("deriveFeed — mute overlay (§2)", () => {
-  it("while muted only R1/R2 render; the rest accrues to one catch-up row", () => {
-    const messages = [
-      msg(1, { from: "code-interpreter:0", to: "all", body: "before mute" }),
-      msg(2, { from: "code-interpreter:0", to: "all", body: "after mute — must not render" }),
-      msg(3, { from: "human:0", body: "human still renders" }),
-      msg(4, {
-        from: "code-interpreter:0",
-        to: "human:0",
-        subject: "card",
-        metadata: { choices: [{ id: "a", label: "go" }] },
-      }),
-    ];
+  const messages = [
+    msg(1, { from: "code-interpreter:0", to: "all", body: "before mute" }),
+    msg(2, { from: "code-interpreter:0", to: "all", body: "after mute — must not render" }),
+    msg(3, { from: "human:0", body: "human still renders" }),
+    msg(4, {
+      from: "code-interpreter:0",
+      to: "human:0",
+      subject: "card",
+      metadata: { choices: [{ id: "a", label: "go" }] },
+    }),
+  ];
+
+  it("while muted: ZERO movement — only R1/R2 render, no catch-up row, no ticking", () => {
     const feed = deriveFeed(messages, 1); // muted at id 1
     const kinds = feed.rows.map((r) => r.kind);
     expect(kinds).toContain("card"); // R2 passes the overlay
     expect(kinds.filter((k) => k === "message")).toHaveLength(2); // msg1 (pre-mute) + human
-    const catchup = feed.rows.find((r) => r.kind === "burst" && r.key === "muted-catchup");
-    expect(catchup && catchup.kind === "burst" && catchup.count).toBe(1);
+    expect(feed.rows.some((r) => r.kind === "burst")).toBe(false); // nothing else moves
+    expect(feed.engineOnly.map((m) => m.id)).toEqual([2]); // accrued, audited
+    expect(reconcile(messages, feed)).toBe(true);
+  });
+
+  it("on unmute: accrued range folds into ONE catch-up row, not ordinary rows", () => {
+    const feed = deriveFeed(messages, null, { from: 2, to: 4 });
+    const catchup = feed.rows.find((r) => r.kind === "burst" && r.key.startsWith("muted-catchup"));
+    expect(catchup && catchup.kind === "burst" && catchup.count).toBe(1); // msg 2 only
+    expect(catchup && catchup.kind === "burst" && catchup.events.map((m) => m.id)).toEqual([2]);
+    // R1 and R2 inside the range rendered normally (they were visible during mute)
+    expect(feed.rows.map((r) => r.kind)).toContain("card");
+    expect(reconcile(messages, feed)).toBe(true);
+  });
+});
+
+describe("deriveFeed — per-discussion identity (msg 282 MED-3 / 284 MED-2)", () => {
+  it("two sequential continuous discussions = two rows, each keeping its own verdict", () => {
+    const messages = [
+      msg(1, { from: "system", type: "moderation", subject: "review A", metadata: { discussion_action: "start" } }),
+      msg(2, { from: "system", type: "moderation", metadata: { discussion_action: "auto_round", round: 1 } }),
+      msg(3, { from: "moderator:0", subject: "A ended", metadata: { discussion_action: "end", final_round: 1 } }),
+      msg(4, { from: "system", type: "moderation", subject: "review B", metadata: { discussion_action: "start" } }),
+      msg(5, { from: "moderator:0", subject: "B ended", metadata: { discussion_action: "end", final_round: 1 } }),
+    ];
+    const feed = deriveFeed(messages, null);
+    const rows = feed.rows.filter((r) => r.kind === "discussion");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].kind === "discussion" && rows[0].verdict?.subject).toBe("A ended");
+    expect(rows[1].kind === "discussion" && rows[1].verdict?.subject).toBe("B ended");
+    expect(rows[0].kind === "discussion" && rows[0].label).toBe("review A");
+    expect(reconcile(messages, feed)).toBe(true);
+  });
+
+  it("an orphan end (no open discussion) lands in the catch-all burst, no crash", () => {
+    const messages = [msg(1, { from: "moderator:0", metadata: { discussion_action: "end" } })];
+    const feed = deriveFeed(messages, null);
+    expect(feed.rows.filter((r) => r.kind === "discussion")).toHaveLength(0);
+    expect(feed.rows.filter((r) => r.kind === "burst")).toHaveLength(1);
     expect(reconcile(messages, feed)).toBe(true);
   });
 });
@@ -119,6 +157,20 @@ describe("deriveDock — card lifecycle (§4.2)", () => {
     expect(dock[0].status).toBe("resolved");
     expect(dock[0].resolvedChoice).toBe("Finish everything");
     expect(dock[1].status).toBe("active"); // the queue advances
+  });
+
+  it("a string-typed in_reply_to still resolves (msg 282 LOW-2)", () => {
+    const messages = [
+      card(1),
+      msg(2, {
+        from: "human:0",
+        body: "ok",
+        metadata: { in_reply_to: "1" as unknown as number },
+      }),
+    ];
+    const feed = deriveFeed(messages, null);
+    const dock = deriveDock(messages, feed.classified);
+    expect(dock[0].status).toBe("resolved");
   });
 });
 

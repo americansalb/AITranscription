@@ -3,6 +3,7 @@
 // blocker; resolved cards show what was chosen and when.
 import { useState } from "react";
 import { useUi2Store } from "../store/store";
+import { ClampedBody } from "./FeedRow";
 import type { BoardMessage, DecisionCardState } from "../store/types";
 
 interface Choice {
@@ -41,10 +42,11 @@ function ActiveCard({ card }: { card: DecisionCardState }) {
     }
   };
 
+  // no aria-live here — the dock region announces; nesting double-announces
   return (
-    <article className="ui2-dock-card ui2-dock-active" aria-live="polite">
+    <article className="ui2-dock-card ui2-dock-active">
       <h3>{card.msg.subject || `Decision #${card.msg.id}`}</h3>
-      <p className="ui2-body ui2-clamp">{card.msg.body}</p>
+      <ClampedBody body={card.msg.body} />
       <div className="ui2-dock-options">
         {choices.map((c) => (
           <button

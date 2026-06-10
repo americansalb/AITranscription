@@ -49,6 +49,23 @@
   --t-collapse: 150ms ease-in-out;
 }
 
+/* light theme follows the OS unless data-theme pins it (msg 281 LOW —
+   the light tokens were unreachable dead code without this mapping) */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ink: #1a1c1e;
+    --surface: #fafaf8;
+    --surface-2: #ffffff;
+    --line: #e3e1dc;
+    --accent: #8a6516;
+    --status-warn: #b04a2e;
+    --ink-muted: rgba(26, 28, 30, 0.66);
+    --ink-faint: rgba(26, 28, 30, 0.42);
+    --ink-ghost: rgba(26, 28, 30, 0.3);
+    --accent-soft: rgba(138, 101, 22, 0.12);
+  }
+}
+
 [data-theme="light"] {
   --ink: #1a1c1e;
   --surface: #fafaf8;

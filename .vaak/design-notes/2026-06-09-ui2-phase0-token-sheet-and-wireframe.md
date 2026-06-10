@@ -132,7 +132,8 @@ Annotations — behavioral commitments the wireframe encodes:
    - **warm zombie** (`last_alive_at_ms` fresh, `last_working_at` stale) → hollow `--ink` @62% — present-but-not-working is *visibly distinct*, never rendered as healthy
    - **dead** (`last_alive_at_ms` stale) → `--status-warn` filled
    - **vacant** (no binding) → hollow `--ink` @30% — structural, not an error
-   No UI-side heartbeat tracker; no parallel state. One source per fact. Freshness thresholds to be fixed at Phase 2 and stated on that gate card.
+   No UI-side heartbeat tracker; no parallel state. One source per fact. Freshness thresholds: working ≤ 5 min on `last_working_at`, alive ≤ 3 min on the connection record.
+   **Connection-source decision (per review msg 282 MED-1):** the implementation reads `sessions.json → bindings.last_heartbeat` as the connection fact — it is the field `watch_project_dir` already serves in `ParsedProject`; the seat files' `last_alive_at_ms` is not exposed through the existing read API, and decree §3.3 forbids building a new one for this. Both trackers belong to the recorded dual-heartbeat bug class; the UI deliberately uses exactly ONE and names it here. Additionally, dots re-derive on a 30s timer so they cannot freeze when file events stop (reviews msg 281/282 HIGH).
 3. **Collapse is the default state on every launch (§4.1):** expansion is per-row, in-memory only, never persisted. localStorage is not a source of truth anywhere on this surface.
 4. **One discussion = one living row (§4.5):** Delphi #12 must render as row ④ exactly — card, verdict line, expand. Phase-machine chrome, speaker timers, per-turn system rows have no UI.
 5. **Mute (§4.3) is experience-first:** the feed filter flips locally and immediately; the standing board directive is posted as a side effect. Agent non-compliance cannot break the human's silence — non-compliant posts land in the Engine Room only.
