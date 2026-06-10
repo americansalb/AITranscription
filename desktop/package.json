@@ -10,6 +10,7 @@
     "build-with-sidecar": "npm run build-sidecar && npm run build",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:e2e": "playwright test",
     "preview": "vite preview",
     "lint:styles": "stylelint \"src/**/*.css\"",
     "lint:styles:check": "node scripts/check-stylelint-baseline.cjs",
@@ -30,6 +31,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tauri-apps/cli": "^2.0.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",

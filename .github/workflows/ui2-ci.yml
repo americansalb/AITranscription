@@ -47,6 +47,32 @@ jobs:
         working-directory: desktop
         run: npx vitest run src/ui2
 
+  # browser-mode e2e + §7 paint measurements (register ②③): real Chromium,
+  # production bundle via vite preview, Tauri IPC mocked at
+  # __TAURI_INTERNALS__ — limitation recorded in e2e/tauriMock.ts
+  e2e:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: desktop
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright e2e + perf bars
+        working-directory: desktop
+        run: npx playwright test
+
   # REQUIRED since 8b04394: the cfg(unix) get_parent_pid fix made the shell
   # compile on Linux for the first time — green on the merits, so this job
   # vetoes again. (It was briefly continue-on-error while the failure was
