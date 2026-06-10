@@ -48,6 +48,18 @@ export function TopStrip() {
       >
         {muted ? "Unmute room" : "Mute all"}
       </button>
+      {/* trial-period escape hatch (card #380a) — dies with §6 cutover */}
+      <button
+        type="button"
+        className="ui2-oldui-btn"
+        title="Switch back to the old interface (Ctrl+Shift+U)"
+        onClick={() => {
+          window.location.hash = "";
+          window.location.reload();
+        }}
+      >
+        old UI
+      </button>
     </header>
   );
 }

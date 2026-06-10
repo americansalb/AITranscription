@@ -43,6 +43,17 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// Trial-period switch (cutover card #380, human chose "trial — both UIs
+// live"): Ctrl+Shift+U toggles between the old surface and One Window.
+// Hash is only read at boot, so a reload is required; remove at §6 cutover.
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === "u" || e.key === "U")) {
+    e.preventDefault();
+    window.location.hash = window.location.hash === "#/ui2" ? "" : "#/ui2";
+    window.location.reload();
+  }
+});
+
 // Check window type from hash
 const hash = window.location.hash;
 const isOverlay = hash === "#/overlay";
