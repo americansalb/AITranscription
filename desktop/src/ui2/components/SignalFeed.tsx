@@ -16,6 +16,7 @@ export function SignalFeed() {
           computeItemKey={(_, row) => row.key}
           itemContent={(_, row) => <FeedRowView row={row} />}
           followOutput="smooth"
+          initialItemCount={Math.min(rows.length, 30)}
           aria-label="Signal feed messages"
         />
       )}

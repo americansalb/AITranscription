@@ -2,11 +2,16 @@
 // Nothing is hidden from audit; it is hidden from default attention.
 import { useMemo, useState } from "react";
 import { useUi2Store } from "../store/store";
+import type { BoardMessage } from "../store/types";
+
+// stable fallback — an inline [] would make every store snapshot unequal
+// and loop the render (zustand compares with Object.is)
+const NO_MESSAGES: BoardMessage[] = [];
 
 export function EngineRoom() {
   const open = useUi2Store((s) => s.engineRoomOpen);
   const setEngineRoom = useUi2Store((s) => s.setEngineRoom);
-  const messages = useUi2Store((s) => s.project?.messages ?? []);
+  const messages = useUi2Store((s) => (s.project ? s.project.messages : NO_MESSAGES));
   const violations = useUi2Store((s) => s.feed.protocolViolations);
   const [seat, setSeat] = useState("all");
   const [type, setType] = useState("all");

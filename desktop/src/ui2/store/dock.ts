@@ -11,14 +11,15 @@ function meta(msg: BoardMessage): Record<string, unknown> {
     : {};
 }
 
-/** A human reply that resolves a card: in_reply_to + (choice_id | panel-other text). */
-function resolutionOf(card: BoardMessage, messages: BoardMessage[]): BoardMessage | null {
+/** One pass: card id → the human reply that resolves it (in_reply_to). */
+function buildResolutionIndex(messages: BoardMessage[]): Map<number, BoardMessage> {
+  const index = new Map<number, BoardMessage>();
   for (const m of messages) {
     if (role(m.from) !== "human") continue;
-    const mm = meta(m);
-    if (mm.in_reply_to === card.id) return m;
+    const target = meta(m).in_reply_to;
+    if (typeof target === "number" && !index.has(target)) index.set(target, m);
   }
-  return null;
+  return index;
 }
 
 export function deriveDock(
@@ -26,11 +27,12 @@ export function deriveDock(
   classified: ReadonlyMap<number, Treatment>,
 ): DecisionCardState[] {
   const cards = messages.filter((m) => classified.get(m.id)?.rule === "R2");
+  const resolutions = buildResolutionIndex(messages);
   const states: DecisionCardState[] = [];
   let activeAssigned: number | null = null;
 
   for (const card of cards) {
-    const resolution = resolutionOf(card, messages);
+    const resolution = resolutions.get(card.id) ?? null;
     if (resolution) {
       const mm = meta(resolution);
       const choice =

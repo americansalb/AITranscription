@@ -3,11 +3,11 @@
 Items discovered mid-build. Nothing here is shipped or promised.
 
 ## Deferrals (needed before cutover GO, §10 Phase 5)
-- **Bundle font files** (Space Grotesk / Inter / JetBrains Mono, SIL OFL). tokens.css declares them with system fallbacks; actual .woff2 bundling not done — current render uses fallback stacks. Offline-clean either way.
-- **Playwright smoke** (launch → feed → card → choose → mute) — §7 bar, not yet written.
-- **3-platform CI build** — §3.1 acceptance criterion; needs a workflow file + runners.
-- **Perf measurement against the real 5k-message board** (§7: initial render <1s, keystroke <16ms, 60fps scroll). Virtuoso + isolated composer slice make the architecture right; the numbers are unmeasured claims until profiled.
-- **Coverage number**: 25 tests cover classify/digest/dock/liveness (the pure store logic). @vitest/coverage-v8 not installed, so the ≥80% figure is unquantified.
+- ~~Bundle font files~~ DONE (second commit): @fontsource Space Grotesk 600 / Inter 400-600 / JetBrains Mono 400, imported in Ui2App — offline from clean clone.
+- ~~Smoke test~~ DONE in spirit (second commit): `__tests__/smoke.test.tsx` walks launch → feed → card → choose → mute with mocked Tauri APIs (RTL/jsdom). A true Playwright-driving-the-real-webview run is still open — jsdom verifies wiring, not the webview.
+- ~~3-platform CI~~ WORKFLOW ADDED (`.github/workflows/ui2-ci.yml`): npm build + ui2 tests on macOS/Windows/Linux + cargo check of the shell, per push. First green run unverified until pushed; the FULL bundled tauri build remains build.yml (manual/tags) — §3.1's strictest reading (bundle from clean clone in CI per push) is intentionally not burned on every commit.
+- ~~Derivation perf~~ MEASURED (second commit): 5k-message board derives in ~64ms + 8ms reconcile (was 629ms — deriveDock was quadratic, fixed with a reply index; perf.test.ts holds a 250ms CI-safe bound). Paint-side numbers (keystroke <16ms, 60fps scroll) still unmeasured — need the real webview.
+- **Coverage number**: 27 tests over classify/digest/dock/liveness + the smoke path. @vitest/coverage-v8 not installed, so the ≥80% figure is unquantified.
 
 ## Ideas (not authorized, parked)
 - Per-discussion keys for *continuous* discussions: today all continuous-review rounds share one "discussion-active" key, so consecutive continuous discussions fold into one row whose verdict is the latest end-event. Fine for digesting ceremony; revisit if operators want one row per continuous topic.

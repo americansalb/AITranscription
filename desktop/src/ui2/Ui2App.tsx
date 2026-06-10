@@ -7,6 +7,13 @@ import { SignalFeed } from "./components/SignalFeed";
 import { DecisionDock } from "./components/DecisionDock";
 import { Composer } from "./components/Composer";
 import { EngineRoom } from "./components/EngineRoom";
+// Bundled faces (SIL OFL) — offline from a clean clone; tokens.css declares
+// the stacks with system fallbacks. Weights per token sheet §3: 400/500/600.
+import "@fontsource/space-grotesk/600.css";
+import "@fontsource/inter/400.css";
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
+import "@fontsource/jetbrains-mono/400.css";
 import "./tokens.css";
 import "./ui2.css";
 

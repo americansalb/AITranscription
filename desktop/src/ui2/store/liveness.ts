@@ -28,18 +28,22 @@ export function deriveSeatDots(project: ParsedProject, now: number): SeatDot[] {
   const dots: SeatDot[] = [];
   const bindings = project.sessions ?? [];
   for (const status of project.role_statuses ?? []) {
-    const roleSlug = (status as { role?: string }).role ?? "";
-    const title = (status as { title?: string }).title ?? roleSlug;
-    const seats = bindings.filter((b) => b.role === roleSlug);
+    const seats = bindings.filter((b) => b.role === status.slug);
     if (seats.length === 0) {
-      dots.push({ role: roleSlug, instance: 0, title, liveness: "vacant", lastWorkingAt: null });
+      dots.push({
+        role: status.slug,
+        instance: 0,
+        title: status.title,
+        liveness: "vacant",
+        lastWorkingAt: null,
+      });
       continue;
     }
     for (const b of seats) {
       dots.push({
-        role: roleSlug,
+        role: status.slug,
         instance: b.instance,
-        title,
+        title: status.title,
         liveness: seatLiveness(b.last_heartbeat, b.last_working_at ?? null, now),
         lastWorkingAt: b.last_working_at ?? null,
       });
