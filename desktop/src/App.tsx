@@ -1009,6 +1009,20 @@ function App() {
       <header className="header">
         <h1>Vaak</h1>
         <div className="header-actions">
+          {/* Trial-period entry to the One Window surface (cutover card #380a).
+              Visible fallback for Ctrl+Shift+U; dies with the §6 cutover. */}
+          <button
+            className="ui2-trial-btn"
+            title="Open the new One Window interface (trial)"
+            aria-label="Open the new One Window interface, trial period"
+            style={{ fontSize: "12px", padding: "4px 10px" }}
+            onClick={() => {
+              window.location.hash = "#/ui2";
+              window.location.reload();
+            }}
+          >
+            New UI
+          </button>
           {/* Voice Queue Panel Toggle */}
           <button
             className={`voice-toggle-btn ${voiceEnabled ? "enabled" : "disabled"}`}
