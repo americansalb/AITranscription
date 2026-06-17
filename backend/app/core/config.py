@@ -32,8 +32,31 @@ class Settings(BaseSettings):
 
     # AI Models
     whisper_model: str = "whisper-large-v3-turbo"
-    haiku_model: str = "claude-3-5-haiku-20241022"
-    vision_model: str = "claude-3-5-haiku-20241022"
+    # NOTE: claude-3-5-haiku-20241022 was retired (2026-02-19). claude-haiku-4-5 is the
+    # documented drop-in replacement (same Messages API surface).
+    haiku_model: str = "claude-haiku-4-5"
+    vision_model: str = "claude-haiku-4-5"
+
+    # --- Transcription Studio (bulk transcribe + Q&A over transcripts) ---
+    # Model used to answer questions / search across transcripts. Haiku is fast and
+    # cheap, which suits high-volume Q&A over many transcripts.
+    qa_model: str = "claude-haiku-4-5"
+    # Optional shared-secret gate for the /studio API. Empty = open (no auth), matching
+    # the existing public /vaaklite and /translate utilities. Set a value to require it.
+    studio_access_token: str = ""
+    # Where uploaded media is staged while it transcribes. Empty = a temp dir. Render's
+    # disk is ephemeral, so this is transient scratch space, never long-term storage.
+    studio_upload_dir: str = ""
+    # Length of each audio chunk sent to Groq Whisper (seconds). 10 min of 16 kHz mono
+    # FLAC is well under the per-request size limit.
+    studio_chunk_seconds: int = 600
+    # Hard cap on a single uploaded file (MB). Large files are chunked before upload.
+    studio_max_upload_mb: int = 1024
+    # Max audio bytes (MB) to send to Groq in one transcription request. Groq's audio
+    # endpoint caps at 25 MB; stay just under it.
+    groq_direct_limit_mb: int = 24
+    # How many transcript segments to feed Claude as context when answering a question.
+    studio_qa_max_segments: int = 30
 
     # Rate limits
     max_audio_duration_seconds: int = 300  # 5 minutes max per request

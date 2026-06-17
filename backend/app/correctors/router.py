@@ -17,7 +17,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.correctors.rule_based import RuleBasedCorrector, HallucinationDetector
 from app.services.correction_retriever import CorrectionRetriever
 from app.services.polish import polish_service
-from app.training.correction_trainer import MLCorrector
+
+# The ML corrector depends on torch, which is an optional ("ml") extra and is not
+# installed in the lightweight web deployment. Import it defensively so the whole
+# correctors package — and anything that transitively imports it — still loads when
+# torch is absent. The ML layer simply degrades to a no-op in that case.
+try:
+    from app.training.correction_trainer import MLCorrector
+except Exception:  # pragma: no cover - exercised only when torch is uninstalled
+    MLCorrector = None
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +45,8 @@ class CorrectionRouter:
         self.user_id = user_id
         self.hallucination_detector = HallucinationDetector()
         self.rule_corrector = RuleBasedCorrector(db, user_id)
-        self.ml_corrector = MLCorrector(db, user_id)
+        # MLCorrector is None when the optional torch-based "ml" extra is not installed.
+        self.ml_corrector = MLCorrector(db, user_id) if MLCorrector is not None else None
         self.retriever = CorrectionRetriever(db, user_id)
 
     async def correct(
@@ -122,8 +131,8 @@ class CorrectionRouter:
                     corrections=corrections_applied,
                 )
 
-        # Layer 2: ML model correction
-        if await self.ml_corrector.has_trained_model():
+        # Layer 2: ML model correction (skipped when the torch "ml" extra is absent)
+        if self.ml_corrector is not None and await self.ml_corrector.has_trained_model():
             ml_result = await self.ml_corrector.correct(current_text)
             if ml_result:
                 if ml_result["confidence"] >= self.ML_CONFIDENCE_THRESHOLD:

@@ -32,6 +32,8 @@ from app.api.gamification import router as gamification_router
 from app.api.audience import router as audience_router
 from app.api.roles import router as roles_router
 from app.api.translate_page import router as translate_page_router
+from app.api.studio import router as studio_router
+from app.api.studio_page import router as studio_page_router
 from app.core.config import settings
 from app.core.database import engine
 from app.models.base import Base
@@ -68,7 +70,18 @@ async def lifespan(app: FastAPI):
     # from app.services.correction_retriever import preload_embedding_model
     # preload_embedding_model()
 
+    # Start the bulk Transcription Studio worker (creates its tables if missing and
+    # re-queues any jobs interrupted by a restart). Guarded so a DB hiccup here can't
+    # take the rest of the app down at startup.
+    from app.services import studio_transcription
+    try:
+        await studio_transcription.start_worker()
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to start transcription studio worker")
+
     yield
+
+    await studio_transcription.stop_worker()
 
 
 app = FastAPI(
@@ -106,6 +119,10 @@ app.include_router(roles_router, prefix="/api/v1")
 # Standalone Spanish translator page (no auth, mounted at /translate)
 app.include_router(translate_page_router)
 
+# Bulk Transcription Studio — JSON API + self-contained web UI at /studio
+app.include_router(studio_router, prefix="/api/v1/studio", tags=["studio"])
+app.include_router(studio_page_router)
+
 
 # Mount Vaak Lite sub-app at /vaaklite
 from app.vaaklite.app import vaaklite_app  # noqa: E402
@@ -127,4 +144,5 @@ async def root():
         "docs": "/docs",
         "health": "/api/v1/health",
         "vaaklite": "/vaaklite",
+        "studio": "/studio",
     }

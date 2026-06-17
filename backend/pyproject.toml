@@ -20,10 +20,15 @@ dependencies = [
     "groq>=0.4.0",
     "openai>=1.50.0",
     "google-genai>=1.0.0",
-    # ML Learning System
-    "sentence-transformers>=2.2.0",
+    # Bundled, statically-linked ffmpeg binary — used to extract audio from video
+    # and split large media into Groq-sized chunks. Avoids needing apt/Docker on the
+    # Render Python runtime.
+    "imageio-ffmpeg>=0.4.9",
+    # ML Learning System (lightweight runtime pieces only). pgvector is imported at
+    # startup (app.models.learning) and numpy by the retriever, so they stay here.
+    # The heavy training/embedding stack (torch, sentence-transformers) is optional —
+    # see the "ml" extra below — and is NOT installed for the web deployment.
     "pgvector>=0.2.0",
-    "torch>=2.0.0",
     "numpy>=1.24.0",
     "psutil>=5.9.0",  # For memory monitoring in ML features
 ]
@@ -33,7 +38,16 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "httpx>=0.27.0",
+    "aiosqlite>=0.20.0",  # in-memory SQLite for the test suite
     "ruff>=0.3.0",
+]
+# Heavy, optional ML training/embedding stack. Only needed to TRAIN the experimental
+# on-device correction models (enable_ml_corrections), never for serving the API or
+# the transcription studio. Keeping these out of the default install shrinks the
+# Render build by ~2 GB so it fits the free tier. Install with: pip install -e .[ml]
+ml = [
+    "sentence-transformers>=2.2.0",
+    "torch>=2.0.0",
 ]
 
 [build-system]

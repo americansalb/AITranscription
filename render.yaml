@@ -10,7 +10,7 @@ services:
     buildCommand: |
       pip install -e . &&
       alembic upgrade head &&
-      python -m scripts.seed_admin --force &&
+      (python -m scripts.seed_admin --force || echo "Admin seed skipped (set ADMIN_SEED_ACCOUNTS + ADMIN_BOOTSTRAP_PASSWORD to enable)") &&
       cd ../vaak-lite/frontend && npm install && npm run build &&
       rm -rf ../../backend/app/vaaklite/static &&
       cp -r dist ../../backend/app/vaaklite/static
@@ -30,6 +30,16 @@ services:
         fromDatabase:
           name: vaak-db
           property: connectionString
+      # Optional: dev/admin account seeding at build time. If unset, seeding is
+      # skipped (the build no longer fails on it).
+      - key: ADMIN_SEED_ACCOUNTS
+        sync: false
+      - key: ADMIN_BOOTSTRAP_PASSWORD
+        sync: false
+      # Optional: shared-secret gate for the bulk Transcription Studio at /studio.
+      # Leave unset to keep it open (like /vaaklite and /translate).
+      - key: STUDIO_ACCESS_TOKEN
+        sync: false
     healthCheckPath: /api/v1/health
 
 databases:

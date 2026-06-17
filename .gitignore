@@ -32,6 +32,11 @@ logs/
 htmlcov/
 .pytest_cache/
 
+# Databases (local/dev SQLite, test artifacts)
+*.db
+*.sqlite
+*.sqlite3
+
 # Tauri
 desktop/src-tauri/target/
 
