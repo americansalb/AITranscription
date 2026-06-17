@@ -6,9 +6,12 @@ Separate from the desktop backend. Shares models/schemas via the shared/ package
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
@@ -119,3 +122,42 @@ async def health_check():
         "status": "ok",
         "version": settings.version,
     }
+
+
+# --- Static SPA (web-client production build) ---
+# The Render build copies web-client/dist into app/static (see render.yaml
+# buildCommand). When present, the single-page app is served from the same
+# origin as the API, so the frontend's relative /api/v1 calls and the
+# /api/v1/messages/*/ws WebSocket work without any CORS configuration.
+# In local dev the directory is absent and the Vite dev server proxies /api.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+if (_STATIC_DIR / "index.html").is_file():
+    _assets_dir = _STATIC_DIR / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def spa_index():
+        return FileResponse(_STATIC_DIR / "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_catch_all(full_path: str):
+        # API routers are registered above and match first; anything that
+        # reaches here under api/ (or the health probe) is a genuine miss and
+        # should 404 as JSON rather than be masked by the HTML shell.
+        if full_path.startswith("api/") or full_path == "health":
+            raise HTTPException(status_code=404, detail="Not found")
+        # Serve a real static file if one exists, guarding against path
+        # traversal escaping the static directory.
+        candidate = (_STATIC_DIR / full_path).resolve()
+        if _STATIC_DIR in candidate.parents and candidate.is_file():
+            return FileResponse(candidate)
+        # Unknown path → hand it to the client-side router (deep links, reload).
+        return FileResponse(_STATIC_DIR / "index.html")
+else:
+    logger.warning(
+        "Static SPA bundle not found at %s — serving API only. "
+        "Run the web-client build to populate it.",
+        _STATIC_DIR,
+    )
