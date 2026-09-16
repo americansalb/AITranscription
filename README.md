@@ -1,0 +1,24 @@
+# Talk. It does the work. It tells you what it did.
+
+You speak. Claude Code does the work. It opens the result and tells you what it did and what it sees, in a voice of your choice. You never look.
+
+This branch is the new home for that product. It starts empty on purpose.
+
+## Branches
+
+- `main` is this branch: the new product.
+- `legacy` is the previous Vaak codebase in full, kept for reference and for porting.
+
+Nothing on this branch imports from `legacy`. Pieces are ported deliberately, one at a time, with their tests.
+
+## Ported from legacy, in this order
+
+1. Accessibility tree capture and focus tracking, from `desktop/src-tauri/src/a11y`
+2. Screen description, screen chat, and the computer-use loop, from `backend/app/services/screen_reader.py`
+3. Terminal-process session id, from `mcp-speak`
+4. Text-to-speech callers
+5. Paste-into-focused-window dictation
+6. macOS permission wizard
+7. Voice rules and the detail scale, already in `CLAUDE.md`
+
+Everything else stays on `legacy`.
