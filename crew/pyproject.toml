@@ -1,0 +1,26 @@
+[project]
+name = "crew"
+version = "0.1.0"
+description = "A spec from what you said, a review by a model that did not write the code, and a gate that is code rather than an agent."
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.40",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+crew = "crew.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["crew*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
