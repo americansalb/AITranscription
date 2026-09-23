@@ -7,7 +7,11 @@ This branch is the new home for that product. It starts empty on purpose.
 ## Branches
 
 - `main` is this branch: the new product.
-- `legacy` is the previous Vaak codebase in full, kept for reference and for porting.
+- `legacy` is a snapshot of the old `main` branch. It is **not** the full codebase.
+- The most recent collaboration work is **not on main or legacy**. It lives on
+  `feature/strict-turn-discipline`, which is 603 commits beyond main and runs
+  through June 2026, and on `feature/al-vision-slice-1`. Do not delete those
+  branches on the assumption that `legacy` holds everything.
 
 Nothing on this branch imports from `legacy`. Pieces are ported deliberately, one at a time, with their tests.
 
