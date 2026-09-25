@@ -51,7 +51,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 fn the_name_is_one_trimmed_non_empty_line() {
     let raw = fs::read_to_string(repo_root().join("PRODUCT_NAME")).expect("PRODUCT_NAME exists");
-    let name = platform::PRODUCT_NAME;
+    let name = logic::PRODUCT_NAME;
     assert!(!name.is_empty(), "PRODUCT_NAME is empty");
     assert_eq!(name, raw.trim(), "PRODUCT_NAME is read exactly as written, minus surrounding whitespace");
     assert!(!name.contains('\n'), "PRODUCT_NAME must be a single line");
@@ -60,7 +60,7 @@ fn the_name_is_one_trimmed_non_empty_line() {
 #[test]
 fn the_name_appears_nowhere_but_the_name_file_and_the_readme() {
     let root = repo_root();
-    let name = words(platform::PRODUCT_NAME);
+    let name = words(logic::PRODUCT_NAME);
     let mut files = Vec::new();
     walk(&root, &mut files);
 

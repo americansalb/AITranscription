@@ -1,0 +1,33 @@
+{
+  "platform": "macos",
+  "app": { "name": "Mail", "pid": 4242 },
+  "window_title": "Inbox (3 messages)",
+  "scale": 2.0,
+  "captured_at_ms": 1758823200000,
+  "elapsed_ms": 41,
+  "truncated": false,
+  "element_count": 9,
+  "elements": [
+    {
+      "id": 1, "role": "toolbar", "name": "Toolbar",
+      "children": [
+        { "id": 2, "role": "button", "name": "New Message", "bounds": { "x": 20, "y": 8, "width": 40, "height": 28 } },
+        { "id": 3, "role": "button", "name": "Reply", "enabled": false, "bounds": { "x": 70, "y": 8, "width": 40, "height": 28 } },
+        { "id": 4, "role": "text_field", "name": "Search", "focused": true, "bounds": { "x": 600, "y": 8, "width": 200, "height": 28 } }
+      ]
+    },
+    {
+      "id": 5, "role": "group",
+      "children": [
+        {
+          "id": 6, "role": "table", "name": "Messages",
+          "children": [
+            { "id": 7, "role": "row", "name": "Sarah Kim, Lunch Thursday?", "selected": true, "bounds": { "x": 0, "y": 60, "width": 300, "height": 44 } },
+            { "id": 8, "role": "row", "name": "AALB Board, Minutes attached", "bounds": { "x": 0, "y": 104, "width": 300, "height": 44 } }
+          ]
+        },
+        { "id": 9, "role": "text_field", "name": "Password", "secure": true, "bounds": { "x": 320, "y": 200, "width": 200, "height": 28 } }
+      ]
+    }
+  ]
+}

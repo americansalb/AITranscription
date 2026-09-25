@@ -5,38 +5,68 @@ the repository root, which code reads at compile time, and this heading. To
 rename the product, change those two. No crate, file, identifier, or message
 contains the name, and a test fails if it ever does.
 
-Talk. It does the work. It tells you what it did.
+## Talk. It does the work. It tells you what it did.
 
-You speak. Claude Code does the work. It opens the result and tells you what it did and what it sees, in a voice of your choice. You never look.
+You speak. It works, or Claude Code works. It tells you what happened and what
+is on the screen, in a voice of your choice. You never look.
 
-This branch is the new home for that product. It starts empty on purpose.
+Version one has no window. The interface is a menu bar menu, one key, and
+speech. Everything is set by voice, every state can be said in one sentence,
+and every error is a sentence too.
 
-## Branches
+## What is here
 
-- `main` is this branch: the new product.
-- `legacy` is a snapshot of the old `main` branch. It is **not** the full codebase.
-- The most recent collaboration work is **not on main or legacy**. It lives on
-  `feature/strict-turn-discipline`, which is 603 commits beyond main and runs
-  through June 2026, and on `feature/al-vision-slice-1`. Do not delete those
-  branches on the assumption that `legacy` holds everything.
+- `crates/logic` is pure logic: no operating system, no network, no clock.
+  The screen schema, the spoken sentence builder, and the tree-to-text
+  renderer. Every test in it runs on Linux, against fixtures checked into
+  `crates/logic/tests/fixtures`.
+- `crates/platform` is the only place operating-system code lives. It reads
+  the accessibility tree and tracks keyboard focus on macOS and Windows, one
+  implementation each, behind one interface. Linux is an honest stub that says
+  so aloud.
 
-Nothing on this branch imports from `legacy`. Pieces are ported deliberately, one at a time, with their tests.
+Nothing here is ported from the old code. The branches `legacy`,
+`feature/strict-turn-discipline`, and `dev-local` hold the previous codebase
+and are reference material only: read them for system call details, never
+copy from them.
 
-## Ported from legacy, in this order
+## Rules that are code
 
-1. Accessibility tree capture and focus tracking, from `desktop/src-tauri/src/a11y`
-2. Screen description, screen chat, and the computer-use loop, from `backend/app/services/screen_reader.py`
-3. Terminal-process session id, from `mcp-speak`
-4. Text-to-speech callers
-5. Paste-into-focused-window dictation
-6. macOS permission wizard
-7. Voice rules and the detail scale, already in `CLAUDE.md`
+Each of these is a test that fails when broken, not a sentence someone has to
+remember.
 
-Everything else stays on `legacy`.
+- A secure field never carries a value, and no text ever shows one.
+- The product name is data. It appears nowhere in code.
+- Every platform error has a spoken sentence.
+- The same tests run on macOS, Windows, and Linux on every push. Parity is a
+  gate, not a goal.
+
+## The plan
+
+Six milestones. Each ends with something you can hear or use, each is green
+on all three runners before the next starts, and each ships with a recorded
+transcript of a real session.
+
+1. Fresh foundations: this schema, this platform layer, these tests.
+2. Speech out: system voices, a streaming sentence splitter, markdown to
+   speech with a fixture corpus of real Claude Code output, a say command, and
+   the Claude Code Stop hook it writes for itself.
+3. Talks first: the app binary, the menu, a spoken hello within one second of
+   launch, lazy spoken permission flow, the "are you working" self-check, and
+   an error catalog where every error speaks.
+4. Look: capture on both platforms into this schema, the direct model client
+   with streaming, the key from the clipboard into the keychain, "what is on
+   my screen" with follow-up questions, screenshots only on request.
+5. Voice in: one talk key that needs no permission, system speech recognition
+   with vocabulary from the screen, echo control, end-of-speech detection,
+   screen reader detection and the two modes.
+6. Act, then ship: computer use with narrate-and-confirm, input abort, modal
+   detection, step limits; then signing, installer, auto-update, a weekly live
+   canary, Homebrew and winget.
 
 ## Building
 
 The code is a Cargo workspace. `cargo test` at the root runs every test on the
 platform you are on, and continuous integration runs the same on macOS,
-Windows, and Linux for every push. `crates/platform` is the only place
-platform-specific code lives; nothing outside it may name a platform API.
+Windows, and Linux for every push. Reading a real screen needs the
+Accessibility permission on macOS and nothing on Windows.

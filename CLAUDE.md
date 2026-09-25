@@ -52,7 +52,10 @@ The user CANNOT see the screen. You MUST describe all visual information.
 
 ## Working rules for this repository
 
-- The `legacy` branch holds the previous Vaak codebase. Nothing on `main` imports from it. Pieces are ported deliberately, one at a time, with their tests.
+- Nothing is ported from the old code. The branches `legacy`, `feature/strict-turn-discipline`, and `dev-local` are reference material only: read them for system call details, never copy from them.
+- Version one has no window. The interface is a menu bar menu, one key, and speech. Every setting is changed by voice.
+- Every error has a spoken sentence, enforced by a test. Silence is the one failure this app must never have.
+- Operating-system calls live only in `crates/platform`. Pure logic lives in `crates/logic` and is tested on Linux against fixtures in `crates/logic/tests/fixtures`.
 - Every change that adds a concept, such as a setting, a mode, a window, or a role, must remove or fold one.
 - Tests run in CI on every push. A change without a passing test command does not merge.
 - The complete state of the app must be describable aloud in under a minute. A feature that cannot be described in one spoken sentence does not ship.

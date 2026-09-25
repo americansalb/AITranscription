@@ -2,12 +2,11 @@
 name = "platform"
 version = "0.1.0"
 edition = "2021"
-description = "The only place platform-specific code lives: accessibility tree capture and focus tracking, with one implementation per operating system."
+description = "The only place operating-system code lives: reading the accessibility tree and tracking focus, one implementation per platform, behind one interface."
 publish = false
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+logic = { path = "../logic" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

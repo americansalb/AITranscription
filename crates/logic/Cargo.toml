@@ -1,0 +1,12 @@
+[package]
+name = "logic"
+version = "0.1.0"
+edition = "2021"
+description = "Pure logic: no operating system, no network. The screen schema, the spoken sentence builder, and the tree-to-text renderer. Every test runs on Linux."
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

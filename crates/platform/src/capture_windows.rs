@@ -1,316 +1,239 @@
-//! Windows UIA tree capture → NormalizedTree.
-//!
-//! Captures the UI Automation element tree from the foreground window, producing
-//! a [`NormalizedTree`] with platform-agnostic roles via [`uia_control_type_to_role`].
-//!
-//! # Implementation Notes
-//! - Uses `uia_control_type_to_role()` from `types.rs` for direct int → NormalizedRole mapping.
-//! - Bounds from UIA are already in top-left origin — no coordinate flip needed.
-//! - `accelerator_key` and `access_key` are combined into the single `shortcut` field.
-//! - UIA states (enabled, offscreen) are mapped to `ElementState` enum values.
-//! - Depth limit: 8, element cap: 500 (matching original uia_capture.rs).
+//! Windows capture: the window in front, read through UI Automation into the
+//! shared schema.
 
-use super::types::*;
+use crate::{now_ms, PlatformError};
+use logic::schema::{App, Element, Limits, Rect, Role, Snapshot};
+use std::time::{Duration, Instant};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::System::Com::*;
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-/// Capture the UIA tree from the foreground window and return as NormalizedTree.
-pub fn capture() -> Result<NormalizedTree, String> {
-    // Initialize COM on this thread
+/// Initializes COM for this thread and uninitializes it on drop, unless COM
+/// was already initialized in another mode, in which case it is left alone.
+pub struct ComGuard {
+    owned: bool,
+}
+
+impl ComGuard {
+    pub fn new() -> ComGuard {
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        ComGuard { owned: hr.is_ok() }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.owned {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+pub fn automation() -> Result<IUIAutomation, PlatformError> {
+    unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+        .map_err(|e| PlatformError::System(format!("UI Automation is unavailable: {e}")))
+}
+
+pub fn snapshot(limits: &Limits) -> Result<Snapshot, PlatformError> {
+    let _com = ComGuard::new();
+    let started = Instant::now();
+    let uia = automation()?;
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd == HWND::default() {
+        return Err(PlatformError::NoForegroundWindow);
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid != 0 && pid == unsafe { GetCurrentProcessId() } {
+        return Err(PlatformError::OwnWindow);
+    }
+
+    let root = unsafe { uia.ElementFromHandle(hwnd) }
+        .map_err(|e| PlatformError::System(format!("the window could not be read: {e}")))?;
+    let window_title = unsafe { root.CurrentName() }.map(|s| s.to_string()).unwrap_or_default();
+    let tree = unsafe { uia.ControlViewWalker() }
+        .map_err(|e| PlatformError::System(format!("the window could not be walked: {e}")))?;
+
+    let mut walker = Walker::new(limits, started);
+    let elements = walker.children_of(&tree, &root, 0);
+
+    Ok(Snapshot {
+        platform: "windows".to_string(),
+        app: App { name: process_name(pid), pid },
+        window_title,
+        scale: 1.0,
+        captured_at_ms: now_ms(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        truncated: walker.truncated,
+        element_count: Snapshot::count_elements(&elements),
+        elements,
+    })
+}
+
+pub fn focused_element() -> Result<Element, PlatformError> {
+    let _com = ComGuard::new();
+    let uia = automation()?;
+    let focused = unsafe { uia.GetFocusedElement() }.map_err(|_| PlatformError::NoForegroundWindow)?;
+    if is_ours(&focused) {
+        return Err(PlatformError::OwnWindow);
+    }
+    Ok(read_element(&focused, 1))
+}
+
+/// True when the element belongs to this process.
+pub fn is_ours(element: &IUIAutomationElement) -> bool {
+    unsafe { element.CurrentProcessId() }
+        .map(|p| p as u32 == unsafe { GetCurrentProcessId() })
+        .unwrap_or(false)
+}
+
+/// Read one element into the shared schema, without its children.
+pub fn read_element(el: &IUIAutomationElement, id: u32) -> Element {
     unsafe {
-        CoInitializeEx(Some(std::ptr::null()), COINIT_APARTMENTTHREADED)
+        let name = el.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+        let control = el.CurrentControlType().map(|c| c.0).unwrap_or(0);
+        let role = Role::from_uia(control);
+        let secure = el.CurrentIsPassword().map(|b| b.as_bool()).unwrap_or(false);
+
+        let mut e = Element::new(id, role, name);
+        if secure {
+            e = e.secure();
+        } else if let Some(value) = value_of(el) {
+            e = e.with_value(value);
+        }
+        e.enabled = el.CurrentIsEnabled().map(|b| b.as_bool()).unwrap_or(true);
+        e.focused = el.CurrentHasKeyboardFocus().map(|b| b.as_bool()).unwrap_or(false);
+        e.selected = el
+            .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
             .ok()
-            .map_err(|e| format!("COM init failed: {}", e))?;
+            .and_then(|p| p.CurrentIsSelected().ok())
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+        e.bounds = el.CurrentBoundingRectangle().ok().map(rect_from).filter(Rect::is_visible);
+        e
     }
-
-    let result: Result<NormalizedTree, String> = (|| {
-        let uia: IUIAutomation = unsafe {
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-                .map_err(|e| format!("Failed to create UIA: {}", e))?
-        };
-
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0 == std::ptr::null_mut() {
-            return Err("No foreground window".to_string());
-        }
-
-        let root: IUIAutomationElement = unsafe {
-            uia.ElementFromHandle(hwnd)
-                .map_err(|e| format!("ElementFromHandle failed: {}", e))?
-        };
-
-        let window_title = unsafe {
-            root.CurrentName()
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-
-        let process_name = get_process_name(hwnd);
-
-        let walker = unsafe {
-            uia.ControlViewWalker()
-                .map_err(|e| format!("ControlViewWalker failed: {}", e))?
-        };
-
-        let mut element_count = 0usize;
-        let mut id_counter: u64 = 0;
-        let elements = walk_tree(&walker, &root, 0, 8, &mut element_count, 500, &mut id_counter);
-
-        Ok(NormalizedTree {
-            window_title,
-            process_name,
-            platform: "windows".to_string(),
-            element_count,
-            elements,
-        })
-    })();
-
-    unsafe { CoUninitialize() };
-    result
 }
 
-fn walk_tree(
-    walker: &IUIAutomationTreeWalker,
-    parent: &IUIAutomationElement,
-    depth: u32,
-    max_depth: u32,
-    count: &mut usize,
-    max_elements: usize,
-    id_counter: &mut u64,
-) -> Vec<NormalizedElement> {
-    if depth >= max_depth || *count >= max_elements {
-        return Vec::new();
-    }
-
-    let mut elements = Vec::new();
-
-    let first_child = unsafe { walker.GetFirstChildElement(parent) };
-    let mut current = match first_child {
-        Ok(el) => el,
-        Err(_) => return elements,
-    };
-
-    loop {
-        if *count >= max_elements {
-            break;
-        }
-
-        let mut element = read_element(&current, depth, id_counter);
-
-        let dominated = element.name.is_empty()
-            && element.value.is_none()
-            && !element.role.is_interactive();
-
-        element.children = walk_tree(walker, &current, depth + 1, max_depth, count, max_elements, id_counter);
-        element.children_count = element.children.len() as u32;
-
-        if !dominated || !element.children.is_empty() {
-            *count += 1;
-            elements.push(element);
-        }
-
-        match unsafe { walker.GetNextSiblingElement(&current) } {
-            Ok(next) => current = next,
-            Err(_) => break,
-        }
-    }
-
-    elements
-}
-
-#[allow(non_upper_case_globals)] // Windows SDK constants use mixed case
-fn read_element(
-    el: &IUIAutomationElement,
-    depth: u32,
-    id_counter: &mut u64,
-) -> NormalizedElement {
-    *id_counter += 1;
-    let id = *id_counter;
-
-    let name = unsafe { el.CurrentName().map(|s| s.to_string()).unwrap_or_default() };
-
-    let control_type_id = unsafe {
-        el.CurrentControlType().unwrap_or(UIA_CONTROLTYPE_ID(0))
-    };
-    let role = uia_control_type_to_role(control_type_id.0);
-
-    let value = get_value(el);
-
-    let bounds = unsafe {
-        el.CurrentBoundingRectangle()
-            .map(|r| {
-                let w = r.right - r.left;
-                let h = r.bottom - r.top;
-                if w > 0 && h > 0 {
-                    Some(Rect {
-                        x: r.left,
-                        y: r.top,
-                        width: w as u32,
-                        height: h as u32,
-                    })
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(None)
-    };
-
-    let mut states = Vec::new();
+#[allow(non_upper_case_globals)]
+fn value_of(el: &IUIAutomationElement) -> Option<String> {
     unsafe {
-        if let Ok(enabled) = el.CurrentIsEnabled() {
-            if !enabled.as_bool() {
-                states.push(ElementState::Disabled);
-            }
-        }
-        if let Ok(offscreen) = el.CurrentIsOffscreen() {
-            if offscreen.as_bool() {
-                states.push(ElementState::Offscreen);
-            }
-        }
-        // Expand/collapse state (tree items, menus, combo boxes)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) {
-            if let Ok(state) = pattern.CurrentExpandCollapseState() {
-                match state {
-                    ExpandCollapseState_Expanded => states.push(ElementState::Expanded),
-                    ExpandCollapseState_Collapsed => states.push(ElementState::Collapsed),
-                    _ => {}
+        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
+            if let Ok(value) = pattern.CurrentValue() {
+                let text = value.to_string();
+                if !text.is_empty() {
+                    return Some(text);
                 }
             }
         }
-        // Toggle state → Checked/Unchecked/Indeterminate (checkboxes, toggle buttons)
         if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) {
             if let Ok(state) = pattern.CurrentToggleState() {
-                match state {
-                    ToggleState_On => states.push(ElementState::Checked),
-                    ToggleState_Off => states.push(ElementState::Unchecked),
-                    _ => states.push(ElementState::Indeterminate),
-                }
+                return Some(
+                    match state {
+                        ToggleState_On => "checked",
+                        ToggleState_Off => "unchecked",
+                        _ => "mixed",
+                    }
+                    .to_string(),
+                );
             }
         }
-        // Selection state (list items, tree items)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId) {
-            if let Ok(selected) = pattern.CurrentIsSelected() {
-                if selected.as_bool() {
-                    states.push(ElementState::Selected);
-                }
-            }
-        }
-        // ReadOnly state from ValuePattern (text inputs, text areas)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
-            if let Ok(readonly) = pattern.CurrentIsReadOnly() {
-                if readonly.as_bool() {
-                    states.push(ElementState::ReadOnly);
-                }
-            }
-        }
-    }
-
-    // Combine accelerator_key and access_key into shortcut
-    let accelerator_key = unsafe {
-        el.CurrentAcceleratorKey().map(|s| s.to_string()).unwrap_or_default()
-    };
-    let access_key = unsafe {
-        el.CurrentAccessKey().map(|s| s.to_string()).unwrap_or_default()
-    };
-    let shortcut = if !accelerator_key.is_empty() {
-        Some(accelerator_key)
-    } else if !access_key.is_empty() {
-        Some(access_key)
-    } else {
         None
-    };
-
-    NormalizedElement {
-        id,
-        name,
-        role,
-        value,
-        bounds,
-        states,
-        shortcut,
-        depth,
-        children_count: 0, // Set after children are walked
-        children: Vec::new(),
     }
 }
 
-#[allow(non_upper_case_globals)] // Windows SDK constants use mixed case (ToggleState_On, etc.)
-fn get_value(el: &IUIAutomationElement) -> Option<String> {
-    unsafe {
-        // Value pattern (text inputs, etc.)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
-            if let Ok(val) = pattern.CurrentValue() {
-                let s = val.to_string();
-                if !s.is_empty() {
-                    if s.chars().count() > 200 {
-                        // char-safe truncation: byte slicing &s[..200] panics if
-                        // byte 200 splits a multi-byte UTF-8 char (captured UI text)
-                        return Some(format!("{}...", s.chars().take(200).collect::<String>()));
-                    }
-                    return Some(s);
-                }
-            }
-        }
-        // Toggle pattern (checkboxes, toggles)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) {
-            if let Ok(state) = pattern.CurrentToggleState() {
-                return Some(match state {
-                    ToggleState_On => "checked".to_string(),
-                    ToggleState_Off => "unchecked".to_string(),
-                    _ => "indeterminate".to_string(),
-                });
-            }
-        }
-        // Selection pattern (lists, combo boxes)
-        if let Ok(pattern) = el.GetCurrentPatternAs::<IUIAutomationSelectionPattern>(UIA_SelectionPatternId) {
-            if let Ok(selection) = pattern.GetCurrentSelection() {
-                if let Ok(len) = selection.Length() {
-                    if len > 0 {
-                        if let Ok(item) = selection.GetElement(0) {
-                            if let Ok(name) = item.CurrentName() {
-                                return Some(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+fn rect_from(r: RECT) -> Rect {
+    Rect {
+        x: r.left as f64,
+        y: r.top as f64,
+        width: (r.right - r.left) as f64,
+        height: (r.bottom - r.top) as f64,
     }
-    None
 }
 
-fn get_process_name(hwnd: windows::Win32::Foundation::HWND) -> String {
-    use windows::Win32::System::Threading::*;
-    use windows::Win32::Foundation::CloseHandle;
-
+/// The executable name of a process without its extension, or empty.
+fn process_name(pid: u32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
     unsafe {
-        let mut pid = 0u32;
-        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let result =
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut size);
+        let _ = CloseHandle(handle);
+        if result.is_err() {
             return String::new();
         }
+        let path = String::from_utf16_lossy(&buffer[..size as usize]);
+        let file = path.rsplit('\\').next().unwrap_or("");
+        file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file).to_string()
+    }
+}
 
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-        match handle {
-            Ok(h) => {
-                let mut buf = [0u16; 260];
-                let mut size = buf.len() as u32;
-                let success = QueryFullProcessImageNameW(
-                    h,
-                    PROCESS_NAME_WIN32,
-                    windows::core::PWSTR(buf.as_mut_ptr()),
-                    &mut size,
-                );
-                let _ = CloseHandle(h);
-                if success.is_ok() {
-                    let path = String::from_utf16_lossy(&buf[..size as usize]);
-                    path.rsplit('\\').next().unwrap_or("").to_string()
-                } else {
-                    String::new()
-                }
-            }
-            Err(_) => String::new(),
+struct Walker<'a> {
+    limits: &'a Limits,
+    started: Instant,
+    budget: Duration,
+    count: u32,
+    next_id: u32,
+    truncated: bool,
+}
+
+impl<'a> Walker<'a> {
+    fn new(limits: &'a Limits, started: Instant) -> Walker<'a> {
+        Walker {
+            limits,
+            started,
+            budget: Duration::from_millis(limits.budget_ms),
+            count: 0,
+            next_id: 0,
+            truncated: false,
         }
+    }
+
+    fn children_of(
+        &mut self,
+        tree: &IUIAutomationTreeWalker,
+        parent: &IUIAutomationElement,
+        depth: u32,
+    ) -> Vec<Element> {
+        if depth >= self.limits.max_depth {
+            self.truncated = true;
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut current = match unsafe { tree.GetFirstChildElement(parent) } {
+            Ok(el) => el,
+            Err(_) => return out,
+        };
+        loop {
+            if self.count >= self.limits.max_elements || self.started.elapsed() > self.budget {
+                self.truncated = true;
+                break;
+            }
+            self.count += 1;
+            self.next_id += 1;
+            let mut element = read_element(&current, self.next_id);
+            element.children = self.children_of(tree, &current, depth + 1);
+            out.push(element);
+            match unsafe { tree.GetNextSiblingElement(&current) } {
+                Ok(next) => current = next,
+                Err(_) => break,
+            }
+        }
+        out
     }
 }

@@ -5,24 +5,16 @@
 //! crate may name a platform API. That rule is what makes the second platform
 //! a copy of an interface instead of an archaeology dig.
 //!
-//! Capabilities are reported, never assumed. A platform that cannot do
-//! something says so, so the app can say so aloud.
+//! Capabilities are reported, never assumed, and every error has a spoken
+//! sentence, so the app can always say what is going on.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 compile_error!("the platform crate supports macOS, Windows, and Linux only");
 
-/// The product's working name, read at compile time from the PRODUCT_NAME
-/// file at the repository root.
-///
-/// That file and the readme heading are the only two places the name is
-/// written. No crate, module, file, identifier, or message contains it, and
-/// tests/product_name.rs fails if it ever leaks into one. Renaming the
-/// product is editing that file: nothing in code changes.
-pub const PRODUCT_NAME: &str = include_str!("../../../PRODUCT_NAME").trim_ascii();
+mod error;
 
-pub mod announce;
-pub mod types;
-
+#[cfg(target_os = "macos")]
+mod ax;
 #[cfg(target_os = "macos")]
 mod capture_macos;
 #[cfg(target_os = "macos")]
@@ -38,14 +30,25 @@ mod capture_linux;
 #[cfg(target_os = "linux")]
 mod focus_linux;
 
-pub use announce::{FocusEvent, FocusSink};
-pub use types::*;
+pub use error::PlatformError;
+pub use logic::schema::{App, Element, Limits, Rect, Role, Snapshot};
 
-use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use capture_macos as capture;
+#[cfg(target_os = "macos")]
+use focus_macos as focus;
+#[cfg(target_os = "windows")]
+use capture_windows as capture;
+#[cfg(target_os = "windows")]
+use focus_windows as focus;
+#[cfg(target_os = "linux")]
+use capture_linux as capture;
+#[cfg(target_os = "linux")]
+use focus_linux as focus;
 
-/// What this platform can do. Reported from compile-time facts, so it is
-/// always honest, and it is what the app reads aloud when asked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What this platform can do, from compile-time facts, so it is always
+/// honest. It is what the app reads aloud when asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub platform: &'static str,
     pub accessibility_tree: bool,
@@ -66,84 +69,58 @@ impl Capabilities {
 }
 
 pub fn capabilities() -> Capabilities {
-    #[cfg(target_os = "macos")]
-    {
-        Capabilities { platform: "macos", accessibility_tree: true, focus_tracking: true }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Capabilities { platform: "windows", accessibility_tree: true, focus_tracking: true }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Capabilities { platform: "linux", accessibility_tree: false, focus_tracking: false }
+    let supported = cfg!(any(target_os = "macos", target_os = "windows"));
+    Capabilities {
+        platform: std::env::consts::OS,
+        accessibility_tree: supported,
+        focus_tracking: supported,
     }
 }
 
-/// Capture the accessibility tree of the foreground window, normalized to one
-/// schema. Coordinates use a top-left screen origin on every platform.
-pub fn capture_tree() -> Result<NormalizedTree, String> {
-    #[cfg(target_os = "macos")]
-    {
-        capture_macos::capture()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        capture_windows::capture()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        capture_linux::capture()
-    }
+/// Capture the window in front as one snapshot, within the given limits.
+/// Secure fields never carry a value, and our own windows are refused.
+pub fn snapshot(limits: &Limits) -> Result<Snapshot, PlatformError> {
+    capture::snapshot(limits)
 }
 
-/// Start announcing keyboard focus changes. Each change that produces a
-/// non-empty, non-duplicate announcement is handed to `sink`. The sink is
-/// called on a background thread owned by this crate.
-pub fn start_focus_tracking(sink: FocusSink) {
-    #[cfg(target_os = "macos")]
-    {
-        focus_macos::start(sink)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        focus_windows::start(sink)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        focus_linux::start(sink)
-    }
+/// The element that has keyboard focus right now, without its children.
+pub fn focused_element() -> Result<Element, PlatformError> {
+    capture::focused_element()
+}
+
+/// One change of keyboard focus, with the sentence to speak already built.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FocusEvent {
+    pub element: Element,
+    pub sentence: String,
+    pub timestamp_ms: u64,
+}
+
+/// Where focus events go. Called on a background thread owned by this
+/// crate, so it must be safe to send and share.
+pub type FocusSink = Box<dyn Fn(FocusEvent) + Send + Sync + 'static>;
+
+/// Start announcing keyboard focus changes. Each change with something worth
+/// saying, and different from the last, is handed to `sink`.
+pub fn start_focus_tracking(sink: FocusSink) -> Result<(), PlatformError> {
+    focus::start(sink)
 }
 
 /// Stop focus tracking and let the background thread exit.
 pub fn stop_focus_tracking() {
-    #[cfg(target_os = "macos")]
-    {
-        focus_macos::stop()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        focus_windows::stop()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        focus_linux::stop()
-    }
+    focus::stop()
 }
 
 pub fn is_focus_tracking_active() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        focus_macos::is_active()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        focus_windows::is_active()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        focus_linux::is_active()
-    }
+    focus::is_active()
+}
+
+/// Milliseconds since the Unix epoch, or zero if the clock is unavailable.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -152,8 +129,7 @@ mod tests {
 
     #[test]
     fn capabilities_name_the_platform_we_compiled_for() {
-        let caps = capabilities();
-        assert_eq!(caps.platform, std::env::consts::OS);
+        assert_eq!(capabilities().platform, std::env::consts::OS);
     }
 
     #[test]
@@ -171,20 +147,13 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_reports_no_capabilities_and_captures_an_empty_tree() {
+    fn linux_is_honest_about_having_nothing() {
         let caps = capabilities();
         assert!(!caps.accessibility_tree);
         assert!(!caps.focus_tracking);
-        let tree = capture_tree().expect("the linux stub never fails");
-        assert_eq!(tree.platform, "linux");
-        assert_eq!(tree.element_count, 0);
-        assert!(tree.elements.is_empty());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_focus_tracking_never_activates() {
-        start_focus_tracking(Box::new(|_event| {}));
+        assert_eq!(snapshot(&Limits::default()), Err(PlatformError::NotSupported));
+        assert_eq!(focused_element(), Err(PlatformError::NotSupported));
+        assert_eq!(start_focus_tracking(Box::new(|_| {})), Err(PlatformError::NotSupported));
         assert!(!is_focus_tracking_active());
         stop_focus_tracking();
     }
