@@ -59,3 +59,4 @@ The user CANNOT see the screen. You MUST describe all visual information.
 - Ship before planning. No plan document longer than one page until the thing it plans exists.
 - Every change to spoken output or screen description includes a recorded transcript of a real session showing its effect.
 - The measure is task success: can the user finish a real task, start to end, without looking at the screen.
+- The product name is data, not code. It is written only in the `PRODUCT_NAME` file at the repository root and the readme heading. Code reads it from the file. Never put it in a crate name, file name, identifier, string, or message; a test enforces this.

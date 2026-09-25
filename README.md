@@ -1,6 +1,9 @@
 # RISHI
 
-Working name. The product name comes later.
+Working name. It is written in exactly two places: the file `PRODUCT_NAME` at
+the repository root, which code reads at compile time, and this heading. To
+rename the product, change those two. No crate, file, identifier, or message
+contains the name, and a test fails if it ever does.
 
 Talk. It does the work. It tells you what it did.
 

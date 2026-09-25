@@ -9,7 +9,16 @@
 //! something says so, so the app can say so aloud.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-compile_error!("rishi-platform supports macOS, Windows, and Linux only");
+compile_error!("the platform crate supports macOS, Windows, and Linux only");
+
+/// The product's working name, read at compile time from the PRODUCT_NAME
+/// file at the repository root.
+///
+/// That file and the readme heading are the only two places the name is
+/// written. No crate, module, file, identifier, or message contains it, and
+/// tests/product_name.rs fails if it ever leaks into one. Renaming the
+/// product is editing that file: nothing in code changes.
+pub const PRODUCT_NAME: &str = include_str!("../../../PRODUCT_NAME").trim_ascii();
 
 pub mod announce;
 pub mod types;
