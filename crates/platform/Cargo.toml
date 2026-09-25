@@ -1,5 +1,5 @@
 [package]
-name = "liberty-platform"
+name = "rishi-platform"
 version = "0.1.0"
 edition = "2021"
 description = "The only place platform-specific code lives: accessibility tree capture and focus tracking, with one implementation per operating system."

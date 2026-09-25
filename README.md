@@ -1,4 +1,8 @@
-# Talk. It does the work. It tells you what it did.
+# RISHI
+
+Working name. The product name comes later.
+
+Talk. It does the work. It tells you what it did.
 
 You speak. Claude Code does the work. It opens the result and tells you what it did and what it sees, in a voice of your choice. You never look.
 

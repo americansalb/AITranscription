@@ -9,7 +9,7 @@
 //! something says so, so the app can say so aloud.
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-compile_error!("liberty-platform supports macOS, Windows, and Linux only");
+compile_error!("rishi-platform supports macOS, Windows, and Linux only");
 
 pub mod announce;
 pub mod types;
