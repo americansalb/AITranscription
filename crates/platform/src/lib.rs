@@ -116,6 +116,7 @@ pub fn is_focus_tracking_active() -> bool {
 }
 
 /// Milliseconds since the Unix epoch, or zero if the clock is unavailable.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
