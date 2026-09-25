@@ -26,3 +26,10 @@ Nothing on this branch imports from `legacy`. Pieces are ported deliberately, on
 7. Voice rules and the detail scale, already in `CLAUDE.md`
 
 Everything else stays on `legacy`.
+
+## Building
+
+The code is a Cargo workspace. `cargo test` at the root runs every test on the
+platform you are on, and continuous integration runs the same on macOS,
+Windows, and Linux for every push. `crates/platform` is the only place
+platform-specific code lives; nothing outside it may name a platform API.
