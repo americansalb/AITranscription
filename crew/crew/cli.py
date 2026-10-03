@@ -6,6 +6,15 @@ Three commands, in the order they run:
     crew review                 review the diff against that spec
     crew check                  decide whether the work is done
 
+And the shared truth, which every agent reads before working and appends to
+while working:
+
+    crew truth add claim "..." --as tester@claude-opus-5 --evidence ...
+    crew truth verify <id> --evidence ...
+    crew truth resolve <id> --upheld --reason ...
+    crew truth retire <id> --superseded-by <id>
+    crew truth check | view | score
+
 Nothing here talks to anything except files and one provider at a time. Roles
 never message each other; this module is the only thing that moves an artifact
 from one to the next.
@@ -19,12 +28,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import gate, interpret, providers, review as review_mod, spec as spec_mod
+import os
+
+from . import gate, interpret, providers, review as review_mod, spec as spec_mod, truth as truth_mod
 
 CREW_DIR = ".crew"
 SPEC_FILE = "spec.md"
 REVIEW_FILE = "review.json"
 CONFIG_FILE = "config.json"
+TRUTH_FILE = "truth.jsonl"
+TRUTH_VIEW = "truth.md"
 
 
 def crew_dir(root: Path) -> Path:
@@ -37,6 +50,14 @@ def spec_path(root: Path) -> Path:
 
 def review_path(root: Path) -> Path:
     return crew_dir(root) / REVIEW_FILE
+
+
+def truth_path(root: Path) -> Path:
+    return crew_dir(root) / TRUTH_FILE
+
+
+def truth_view_path(root: Path) -> Path:
+    return crew_dir(root) / TRUTH_VIEW
 
 
 def load_config(root: Path) -> dict:
@@ -191,6 +212,112 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- the shared truth ----------------------------------------------------------
+
+
+def author_from(args: argparse.Namespace) -> truth_mod.Author:
+    text = getattr(args, "as_", None) or os.environ.get("CREW_AS", "")
+    if not text:
+        raise truth_mod.TruthError(
+            "Say who is writing: --as role@model, or set CREW_AS in the environment."
+        )
+    return truth_mod.Author.parse(text)
+
+
+def refresh_view(root: Path) -> None:
+    """Regenerate the readable view after every successful write."""
+    state, problems = truth_mod.load(truth_path(root))
+    if not problems:
+        truth_view_path(root).write_text(truth_mod.render_view(state), encoding="utf-8")
+
+
+def cmd_truth_add(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    text = args.text
+    if text == "-":
+        text = sys.stdin.read().strip()
+    author = author_from(args)
+    entry = truth_mod.Entry(
+        id=truth_mod.new_id(),
+        kind=args.kind,
+        text=text,
+        author=author,
+        time=truth_mod.now(),
+        confidence=args.confidence,
+        evidence=args.evidence or [],
+        about=args.about,
+        round=args.round,
+        severity=args.severity,
+        options=args.option or [],
+        tokens=args.tokens,
+        tags=args.tag or [],
+    )
+    event = truth_mod.Event(op="add", time=entry.time, author=author, entry=entry)
+    truth_mod.append(truth_path(root), event)
+    refresh_view(root)
+    print(f"Added {entry.kind} {entry.id}.")
+    return 0
+
+
+def _truth_op(args: argparse.Namespace, op: str, **fields) -> int:
+    root = Path(args.root).resolve()
+    author = author_from(args)
+    event = truth_mod.Event(op=op, time=truth_mod.now(), author=author, target=args.target, **fields)
+    truth_mod.append(truth_path(root), event)
+    refresh_view(root)
+    state, _ = truth_mod.load(truth_path(root))
+    print(f"{args.target} is now {state.status(args.target)}.")
+    return 0
+
+
+def cmd_truth_verify(args: argparse.Namespace) -> int:
+    return _truth_op(args, "verify", evidence=args.evidence)
+
+
+def cmd_truth_resolve(args: argparse.Namespace) -> int:
+    upheld = True if args.upheld else False if args.rejected else None
+    return _truth_op(args, "resolve", upheld=upheld, reason=args.reason)
+
+
+def cmd_truth_retire(args: argparse.Namespace) -> int:
+    return _truth_op(args, "retire", reason=args.reason, superseded_by=args.superseded_by)
+
+
+def cmd_truth_check(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    state, problems = truth_mod.load(truth_path(root))
+    print(truth_mod.spoken_summary(state, problems))
+    for problem in problems:
+        print(f"  {problem}")
+    return 1 if problems else 0
+
+
+def cmd_truth_view(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    state, problems = truth_mod.load(truth_path(root))
+    if problems:
+        print(truth_mod.spoken_summary(state, problems), file=sys.stderr)
+        return 1
+    view = truth_mod.render_view(state)
+    if args.write:
+        crew_dir(root).mkdir(parents=True, exist_ok=True)
+        truth_view_path(root).write_text(view, encoding="utf-8")
+        print(f"Written to {truth_view_path(root)}.")
+    else:
+        print(view, end="")
+    return 0
+
+
+def cmd_truth_score(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    state, problems = truth_mod.load(truth_path(root))
+    if problems:
+        print(truth_mod.spoken_summary(state, problems), file=sys.stderr)
+        return 1
+    print(truth_mod.render_scoreboard(truth_mod.scoreboard(state)), end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crew",
@@ -222,6 +349,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = subparsers.add_parser("status", help="Say where this change stands.")
     p_status.set_defaults(func=cmd_status)
 
+    p_truth = subparsers.add_parser("truth", help="The shared truth every agent reads and appends to.")
+    truth_sub = p_truth.add_subparsers(dest="truth_command", required=True)
+
+    def who(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--as", dest="as_", help="Who is writing, as role@model. Defaults to CREW_AS.")
+
+    p_add = truth_sub.add_parser("add", help="Append an entry.")
+    p_add.add_argument("kind", choices=["claim", "decision", "question", "task", "objection", "position", "outcome"])
+    p_add.add_argument("text", help="The entry, in one sentence. Use - for stdin.")
+    who(p_add)
+    p_add.add_argument("--confidence", type=float, help="0 to 1. How sure the author is.")
+    p_add.add_argument("--evidence", nargs="*", help="Commits, tests, files, sources.")
+    p_add.add_argument("--about", help="The entry this is about. Required for objection, position, outcome.")
+    p_add.add_argument("--round", type=int, help="Deliberation round, for positions.")
+    p_add.add_argument("--severity", choices=["high", "medium", "low"], help="For objections.")
+    p_add.add_argument("--option", action="append", help="An option, for decisions. Repeatable.")
+    p_add.add_argument("--tokens", type=int, help="Tokens spent producing this entry.")
+    p_add.add_argument("--tag", action="append", help="A tag. Repeatable.")
+    p_add.set_defaults(func=cmd_truth_add)
+
+    p_verify = truth_sub.add_parser("verify", help="Promote a claim or decision to verified. Needs evidence.")
+    p_verify.add_argument("target")
+    p_verify.add_argument("--evidence", nargs="+", required=True)
+    who(p_verify)
+    p_verify.set_defaults(func=cmd_truth_verify)
+
+    p_resolve = truth_sub.add_parser("resolve", help="Close an objection, question, or task.")
+    p_resolve.add_argument("target")
+    outcome = p_resolve.add_mutually_exclusive_group()
+    outcome.add_argument("--upheld", action="store_true", help="The objection stood.")
+    outcome.add_argument("--rejected", action="store_true", help="The objection did not stand.")
+    p_resolve.add_argument("--reason", required=True)
+    who(p_resolve)
+    p_resolve.set_defaults(func=cmd_truth_resolve)
+
+    p_retire = truth_sub.add_parser("retire", help="Move an entry to history. Nothing is deleted.")
+    p_retire.add_argument("target")
+    p_retire.add_argument("--superseded-by", dest="superseded_by", help="The entry that replaces it.")
+    p_retire.add_argument("--reason")
+    who(p_retire)
+    p_retire.set_defaults(func=cmd_truth_retire)
+
+    p_tcheck = truth_sub.add_parser("check", help="Validate the whole log.")
+    p_tcheck.set_defaults(func=cmd_truth_check)
+
+    p_tview = truth_sub.add_parser("view", help="Render the readable truth.")
+    p_tview.add_argument("--write", action="store_true", help="Write .crew/truth.md instead of printing.")
+    p_tview.set_defaults(func=cmd_truth_view)
+
+    p_tscore = truth_sub.add_parser("score", help="Measure every author against outcomes.")
+    p_tscore.set_defaults(func=cmd_truth_score)
+
     return parser
 
 
@@ -230,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (providers.ProviderError, spec_mod.SpecError, ValueError) as exc:
+    except (providers.ProviderError, spec_mod.SpecError, truth_mod.TruthError, ValueError) as exc:
         print(f"{exc}", file=sys.stderr)
         return 2
 

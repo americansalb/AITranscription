@@ -85,3 +85,38 @@ Everything lives in `.crew/`: the spec, the last review, and an optional
 Every addition removes or folds something. The state of a run must be sayable
 aloud in under a minute, which is what `crew status` is for. Nothing ships
 without a test that runs in continuous integration.
+
+## The shared truth
+
+Agents are transient. What persists is `.crew/truth.jsonl`, an append-only
+log that every agent reads before working and appends to while working, so
+the next agent starts where the last one ended. `.crew/truth.md` is a view
+generated from it on every write; never edit the view by hand.
+
+Four rules are code, enforced on every write:
+
+- Entries carry provenance: author as `role@model`, time, and evidence.
+- Nothing is overwritten. Retiring keeps history; status is derived.
+- A contradiction is an objection about another entry. While it is live,
+  the target is contested. Resolving it records whether it was upheld.
+- Promotion to verified needs evidence.
+
+```
+export CREW_AS=implementer@claude-opus-5
+crew truth add claim "The capture takes 40 ms on the Mail window." --evidence "commit 914407b"
+crew truth add objection "Only on a small window." --about e1a2b3c --severity medium --as skeptic@gpt-5
+crew truth resolve e4d5e6f --upheld --reason "Chrome measured at 900 ms."
+crew truth verify e1a2b3c --evidence "timing test in CI"
+crew truth add decision "Which recognizer goes first?" --option Groq --option OpenAI
+crew truth add position Groq --about e7a8b9c --round 1 --confidence 0.7
+crew truth add outcome Groq --about e7a8b9c --evidence "bake-off 2026-10-10"
+crew truth check     # validates the whole log; exit 1 on any problem
+crew truth view      # the readable truth
+crew truth score     # the scoreboard
+```
+
+The scoreboard measures every author against outcomes, never approval:
+accuracy of final positions, calibration as a Brier score, conformity flips
+(right alone in round one, wrong after seeing others), productive updates
+(the reverse), objections upheld over objections resolved, claims verified,
+and tokens per useful contribution. It is computed from the log by code.
