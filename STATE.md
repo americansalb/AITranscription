@@ -109,7 +109,11 @@ overrides. This is the sound kernel of the old economy, with no currency.
   of main, including the old deliberation system, the Delphi gate, and the
   turn-gate hook. `dev-local` has 130 more commits. Do not delete either.
 - `claude/sleepy-goldberg-9s5ztv`: the `crew` tool (spec, independent
-  review, gate as code), 29 tests.
+  review, gate as code) and, since 2026-10-03, the shared truth: an
+  append-only log with derived status, a validator, a generated view, and
+  the per-author scoreboard, as `crew truth`. 43 tests. The deliberation
+  workflow that writes into it is next, once the form and the council's
+  models are decided.
 
 ## How to resume
 
