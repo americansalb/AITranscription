@@ -52,6 +52,7 @@ The user CANNOT see the screen. You MUST describe all visual information.
 
 ## Working rules for this repository
 
+- Read `STATE.md` before anything else. It is the durable memory of this project. Every decision is written there in the same turn it is made, with the date. After a compaction or a restart, `STATE.md` is the truth, not memory. A session-start hook prints it automatically.
 - Nothing is ported from the old code. The branches `legacy`, `feature/strict-turn-discipline`, and `dev-local` are reference material only: read them for system call details, never copy from them.
 - Version one has no window. The interface is a menu bar menu, one key, and speech. Every setting is changed by voice.
 - Every error has a spoken sentence, enforced by a test. Silence is the one failure this app must never have.
