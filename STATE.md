@@ -71,7 +71,7 @@ name is in the file PRODUCT_NAME and nowhere else in code.
 - Company name, whether to register domains, whether to rename the `crew`
   tool, whether to make the repository private.
 
-## Requested 2026-10-03, not yet decided
+## Requested 2026-10-03, decided 2026-10-05
 
 The founder is tired of talking to one agent at a time and losing everything
 to compaction. They want the multi-agent deliberation idea rebuilt, better:
@@ -99,6 +99,19 @@ objection yield (share of objections upheld), and cost per upheld
 contribution. Votes are weighted by calibration; an agent below a floor
 loses its seat on the next council; the human is measured the same way on
 overrides. This is the sound kernel of the old economy, with no currency.
+
+Decided 2026-10-05 on the founder's "BEGIN", taking the recommended defaults:
+the tool lives inside Claude Code through the crew command line, not as a
+standalone app; the council spans the model families with keys on the
+founder's machine, Anthropic and Groq-hosted open-weight models, with OpenAI
+added if a key appears. Built the same day: `crew deliberate`, three rounds
+(blind positions, anonymized objections, private revision), a code tally
+weighted by calibration, adoption at two-thirds weighted agreement, the
+crux when split, and the whole run written into the truth. 61 tests. The
+first live run needs the keys, so it happens on the founder's machine:
+`crew deliberate "..." --option A --option B` in any repository with
+`.crew/`. Next: a Claude Code skill that invokes it, and the first real
+decision recorded with its outcome.
 
 ## Where things are
 
