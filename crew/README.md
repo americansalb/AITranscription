@@ -120,3 +120,54 @@ accuracy of final positions, calibration as a Brier score, conformity flips
 (right alone in round one, wrong after seeing others), productive updates
 (the reverse), objections upheld over objections resolved, claims verified,
 and tokens per useful contribution. It is computed from the log by code.
+
+## Deliberation
+
+A council decides a question in three rounds, built so the known failure
+modes of multi-agent debate cannot happen by construction.
+
+1. **Positions, blind.** Each seat answers alone, not knowing what the others
+   said or who they are. Its brief is the question, the options, and the
+   shared truth, identical for every seat.
+2. **Objections, anonymized.** Each seat sees the others' positions under
+   shuffled letters and may only object: a concrete flaw, with evidence and a
+   severity. No praise, no agreement, no revising yet.
+3. **Revision, private.** Each seat sees the objections against its own
+   position, must accept or reject each with a reason, and gives a final
+   answer. Changing to match the majority is explicitly not a reason.
+
+Then code tallies. Votes are weighted by each seat's calibration on past
+decisions once the scoreboard knows it, a decision is adopted only when
+weighted agreement clears the threshold (two thirds by default), and when it
+does not, the output is the top options and the crux, never a manufactured
+consensus. The shuffle seed and the whole run are saved under
+`.crew/deliberations/`, and everything is written into the truth: the
+decision, every position in rounds one and three, every objection and how
+its holder answered it, and the adoption.
+
+```
+crew deliberate "Which recognizer goes first?" --option Groq --option OpenAI
+crew deliberate "What should the talk key be?"           # the seats propose the ballot
+crew deliberate "..." --seat analyst@anthropic --seat skeptic@groq --seat advocate@openai
+crew deliberate "..." --rounds 1                          # a blind vote, no debate
+crew deliberate "..." --dry-run                           # show the seats and the first brief
+```
+
+Seats are `role@provider` or `role@provider:model`. Built-in roles: analyst,
+skeptic, advocate, builder, historian. Without `--seat`, seats come from
+`.crew/council.json`, which may also define roles:
+
+```json
+{"seats": ["analyst@anthropic", "skeptic@groq", "advocate@openai"],
+ "roles": {"advocate": "You speak for interpreters working in hospitals."}}
+```
+
+Without that file, one seat goes to each model family the environment has a
+key for: `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`. Groq hosts
+open-weight models from other families, so one Groq key gives the council a
+second family. A council on a single family is allowed and says so, because
+seats on one family share blind spots.
+
+Record the real-world result later with `crew truth add outcome`, and the
+scoreboard turns the run into calibration and independence numbers for every
+seat.

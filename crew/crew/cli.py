@@ -6,6 +6,11 @@ Three commands, in the order they run:
     crew review                 review the diff against that spec
     crew check                  decide whether the work is done
 
+A council that decides a question in three rounds and writes the whole run
+into the truth:
+
+    crew deliberate "question" --option A --option B --seat skeptic@groq
+
 And the shared truth, which every agent reads before working and appends to
 while working:
 
@@ -30,7 +35,7 @@ from pathlib import Path
 
 import os
 
-from . import gate, interpret, providers, review as review_mod, spec as spec_mod, truth as truth_mod
+from . import deliberate as deliberate_mod, gate, interpret, providers, review as review_mod, spec as spec_mod, truth as truth_mod
 
 CREW_DIR = ".crew"
 SPEC_FILE = "spec.md"
@@ -38,6 +43,8 @@ REVIEW_FILE = "review.json"
 CONFIG_FILE = "config.json"
 TRUTH_FILE = "truth.jsonl"
 TRUTH_VIEW = "truth.md"
+COUNCIL_FILE = "council.json"
+DELIBERATIONS_DIR = "deliberations"
 
 
 def crew_dir(root: Path) -> Path:
@@ -217,6 +224,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def author_from(args: argparse.Namespace) -> truth_mod.Author:
     text = getattr(args, "as_", None) or os.environ.get("CREW_AS", "")
+    if not text and getattr(args, "command", "") == "deliberate":
+        text = "council@crew"
     if not text:
         raise truth_mod.TruthError(
             "Say who is writing: --as role@model, or set CREW_AS in the environment."
@@ -318,6 +327,79 @@ def cmd_truth_score(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- deliberation ------------------------------------------------------------------
+
+
+def load_council(root: Path) -> dict:
+    path = crew_dir(root) / COUNCIL_FILE
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def cmd_deliberate(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    council = load_council(root)
+    specs = args.seat or council.get("seats") or []
+    seats = [deliberate_mod.Seat.parse(s) for s in specs] or deliberate_mod.default_seats()
+    custom_roles = council.get("roles") or {}
+
+    context = ""
+    if args.context:
+        context_path = Path(args.context)
+        if not context_path.exists():
+            print(f"Context file not found: {context_path}", file=sys.stderr)
+            return 2
+        context = context_path.read_text(encoding="utf-8")
+
+    state, problems = truth_mod.load(truth_path(root))
+    if problems and not args.no_truth:
+        print(truth_mod.spoken_summary(state, problems), file=sys.stderr)
+        return 1
+    if not args.no_truth and truth_view_path(root).exists():
+        context += "\n\nThe shared truth so far:\n" + truth_view_path(root).read_text(encoding="utf-8")
+
+    print("Seats: " + ", ".join(f"{s.role} on {s.provider} ({s.model_name})" for s in seats))
+    if args.dry_run:
+        system, user = deliberate_mod.round1_brief(seats[0], args.question, args.option or [], context, custom_roles)
+        print("\nRound one brief for the first seat, system:\n" + system)
+        print("\nUser:\n" + user)
+        print("\nDry run. Nothing was asked and nothing was written.")
+        return 0
+
+    weights = {} if args.no_truth else deliberate_mod.weights_from_scoreboard(state)
+    record = deliberate_mod.run(
+        args.question, args.option or [], seats, context=context, rounds=args.rounds,
+        threshold=args.threshold, weights=weights, custom_roles=custom_roles,
+    )
+
+    record_path = None
+    if not args.no_truth:
+        records = crew_dir(root) / DELIBERATIONS_DIR
+        records.mkdir(parents=True, exist_ok=True)
+        stamp = truth_mod.now().replace(":", "").replace("+0000", "Z")
+        record_path = records / f"{stamp}-{truth_mod.new_id()}.json"
+        deliberate_mod.record_to_truth(truth_path(root), record, author_from(args), record_path)
+        record_path.write_text(record.to_json(), encoding="utf-8")
+        refresh_view(root)
+
+    print(record.spoken_summary())
+    for s in record.seats:
+        moved = "" if s.round3 is None or s.final_position == s.round1["position"] else f" (was {s.round1['position']})"
+        print(f"  {s.label} {s.role} on {s.provider}: {s.final_position}, confidence {s.final_confidence:.0%}{moved}")
+    for o in record.objections:
+        answer = "unanswered" if o.accepted is None else ("upheld" if o.accepted else "rejected")
+        print(f"  objection by {o.by_role} against {o.to_label} ({o.severity}, {answer}): {o.claim}")
+    for warning in record.warnings:
+        print(f"  warning: {warning}")
+    if record.decision_id:
+        print(f"Recorded as {record.decision_id}.")
+    return 0 if record.decided else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crew",
@@ -348,6 +430,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = subparsers.add_parser("status", help="Say where this change stands.")
     p_status.set_defaults(func=cmd_status)
+
+    p_delib = subparsers.add_parser("deliberate", help="Decide a question with a council, in three rounds.")
+    p_delib.add_argument("question", help="The question, in one sentence.")
+    p_delib.add_argument("--option", action="append", help="An option. Repeatable. Without options the seats propose the ballot.")
+    p_delib.add_argument("--seat", action="append", help="role@provider or role@provider:model. Repeatable. Defaults to .crew/council.json, then one seat per model family with a key.")
+    p_delib.add_argument("--context", help="A file every seat reads, identically.")
+    p_delib.add_argument("--rounds", type=int, default=3, choices=[1, 2, 3], help="1 is a blind vote, 2 adds objections, 3 adds revision.")
+    p_delib.add_argument("--threshold", type=float, default=deliberate_mod.DEFAULT_THRESHOLD, help="Weighted agreement needed to decide. Default two thirds.")
+    p_delib.add_argument("--no-truth", action="store_true", help="Do not read or write the shared truth.")
+    p_delib.add_argument("--dry-run", action="store_true", help="Show the seats and the first brief. Ask nothing, write nothing.")
+    p_delib.add_argument("--as", dest="as_", help="Who convened the council, as role@model. Defaults to CREW_AS, then council@crew.")
+    p_delib.set_defaults(func=cmd_deliberate)
 
     p_truth = subparsers.add_parser("truth", help="The shared truth every agent reads and appends to.")
     truth_sub = p_truth.add_subparsers(dest="truth_command", required=True)
@@ -409,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (providers.ProviderError, spec_mod.SpecError, truth_mod.TruthError, ValueError) as exc:
+    except (providers.ProviderError, spec_mod.SpecError, truth_mod.TruthError, deliberate_mod.DeliberationError, ValueError) as exc:
         print(f"{exc}", file=sys.stderr)
         return 2
 

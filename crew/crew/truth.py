@@ -34,7 +34,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, ValidationError
 
 Kind = Literal["claim", "decision", "question", "task", "objection", "position", "outcome"]
-Op = Literal["add", "verify", "resolve", "retire"]
+Op = Literal["add", "verify", "resolve", "retire", "decide"]
 Severity = Literal["high", "medium", "low"]
 
 KINDS_WITH_TARGET = ("objection", "position", "outcome")
@@ -89,6 +89,11 @@ class Event(BaseModel):
     upheld: bool | None = None
     reason: str | None = None
     superseded_by: str | None = None
+    chosen: str | None = None
+
+
+def _same(a: str, b: str) -> bool:
+    return a.strip().lower() == b.strip().lower()
 
 
 def now() -> str:
@@ -111,6 +116,8 @@ class Record:
     resolution: str | None = None
     retired: bool = False
     superseded_by: str | None = None
+    chosen: str | None = None
+    decide_evidence: list[str] = field(default_factory=list)
     objections: list[str] = field(default_factory=list)
 
 
@@ -228,6 +235,14 @@ class State:
                     raise TruthError(f"{event.superseded_by} is itself retired.")
             if not event.reason and not event.superseded_by:
                 raise TruthError("Retiring needs a reason or a successor.")
+        elif event.op == "decide":
+            if record.entry.kind != "decision":
+                raise TruthError(f"Only a decision can be decided, not a {record.entry.kind}.")
+            if not event.chosen or not event.chosen.strip():
+                raise TruthError("Deciding needs the chosen option.")
+            options = record.entry.options
+            if options and not any(_same(event.chosen, o) for o in options):
+                raise TruthError(f"{event.chosen!r} is not one of the options: {', '.join(options)}.")
 
     def apply(self, event: Event) -> None:
         """Apply an event that has passed check()."""
@@ -250,6 +265,9 @@ class State:
         elif event.op == "retire":
             record.retired = True
             record.superseded_by = event.superseded_by
+        elif event.op == "decide":
+            record.chosen = event.chosen
+            record.decide_evidence = list(event.evidence)
 
 
 # -- the log on disk -----------------------------------------------------------
@@ -344,6 +362,8 @@ def render_view(state: State) -> str:
         lines.append("## Decisions")
         for record in decisions:
             lines.append(_line(state, record))
+            if record.chosen:
+                lines.append(f"  decided: {record.chosen}")
             outcome = state.outcome_of(record.entry.id)
             if outcome:
                 lines.append(f"  outcome: {outcome.entry.text} ({outcome.entry.author.key}, {outcome.entry.time[:10]})")
@@ -418,10 +438,6 @@ class Score:
     @property
     def tokens_per_useful(self) -> float | None:
         return self.tokens / self.useful if self.useful and self.tokens else None
-
-
-def _same(a: str, b: str) -> bool:
-    return a.strip().lower() == b.strip().lower()
 
 
 def scoreboard(state: State) -> dict[str, Score]:
